@@ -11,10 +11,11 @@
  * catalog route pointed at a different protocol — is built by `createProvider`
  * over the protocol table below.
  *
- * Credentials never reach this module's storage: the harness resolves a route's
- * key through `ctx.credentials` before the request enters pi-ai and hands it
- * over as a stream option, which `Models` presents to `resolve()` as the
- * credential key.
+ * API keys never reach this module's storage: the harness resolves a route's
+ * named key through `ctx.credentials` before the request enters pi-ai and
+ * hands it over as a stream option. Provider OAuth credentials stay in the
+ * adapter-owned, provider-scoped credential store and are resolved or refreshed
+ * only by pi-ai's declared OAuth method.
  *
  * @module dsh-llm-pi-ai/provider
  */
@@ -122,8 +123,9 @@ export interface ProviderSpec {
  * one the installed catalog ships — would refuse a profile's explicit key with
  * `Provider is not configured` before any request went out. Adding the harness
  * method beside the provider's own restores that route. A keyless profile adds
- * nothing and still reports the honest refusal, because this adapter resolves
- * credentials through its own seam and holds no OAuth store to fall back on.
+ * nothing and therefore uses the catalog provider unchanged: an OAuth-capable
+ * route resolves from the adapter-owned credential store, while a route with no
+ * stored OAuth credential still reports pi-ai's honest not-configured refusal.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.

@@ -4,8 +4,8 @@
  * provider's endpoint, protocol, and model catalog as defaults, and a route
  * pi-ai does not ship is declared outright. Profile facts resolve per request
  * over the optional `llm-pi-ai` user-settings section and the optional
- * credential seam, so a changed key, endpoint, model, or knob reaches the next
- * request without a restart; a changed *route set* (or a route's
+ * credential seam and the persistent pi-ai OAuth store, so a changed key,
+ * endpoint, model, or knob reaches the next request without a restart; a changed *route set* (or a route's
  * registration-captured retry policy) re-registers the same adapter instance
  * in place.
  *
@@ -14,6 +14,8 @@
  *   name: '@deepseek-ai/dsh-llm-pi-ai'
  *   config:
  *     providers:
+ *       # Native subscription route: OAuth comes from the DSH pi-ai store.
+ *       openai-codex: {}
  *       # Catalog route: everything but the credential comes from pi-ai.
  *       openai:
  *         apiKeyEnv: OPENAI_API_KEY
@@ -61,10 +63,11 @@ import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { PiAiAdapter } from './adapter.ts'
-import { catalogProviderIds, catalogProviderTakesApiKey } from './catalog.ts'
+import { catalogProviderIds, catalogProviderTakesApiKey, catalogProviderTakesOAuth } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
+import { PiAiOAuthCredentialStore } from './oauth-store.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
@@ -79,6 +82,7 @@ export type {
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
 } from './config.ts'
+export { PiAiOAuthCredentialStore } from './oauth-store.ts'
 export { supportedProtocols } from './provider.ts'
 
 export const name = 'llm-pi-ai'
@@ -134,13 +138,10 @@ function directoryEntries(
       declared: !catalog.has(provider),
     })
   }
-  // A provider whose only native method is OAuth leaves this adapter nothing
-  // to authenticate with, so offering it would put a card on the settings page
-  // whose own posture — no key, credentials discovered by the provider — fails
-  // every request. Catalog *membership* is unaffected, so `declare` above still
-  // answers what pi-ai ships.
+  // Offer every catalog route this adapter can authenticate through either a
+  // harness API-key reference or the DSH-owned pi-ai OAuth credential store.
   for (const provider of catalog) {
-    if (catalogProviderTakesApiKey(provider)) declare(provider, provider)
+    if (catalogProviderTakesApiKey(provider) || catalogProviderTakesOAuth(provider)) declare(provider, provider)
   }
   for (const [provider, profile] of profiles) declare(provider, profile.displayName)
   return [...entries.values()]
@@ -148,6 +149,7 @@ function directoryEntries(
 
 /** Register one generic pi-ai adapter for all configured provider routes. */
 export function apply(ctx: Context, config: Config): void {
+  const oauthCredentials = new PiAiOAuthCredentialStore()
   let current: () => Config = () => config
   let lastRaw: Config | undefined
   let memoized: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
@@ -199,6 +201,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const adapter = new PiAiAdapter({
     profiles,
+    credentials: oauthCredentials,
     resolveApiKey,
     resolveAttachments: () => ctx.get('attachments'),
     onReplayDegrade: ({ provider, model, reason }) => {

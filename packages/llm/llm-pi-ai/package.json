@@ -43,6 +43,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.82.1",
+    "@deepseek-ai/dsh-atomic-write": "workspace:^",
+    "@deepseek-ai/dsh-home-paths": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^"
   },
   "devDependencies": {
