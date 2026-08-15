@@ -13,10 +13,11 @@
  * way down: switching models mid-reply takes effect on the next step, never
  * inside the one in flight.
  *
- * Credentials stay outside that collection. The harness resolves a route's key
- * through its own seam and passes it as the request's `apiKey` option, which
- * pi-ai treats as the highest-priority auth override — so `Models` never holds
- * a credential store and the harness keeps its fail-loud reference semantics.
+ * API-key references stay outside that collection. The harness resolves a
+ * route's named key and passes it as the request's highest-priority `apiKey`
+ * override. The collection also receives the stable DSH-owned pi-ai credential
+ * store so routes naming no key can use provider-native OAuth and persist token
+ * refreshes.
  *
  * @module dsh-llm-pi-ai/adapter
  */
@@ -24,6 +25,7 @@
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
   Api,
+  CredentialStore,
   Model,
   Models,
   ModelThinkingLevel,
@@ -74,6 +76,8 @@ export interface PiAiAdapterOptions {
    * `MISSING_CREDENTIAL` rather than falling back.
    */
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
+  /** Stable DSH-owned credential store used by provider-native OAuth. */
+  credentials?: CredentialStore
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
 }
@@ -199,7 +203,9 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels()
+    const models: MutableModels = createModels({
+      ...this.config.credentials === undefined ? {} : { credentials: this.config.credentials },
+    })
     for (const profile of profiles.values()) models.setProvider(profile.piProvider)
     this.snapshot = { profiles, models }
     return this.snapshot

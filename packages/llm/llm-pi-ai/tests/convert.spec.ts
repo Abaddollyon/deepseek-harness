@@ -701,6 +701,12 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it('maps routable HTTP-ish error messages to stable codes', () => {
+    const authFailure = mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'OAuth refresh failed: sentinel-provider-response',
+    }))
+    expect(authFailure).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(JSON.stringify(authFailure)).not.toContain('sentinel-provider-response')
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 401: bad key' })))
       .toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: rate limit' })))
