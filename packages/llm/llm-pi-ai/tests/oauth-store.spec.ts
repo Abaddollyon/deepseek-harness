@@ -103,11 +103,11 @@ describe('PiAiOAuthCredentialStore', () => {
   it('keeps lock-free readers stable during replacement and deletion', async () => {
     const { store } = await harness()
     for (let index = 0; index < 20; index += 1) {
-      await store.modify('openai-codex', async () => oauth('before-' + index))
+      await store.modify('openai-codex', async () => oauth(`before-${index}`))
       await expect(Promise.all([
         store.read('openai-codex'),
         store.list(),
-        store.modify('openai-codex', async () => oauth('after-' + index)),
+        store.modify('openai-codex', async () => oauth(`after-${index}`)),
       ])).resolves.toBeDefined()
       await expect(Promise.all([
         store.read('openai-codex'),
