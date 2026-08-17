@@ -584,16 +584,18 @@ async function waitForPersistedChildTurnEnd(
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
   minimumTurn = 1,
 ): Promise<void> {
-  await vi.waitFor(async () => {
-    const log = (await harvestSessionLogs(root))[child]
-    if (log === undefined || !latestTurnIsClosed(log.content)
-      || !hasRequestHeaderAfterDescriptor(log.content)
-      || !hasClosedTurn(log.content, minimumTurn)) {
-      throw new Error(
-        `snapshot-harness: subagent child #${child} did not persist closed turn ${minimumTurn} within ${timeoutMs}ms`,
-      )
-    }
-  }, { interval: WAIT_POLL_INTERVAL_MS, timeout: timeoutMs })
+  const diagnostic = `snapshot-harness: subagent child #${child} did not persist closed turn ${minimumTurn} within ${timeoutMs}ms`
+  try {
+    await vi.waitFor(async () => {
+      const log = (await harvestSessionLogs(root))[child]
+      if (log === undefined || !latestTurnIsClosed(log.content)
+        || !hasRequestHeaderAfterDescriptor(log.content)
+        || !hasClosedTurn(log.content, minimumTurn)) throw new Error(diagnostic)
+    }, { interval: WAIT_POLL_INTERVAL_MS, timeout: timeoutMs })
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Timed out in waitFor!') throw new Error(diagnostic)
+    throw error
+  }
 }
 
 /** Whether a raw session log contains the requested closed turn. */
