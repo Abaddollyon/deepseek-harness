@@ -133,6 +133,10 @@ export class SessionManager {
   private listPhase: SessionListPhase = 'pending'
   private listError: RpcError | null = null
   private listInflight: Promise<void> | null = null
+  /** A reconnect occurred while the current list request belonged to the prior generation. */
+  private listStale = false
+  /** Monotonic transport generation used to reject pre-disconnect pull results. */
+  private connectionGeneration = 0
   /** Mutations arriving after a list request starts are replayed over its response. */
   private listMutations: SessionListMutation[] | null = null
   private readonly addresses = new Map<SessionId, SubagentAddress>()
@@ -298,7 +302,7 @@ export class SessionManager {
           // A catalogued child exists only after its delegated session has
           // durable history, even though child rows do not carry `blank`.
           session.handleBlank(false)
-          session.handleRunning(child.activity === 'running')
+          session.handleRunning((child.directActivity ?? child.activity) === 'running')
         }
       }
     }
@@ -348,18 +352,22 @@ export class SessionManager {
     const existing = this.catalogInflight.get(parentSessionId)
     if (existing !== undefined) return existing.promise
     const previous = this.catalogs.get(parentSessionId)
+    const generation = this.connectionGeneration
     const expandableRows = new Set<SessionId>()
     const activityRows = new Map<SessionId, 'running' | 'inactive'>()
-    this.catalogs.set(parentSessionId, {
-      entries: previous?.entries ?? [],
-      parentAvailable: previous?.parentAvailable ?? false,
-      state: 'loading',
-      error: null,
-    })
-    this.notifier.markDirty()
+    if (previous?.state !== 'ready') {
+      this.catalogs.set(parentSessionId, {
+        entries: previous?.entries ?? [],
+        parentAvailable: previous?.parentAvailable ?? false,
+        state: 'loading',
+        error: null,
+      })
+      this.notifier.markDirty()
+    }
     const operation = (async () => {
       try {
         const { result } = await this.api.subagents.list({ parentSessionId })
+        if (generation !== this.connectionGeneration) return
         if (result.ok) {
           const parentAvailable = this.catalogInflight.get(parentSessionId)?.parentAvailableOverride
             ?? result.value.parentAvailable
@@ -386,6 +394,7 @@ export class SessionManager {
           })
         }
       } catch (error: unknown) {
+        if (generation !== this.connectionGeneration) return
         const folded = transportError<never>(error)
         this.catalogs.set(parentSessionId, {
           entries: this.withCatalogMutations(
@@ -441,12 +450,14 @@ export class SessionManager {
     this.listState = 'loading'
     this.listError = null
     const established = this.summaries
+    const generation = this.connectionGeneration
     const mutations: SessionListMutation[] = []
     this.listMutations = mutations
     this.notifier.markDirty()
     this.listInflight = (async () => {
       try {
         const { result } = await this.api.sessions.list({})
+        if (generation !== this.connectionGeneration) return
         if (result.ok) {
           const baseline = this.listPhase === 'pending'
             ? result.value.items
@@ -495,6 +506,7 @@ export class SessionManager {
           this.listError = result.error
         }
       } catch (error) {
+        if (generation !== this.connectionGeneration) return
         this.listState = 'error'
         const folded = transportError<never>(error)
         /* v8 ignore next -- the `? null` arm is unreachable: transportError always returns ok:false. */
@@ -502,6 +514,10 @@ export class SessionManager {
       } finally {
         this.listMutations = null
         this.listInflight = null
+        if (this.listStale) {
+          this.listStale = false
+          void this.refreshList()
+        }
         this.notifier.markDirty()
       }
     })()
@@ -885,6 +901,9 @@ export class SessionManager {
    * request with its live rpcId.
   */
   handleDisconnected(): void {
+    this.connectionGeneration += 1
+    if (this.listInflight !== null) this.listStale = true
+    for (const parentSessionId of this.catalogInflight.keys()) this.catalogStale.add(parentSessionId)
     if (this.pendingInteractions.size > 0) {
       this.pendingInteractions.clear()
       this.notifier.markDirty()
@@ -927,17 +946,22 @@ export class SessionManager {
 
   /** Apply one Agent-driver transition to loaded and in-flight catalogs. */
   private updateCatalogActivity(childSessionId: SessionId, running: boolean): void {
-    const activity = running ? 'running' as const : 'inactive' as const
+    const directActivity = running ? 'running' as const : 'inactive' as const
     for (const inflight of this.catalogInflight.values()) {
-      inflight.activityRows.set(childSessionId, activity)
+      inflight.activityRows.set(childSessionId, directActivity)
     }
     let changed = false
     for (const [parentSessionId, catalog] of this.catalogs) {
-      if (!catalog.entries.some(entry =>
-        entry.kind === 'child' && entry.id === childSessionId && entry.activity !== activity)) continue
+      if (!catalog.entries.some(entry => entry.kind === 'child' && entry.id === childSessionId
+        && (entry.directActivity !== directActivity
+          || entry.activity !== (running || (entry.runningDescendantCount ?? 0) > 0 ? 'running' : 'inactive')))) continue
       const entries = catalog.entries.map((entry) => {
         if (entry.kind !== 'child' || entry.id !== childSessionId) return entry
-        return { ...entry, activity }
+        return {
+          ...entry,
+          directActivity,
+          activity: running || (entry.runningDescendantCount ?? 0) > 0 ? 'running' as const : 'inactive' as const,
+        }
       })
       changed = true
       this.catalogs.set(parentSessionId, { ...catalog, entries })
@@ -975,12 +999,17 @@ export class SessionManager {
   ): SubagentCatalog['entries'] {
     return entries.map((entry) => {
       if (entry.kind !== 'child') return entry
-      const activity = activityRows.get(entry.id)
-      if (!expandableRows.has(entry.id) && activity === undefined) return entry
+      const directActivity = activityRows.get(entry.id)
+      if (!expandableRows.has(entry.id) && directActivity === undefined) return entry
       return {
         ...entry,
         ...expandableRows.has(entry.id) ? { hasChildren: true } : {},
-        ...activity === undefined ? {} : { activity },
+        ...directActivity === undefined ? {} : {
+          directActivity,
+          activity: directActivity === 'running' || (entry.runningDescendantCount ?? 0) > 0
+            ? 'running' as const
+            : 'inactive' as const,
+        },
       }
     })
   }

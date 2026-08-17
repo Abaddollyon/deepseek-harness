@@ -15,8 +15,10 @@ export type SubagentListEntry =
   | {
     kind: 'child'
     id: SessionId
-    /** Whether the child Agent driver is running at the Host sampling boundary. */
+    /** Whether this branch has any running Agent at the Host sampling boundary. */
     activity: 'running' | 'inactive'
+    /** Exact direct-child Agent activity, separate from branch activity. */
+    directActivity?: 'running' | 'inactive'
     /** Whether a direct descendant has durable `origin: 'subagent'`. */
     hasChildren: boolean
     /** Number of currently running descendants below this direct child branch. */

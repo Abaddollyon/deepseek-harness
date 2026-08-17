@@ -194,8 +194,9 @@ describe('subagent gateway', () => {
       .toMatchObject({ ok: true, value: { entries: [{ activity: 'running' }] } })
   })
 
-  it('keeps a direct branch active while a nested descendant is running', async () => {
+  it('keeps a direct branch active while a deep descendant is running without double counting rows', async () => {
     const nested = sid('nested')
+    const deep = sid('deep')
     const { api, listDescendants } = bench({
       entries: [{
         kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
@@ -204,13 +205,17 @@ describe('subagent gateway', () => {
       descendants: [
         { kind: 'child', id: CHILD, parentId: PARENT },
         { kind: 'child', id: nested, parentId: CHILD },
+        { kind: 'child', id: deep, parentId: nested },
+        { kind: 'child', id: deep, parentId: nested },
       ],
-      runningDescendantIds: [nested],
+      runningDescendantIds: [deep],
     })
     const response = await api.subagents.list(request({ parentSessionId: PARENT }))
     expect(response.result).toMatchObject({
       ok: true,
-      value: { entries: [{ activity: 'running', runningDescendantCount: 1 }] },
+      value: { entries: [{
+        activity: 'running', directActivity: 'inactive', runningDescendantCount: 1,
+      }] },
     })
     expect(listDescendants).toHaveBeenCalledWith(PARENT, undefined)
   })

@@ -55,6 +55,7 @@ class CatalogAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
+      inputModalities: model === 'deepseek-chat' ? ['text', 'image'] : ['text'],
       ...this.reasoning === undefined ? {} : { reasoning: this.reasoning },
     })
   }
@@ -294,11 +295,12 @@ describe('Web session model selection', () => {
       id: 'deepseek-official',
       name: 'DeepSeek',
       models: [
-        { id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: REASONING },
+        { id: 'deepseek-chat', name: 'DeepSeek Chat', inputModalities: ['text', 'image'], reasoning: REASONING },
         {
           id: 'deepseek-reasoner',
           name: 'DeepSeek Reasoner',
           description: 'Reasoning model',
+          inputModalities: ['text'],
           reasoning: REASONING,
         },
       ],

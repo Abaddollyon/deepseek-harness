@@ -297,6 +297,7 @@ async function buildModelCatalog(ctx: Context): Promise<{
           id: model.id,
           name: model.name,
           ...model.description === undefined ? {} : { description: model.description },
+          ...resolved.inputModalities === undefined ? {} : { inputModalities: [...resolved.inputModalities] },
           ...reasoning === undefined ? {} : { reasoning },
         }
       }))
@@ -2594,6 +2595,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               ? {
                 ...entry,
                 activity: branchRunningCount(entry.id) > 0 ? 'running' : 'inactive',
+                directActivity: ctx.agents.get(entry.id)?.status === 'running' ? 'running' : 'inactive',
                 runningDescendantCount: Math.max(
                   0,
                   branchRunningCount(entry.id) - (ctx.agents.get(entry.id)?.status === 'running' ? 1 : 0),
