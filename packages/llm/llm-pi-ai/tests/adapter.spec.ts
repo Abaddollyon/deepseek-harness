@@ -886,6 +886,7 @@ describe('provider profile lifecycle', () => {
       expect(chunks.at(-1)).toMatchObject({
         type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH' } },
       })
+      expect(chunks.at(-1)).not.toHaveProperty('reason.failure.cause')
       expect(JSON.stringify(chunks)).not.toContain('sentinel-secret-provider-response')
       expect(JSON.stringify(chunks)).not.toContain('secret-refresh-token')
       expect(JSON.stringify(chunks)).not.toContain('secret-expired-access')

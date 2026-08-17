@@ -365,7 +365,7 @@ export class PiAiAdapter extends LlmAdapter {
         throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
       }
       if (error instanceof ModelsError && (error.code === 'auth' || error.code === 'oauth')) {
-        throw new LlmError(`pi-ai authentication failed for provider "${options.provider}"`, 'AUTH', { cause: error })
+        throw new LlmError(`pi-ai authentication failed for provider "${options.provider}"`, 'AUTH')
       }
       throw error
     } finally {

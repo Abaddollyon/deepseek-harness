@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OAuthCredential } from '@earendil-works/pi-ai'
@@ -46,6 +46,8 @@ describe('PiAiOAuthCredentialStore', () => {
     expect(JSON.stringify(listed)).not.toContain('refresh-secret-access')
 
     await store.delete('openai-codex')
+    const digest = createHash('sha256').update('openai-codex').digest('hex')
+    expect(await readFile(join(store.directory, digest + '.compat'), 'utf8')).toBe('compat-v1\n')
     expect(await store.read('openai-codex')).toBeUndefined()
     expect(await store.list()).toEqual([])
   })
@@ -53,20 +55,66 @@ describe('PiAiOAuthCredentialStore', () => {
   it('reads and atomically migrates a legacy bare-digest record', async () => {
     const { store } = await harness()
     const credential = oauth('legacy')
-    await store.modify('openai-codex', async () => credential)
     const canonical = join(
       store.directory,
       createHash('sha256').update('openai-codex').digest('hex') + '.json',
     )
     const legacy = canonical.slice(0, -'.json'.length)
-    await writeFile(legacy, await readFile(canonical), { mode: 0o600 })
-    await rm(canonical)
+    await mkdir(store.directory, { recursive: true, mode: 0o700 })
+    await writeFile(legacy, JSON.stringify({
+      version: 1, providerId: 'openai-codex', credential,
+    }) + '\n', { mode: 0o600 })
 
     expect(await store.read('openai-codex')).toEqual(credential)
     expect(await store.list()).toEqual([{ providerId: 'openai-codex', type: 'oauth' }])
     await store.modify('openai-codex', async current => current)
     expect(JSON.parse(await readFile(canonical, 'utf8'))).toMatchObject({ providerId: 'openai-codex' })
-    await expect(readFile(legacy, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(legacy, 'utf8'))).toMatchObject({ providerId: 'openai-codex' })
+    expect(await readFile(legacy + '.compat', 'utf8')).toBe('compat-v1\n')
+  })
+
+  it('shares the legacy lock and follows a later old-writer refresh or delete', async () => {
+    const { store } = await harness()
+    const canonicalCredential = oauth('canonical')
+    await store.modify('openai-codex', async () => canonicalCredential)
+    const canonical = join(
+      store.directory,
+      createHash('sha256').update('openai-codex').digest('hex') + '.json',
+    )
+    const legacy = canonical.slice(0, -'.json'.length)
+    const refreshed = oauth('legacy-refreshed')
+    await writeFile(legacy, JSON.stringify({
+      version: 1, providerId: 'openai-codex', credential: refreshed,
+    }) + '\n', { mode: 0o600 })
+    const tied = new Date(1_700_000_000_000)
+    await utimes(canonical, tied, tied)
+    await utimes(legacy, tied, tied)
+
+    expect(await store.read('openai-codex')).toEqual(refreshed)
+    await rm(legacy)
+    expect(await store.read('openai-codex')).toBeUndefined()
+    expect(await store.list()).toEqual([])
+    await store.modify('openai-codex', async () => oauth('new-login'))
+    await rm(canonical)
+    expect(await store.read('openai-codex')).toBeUndefined()
+    expect(await store.list()).toEqual([])
+  })
+
+  it('keeps lock-free readers stable during replacement and deletion', async () => {
+    const { store } = await harness()
+    for (let index = 0; index < 20; index += 1) {
+      await store.modify('openai-codex', async () => oauth('before-' + index))
+      await expect(Promise.all([
+        store.read('openai-codex'),
+        store.list(),
+        store.modify('openai-codex', async () => oauth('after-' + index)),
+      ])).resolves.toBeDefined()
+      await expect(Promise.all([
+        store.read('openai-codex'),
+        store.list(),
+        store.delete('openai-codex'),
+      ])).resolves.toBeDefined()
+    }
   })
 
   it('treats an undefined modify result as an unchanged credential', async () => {
@@ -195,9 +243,9 @@ describe('PiAiOAuthCredentialStore', () => {
   it('rejects malformed durable records without exposing their text', async () => {
     const { store } = await harness()
     await store.modify('openai-codex', async () => oauth('secret'))
-    const [filename] = await readdir(store.directory)
-    const path = join(store.directory, filename!)
-    await writeFile(path, '{"access":"sentinel-secret"', { mode: 0o600 })
+    const digest = createHash('sha256').update('openai-codex').digest('hex')
+    await writeFile(join(store.directory, digest + '.json'), '{"access":"sentinel-secret"', { mode: 0o600 })
+    await writeFile(join(store.directory, digest), '{"access":"sentinel-secret"', { mode: 0o600 })
 
     const failure = await store.read('openai-codex').then(() => undefined, (error: unknown) => error as Error)
     expect(failure?.message).toBe('llm-pi-ai OAuth store: credential record is not valid JSON')
@@ -207,11 +255,12 @@ describe('PiAiOAuthCredentialStore', () => {
   it('rejects a record whose provider identity does not match its hashed filename', async () => {
     const { store } = await harness()
     await store.modify('openai-codex', async () => oauth('secret'))
-    const [filename] = await readdir(store.directory)
-    const path = join(store.directory, filename!)
+    const digest = createHash('sha256').update('openai-codex').digest('hex')
+    const path = join(store.directory, digest + '.json')
     const record = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
     record.providerId = 'anthropic'
     await writeFile(path, JSON.stringify(record), { mode: 0o600 })
+    await writeFile(join(store.directory, digest), JSON.stringify(record), { mode: 0o600 })
 
     await expect(store.read('openai-codex')).rejects.toThrow('provider id does not match')
   })
