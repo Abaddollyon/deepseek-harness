@@ -369,6 +369,12 @@ export class SessionManager {
         const { result } = await this.api.subagents.list({ parentSessionId })
         if (generation !== this.connectionGeneration) return
         if (result.ok) {
+          const directIds = new Set(result.value.entries
+            .filter(entry => entry.kind === 'child')
+            .map(entry => entry.id))
+          if ([...activityRows.keys()].some(childId => !directIds.has(childId))) {
+            this.catalogStale.add(parentSessionId)
+          }
           const parentAvailable = this.catalogInflight.get(parentSessionId)?.parentAvailableOverride
             ?? result.value.parentAvailable
           this.catalogs.set(parentSessionId, {
@@ -947,11 +953,28 @@ export class SessionManager {
   /** Apply one Agent-driver transition to loaded and in-flight catalogs. */
   private updateCatalogActivity(childSessionId: SessionId, running: boolean): void {
     const directActivity = running ? 'running' as const : 'inactive' as const
+    // An in-flight aggregate may have counted this child before the status
+    // frame. Re-pull it after settlement; activityRows still prevents a stale
+    // direct row from flickering in the first result.
     for (const inflight of this.catalogInflight.values()) {
       inflight.activityRows.set(childSessionId, directActivity)
     }
+    const refreshParents = new Set<SessionId>()
+    let frontier = new Set<SessionId>([childSessionId])
+    while (frontier.size > 0) {
+      const next = new Set<SessionId>()
+      for (const [parentSessionId, catalog] of this.catalogs) {
+        if (refreshParents.has(parentSessionId)) continue
+        if (!catalog.entries.some(entry => entry.kind === 'child' && frontier.has(entry.id))) continue
+        refreshParents.add(parentSessionId)
+        next.add(parentSessionId)
+      }
+      frontier = next
+    }
+    for (const parentSessionId of refreshParents) this.scheduleCatalogRefresh(parentSessionId)
     let changed = false
     for (const [parentSessionId, catalog] of this.catalogs) {
+      if (!catalog.entries.some(entry => entry.kind === 'child' && entry.id === childSessionId)) continue
       if (!catalog.entries.some(entry => entry.kind === 'child' && entry.id === childSessionId
         && (entry.directActivity !== directActivity
           || entry.activity !== (running || (entry.runningDescendantCount ?? 0) > 0 ? 'running' : 'inactive')))) continue

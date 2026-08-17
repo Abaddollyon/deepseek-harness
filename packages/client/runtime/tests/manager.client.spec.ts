@@ -560,6 +560,60 @@ describe('subagent catalogs', () => {
     ])
   })
 
+  it('refreshes loaded ancestor aggregates when a running grandchild stops', async () => {
+    vi.useFakeTimers()
+    try {
+      const api = new FakeApiClient()
+      const root = 'fk-root' as SessionId
+      const grandchild = 'fk-grandchild' as SessionId
+      const calls = new Map<SessionId, number>()
+      api.onSubagentList = (payload) => {
+        const parentSessionId = (payload as { parentSessionId: SessionId }).parentSessionId
+        const call = calls.get(parentSessionId) ?? 0
+        calls.set(parentSessionId, call + 1)
+        return Promise.resolve(ok({
+          entries: (parentSessionId === root
+            ? [{
+              kind: 'child', id: S1, mode: 'continuable', label: 'branch',
+              activity: call === 0 ? 'running' : 'inactive', directActivity: 'inactive',
+              runningDescendantCount: call === 0 ? 1 : 0, hasChildren: true,
+            }]
+            : [{
+              kind: 'child', id: grandchild, mode: 'continuable', label: 'leaf',
+              activity: call === 0 ? 'running' : 'inactive',
+              directActivity: call === 0 ? 'running' : 'inactive',
+              runningDescendantCount: 0, hasChildren: false,
+            }]) as never[],
+          parentAvailable: true,
+        }))
+      }
+      const manager = new SessionManager(api, fakeRemote())
+      await manager.refreshSubagents(root)
+      await manager.refreshSubagents(S1)
+
+      manager.handleHostEnvelope({
+        rpcId: 'grandchild-stopped' as never,
+        payload: { type: 'host/session-status', sessionId: grandchild, running: false },
+      })
+      expect(manager.getListSnapshot().subagentsByParent[root]?.entries).toMatchObject([
+        { id: S1, activity: 'running', runningDescendantCount: 1 },
+      ])
+      expect(manager.getListSnapshot().subagentsByParent[S1]?.entries).toMatchObject([
+        { id: grandchild, activity: 'inactive', directActivity: 'inactive' },
+      ])
+
+      await vi.advanceTimersByTimeAsync(50)
+      await vi.waitFor(() => {
+        expect(manager.getListSnapshot().subagentsByParent[root]?.entries).toMatchObject([
+          { id: S1, activity: 'inactive', runningDescendantCount: 0 },
+        ])
+      })
+      expect(api.callsOf('subagent.list')).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('marks a detached catalog child inactive without requiring a selected address', async () => {
     const api = new FakeApiClient()
     api.onSubagentList = () => Promise.resolve(ok({

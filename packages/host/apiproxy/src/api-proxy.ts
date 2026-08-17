@@ -2588,7 +2588,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           const entries = catalog.children
           const descendants = catalog.descendants
           const parentById = new Map(
-            descendants.filter(entry => entry.kind === 'child').map(entry => [entry.id, entry.parentId]),
+            descendants.filter(entry => entry.kind === 'child').map(entry => [entry.id, entry.parentSubagentId ?? entry.parentId]),
           )
           const runningIds = new Set([
             ...entries

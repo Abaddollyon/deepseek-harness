@@ -805,6 +805,45 @@ describe('provider profile lifecycle', () => {
     })).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
   })
 
+  it('normalizes expired OAuth refresh failures to a redacted AUTH error', async () => {
+    const credential = {
+      type: 'oauth' as const,
+      access: 'secret-expired-access',
+      refresh: 'secret-refresh-token',
+      expires: Date.now() - 60_000,
+    }
+    const credentials = {
+      read: async () => credential,
+      list: async () => [{ providerId: 'openai-codex', type: 'oauth' as const }],
+      modify: async (
+        _providerId: string,
+        fn: (current: typeof credential | undefined) => Promise<typeof credential | undefined>,
+      ) => fn(credential),
+      delete: async () => undefined,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('sentinel-secret-provider-response')))
+    const adapter = new PiAiAdapter({
+      profiles: () => resolveProfiles({ 'openai-codex': {} }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      credentials,
+    })
+    const chunks = []
+
+    try {
+      for await (const chunk of adapter.stream({
+        provider: 'openai-codex', model: 'gpt-5.4', messages: [],
+      })) chunks.push(chunk)
+      expect(chunks.at(-1)).toMatchObject({
+        type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH' } },
+      })
+      expect(JSON.stringify(chunks)).not.toContain('sentinel-secret-provider-response')
+      expect(JSON.stringify(chunks)).not.toContain('secret-refresh-token')
+      expect(JSON.stringify(chunks)).not.toContain('secret-expired-access')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('validates profiles at the shared resolver boundary', () => {
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: 0 },

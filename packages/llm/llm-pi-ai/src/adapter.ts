@@ -22,7 +22,7 @@
  * @module dsh-llm-pi-ai/adapter
  */
 
-import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
+import { createModels, getSupportedThinkingLevels, ModelsError } from '@earendil-works/pi-ai'
 import type {
   Api,
   CredentialStore,
@@ -363,6 +363,9 @@ export class PiAiAdapter extends LlmAdapter {
       }
       if (options.signal?.aborted) {
         throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
+      }
+      if (error instanceof ModelsError && (error.code === 'auth' || error.code === 'oauth')) {
+        throw new LlmError(`pi-ai authentication failed for provider "${options.provider}"`, 'AUTH', { cause: error })
       }
       throw error
     } finally {
