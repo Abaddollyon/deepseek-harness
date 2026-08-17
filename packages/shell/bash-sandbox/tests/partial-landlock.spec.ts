@@ -170,16 +170,20 @@ describe('partial Landlock runner-failure classification', () => {
       expect(background).not.toBeInstanceOf(SandboxUnavailableError)
     } else {
       expect(foreground).toMatchObject({
-        exitCode: 127,
         signal: null,
         sandbox: { mode: 'read-only', denied: false, enforcement: 'full' },
       })
+      // Linux shell fallback status differs across Node/libuv releases: Node 24
+      // commonly reports command-not-found (127), while Node 25 reports the
+      // malformed shell program's ordinary failure (1). Both prove that the
+      // launched runner was not misclassified as sandbox infrastructure failure.
+      expect([1, 127]).toContain(foreground.exitCode)
       expect((foreground as { stderr: { text: string } }).stderr.text.length).toBeGreaterThan(0)
 
       const background = bash.start(bash.resolve(request))
       await background.done
       expect(background.status).toBe('completed')
-      expect(background.exitCode).toBe(127)
+      expect(background.exitCode).toBe(foreground.exitCode)
       expect(background.signal).toBeNull()
       expect(background.sandbox).toEqual({ mode: 'read-only', denied: false, enforcement: 'full' })
       const output = background.readOutput().delta
