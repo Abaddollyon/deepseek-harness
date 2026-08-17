@@ -387,29 +387,31 @@ describe('WorkspaceBrowser', () => {
     expect(startSession).toHaveBeenCalledWith(wid('alpha'))
   })
 
-  it('auto-expands the Ungrouped bucket for a loose current session; its header has no menu and its ＋ is inert', () => {
+  it('keeps the Ungrouped bucket folded for a loose current session; its header has no menu and its ＋ is inert', () => {
     const startSession = vi.fn()
     mount({
       useSessions: hook(sessionState([summary('loose', 1)], { current: sid('loose') })),
       useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
       startSession,
     })
-    // The loose session's group is UNGROUPED_KEY: expanded by the effect.
-    expect(screen.getByText('loose')).toBeTruthy()
+    // Groups start closed, even the one holding the current session.
+    expect(screen.queryByText('loose')).toBeNull()
     expect(screen.queryByRole('button', { name: '工作区“未分组”的操作' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '在“未分组”中新建会话' }))
     expect(startSession).not.toHaveBeenCalled()
   })
 
-  it('keeps an already-expanded group when the selection moves within it', () => {
+  it('starts the current session\'s group closed and keeps an explicit expansion when the selection moves within it', () => {
     const first = sessionState([summary('a', 2), summary('b', 1)], { current: sid('a') })
     const b = mount({
       useSessions: hook(first),
       useWorkspaces: hook(workspaceState([workspace('alpha', ['a', 'b'])])),
     })
+    // Groups start closed, even the one holding the current session.
+    expect(screen.queryByText('a')).toBeNull()
+    fireEvent.click(screen.getByText('alpha'))
     expect(screen.getByText('a')).toBeTruthy()
-    // Selection hop inside the same group: the effect re-runs and leaves the
-    // expansion list unchanged (no duplicate key, group still open).
+    // Selection hop inside the same group leaves the expansion unchanged.
     rerender(b, { useSessions: hook({ ...first, current: sid('b') }) })
     expect(screen.getByText('b')).toBeTruthy()
     fireEvent.click(screen.getByText('alpha'))
@@ -429,10 +431,14 @@ describe('WorkspaceBrowser', () => {
         workspace('alpha', ['alpha-blank']), workspace('beta', ['beta-blank']),
       ])),
     })
+    // Groups start closed; the current blank row appears once its group is
+    // explicitly expanded.
+    fireEvent.click(screen.getByText('alpha'))
     expect(screen.getByText('新会话')).toBeTruthy()
     expect(screen.queryByText('alpha-blank')).toBeNull()
     expect(screen.queryByText('beta-blank')).toBeNull()
 
+    fireEvent.click(screen.getByText('beta'))
     rerender(b, { useSessions: hook({ ...sessions, current: staleBlank.id }) })
     expect(screen.getAllByText('新会话')).toHaveLength(1)
     b.store.actions.setGroupBy('flat')
