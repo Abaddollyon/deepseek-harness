@@ -56,6 +56,8 @@ export interface SessionSummary {
   /** Coarse durable origin for navigation filtering; not a continuation capability. */
   origin?: 'subagent'
   running: boolean
+  /** Running descendants projected from a loaded subagent catalog branch. */
+  runningSubagentCount?: number
   /** User interaction currently blocking this session (sidebar amber-dot state). */
   pendingInteraction?: PendingInteractionStatus
   /** Finished while not selected and not yet opened — the sidebar's green "done" reminder. Absent = false. */
@@ -173,6 +175,53 @@ function displayTitleOf(title: string | undefined, cwd: string | undefined, id: 
     if (base !== '') return base
   }
   return id
+}
+
+/** Reuse unchanged sidebar rows so catalog refreshes do not remount every row. */
+function sameSessionSummary(a: SessionSummary, b: SessionSummary): boolean {
+  return a.id === b.id
+    && a.title === b.title
+    && a.displayTitle === b.displayTitle
+    && a.cwd === b.cwd
+    && a.agentPreset === b.agentPreset
+    && a.parentId === b.parentId
+    && a.origin === b.origin
+    && a.running === b.running
+    && a.runningSubagentCount === b.runningSubagentCount
+    && a.pendingInteraction === b.pendingInteraction
+    && a.completed === b.completed
+    && a.blank === b.blank
+    && a.updatedAt === b.updatedAt
+    && a.projectionValues === b.projectionValues
+}
+
+/** Compare a record by value identity without allocating a normalized copy. */
+function sameRecord<T>(
+  next: Readonly<Record<string, T>>,
+  previous: Readonly<Record<string, T>>,
+  equal: (nextValue: T, previousValue: T) => boolean = (nextValue, previousValue) => nextValue === previousValue,
+): boolean {
+  const nextKeys = Object.keys(next)
+  const previousKeys = Object.keys(previous)
+  return nextKeys.length === previousKeys.length
+    && nextKeys.every(key => Object.hasOwn(previous, key) && equal(next[key] as T, previous[key] as T))
+}
+
+/** Catalog records are rebuilt around a stable entry array on ordinary refreshes. */
+function sameCatalogSnapshot(a: SubagentCatalogSnapshot, b: SubagentCatalogSnapshot): boolean {
+  return a.state === b.state
+    && a.parentAvailable === b.parentAvailable
+    && a.error === b.error
+    && a.entries.length === b.entries.length
+    && a.entries.every((entry, index) => entry === b.entries[index])
+}
+
+/** Address values may be reconstructed while their route remains unchanged. */
+function sameSubagentAddress(a: SubagentAddress | undefined, b: SubagentAddress | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined
+    && a.parentSessionId === b.parentSessionId
+    && a.childSessionId === b.childSessionId
+    && a.mode === b.mode)
 }
 
 /**
@@ -658,6 +707,7 @@ export class SessionRuntime implements ISessions {
 
   /** Project the manager's list snapshot into the store (title derivation is display-only). */
   private projectList(): void {
+    const previous = this.list.getSnapshot()
     const {
       items, current, phase, subagentsByParent, jobsBySession, currentAddress,
     } = this.manager.getListSnapshot()
@@ -665,7 +715,7 @@ export class SessionRuntime implements ISessions {
     const byId: Record<SessionId, SessionSummary> = {}
     for (const entry of items) {
       ids.push(entry.sessionId)
-      byId[entry.sessionId] = {
+      const next: SessionSummary = {
         id: entry.sessionId,
         displayTitle: displayTitleOf(entry.title, entry.cwd, entry.sessionId),
         running: entry.running,
@@ -684,6 +734,37 @@ export class SessionRuntime implements ISessions {
         ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
         ...(entry.agentPreset !== undefined ? { agentPreset: entry.agentPreset } : {}),
       }
+      const previousRow = previous.byId[entry.sessionId]
+      byId[entry.sessionId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+        ? previousRow
+        : next
+    }
+    // Host list rows intentionally hide subagents; loaded catalogs still need to feed
+    // the lineage index so the sidebar can show live branch activity.
+    for (const [parentId, snapshot] of Object.entries(subagentsByParent)) {
+      for (const entry of snapshot.entries) {
+        if (entry.kind !== 'child') continue
+        const existing = byId[entry.id]
+        const next: SessionSummary = existing === undefined
+          ? {
+            id: entry.id,
+            displayTitle: entry.label ?? entry.id,
+            parentId: parentId as SessionId,
+            origin: 'subagent',
+            running: entry.activity === 'running',
+            ...(entry.runningDescendantCount === undefined ? {}
+              : { runningSubagentCount: entry.runningDescendantCount }),
+            blank: false,
+            updatedAt: 0,
+          }
+          : entry.runningDescendantCount === undefined
+            ? existing
+            : { ...existing, runningSubagentCount: entry.runningDescendantCount }
+        const previousRow = previous.byId[entry.id]
+        byId[entry.id] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+          ? previousRow
+          : next
+      }
     }
     if (current !== undefined && currentAddress !== undefined) {
       const seen = new Set<SessionId>()
@@ -697,7 +778,7 @@ export class SessionRuntime implements ISessions {
         const displayTitle = child.label ?? childId
         const summary = byId[childId]
         if (summary === undefined) {
-          byId[childId] = {
+          const next: SessionSummary = {
             id: childId,
             displayTitle,
             parentId: address.parentSessionId,
@@ -706,8 +787,16 @@ export class SessionRuntime implements ISessions {
             blank: false,
             updatedAt: 0,
           }
+          const previousRow = previous.byId[childId]
+          byId[childId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+            ? previousRow
+            : next
         } else if (summary.displayTitle !== displayTitle) {
-          byId[childId] = { ...summary, displayTitle }
+          const next = { ...summary, displayTitle }
+          const previousRow = previous.byId[childId]
+          byId[childId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+            ? previousRow
+            : next
         }
         const parent = byId[address.parentSessionId]
         if (parent !== undefined && parent.origin !== 'subagent') break
@@ -729,7 +818,42 @@ export class SessionRuntime implements ISessions {
         ...(currentAddress === undefined ? {} : { subagentAddress: currentAddress }),
       })
     }
-    this.list.set({ ids, byId, current, phase, subagentsByParent, jobsBySession, currentAddress })
+    const stableIds = previous.ids.length === ids.length
+      && previous.ids.every((id, index) => id === ids[index])
+      ? previous.ids
+      : ids
+    const stableById = sameRecord(byId, previous.byId, sameSessionSummary)
+      ? previous.byId
+      : byId
+    const stableSubagentsByParent = sameRecord(
+      subagentsByParent, previous.subagentsByParent, sameCatalogSnapshot)
+      ? previous.subagentsByParent
+      : subagentsByParent
+    const stableJobsBySession = sameRecord(jobsBySession, previous.jobsBySession)
+      ? previous.jobsBySession
+      : jobsBySession
+    const stableCurrentAddress = sameSubagentAddress(currentAddress, previous.currentAddress)
+      ? previous.currentAddress
+      : currentAddress
+    if (stableIds === previous.ids
+      && stableById === previous.byId
+      && current === previous.current
+      && phase === previous.phase
+      && stableSubagentsByParent === previous.subagentsByParent
+      && stableJobsBySession === previous.jobsBySession
+      && stableCurrentAddress === previous.currentAddress) {
+      this.pruneScopes()
+      return
+    }
+    this.list.set({
+      ids: stableIds,
+      byId: stableById,
+      current,
+      phase,
+      subagentsByParent: stableSubagentsByParent,
+      jobsBySession: stableJobsBySession,
+      currentAddress: stableCurrentAddress,
+    })
     this.pruneScopes()
   }
 

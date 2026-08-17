@@ -973,6 +973,38 @@ describe('SubagentRuntime.listChildren', () => {
   })
 })
 
+describe('SubagentRuntime.listChildrenAndDescendants', () => {
+  it('shares one persistence listing across direct and descendant projections', async () => {
+    const { ctx, parent } = await setup([textResponse('done')])
+    const childId = await startChild(ctx, parent, 'direct child')
+    const grandchildId = await authorChild(ctx, '00000000-0000-4000-8000-0000000000cc', {
+      parentSession: childId,
+      origin: 'subagent',
+    }, childEvents(descriptorPayload('grandchild')))
+    const persistenceList = vi.spyOn(ctx.sessionPersistence, 'list')
+
+    const catalog = await ctx.subagents.listChildrenAndDescendants(parent.id)
+
+    expect(persistenceList).toHaveBeenCalledTimes(1)
+    expect(catalog.children).toEqual([
+      {
+        kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
+        activity: 'inactive', hasChildren: true,
+      },
+    ])
+    expect(catalog.descendants).toEqual([
+      {
+        kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
+        activity: 'inactive', hasChildren: true, parentId: parent.id, depth: 1,
+      },
+      {
+        kind: 'child', id: grandchildId, label: 'grandchild', mode: 'continuable',
+        activity: 'inactive', hasChildren: false, parentId: childId, depth: 2,
+      },
+    ])
+  })
+})
+
 describe('SubagentRuntime.listDescendants', () => {
   it('flattens the complete tree in stable pre-order with verified parent and depth', async () => {
     const { ctx, parent } = await setup([])

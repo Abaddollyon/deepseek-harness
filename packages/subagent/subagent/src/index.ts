@@ -63,8 +63,12 @@ import type {
 } from './continuation.ts'
 import SubagentActivationSetupRegistry from './activation-setup-registry.ts'
 import type { ContinuableSetupContribution } from './activation-setup-registry.ts'
-import { listChildren as listSubagentChildren, listDescendants as listSubagentDescendants } from './list-children.ts'
-import type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
+import {
+  listChildren as listSubagentChildren,
+  listChildrenAndDescendants as listSubagentChildrenAndDescendants,
+  listDescendants as listSubagentDescendants,
+} from './list-children.ts'
+import type { SubagentCatalogListing, SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 
@@ -122,7 +126,7 @@ export type {
   SubagentSettledMessageSource,
 } from './continuation.ts'
 export type { ContinuableSetupContribution } from './activation-setup-registry.ts'
-export type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
+export type { SubagentCatalogListing, SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 export type { SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
 export type { SubagentIdentityProjection, SubagentTimingProjection } from './projection-types.ts'
 
@@ -284,7 +288,6 @@ export class SubagentRuntime extends Service {
    * @returns the exact Cordis effect disposer.
    */
   registerContinuableSetup(contribution: ContinuableSetupContribution): () => void {
-    // oxlint-disable-next-line typescript/no-misused-promises -- synchronous cleanup; direct return preserves disposer identity
     return this.ctx.effect(
       () => this.setupRegistry.register(contribution),
       'subagents.registerContinuableSetup()',
@@ -357,6 +360,20 @@ export class SubagentRuntime extends Service {
   }
 
   /**
+   * Read direct children and the full descendant tree from one prepared corpus.
+   * This is the efficient catalog path for consumers that need both views.
+   * @param rootSessionId - session whose catalog is read.
+   * @param signal - caller-owned cancellation forwarded to persistence.
+   * @returns both historical catalog projections without a second persistence scan.
+   */
+  listChildrenAndDescendants(
+    rootSessionId: SessionId,
+    signal?: AbortSignal,
+  ): Promise<SubagentCatalogListing> {
+    return listSubagentChildrenAndDescendants(this.ctx, rootSessionId, signal)
+  }
+
+  /**
    * Enumerate the root's complete session-backed subagent tree in stable
    * pre-order from one live-preferred corpus, without loading or resuming an
    * Agent. Ordinary sessions and one-shot children remain traversal nodes so
@@ -384,7 +401,6 @@ export class SubagentRuntime extends Service {
    */
   registerProvider(provider: SubagentProvider): () => void {
     const name = provider.name
-    // oxlint-disable-next-line typescript/no-misused-promises -- synchronous cleanup; direct return preserves disposer identity
     return this.ctx.effect(function* (this: SubagentRuntime) {
       if (this.providers.has(name)) {
         throw new SubagentError(`a subagent provider named "${name}" is already registered`, 'DUPLICATE_PROVIDER')

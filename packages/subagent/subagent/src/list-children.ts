@@ -98,6 +98,12 @@ export type SubagentDescendantListEntry = SubagentListEntry & {
   readonly depth: number
 }
 
+/** Direct children and the complete descendant projection from one prepared corpus. */
+export interface SubagentCatalogListing {
+  readonly children: SubagentListEntry[]
+  readonly descendants: SubagentDescendantListEntry[]
+}
+
 type CorpusRecord = { readonly header: SessionHeader; readonly live: Session | undefined }
 
 interface ListingRuntime {
@@ -115,22 +121,55 @@ interface PositionedCandidate {
 }
 
 /**
- * Enumerate one parent's origin-classified direct children from the
- * live-preferred merge of `ctx.sessions` and optional session persistence,
- * serving each identity from the `subagent` projection unit: the registry's
- * watermark snapshot for a live child; for a cold one, a durable
- * projection-cache row when it serves an own-suffix identity (the seq gate),
- * else one bounded-concurrency persistence inspection folded through the
- * registry.
- * @see SubagentRuntime.listChildren for the public cancellation and failure contract.
- * @param ctx - context carrying the session store, the projection registry,
- *   optional persistence, and the optional projection cache.
- * @param parentSessionId - parent session whose direct children are listed.
+ * Enumerate direct children and the complete descendant tree from one prepared
+ * live-preferred corpus. The two projections share candidate resolution too, so
+ * a catalog RPC does not scan persistence twice or fold the same child twice.
+ * @param ctx - context carrying the session store, projection registry, and optional persistence/cache.
+ * @param rootSessionId - session whose direct children and descendant tree are listed.
  * @param signal - caller-owned cancellation observed around every persistence read.
- * @returns children and per-child diagnostics ordered by `createdAt`, then id.
- * @throws {@link SubagentError} when the projection registry or the session
- *   store is not mounted, or the caller cancels the listing.
+ * @returns both public catalog views with their historical ordering preserved.
+ * @throws {@link SubagentError} when listing services are unavailable or cancelled.
  */
+export async function listChildrenAndDescendants(
+  ctx: Context,
+  rootSessionId: SessionId,
+  signal?: AbortSignal,
+): Promise<SubagentCatalogListing> {
+  const listing = await prepareListing(ctx, signal)
+  const directCandidates = [...listing.corpus.values()]
+    .filter(record => record.header.parentSession === rootSessionId
+      && record.header.origin === 'subagent')
+    .sort(compareCorpusRecords)
+  const positioned = descendantCandidates(listing.corpus, rootSessionId)
+
+  // A direct child normally appears in both views. Resolve each candidate once
+  // while retaining the direct-list and pre-order traversal projections.
+  const candidates = new Map<SessionId, CorpusRecord>()
+  for (const candidate of directCandidates) candidates.set(candidate.header.id, candidate)
+  for (const candidate of positioned) candidates.set(candidate.record.header.id, candidate.record)
+  const resolved = await resolveCandidateRows([...candidates.values()], listing, signal)
+  const rowsById = new Map<SessionId, SubagentListEntry>()
+  for (const [index, id] of [...candidates.keys()].entries()) {
+    const row = resolved[index]
+    if (row !== undefined) rowsById.set(id, row)
+  }
+
+  const children: SubagentListEntry[] = []
+  for (const candidate of directCandidates) {
+    const row = rowsById.get(candidate.header.id)
+    if (row !== undefined) children.push(row)
+  }
+  const descendants: SubagentDescendantListEntry[] = []
+  for (const position of positioned) {
+    const row = rowsById.get(position.record.header.id)
+    if (row !== undefined) {
+      descendants.push({ ...row, parentId: position.parentId, depth: position.depth })
+    }
+  }
+  return { children, descendants }
+}
+
+/** Enumerate direct children while preserving the historical public method. */
 export async function listChildren(
   ctx: Context,
   parentSessionId: SessionId,

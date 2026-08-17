@@ -2552,12 +2552,52 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     subagents: {
       async list(request, signal) {
         try {
-          const entries = await ctx.subagents.listChildren(request.payload.parentSessionId, signal)
+          const catalog = typeof ctx.subagents.listChildrenAndDescendants === 'function'
+            ? await ctx.subagents.listChildrenAndDescendants(request.payload.parentSessionId, signal)
+            : {
+              children: await ctx.subagents.listChildren(request.payload.parentSessionId, signal),
+              descendants: typeof ctx.subagents.listDescendants === 'function'
+                ? await ctx.subagents.listDescendants(request.payload.parentSessionId, signal)
+                : [],
+            }
+          const entries = catalog.children
+          const descendants = catalog.descendants
+          const parentById = new Map(
+            descendants.filter(entry => entry.kind === 'child').map(entry => [entry.id, entry.parentId]),
+          )
+          const runningIds = new Set([
+            ...entries
+              .filter(entry => entry.kind === 'child' && ctx.agents.get(entry.id)?.status === 'running')
+              .map(entry => entry.id),
+            ...descendants
+              .filter(entry => entry.kind === 'child' && ctx.agents.get(entry.id)?.status === 'running')
+              .map(entry => entry.id),
+          ])
+          const branchRunningCount = (rootId: SessionId): number => {
+            let count = 0
+            for (const runningId of runningIds) {
+              const seen = new Set<SessionId>()
+              let current: SessionId | undefined = runningId
+              while (current !== undefined && !seen.has(current)) {
+                if (current === rootId) {
+                  count += 1
+                  break
+                }
+                seen.add(current)
+                current = parentById.get(current)
+              }
+            }
+            return count
+          }
           return ok(request, {
             entries: entries.map(entry => entry.kind === 'child'
               ? {
                 ...entry,
-                activity: ctx.agents.get(entry.id)?.status === 'running' ? 'running' : 'inactive',
+                activity: branchRunningCount(entry.id) > 0 ? 'running' : 'inactive',
+                runningDescendantCount: Math.max(
+                  0,
+                  branchRunningCount(entry.id) - (ctx.agents.get(entry.id)?.status === 'running' ? 1 : 0),
+                ),
               }
               : entry),
             parentAvailable: ctx.agents.get(request.payload.parentSessionId) !== undefined,
