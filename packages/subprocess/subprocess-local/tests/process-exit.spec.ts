@@ -28,15 +28,23 @@ function processExists(pid: number): boolean {
 }
 
 async function readTree(path: string): Promise<TreeState> {
-  return vi.waitFor(async () => {
-    const text = await readFile(path, 'utf8')
-    const state = JSON.parse(text) as Partial<TreeState>
-    if (!Number.isSafeInteger(state.root) || !Number.isSafeInteger(state.descendant)
-      || (state.root ?? 0) <= 0 || (state.descendant ?? 0) <= 0 || state.root === state.descendant) {
-      throw new Error(`invalid managed-tree state: ${text}`)
+  let observed: TreeState | undefined
+  await vi.waitUntil(async () => {
+    try {
+      const text = await readFile(path, 'utf8')
+      const state = JSON.parse(text) as Partial<TreeState>
+      if (!Number.isSafeInteger(state.root) || !Number.isSafeInteger(state.descendant)
+        || (state.root ?? 0) <= 0 || (state.descendant ?? 0) <= 0 || state.root === state.descendant) return false
+      observed = state as TreeState
+      return true
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      if (code === 'ENOENT' || error instanceof SyntaxError) return false
+      throw error
     }
-    return state as TreeState
   }, { interval: 10, timeout: scenarioTimeoutMs })
+  if (observed === undefined) throw new Error('managed-tree state was not observed')
+  return observed
 }
 
 async function captureIdentities(inspector: ProcessInspector, state: TreeState): Promise<ProcessIdentity[]> {
