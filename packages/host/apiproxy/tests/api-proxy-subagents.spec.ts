@@ -18,6 +18,9 @@ function bench(options: {
   parentLive?: boolean
   childStatus?: 'idle' | 'running'
   entries?: object[]
+  descendants?: object[]
+  combinedCatalog?: { children: object[]; descendants: object[] }
+  runningDescendantIds?: SessionId[]
   followupError?: Error
   interruptError?: Error
   listError?: Error
@@ -36,6 +39,7 @@ function bench(options: {
   const getAgent = vi.fn((id: SessionId) => {
     if (options.parentLive !== false && id === PARENT) return parent
     if (id === CHILD) return child
+    if (options.runningDescendantIds?.includes(id) === true) return { id, status: 'running' }
     return undefined
   })
   const listChildren = vi.fn(() => options.listError === undefined
@@ -46,6 +50,10 @@ function bench(options: {
       },
     ])
     : Promise.reject(options.listError))
+  const listDescendants = vi.fn(() => Promise.resolve(options.descendants ?? []))
+  const listChildrenAndDescendants = options.combinedCatalog === undefined
+    ? undefined
+    : vi.fn(() => Promise.resolve(options.combinedCatalog!))
   const followup = vi.fn((
     _parent: unknown,
     _childId: SessionId,
@@ -82,7 +90,13 @@ function bench(options: {
   })
   const ctx = new Context()
   ctx.provide('agents', { get: getAgent })
-  ctx.provide('subagents', { listChildren, followup, interrupt })
+  ctx.provide('subagents', {
+    listChildren,
+    listDescendants,
+    ...(listChildrenAndDescendants === undefined ? {} : { listChildrenAndDescendants }),
+    followup,
+    interrupt,
+  })
   ctx.provide('sessions', {
     get: (id: SessionId) => options.liveChild === true && id === CHILD
       ? { id: CHILD, header: childHeader, events: childEvents }
@@ -105,7 +119,10 @@ function bench(options: {
   const api = createApiProxy(ctx, {
     defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp',
   })
-  return { api, getAgent, listChildren, inspect, snapshot, restore, followup, interrupt, parent }
+  return {
+    api, getAgent, listChildren, listDescendants, listChildrenAndDescendants,
+    inspect, snapshot, restore, followup, interrupt, parent,
+  }
 }
 
 describe('subagent gateway', () => {
@@ -137,6 +154,33 @@ describe('subagent gateway', () => {
     expect(listChildren).toHaveBeenCalledWith(PARENT, undefined)
   })
 
+  it('uses the combined catalog method when the runtime provides it', async () => {
+    const nested = sid('nested')
+    const catalog = bench({
+      combinedCatalog: {
+        children: [{
+          kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+          activity: 'inactive', hasChildren: true,
+        }],
+        descendants: [
+          { kind: 'child', id: CHILD, parentId: PARENT, depth: 1 },
+          { kind: 'child', id: nested, parentId: CHILD, depth: 2 },
+        ],
+      },
+      runningDescendantIds: [nested],
+    })
+
+    const response = await catalog.api.subagents.list(request({ parentSessionId: PARENT }))
+
+    expect(response.result).toMatchObject({
+      ok: true,
+      value: { entries: [{ id: CHILD, activity: 'running', runningDescendantCount: 1 }] },
+    })
+    expect(catalog.listChildrenAndDescendants).toHaveBeenCalledWith(PARENT, undefined)
+    expect(catalog.listChildren).not.toHaveBeenCalled()
+    expect(catalog.listDescendants).not.toHaveBeenCalled()
+  })
+
   it('derives catalog activity from the live child Agent rather than Session residency', async () => {
     const residentIdle = bench({ childStatus: 'idle', entries: [{
       kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
@@ -148,6 +192,27 @@ describe('subagent gateway', () => {
     const running = bench({ childStatus: 'running' })
     expect((await running.api.subagents.list(request({ parentSessionId: PARENT }))).result)
       .toMatchObject({ ok: true, value: { entries: [{ activity: 'running' }] } })
+  })
+
+  it('keeps a direct branch active while a nested descendant is running', async () => {
+    const nested = sid('nested')
+    const { api, listDescendants } = bench({
+      entries: [{
+        kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+        activity: 'inactive', hasChildren: true,
+      }],
+      descendants: [
+        { kind: 'child', id: CHILD, parentId: PARENT },
+        { kind: 'child', id: nested, parentId: CHILD },
+      ],
+      runningDescendantIds: [nested],
+    })
+    const response = await api.subagents.list(request({ parentSessionId: PARENT }))
+    expect(response.result).toMatchObject({
+      ok: true,
+      value: { entries: [{ activity: 'running', runningDescendantCount: 1 }] },
+    })
+    expect(listDescendants).toHaveBeenCalledWith(PARENT, undefined)
   })
 
   it('reads a healthy direct child without looking up or activating any Agent', async () => {
