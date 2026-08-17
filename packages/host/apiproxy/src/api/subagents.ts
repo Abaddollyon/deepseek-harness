@@ -19,6 +19,8 @@ export type SubagentListEntry =
     activity: 'running' | 'inactive'
     /** Whether a direct descendant has durable `origin: 'subagent'`. */
     hasChildren: boolean
+    /** Number of currently running descendants below this direct child branch. */
+    runningDescendantCount?: number
   } & (
     | {
       mode: 'one-shot'

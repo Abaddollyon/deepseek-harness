@@ -9,11 +9,13 @@ function summary(
   parentId?: SessionId,
   origin?: 'subagent',
   running = false,
+  runningSubagentCount?: number,
 ): SessionSummary {
   return {
     id: sid(id), displayTitle: id, running, blank: false, updatedAt: 0,
     ...(parentId === undefined ? {} : { parentId }),
     ...(origin === undefined ? {} : { origin }),
+    ...(runningSubagentCount === undefined ? {} : { runningSubagentCount }),
   }
 }
 
@@ -32,6 +34,15 @@ describe('indexSubagentDescendants', () => {
     const result = index(owner, child, grandchild)
     expect(result.get(owner.id)).toEqual({ count: 2, runningCount: 1 })
     expect(result.get(child.id)).toEqual({ count: 1, runningCount: 1 })
+  })
+
+  it('uses a hidden descendant hint without double counting loaded descendants', () => {
+    const owner = summary('owner')
+    const child = summary('child', owner.id, 'subagent', false, 1)
+    const grandchild = summary('grandchild', child.id, 'subagent', true)
+
+    const result = index(owner, child, grandchild)
+    expect(result.get(owner.id)).toEqual({ count: 2, runningCount: 1 })
   })
 
   it('stops at ordinary forks and fails soft on cycles and missing parents', () => {

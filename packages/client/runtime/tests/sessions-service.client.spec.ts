@@ -72,6 +72,21 @@ describe('list store projection', () => {
     expect(state.byId[sid('s2')]?.title).toBeUndefined()
   })
 
+  it('reuses list and row identities after an equivalent refresh', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 's1', cwd: '/home/u/proj-a/' }])
+    const first = b.svc.list.getSnapshot()
+
+    await feedList(b, [{ id: 's1', cwd: '/home/u/proj-a/' }])
+    const second = b.svc.list.getSnapshot()
+
+    expect(second.ids).toBe(first.ids)
+    expect(second.byId).toBe(first.byId)
+    expect(second.byId[sid('s1')]).toBe(first.byId[sid('s1')])
+    expect(second.subagentsByParent).toBe(first.subagentsByParent)
+    expect(second.jobsBySession).toBe(first.jobsBySession)
+  })
+
   it('reprojects a blank session whose composition switched and nothing else moved', async () => {
     const b = bench()
     await feedList(b, [{ id: 's1', blank: true, agentPreset: 'standard' }])
