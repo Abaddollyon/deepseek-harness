@@ -288,10 +288,11 @@ export class SubagentRuntime extends Service {
    * @returns the exact Cordis effect disposer.
    */
   registerContinuableSetup(contribution: ContinuableSetupContribution): () => void {
-    return this.ctx.effect(
+    const dispose = this.ctx.effect(
       () => this.setupRegistry.register(contribution),
       'subagents.registerContinuableSetup()',
     )
+    return () => void dispose()
   }
 
   /**
@@ -401,7 +402,7 @@ export class SubagentRuntime extends Service {
    */
   registerProvider(provider: SubagentProvider): () => void {
     const name = provider.name
-    return this.ctx.effect(function* (this: SubagentRuntime) {
+    const dispose = this.ctx.effect(function* (this: SubagentRuntime) {
       if (this.providers.has(name)) {
         throw new SubagentError(`a subagent provider named "${name}" is already registered`, 'DUPLICATE_PROVIDER')
       }
@@ -414,6 +415,7 @@ export class SubagentRuntime extends Service {
       // repository's fail-loud registration semantics.
       this.ctx.emit('subagent/provider-added', provider)
     }.bind(this), 'subagents.registerProvider()')
+    return () => void dispose()
   }
 
   /**
