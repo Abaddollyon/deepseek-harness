@@ -18,6 +18,8 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 const RECORD_VERSION = 1
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
+const RECORD_FILENAME = /^[0-9a-f]{64}\.json$/
+const LEGACY_RECORD_FILENAME = /^[0-9a-f]{64}$/
 
 interface CredentialRecord {
   version: typeof RECORD_VERSION
@@ -155,22 +157,28 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
     return join(this.directory, digest + '.json')
   }
 
+  private legacyFilename(providerId: string): string {
+    return this.filename(providerId).slice(0, -'.json'.length)
+  }
+
   private async ensureDirectory(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
     await assertPrivatePath(this.directory, 'directory')
   }
 
   private async readRecord(providerId: string): Promise<CredentialRecord | undefined> {
-    const filename = this.filename(providerId)
-    let text: string
-    try {
-      await assertPrivatePath(filename, 'file')
-      text = await readFile(filename, 'utf8')
-    } catch (error) {
-      if (isENOENT(error)) return undefined
-      throw error
+    for (const filename of [this.filename(providerId), this.legacyFilename(providerId)]) {
+      let text: string
+      try {
+        await assertPrivatePath(filename, 'file')
+        text = await readFile(filename, 'utf8')
+      } catch (error) {
+        if (isENOENT(error)) continue
+        throw error
+      }
+      return parseRecord(text, providerId)
     }
-    return parseRecord(text, providerId)
+    return undefined
   }
 
   private enqueue<T>(providerId: string, operation: () => Promise<T>): Promise<T> {
@@ -197,21 +205,29 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
       if (isENOENT(error)) return []
       throw error
     }
-    const records: CredentialInfo[] = []
+    const records = new Map<string, { info: CredentialInfo; canonical: boolean }>()
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      if (!entry.name.endsWith('.json')) continue
+      if (!RECORD_FILENAME.test(entry.name) && !LEGACY_RECORD_FILENAME.test(entry.name)) continue
       if (!entry.isFile() || entry.isSymbolicLink()) {
         throw new Error('llm-pi-ai OAuth store: credential directory contains an unsafe entry')
       }
       const filename = join(this.directory, entry.name)
       await assertPrivatePath(filename, 'file')
       const record = parseRecord(await readFile(filename, 'utf8'))
-      if (this.filename(record.providerId) !== filename) {
+      if (this.filename(record.providerId) !== filename && this.legacyFilename(record.providerId) !== filename) {
         throw new Error('llm-pi-ai OAuth store: credential record filename is invalid')
       }
-      records.push({ providerId: record.providerId, type: record.credential.type })
+      const canonical = RECORD_FILENAME.test(entry.name)
+      const existing = records.get(record.providerId)
+      if (existing === undefined || (!existing.canonical && canonical)) {
+        records.set(record.providerId, {
+          info: { providerId: record.providerId, type: record.credential.type },
+          canonical,
+        })
+      }
     }
-    return records.sort((left, right) => left.providerId.localeCompare(right.providerId))
+    return [...records.values()].map(record => record.info)
+      .sort((left, right) => left.providerId.localeCompare(right.providerId))
   }
 
   async modify(
@@ -231,6 +247,7 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
           mode: PRIVATE_FILE_MODE,
           dirMode: PRIVATE_DIRECTORY_MODE,
         })
+        await rm(this.legacyFilename(providerId), { force: true })
         return candidate
       })
     })
@@ -242,7 +259,10 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
       await this.ensureDirectory()
       const filename = this.filename(providerId)
       await withFileLock(filename, async () => {
-        await rm(filename, { force: true })
+        await Promise.all([
+          rm(filename, { force: true }),
+          rm(this.legacyFilename(providerId), { force: true }),
+        ])
       })
     })
   }

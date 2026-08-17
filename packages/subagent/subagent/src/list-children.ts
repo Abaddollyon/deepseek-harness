@@ -94,6 +94,8 @@ export type SubagentListEntry =
 export type SubagentDescendantListEntry = SubagentListEntry & {
   /** Durable direct parent of this candidate in the enumerated tree. */
   readonly parentId: SessionId
+  /** Nearest emitted subagent ancestor, skipping ordinary traversal-only sessions. */
+  readonly parentSubagentId?: SessionId
   /** Edge distance from the requested root; direct children are `1`. */
   readonly depth: number
 }
@@ -117,6 +119,7 @@ interface ListingRuntime {
 interface PositionedCandidate {
   readonly record: CorpusRecord
   readonly parentId: SessionId
+  readonly parentSubagentId?: SessionId
   readonly depth: number
 }
 
@@ -159,11 +162,17 @@ export async function listChildrenAndDescendants(
     const row = rowsById.get(candidate.header.id)
     if (row !== undefined) children.push(row)
   }
+  const positionsById = new Map(positioned.map(position => [position.record.header.id, position]))
   const descendants: SubagentDescendantListEntry[] = []
   for (const position of positioned) {
     const row = rowsById.get(position.record.header.id)
     if (row !== undefined) {
-      descendants.push({ ...row, parentId: position.parentId, depth: position.depth })
+      descendants.push({
+        ...row,
+        parentId: position.parentId,
+        ...servedParentSubagentLink(position, positionsById, rowsById),
+        depth: position.depth,
+      })
     }
   }
   return { children, descendants }
@@ -209,14 +218,42 @@ export async function listDescendants(
     listing,
     signal,
   )
+  const positionsById = new Map(positioned.map(position => [position.record.header.id, position]))
+  const rowsById = new Map<SessionId, SubagentListEntry>()
+  positioned.forEach((position, index) => {
+    const row = rows[index]
+    if (row !== undefined) rowsById.set(position.record.header.id, row)
+  })
   const entries: SubagentDescendantListEntry[] = []
   positioned.forEach((position, index) => {
     const row = rows[index]
     if (row !== undefined) {
-      entries.push({ ...row, parentId: position.parentId, depth: position.depth })
+      entries.push({
+        ...row,
+        parentId: position.parentId,
+        ...servedParentSubagentLink(position, positionsById, rowsById),
+        depth: position.depth,
+      })
     }
   })
   return entries
+}
+
+
+/** Find the nearest emitted subagent row, skipping ordinary and omitted/corrupt nodes. */
+function servedParentSubagentLink(
+  position: PositionedCandidate,
+  positionsById: ReadonlyMap<SessionId, PositionedCandidate>,
+  rowsById: ReadonlyMap<SessionId, SubagentListEntry>,
+): { parentSubagentId?: SessionId } {
+  let candidateId = position.parentSubagentId
+  const seen = new Set<SessionId>()
+  while (candidateId !== undefined && !seen.has(candidateId)) {
+    seen.add(candidateId)
+    if (rowsById.get(candidateId)?.kind === 'child') return { parentSubagentId: candidateId }
+    candidateId = positionsById.get(candidateId)?.parentSubagentId
+  }
+  return {}
 }
 
 /** Resolve listing services once and build one live-preferred session corpus. */
@@ -362,8 +399,16 @@ function descendantCandidates(
     visited.add(id)
     if (position.record.header.origin === 'subagent') positioned.push(position)
     const descendants = children.get(id) ?? []
+    const nearestSubagentId = position.record.header.origin === 'subagent'
+      ? id
+      : position.parentSubagentId
     for (const record of [...descendants].reverse()) {
-      stack.push({ record, parentId: id, depth: position.depth + 1 })
+      stack.push({
+        record,
+        parentId: id,
+        ...nearestSubagentId === undefined ? {} : { parentSubagentId: nearestSubagentId },
+        depth: position.depth + 1,
+      })
     }
   }
   return positioned

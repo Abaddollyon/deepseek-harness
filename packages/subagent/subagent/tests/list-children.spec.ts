@@ -999,7 +999,8 @@ describe('SubagentRuntime.listChildrenAndDescendants', () => {
       },
       {
         kind: 'child', id: grandchildId, label: 'grandchild', mode: 'continuable',
-        activity: 'inactive', hasChildren: false, parentId: childId, depth: 2,
+        activity: 'inactive', hasChildren: false, parentId: childId,
+        parentSubagentId: childId, depth: 2,
       },
     ])
   })
@@ -1032,7 +1033,8 @@ describe('SubagentRuntime.listDescendants', () => {
       },
       {
         kind: 'child', id: grandchild, label: 'under a', mode: 'continuable',
-        activity: 'inactive', hasChildren: false, parentId: childA, depth: 2,
+        activity: 'inactive', hasChildren: false, parentId: childA,
+        parentSubagentId: childA, depth: 2,
       },
       {
         kind: 'child', id: childB, label: 'branch b', mode: 'continuable',
@@ -1136,6 +1138,16 @@ describe('SubagentRuntime.listDescendants', () => {
       createdAt: 9_999_999_999_999,
       origin: 'subagent',
     }, childEvents(descriptorPayload('under the one-shot')))
+    const ordinary = ctx.sessions.create(SessionId('ordinary-under-one-shot'), {
+      meta: { createdAt: 10_000_000_000_000, parentSession: oneShotId },
+    })
+    ordinary.append('turn/start', { turn: 1 })
+    await ctx.sessions.flush(ordinary)
+    const belowOrdinary = await authorChild(ctx, '00000000-0000-4000-8000-00000000bbb3', {
+      parentSession: ordinary.id,
+      createdAt: 10_000_000_000_001,
+      origin: 'subagent',
+    }, childEvents(descriptorPayload('below ordinary')))
 
     const entries = await ctx.subagents.listDescendants(parent.id)
     // The fork is absent (descriptor-less); the one-shot is present with its
@@ -1150,7 +1162,13 @@ describe('SubagentRuntime.listDescendants', () => {
     }))
     expect(entries).toContainEqual({
       kind: 'child', id: underOneShot, label: 'under the one-shot', mode: 'continuable',
-      activity: 'inactive', hasChildren: false, parentId: oneShotId, depth: 2,
+      activity: 'inactive', hasChildren: false, parentId: oneShotId,
+      parentSubagentId: oneShotId, depth: 2,
+    })
+    expect(entries).toContainEqual({
+      kind: 'child', id: belowOrdinary, label: 'below ordinary', mode: 'continuable',
+      activity: 'inactive', hasChildren: false, parentId: ordinary.id,
+      parentSubagentId: oneShotId, depth: 3,
     })
     // Pre-order: every child appears after its own parent entry.
     const position = new Map(entries.map((entry, index) => [entry.id, index]))

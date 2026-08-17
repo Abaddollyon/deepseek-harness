@@ -181,6 +181,35 @@ describe('subagent gateway', () => {
     expect(catalog.listDescendants).not.toHaveBeenCalled()
   })
 
+  it('credits running descendants across an ordinary traversal-only session', async () => {
+    const ordinary = sid('ordinary-fork')
+    const deep = sid('deep-subagent')
+    const { api } = bench({
+      combinedCatalog: {
+        children: [{
+          kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+          activity: 'inactive', hasChildren: true,
+        }],
+        descendants: [
+          { kind: 'child', id: CHILD, parentId: PARENT, depth: 1 },
+          {
+            kind: 'child', id: deep, parentId: ordinary,
+            parentSubagentId: CHILD, depth: 3,
+          },
+        ],
+      },
+      runningDescendantIds: [deep],
+    })
+
+    expect((await api.subagents.list(request({ parentSessionId: PARENT }))).result)
+      .toMatchObject({
+        ok: true,
+        value: { entries: [{
+          id: CHILD, activity: 'running', directActivity: 'inactive', runningDescendantCount: 1,
+        }] },
+      })
+  })
+
   it('derives catalog activity from the live child Agent rather than Session residency', async () => {
     const residentIdle = bench({ childStatus: 'idle', entries: [{
       kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',

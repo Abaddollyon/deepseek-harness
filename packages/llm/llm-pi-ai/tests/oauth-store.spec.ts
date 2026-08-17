@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,6 +37,9 @@ describe('PiAiOAuthCredentialStore', () => {
     await store.modify('openai-codex', async () => credential)
 
     expect(await store.read('openai-codex')).toEqual(credential)
+    expect(await readdir(store.directory)).toContain(
+      createHash('sha256').update('openai-codex').digest('hex') + '.json',
+    )
     const listed = await store.list()
     expect(listed).toEqual([{ providerId: 'openai-codex', type: 'oauth' }])
     expect(JSON.stringify(listed)).not.toContain('secret-access')
@@ -44,6 +48,25 @@ describe('PiAiOAuthCredentialStore', () => {
     await store.delete('openai-codex')
     expect(await store.read('openai-codex')).toBeUndefined()
     expect(await store.list()).toEqual([])
+  })
+
+  it('reads and atomically migrates a legacy bare-digest record', async () => {
+    const { store } = await harness()
+    const credential = oauth('legacy')
+    await store.modify('openai-codex', async () => credential)
+    const canonical = join(
+      store.directory,
+      createHash('sha256').update('openai-codex').digest('hex') + '.json',
+    )
+    const legacy = canonical.slice(0, -'.json'.length)
+    await writeFile(legacy, await readFile(canonical), { mode: 0o600 })
+    await rm(canonical)
+
+    expect(await store.read('openai-codex')).toEqual(credential)
+    expect(await store.list()).toEqual([{ providerId: 'openai-codex', type: 'oauth' }])
+    await store.modify('openai-codex', async current => current)
+    expect(JSON.parse(await readFile(canonical, 'utf8'))).toMatchObject({ providerId: 'openai-codex' })
+    await expect(readFile(legacy, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('treats an undefined modify result as an unchanged credential', async () => {
