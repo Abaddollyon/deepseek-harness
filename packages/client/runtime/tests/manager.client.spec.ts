@@ -898,6 +898,57 @@ describe('connected generation', () => {
     })
   })
 
+  it('rejects stale list and catalog responses across a reconnect generation', async () => {
+    const api = new FakeApiClient()
+    const staleList = deferred<Awaited<ReturnType<FakeApiClient['onList']>>>()
+    const freshList = deferred<Awaited<ReturnType<FakeApiClient['onList']>>>()
+    const staleCatalog = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    const freshCatalog = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    let listCalls = 0
+    let catalogCalls = 0
+    api.onList = () => (++listCalls === 1 ? staleList.promise : freshList.promise)
+    api.onSubagentList = () => (++catalogCalls === 1 ? staleCatalog.promise : freshCatalog.promise)
+    const manager = new SessionManager(api, fakeRemote())
+
+    const initialList = manager.refreshList()
+    manager.setSubagentCatalogOpen(S1, true)
+    manager.handleDisconnected()
+    manager.handleConnected()
+
+    staleList.resolve(ok({ items: [summary(S2)] as never[] }))
+    staleCatalog.resolve(ok({
+      entries: [{
+        kind: 'child', id: S2, mode: 'one-shot', activity: 'running',
+        directActivity: 'running', runningDescendantCount: 0, hasChildren: false,
+      }] as never[],
+      parentAvailable: false,
+    }))
+    await initialList
+    await vi.waitFor(() => {
+      expect(api.callsOf('session.list')).toHaveLength(2)
+      expect(api.callsOf('subagent.list')).toHaveLength(2)
+    })
+    expect(manager.getListSnapshot().items).toEqual([])
+
+    freshList.resolve(ok({ items: [summary(S1)] as never[] }))
+    freshCatalog.resolve(ok({
+      entries: [{
+        kind: 'child', id: S2, mode: 'one-shot', activity: 'running',
+        directActivity: 'inactive', runningDescendantCount: 1, hasChildren: true,
+      }] as never[],
+      parentAvailable: true,
+    }))
+    await vi.waitFor(() => {
+      expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S1])
+      expect(manager.getListSnapshot().subagentsByParent[S1]).toMatchObject({
+        parentAvailable: true,
+        entries: [{
+          id: S2, activity: 'running', directActivity: 'inactive', runningDescendantCount: 1,
+        }],
+      })
+    })
+  })
+
   it('reloads the durable parent address for a restored child selection', async () => {
     const api = new FakeApiClient()
     const address = {
