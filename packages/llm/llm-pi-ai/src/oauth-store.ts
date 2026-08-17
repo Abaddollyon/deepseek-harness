@@ -1,15 +1,16 @@
 /**
  * Persistent pi-ai OAuth credentials owned by the Harness home.
  *
- * Each provider has one versioned file so unrelated providers never share a
- * read-modify-write commit. Provider ids are hashed for filenames and retained
+ * Each provider has one canonical versioned file plus a legacy mirror during
+ * mixed-version operation. Provider ids are hashed for filenames and retained
  * inside the record for collision and corruption checks.
  *
  * @module dsh-llm-pi-ai/oauth-store
  */
 
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, readdir, readFile, rm } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { lstat, mkdir, open, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Credential, CredentialInfo, CredentialStore } from '@earendil-works/pi-ai'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -20,6 +21,7 @@ const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 const RECORD_FILENAME = /^[0-9a-f]{64}\.json$/
 const LEGACY_RECORD_FILENAME = /^[0-9a-f]{64}$/
+const COMPATIBILITY_MARKER_SUFFIX = '.compat'
 
 interface CredentialRecord {
   version: typeof RECORD_VERSION
@@ -136,12 +138,48 @@ async function assertPrivatePath(path: string, kind: 'directory' | 'file'): Prom
   }
 }
 
+/** Read and stat the same owner-only inode, without following a final symlink. */
+async function readPrivateFile(filename: string): Promise<{ text: string; modifiedAt: number } | undefined> {
+  let handle
+  try {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0
+    handle = await open(filename, fsConstants.O_RDONLY | noFollow)
+  } catch (error) {
+    if (isENOENT(error)) return undefined
+    throw error
+  }
+  try {
+    const stats = await handle.stat()
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error('llm-pi-ai OAuth store: credential file has an unsafe file type')
+    }
+    if (process.platform !== 'win32' && (stats.mode & 0o077) !== 0) {
+      throw new Error('llm-pi-ai OAuth store: credential file permissions must be owner-only')
+    }
+    return { text: await handle.readFile('utf8'), modifiedAt: stats.mtimeMs }
+  } finally {
+    await handle.close()
+  }
+}
+
+async function privatePathExists(path: string, kind: 'directory' | 'file'): Promise<boolean> {
+  try {
+    await assertPrivatePath(path, kind)
+    return true
+  } catch (error) {
+    if (isENOENT(error)) return false
+    throw error
+  }
+}
+
 /**
  * Persistent provider-scoped credential store for pi-ai.
  *
- * modify and delete serialize in-process and through a file lock per provider.
- * Readers remain lock-free because commits replace complete files by
- * same-directory rename. The shared atomic writer does not fsync; a sudden
+ * modify and delete serialize in-process and through both generation lock paths
+ * in a fixed order so old and new writers cannot overlap. A persistent marker
+ * makes partial writes and deletes fail closed. Readers bind metadata and bytes
+ * to one opened inode while complete files commit by same-directory rename.
+ * The shared atomic writer does not fsync; a sudden
  * power loss may lose the latest completed replacement while never exposing a
  * partially written JSON document.
  */
@@ -161,24 +199,36 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
     return this.filename(providerId).slice(0, -'.json'.length)
   }
 
+  private compatibilityFilename(providerId: string): string {
+    return this.legacyFilename(providerId) + COMPATIBILITY_MARKER_SUFFIX
+  }
+
   private async ensureDirectory(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
     await assertPrivatePath(this.directory, 'directory')
   }
 
   private async readRecord(providerId: string): Promise<CredentialRecord | undefined> {
-    for (const filename of [this.filename(providerId), this.legacyFilename(providerId)]) {
-      let text: string
-      try {
-        await assertPrivatePath(filename, 'file')
-        text = await readFile(filename, 'utf8')
-      } catch (error) {
-        if (isENOENT(error)) continue
-        throw error
-      }
-      return parseRecord(text, providerId)
+    const canonicalFilename = this.filename(providerId)
+    const legacyFilename = this.legacyFilename(providerId)
+    const compatibilityManaged = await privatePathExists(this.compatibilityFilename(providerId), 'file')
+    const records: { record: CredentialRecord; modifiedAt: number; canonical: boolean }[] = []
+    for (const [filename, canonical] of [
+      [canonicalFilename, true],
+      [legacyFilename, false],
+    ] as const) {
+      const opened = await readPrivateFile(filename)
+      if (opened === undefined) continue
+      records.push({
+        record: parseRecord(opened.text, providerId),
+        modifiedAt: opened.modifiedAt,
+        canonical,
+      })
     }
-    return undefined
+    if (compatibilityManaged && records.length !== 2) return undefined
+    records.sort((left, right) => right.modifiedAt - left.modifiedAt
+      || Number(left.canonical) - Number(right.canonical))
+    return records[0]?.record
   }
 
   private enqueue<T>(providerId: string, operation: () => Promise<T>): Promise<T> {
@@ -205,6 +255,7 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
       if (isENOENT(error)) return []
       throw error
     }
+    const entryNames = new Set(entries.map(entry => entry.name))
     const records = new Map<string, { info: CredentialInfo; canonical: boolean }>()
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!RECORD_FILENAME.test(entry.name) && !LEGACY_RECORD_FILENAME.test(entry.name)) continue
@@ -212,12 +263,20 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
         throw new Error('llm-pi-ai OAuth store: credential directory contains an unsafe entry')
       }
       const filename = join(this.directory, entry.name)
-      await assertPrivatePath(filename, 'file')
-      const record = parseRecord(await readFile(filename, 'utf8'))
+      const opened = await readPrivateFile(filename)
+      if (opened === undefined) continue
+      const record = parseRecord(opened.text)
       if (this.filename(record.providerId) !== filename && this.legacyFilename(record.providerId) !== filename) {
         throw new Error('llm-pi-ai OAuth store: credential record filename is invalid')
       }
       const canonical = RECORD_FILENAME.test(entry.name)
+      const digest = canonical ? entry.name.slice(0, -'.json'.length) : entry.name
+      const compatibilityName = digest + COMPATIBILITY_MARKER_SUFFIX
+      if (entryNames.has(compatibilityName)
+        && (!entryNames.has(digest) || !entryNames.has(digest + '.json'))) {
+        await assertPrivatePath(join(this.directory, compatibilityName), 'file')
+        continue
+      }
       const existing = records.get(record.providerId)
       if (existing === undefined || (!existing.canonical && canonical)) {
         records.set(record.providerId, {
@@ -238,18 +297,27 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
     return this.enqueue(providerId, async () => {
       await this.ensureDirectory()
       const filename = this.filename(providerId)
-      return withFileLock(filename, async () => {
+      const legacyFilename = this.legacyFilename(providerId)
+      return withFileLock(legacyFilename, () => withFileLock(filename, async () => {
         const current = (await this.readRecord(providerId))?.credential
         const candidate = await fn(current)
         if (candidate === undefined) return current
         assertCredential(candidate)
-        await writeFileAtomic(filename, renderRecord(providerId, candidate), {
+        const rendered = renderRecord(providerId, candidate)
+        await writeFileAtomic(this.compatibilityFilename(providerId), 'compat-v1\n', {
           mode: PRIVATE_FILE_MODE,
           dirMode: PRIVATE_DIRECTORY_MODE,
         })
-        await rm(this.legacyFilename(providerId), { force: true })
+        await writeFileAtomic(filename, rendered, {
+          mode: PRIVATE_FILE_MODE,
+          dirMode: PRIVATE_DIRECTORY_MODE,
+        })
+        await writeFileAtomic(legacyFilename, rendered, {
+          mode: PRIVATE_FILE_MODE,
+          dirMode: PRIVATE_DIRECTORY_MODE,
+        })
         return candidate
-      })
+      }))
     })
   }
 
@@ -258,12 +326,11 @@ export class PiAiOAuthCredentialStore implements CredentialStore {
     await this.enqueue(providerId, async () => {
       await this.ensureDirectory()
       const filename = this.filename(providerId)
-      await withFileLock(filename, async () => {
-        await Promise.all([
-          rm(filename, { force: true }),
-          rm(this.legacyFilename(providerId), { force: true }),
-        ])
-      })
+      const legacyFilename = this.legacyFilename(providerId)
+      await withFileLock(legacyFilename, () => withFileLock(filename, async () => {
+        await rm(filename, { force: true })
+        await rm(legacyFilename, { force: true })
+      }))
     })
   }
 }
