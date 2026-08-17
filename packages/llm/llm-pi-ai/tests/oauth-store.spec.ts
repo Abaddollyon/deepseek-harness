@@ -176,7 +176,7 @@ describe('PiAiOAuthCredentialStore', () => {
     const path = join(store.directory, filename!)
     await writeFile(path, '{"access":"sentinel-secret"', { mode: 0o600 })
 
-    const failure = await store.read('openai-codex').then(() => undefined, error => error as Error)
+    const failure = await store.read('openai-codex').then(() => undefined, (error: unknown) => error as Error)
     expect(failure?.message).toBe('llm-pi-ai OAuth store: credential record is not valid JSON')
     expect(failure?.message).not.toContain('sentinel-secret')
   })

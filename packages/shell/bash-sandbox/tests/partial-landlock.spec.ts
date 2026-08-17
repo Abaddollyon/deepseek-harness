@@ -169,7 +169,8 @@ describe('partial Landlock runner-failure classification', () => {
       expect((background as { path?: unknown }).path).toBeUndefined()
       expect(background).not.toBeInstanceOf(SandboxUnavailableError)
     } else {
-      expect(foreground).toMatchObject({
+      const outcome = foreground as { exitCode: number; stderr: { text: string } }
+      expect(outcome).toMatchObject({
         signal: null,
         sandbox: { mode: 'read-only', denied: false, enforcement: 'full' },
       })
@@ -177,13 +178,13 @@ describe('partial Landlock runner-failure classification', () => {
       // commonly reports command-not-found (127), while Node 25 reports the
       // malformed shell program's ordinary failure (1). Both prove that the
       // launched runner was not misclassified as sandbox infrastructure failure.
-      expect([1, 127]).toContain(foreground.exitCode)
-      expect((foreground as { stderr: { text: string } }).stderr.text.length).toBeGreaterThan(0)
+      expect([1, 127]).toContain(outcome.exitCode)
+      expect(outcome.stderr.text.length).toBeGreaterThan(0)
 
       const background = bash.start(bash.resolve(request))
       await background.done
       expect(background.status).toBe('completed')
-      expect(background.exitCode).toBe(foreground.exitCode)
+      expect(background.exitCode).toBe(outcome.exitCode)
       expect(background.signal).toBeNull()
       expect(background.sandbox).toEqual({ mode: 'read-only', denied: false, enforcement: 'full' })
       const output = background.readOutput().delta

@@ -35,7 +35,7 @@ function isENOENT(error: unknown): boolean {
 /** Whether a value is a plain JSON object. */
 function isObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
+  const prototype: unknown = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null
 }
 
@@ -53,7 +53,7 @@ function assertJsonValue(value: unknown, label: string): asserts value is JsonVa
     return
   }
   if (Array.isArray(value)) {
-    value.forEach((entry, index) => assertJsonValue(entry, label + '[' + index + ']'))
+    value.forEach((entry, index) => { assertJsonValue(entry, `${label}[${index}]`) })
     return
   }
   if (!isObject(value)) throw new Error('llm-pi-ai OAuth store: ' + label + ' is not JSON-compatible')
