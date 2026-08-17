@@ -207,13 +207,30 @@ function sameRecord<T>(
     && nextKeys.every(key => Object.hasOwn(previous, key) && equal(next[key] as T, previous[key] as T))
 }
 
-/** Catalog records are rebuilt around a stable entry array on ordinary refreshes. */
+/** Compare decoded catalog rows by wire value so reconnects do not churn the sidebar. */
+function sameCatalogEntry(
+  a: SubagentCatalogSnapshot['entries'][number],
+  b: SubagentCatalogSnapshot['entries'][number],
+): boolean {
+  if (a.kind !== b.kind || a.id !== b.id) return false
+  if (a.kind === 'diagnostic' || b.kind === 'diagnostic') {
+    return a.kind === 'diagnostic' && b.kind === 'diagnostic' && a.reason === b.reason
+  }
+  return a.mode === b.mode
+    && a.activity === b.activity
+    && a.directActivity === b.directActivity
+    && a.runningDescendantCount === b.runningDescendantCount
+    && a.hasChildren === b.hasChildren
+    && a.label === b.label
+}
+
+/** Catalog records may be rebuilt from fresh but equivalent decoded rows. */
 function sameCatalogSnapshot(a: SubagentCatalogSnapshot, b: SubagentCatalogSnapshot): boolean {
   return a.state === b.state
     && a.parentAvailable === b.parentAvailable
     && a.error === b.error
     && a.entries.length === b.entries.length
-    && a.entries.every((entry, index) => entry === b.entries[index])
+    && a.entries.every((entry, index) => sameCatalogEntry(entry, b.entries[index] as typeof entry))
 }
 
 /** Address values may be reconstructed while their route remains unchanged. */
@@ -751,7 +768,7 @@ export class SessionRuntime implements ISessions {
             displayTitle: entry.label ?? entry.id,
             parentId: parentId as SessionId,
             origin: 'subagent',
-            running: entry.activity === 'running',
+            running: (entry.directActivity ?? entry.activity) === 'running',
             ...(entry.runningDescendantCount === undefined ? {}
               : { runningSubagentCount: entry.runningDescendantCount }),
             blank: false,
@@ -783,7 +800,7 @@ export class SessionRuntime implements ISessions {
             displayTitle,
             parentId: address.parentSessionId,
             origin: 'subagent',
-            running: child.activity === 'running',
+            running: (child.directActivity ?? child.activity) === 'running',
             blank: false,
             updatedAt: 0,
           }

@@ -34,41 +34,61 @@ export function indexSubagentDescendants(
     children.set(summary.parentId, siblings)
   }
   const cycleIds = new Set<SessionId>()
+  const resolvedIds = new Set<SessionId>()
   for (const summary of Object.values(summaries)) {
     if (summary.origin !== 'subagent' || summary.parentId === undefined) continue
-    const path = new Set<SessionId>()
+    const path: SessionId[] = []
+    const positions = new Set<SessionId>()
     let current: SessionSummary | undefined = summary
+    let reachesCycle = false
     while (current?.origin === 'subagent' && current.parentId !== undefined) {
-      if (path.has(current.id)) {
-        for (const id of path) cycleIds.add(id)
+      if (cycleIds.has(current.id)) {
+        reachesCycle = true
         break
       }
-      path.add(current.id)
+      if (resolvedIds.has(current.id)) break
+      if (positions.has(current.id)) {
+        reachesCycle = true
+        break
+      }
+      positions.add(current.id)
+      path.push(current.id)
       current = summaries[current.parentId]
     }
+    for (const id of path) resolvedIds.add(id)
+    if (reachesCycle) for (const id of path) cycleIds.add(id)
   }
   const subtreeMemo = new Map<SessionId, SubagentDescendantSummary>()
-  const visiting = new Set<SessionId>()
   const subtree = (summary: SessionSummary): SubagentDescendantSummary => {
     const cached = subtreeMemo.get(summary.id)
     if (cached !== undefined) return cached
-    if (visiting.has(summary.id)) return { count: 0, runningCount: 0 }
-    visiting.add(summary.id)
-    let count = 1
-    let knownRunningCount = 0
-    for (const child of children.get(summary.id) ?? []) {
-      const nested = subtree(child)
-      count += nested.count
-      knownRunningCount += nested.runningCount
+    const stack: { summary: SessionSummary; expanded: boolean }[] = [
+      { summary, expanded: false },
+    ]
+    while (stack.length > 0) {
+      const frame = stack.pop()
+      if (frame === undefined || subtreeMemo.has(frame.summary.id)) continue
+      if (!frame.expanded) {
+        stack.push({ summary: frame.summary, expanded: true })
+        for (const child of children.get(frame.summary.id) ?? []) {
+          if (!subtreeMemo.has(child.id)) stack.push({ summary: child, expanded: false })
+        }
+        continue
+      }
+      let count = 1
+      let knownRunningCount = 0
+      for (const child of children.get(frame.summary.id) ?? []) {
+        const nested = subtreeMemo.get(child.id) ?? { count: 0, runningCount: 0 }
+        count += nested.count
+        knownRunningCount += nested.runningCount
+      }
+      subtreeMemo.set(frame.summary.id, {
+        count,
+        runningCount: (frame.summary.running ? 1 : 0)
+          + Math.max(frame.summary.runningSubagentCount ?? 0, knownRunningCount),
+      })
     }
-    const result = {
-      count,
-      runningCount: (summary.running ? 1 : 0)
-        + Math.max(summary.runningSubagentCount ?? 0, knownRunningCount),
-    }
-    visiting.delete(summary.id)
-    subtreeMemo.set(summary.id, result)
-    return result
+    return subtreeMemo.get(summary.id) ?? { count: 0, runningCount: 0 }
   }
   for (const summary of Object.values(summaries)) {
     if (summary.origin !== 'subagent' || summary.parentId === undefined) continue

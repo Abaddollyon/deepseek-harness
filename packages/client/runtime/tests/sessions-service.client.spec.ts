@@ -10,6 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { SessionCreateError, SessionRuntime, scopeOf } from '../src/client/sessions/service.ts'
+import { indexSubagentDescendants } from '../src/client/sessions/subagent-lineage.ts'
 import { FakeApiClient, deferred, err, fakeRemote, ok } from './fake-api.client.ts'
 
 const sid = (s: string): SessionId => s as SessionId
@@ -85,6 +86,48 @@ describe('list store projection', () => {
     expect(second.byId[sid('s1')]).toBe(first.byId[sid('s1')])
     expect(second.subagentsByParent).toBe(first.subagentsByParent)
     expect(second.jobsBySession).toBe(first.jobsBySession)
+  })
+
+  it('refreshes a hidden one-shot branch status while preserving equivalent sidebar identity', async () => {
+    const b = bench()
+    let running = true
+    b.api.onSubagentList = () => Promise.resolve(ok({
+      entries: [{
+        kind: 'child', id: sid('hidden'), mode: 'one-shot', label: 'Hidden worker',
+        activity: running ? 'running' : 'inactive', directActivity: 'inactive',
+        runningDescendantCount: running ? 1 : 0, hasChildren: true,
+      }] as never[],
+      parentAvailable: true,
+    }))
+    await feedList(b, [{ id: 'root' }])
+
+    await b.svc.refreshSubagents(sid('root'))
+    await Promise.resolve()
+    const first = b.svc.list.getSnapshot()
+    expect(first.ids).toEqual([sid('root')])
+    expect(first.byId[sid('hidden')]).toMatchObject({
+      parentId: sid('root'), origin: 'subagent', displayTitle: 'Hidden worker',
+      running: false, runningSubagentCount: 1,
+    })
+
+    await b.svc.refreshSubagents(sid('root'))
+    await Promise.resolve()
+    const equivalent = b.svc.list.getSnapshot()
+    expect(equivalent.byId).toBe(first.byId)
+    expect(equivalent.subagentsByParent).toBe(first.subagentsByParent)
+    expect(equivalent.byId[sid('hidden')]).toBe(first.byId[sid('hidden')])
+    expect(indexSubagentDescendants(equivalent.byId).get(sid('root'))).toEqual({
+      count: 1, runningCount: 1,
+    })
+
+    running = false
+    await b.svc.refreshSubagents(sid('root'))
+    await Promise.resolve()
+    const inactive = b.svc.list.getSnapshot()
+    expect(inactive.byId[sid('hidden')]).toMatchObject({
+      running: false, runningSubagentCount: 0,
+    })
+    expect(inactive.byId[sid('hidden')]).not.toBe(first.byId[sid('hidden')])
   })
 
   it('reprojects a blank session whose composition switched and nothing else moved', async () => {

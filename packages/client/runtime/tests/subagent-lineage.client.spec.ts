@@ -45,6 +45,22 @@ describe('indexSubagentDescendants', () => {
     expect(result.get(owner.id)).toEqual({ count: 2, runningCount: 1 })
   })
 
+  it('indexes a deeply nested lineage without consuming the call stack', () => {
+    const summaries: SessionSummary[] = [summary('owner')]
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      summaries.push(summary(
+        `child-${depth}`,
+        depth === 0 ? sid('owner') : sid(`child-${depth - 1}`),
+        'subagent',
+        depth === 9_999,
+      ))
+    }
+
+    expect(index(...summaries).get(sid('owner'))).toEqual({
+      count: 10_000, runningCount: 1,
+    })
+  })
+
   it('stops at ordinary forks and fails soft on cycles and missing parents', () => {
     const owner = summary('owner')
     const child = summary('child', owner.id, 'subagent', true)

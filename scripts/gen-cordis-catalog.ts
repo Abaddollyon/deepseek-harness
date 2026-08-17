@@ -573,6 +573,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   RpcReceipt: 'carrier-layer receipt is owned by packages/host/apiproxy/src/api/rpc.ts',
   Sandbox: 'external E2B SDK handle is owned by packages/e2b/e2b/README.md',
   SessionForkSource: 'service-local fork input is owned by packages/core/session/src/index.ts',
+  SubagentCatalogListing: 'service-local catalog projection is owned by packages/subagent/subagent/src/list-children.ts',
   SubagentRunEndInfo: 'event payload contract is owned by packages/subagent/subagent/src/types.ts',
   SubagentRunInfo: 'event payload contract is owned by packages/subagent/subagent/src/types.ts',
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
