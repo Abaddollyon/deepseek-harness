@@ -110,6 +110,17 @@ export function workspaceLabel(cwd: string | undefined): string {
   return base !== undefined && base !== '' ? base : cwd
 }
 
+/**
+ * The group key whose section renders the selected Session's row: the
+ * Workspace accounting for it, or the Ungrouped bucket when none does.
+ * @param current - the selected Session.
+ * @param workspaces - real workspaces in stable Host order.
+ * @returns the workspace id as a group key, or {@link UNGROUPED_KEY}.
+ */
+export function currentGroupKey(current: SessionId, workspaces: readonly WorkspaceView[]): string {
+  return (workspaces.find(w => w.sessionIds.includes(current))?.workspaceId as string | undefined) ?? UNGROUPED_KEY
+}
+
 /** Recency comparator: newest first, id as the deterministic tiebreak (ids are unique per group). */
 function byRecency(a: SessionSummary, b: SessionSummary): number {
   if (b.updatedAt !== a.updatedAt) return b.updatedAt - a.updatedAt
@@ -268,10 +279,7 @@ export function deriveGroups(
   const archived = new Set(archivedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
   const descendants = indexSubagentDescendants(list.byId)
-  const currentGroup = list.current === undefined
-    ? undefined
-    : (workspaces.find(w => w.sessionIds.includes(list.current as SessionId))?.workspaceId as string | undefined)
-        ?? UNGROUPED_KEY
+  const currentGroup = list.current === undefined ? undefined : currentGroupKey(list.current, workspaces)
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
     const expanded = expandedGroups.has(g.key)
