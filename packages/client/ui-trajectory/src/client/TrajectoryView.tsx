@@ -15,10 +15,11 @@ import {
 import { TrajectoryToolbar } from './TrajectoryToolbar.tsx'
 import { TrajectoryTimeline } from './TrajectoryTimeline.tsx'
 import {
-  appendTrajectoryPartialLayout, deriveTrajectoryLayout,
+  appendTrajectoryPartialLayout, createTrajectoryLayoutCache, deriveTrajectoryLayout,
   type TrajectoryTurnModel,
 } from './layout.ts'
 import {
+  deriveTrajectoryTimeline,
   trajectoryTimelineFocusIndexes,
   type TrajectoryTimelineMode,
   type TrajectoryTimeRange,
@@ -40,6 +41,21 @@ function lastCellIndex(turns: readonly TrajectoryTurnModel[]): number {
     }
   }
   return last
+}
+
+function collectMatchIndexes(
+  turns: readonly TrajectoryTurnModel[],
+  matchRecordIds: ReadonlySet<string>,
+): Set<number> {
+  const indexes = new Set<number>()
+  for (const turn of turns) {
+    for (const group of turn.groups) {
+      for (const cell of group.cells) {
+        if (matchRecordIds.has(trajectoryRecordId(cell))) indexes.add(cell.index)
+      }
+    }
+  }
+  return indexes
 }
 
 function timelineBlock(block: AssistantBlock): AssistantBlock {
@@ -252,6 +268,9 @@ export function TrajectoryView({
   ])
   const partialTurn = partial?.turn ?? null
   const partialStep = partial?.step ?? null
+  // One memo per mounted view: the finalized fold reuses the cells and turn
+  // models whose inputs did not move, so appending an event costs the tail.
+  const [layoutCache] = useState(() => createTrajectoryLayoutCache())
   const finalized = useMemo(() => {
     const turns = deriveTrajectoryLayout({
       nodes,
@@ -262,10 +281,10 @@ export function TrajectoryView({
       runningCalls,
       requests,
       callSchemas,
-    })
+    }, layoutCache)
     return { turns, lastIndex: lastCellIndex(turns) }
   }, [
-    nodes, eventLocations, partialTurn, partialStep,
+    layoutCache, nodes, eventLocations, partialTurn, partialStep,
     runningCalls, requests, callSchemas,
   ])
   const timelinePartialSignature = partialStructureSignature(partial)
@@ -323,26 +342,37 @@ export function TrajectoryView({
     () => searchIndex.search(searchQuery),
     [searchIndex, searchIndexRevision, searchQuery],
   )
+  // Split by layout so a streaming token only rescans the in-flight tail: the
+  // finalized set survives every chunk that does not move the finalized fold.
+  const finalizedMatchIndexes = useMemo(
+    () => searchMatchRecordIds === null
+      ? null
+      : collectMatchIndexes(finalized.turns, searchMatchRecordIds),
+    [finalized, searchMatchRecordIds],
+  )
+  const partialMatchIndexes = useMemo(
+    () => searchMatchRecordIds === null
+      ? null
+      : collectMatchIndexes(partialSearchTurns, searchMatchRecordIds),
+    [partialSearchTurns, searchMatchRecordIds],
+  )
   const searchMatchIndexes = useMemo(() => {
-    if (searchMatchRecordIds === null) return null
-    const indexes = new Set<number>()
-    for (const turns of searchLayouts) {
-      for (const turn of turns) {
-        for (const group of turn.groups) {
-          for (const cell of group.cells) {
-            if (searchMatchRecordIds.has(trajectoryRecordId(cell))) indexes.add(cell.index)
-          }
-        }
-      }
-    }
+    if (finalizedMatchIndexes === null || partialMatchIndexes === null) return null
+    if (partialMatchIndexes.size === 0) return finalizedMatchIndexes
+    const indexes = new Set(finalizedMatchIndexes)
+    for (const index of partialMatchIndexes) indexes.add(index)
     return indexes
-  }, [searchLayouts, searchMatchRecordIds])
+  }, [finalizedMatchIndexes, partialMatchIndexes])
   const timelineRange = timelineSelection
+  const timelineModel = useMemo(
+    () => deriveTrajectoryTimeline(timelineTurns, timelineMode),
+    [timelineMode, timelineTurns],
+  )
   const timelineFocusIndexes = useMemo(
     () => timelineRange === null
       ? null
-      : trajectoryTimelineFocusIndexes(timelineTurns, timelineRange, timelineMode),
-    [timelineMode, timelineRange, timelineTurns],
+      : trajectoryTimelineFocusIndexes(timelineModel, timelineRange),
+    [timelineModel, timelineRange],
   )
   const handleRecordSelect = useCallback((index: number) => {
     if (
@@ -466,6 +496,7 @@ export function TrajectoryView({
       />
       <TrajectoryTimeline
         turns={timelineTurns}
+        model={timelineModel}
         mode={timelineMode}
         range={timelineRange}
         hasEarlierRecords={hasOlderHistory}

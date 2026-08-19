@@ -36,13 +36,25 @@ import { zh, type TrajectoryKey } from '../src/client/locales.ts'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-trajectory/client'
 import { apply as nodeApply } from '@deepseek-ai/dsh-client-ui-trajectory'
 import type { TrajectoryTurnModel } from '../src/client/layout.ts'
-import { TrajectoryTimeline } from '../src/client/TrajectoryTimeline.tsx'
+import {
+  TrajectoryTimeline, type TrajectoryTimelineProps,
+} from '../src/client/TrajectoryTimeline.tsx'
 import {
   TrajectoryView, type TrajectoryViewInjected,
 } from '../src/client/TrajectoryView.tsx'
 import { createTrajectoryDurationStore } from '../src/client/duration-store.ts'
 import type { TrajectorySnapshot } from '../src/client/trajectory-contract.ts'
 import { deriveTrajectoryTimeline } from '../src/client/timeline.ts'
+
+/** Owner stand-in: derives the timeline model once, exactly as TrajectoryView does. */
+function TimelineWithModel(props: Omit<TrajectoryTimelineProps, 'model'>) {
+  return (
+    <TrajectoryTimeline
+      {...props}
+      model={deriveTrajectoryTimeline(props.turns, props.mode)}
+    />
+  )
+}
 
 const SID = 's1' as SessionId
 const sessionSnapshots = new WeakMap<SlotRegistry, SnapshotStore<ConversationSnapshot>>()
@@ -622,7 +634,7 @@ describe('timeline projection', () => {
     vi.useFakeTimers()
     try {
       const view = render(
-        <TrajectoryTimeline
+        <TimelineWithModel
           turns={[{
             turn: 1,
             groups: [{
@@ -672,7 +684,7 @@ describe('timeline projection', () => {
   it('marks an unloaded history prefix without inventing timeline duration', () => {
     const onLoadEarlier = vi.fn(() => new Promise<boolean>(() => {}))
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={turns}
         mode="sequence"
         range={null}
@@ -697,7 +709,7 @@ describe('timeline projection', () => {
     expect(screen.getByLabelText('Loading earlier history')).toBeTruthy()
 
     view.rerender(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={turns}
         mode="sequence"
         range={null}
@@ -710,7 +722,7 @@ describe('timeline projection', () => {
 
   it('cancels native scrolling across the timeline while zooming', () => {
     render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -732,7 +744,7 @@ describe('timeline projection', () => {
 
   it('scales sequence gutters with narrow operation spans', () => {
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -759,7 +771,7 @@ describe('timeline projection', () => {
       }],
     }]
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={denseTurns}
         mode="sequence"
         range={null}
@@ -776,7 +788,7 @@ describe('timeline projection', () => {
   it('clears the selection without changing zoom on a zoomed right click', () => {
     const onRangeChange = vi.fn()
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={{ start: 2, end: 4 }}
@@ -808,7 +820,7 @@ describe('timeline projection', () => {
   it('clears the selection and suppresses the context menu at full zoom', () => {
     const onRangeChange = vi.fn()
     render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={{ start: 2, end: 4 }}
@@ -827,7 +839,7 @@ describe('timeline projection', () => {
   it('pans the zoomed viewport with a right-button drag without changing the selection', () => {
     const onRangeChange = vi.fn()
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={{ start: 2, end: 4 }}
@@ -857,7 +869,7 @@ describe('timeline projection', () => {
   it('pans the zoomed viewport only far enough to reveal a newly selected record', async () => {
     const onRangeChange = vi.fn()
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -872,7 +884,7 @@ describe('timeline projection', () => {
     fireEvent.wheel(plot, { clientX: 50, deltaY: -1_000 })
 
     view.rerender(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -888,7 +900,7 @@ describe('timeline projection', () => {
     })
 
     view.rerender(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -907,7 +919,7 @@ describe('timeline projection', () => {
   it('auto-pans a zoomed viewport while a range drag pushes against an edge', () => {
     const onRangeChange = vi.fn()
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={longTurns}
         mode="sequence"
         range={null}
@@ -983,7 +995,7 @@ describe('timeline projection', () => {
       }],
     }] satisfies readonly TrajectoryTurnModel[]
     const view = render(
-      <TrajectoryTimeline
+      <TimelineWithModel
         turns={errorTurns}
         mode="sequence"
         range={null}

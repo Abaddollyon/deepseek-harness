@@ -8,9 +8,9 @@ import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TrajectoryTurnModel } from './layout.ts'
 import type { AssistantMetricDetail, TrajectoryCellKind, TrajectoryCellProps } from './trajectory-record.ts'
 import {
-  deriveTrajectoryTimeline,
   formatTimelineOffset,
   type TrajectoryTimelineMode,
+  type TrajectoryTimelineModel,
   type TrajectoryTimeRange,
 } from './timeline.ts'
 import css from './TrajectoryTimeline.module.css'
@@ -130,6 +130,8 @@ function timelineTooltipLabel(
 /** Props for the fixed full-domain overview above the trajectory ledger. */
 export interface TrajectoryTimelineProps {
   turns: readonly TrajectoryTurnModel[]
+  /** Projection of `turns` under `mode`, derived once per frame by the owner. */
+  model: TrajectoryTimelineModel | null
   mode: TrajectoryTimelineMode
   range: TrajectoryTimeRange | null
   /** Whether the loaded timeline omits an earlier history prefix. */
@@ -234,6 +236,7 @@ function EarlierHistoryBoundary({
 /** Overview renderer with drag ranges, click-sized focus, and Escape reset. */
 export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   turns,
+  model,
   mode,
   range,
   hasEarlierRecords = false,
@@ -244,7 +247,6 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   onRecordSelect,
   onRecordFocus,
 }: TrajectoryTimelineProps) {
-  const model = useMemo(() => deriveTrajectoryTimeline(turns, mode), [mode, turns])
   const detailByIndex = useMemo(
     () => new Map(turns.flatMap(turn =>
       turn.groups.flatMap(group =>

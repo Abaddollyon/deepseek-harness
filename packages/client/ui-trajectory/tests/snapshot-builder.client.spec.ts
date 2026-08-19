@@ -234,4 +234,61 @@ describe('TrajectorySnapshotBuilder', () => {
     expect(builder.apply({ upserts: [middle] }).requests.map(request => request.startSeq))
       .toEqual([1, 3, 5])
   })
+
+  it('republishes every finalized section unchanged while only the partial advances', () => {
+    const builder = new TrajectorySnapshotBuilder()
+    const settled = contribution('assistant:1', 1, {
+      kind: 'assistant',
+      node: {
+        kind: 'assistant', seq: 2, time: 2, turn: 1, step: 1,
+        blocks: [{ kind: 'text', text: 'done' }],
+      },
+      partial: null,
+      request: assistantRequest(1, 1),
+    })
+    const streaming = (text: string) => contribution('assistant:2', 3, {
+      kind: 'assistant',
+      partial: { turn: 1, step: 2, blocks: [{ kind: 'text', text }] },
+      request: { ...assistantRequest(3, 2), completedAt: null, status: 'running' },
+    })
+    builder.replace({ nodes: [settled, streaming('a')] })
+    const first = builder.apply({ upserts: [streaming('ab')] })
+    const second = builder.apply({ upserts: [streaming('abc')] })
+
+    expect(second.eventNodes).toBe(first.eventNodes)
+    expect(second.eventLocations).toBe(first.eventLocations)
+    expect(second.requests).toBe(first.requests)
+    expect(second.callSchemas).toBe(first.callSchemas)
+    expect(second.runningCalls).toBe(first.runningCalls)
+    expect(second.partial).not.toBe(first.partial)
+    expect(second.partial?.blocks).toEqual([{ kind: 'text', text: 'abc' }])
+  })
+
+  it('republishes the identical snapshot when an upsert moves nothing', () => {
+    const builder = new TrajectorySnapshotBuilder()
+    const node = contribution('assistant:1', 1, {
+      kind: 'assistant', partial: null, request: assistantRequest(1, 1),
+    })
+    const first = builder.replace({ nodes: [node] })
+    expect(builder.apply({ upserts: [node] })).toBe(first)
+  })
+
+  it('keeps every prior node identity when one event is appended', () => {
+    const builder = new TrajectorySnapshotBuilder()
+    const settled = (seq: number) => contribution(`node:${seq}`, seq, {
+      kind: 'node',
+      node: {
+        kind: 'assistant', seq, time: seq, turn: 1, step: seq,
+        blocks: [{ kind: 'text', text: `step ${seq}` }],
+      },
+    })
+    const before = builder.replace({ nodes: [settled(1), settled(2), settled(3)] })
+    const after = builder.apply({ upserts: [settled(4)] })
+
+    expect(after.eventNodes).not.toBe(before.eventNodes)
+    for (const [index, node] of before.eventNodes.entries()) {
+      expect(after.eventNodes[index]).toBe(node)
+    }
+    expect(after.eventNodes.at(-1)?.seq).toBe(4)
+  })
 })

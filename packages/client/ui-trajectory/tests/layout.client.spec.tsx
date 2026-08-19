@@ -11,8 +11,9 @@ import type {
 import { TrajectoryGroupHeader } from '../src/client/TrajectoryGroupHeader.tsx'
 import { TrajectoryTurn } from '../src/client/TrajectoryTurn.tsx'
 import { TrajectoryTurnHeader } from '../src/client/TrajectoryTurnHeader.tsx'
+import type { TrajectoryCellProps } from '../src/client/trajectory-record.ts'
 import {
-  appendTrajectoryPartialLayout, deriveTrajectoryLayout,
+  appendTrajectoryPartialLayout, createTrajectoryLayoutCache, deriveTrajectoryLayout,
 } from '../src/client/layout.ts'
 
 afterEach(cleanup)
@@ -548,5 +549,128 @@ describe('run_code sub-dispatch cells', () => {
       'p1:code:1:code:1',
     ])
     expect(cells.map(cell => cell.index)).toEqual([1, 2, 3, 4])
+  })
+})
+
+describe('deriveTrajectoryLayout incremental cache', () => {
+  /** One turn: user in, assistant with a tool call, its result, a closing assistant. */
+  function turnNodes(turn: number): ConversationSnapshot['nodes'] {
+    const base = turn * 100
+    return [
+      {
+        kind: 'user', seq: base + 1, time: base + 1_000,
+        content: [{ type: 'text', text: `ask ${turn}` }], source: null,
+      },
+      {
+        kind: 'assistant', seq: base + 2, time: base + 2_000, turn, step: 1,
+        blocks: [
+          { kind: 'text', text: `plan ${turn}` },
+          { kind: 'tool-call', callId: `c${turn}`, name: 'bash', argsRaw: '{"command":"ls"}' },
+        ],
+        usage: { inputTokens: 10, outputTokens: 20 },
+      },
+      {
+        kind: 'tool-result', seq: base + 3, time: base + 3_500, callId: `c${turn}`,
+        call: { name: 'bash', argsRaw: '{"command":"ls"}' }, callTime: base + 2_200,
+        content: [{ type: 'text', text: `out ${turn}` }], isError: false,
+        callView: null, resultView: null,
+      },
+      {
+        kind: 'assistant', seq: base + 4, time: base + 4_000, turn, step: 2,
+        blocks: [{ kind: 'text', text: `answer ${turn}` }],
+      },
+    ] as unknown as ConversationSnapshot['nodes']
+  }
+
+  const session = [1, 2, 3].flatMap(turn => [...turnNodes(turn)])
+  const requests = session.flatMap((node): RequestView[] => node.kind !== 'assistant'
+    ? []
+    : [{
+      purpose: 'assistant',
+      startSeq: node.seq - 0.5,
+      turn: node.turn,
+      step: node.step,
+      startedAt: node.time - 500,
+      completedAt: node.time,
+      status: 'complete',
+    }])
+  const inputAt = (count: number) => {
+    const nodes = session.slice(0, count)
+    const highest = nodes.at(-1)?.seq ?? 0
+    return {
+      nodes,
+      partial: null,
+      runningCalls: [],
+      requests: requests.filter(request => request.startSeq <= highest),
+    }
+  }
+  const cellsOf = (turns: readonly { groups: readonly { cells: readonly TrajectoryCellProps[] }[] }[]) =>
+    turns.flatMap(turn => turn.groups.flatMap(group => group.cells))
+
+  it('produces exactly the full derivation at every point of an append sequence', () => {
+    const cache = createTrajectoryLayoutCache()
+    for (let count = 1; count <= session.length; count++) {
+      const input = inputAt(count)
+      expect(deriveTrajectoryLayout(input, cache)).toEqual(deriveTrajectoryLayout(input))
+    }
+  })
+
+  it('keeps the cells and turn models an appended event did not touch', () => {
+    const cache = createTrajectoryLayoutCache()
+    const before = deriveTrajectoryLayout(inputAt(8), cache)
+    const beforeCells = cellsOf(before)
+    const after = deriveTrajectoryLayout(inputAt(9), cache)
+    const afterCells = cellsOf(after)
+
+    expect(afterCells.length).toBe(beforeCells.length + 1)
+    for (const [index, cell] of beforeCells.entries()) {
+      expect(afterCells[index]).toBe(cell)
+    }
+    expect(after[0]).toBe(before[0])
+  })
+
+  it('re-expands only the record whose tool result arrived', () => {
+    const cache = createTrajectoryLayoutCache()
+    const before = deriveTrajectoryLayout(inputAt(2), cache)
+    const beforeCells = cellsOf(before)
+    const beforeTool = beforeCells.find(cell => cell.kind === 'tool')
+    expect(beforeTool?.outputDetail).toBeUndefined()
+
+    const after = deriveTrajectoryLayout(inputAt(3), cache)
+    const afterCells = cellsOf(after)
+    const afterTool = afterCells.find(cell => cell.kind === 'tool')
+    expect(afterTool).not.toBe(beforeTool)
+    expect(afterTool?.outputDetail).toBe('out 1')
+    expect(afterCells[0]).toBe(beforeCells[0])
+    expect(after).toEqual(deriveTrajectoryLayout(inputAt(3)))
+  })
+
+  it('republishes the same result identity when nothing in the input moved', () => {
+    const cache = createTrajectoryLayoutCache()
+    const input = inputAt(session.length)
+    const first = deriveTrajectoryLayout(input, cache)
+    expect(deriveTrajectoryLayout(input, cache)).toBe(first)
+    expect(deriveTrajectoryLayout({ ...input, nodes: [...input.nodes] }, cache)).toBe(first)
+  })
+
+  it('re-expands a tool cell whose schema arrived after its first derivation', () => {
+    const cache = createTrajectoryLayoutCache()
+    const input = inputAt(3)
+    const before = deriveTrajectoryLayout(input, cache)
+    const schema = { name: 'bash', description: 'Run', parameters: { type: 'object' } }
+    const withSchema = { ...input, callSchemas: new Map([['c1', schema]]) }
+    const after = deriveTrajectoryLayout(withSchema, cache)
+
+    expect(cellsOf(before).find(cell => cell.kind === 'tool')?.schemaDetail).toBeUndefined()
+    expect(cellsOf(after).find(cell => cell.kind === 'tool')?.schemaDetail)
+      .toBe(JSON.stringify(schema, null, 2))
+    expect(after).toEqual(deriveTrajectoryLayout(withSchema))
+  })
+
+  it('rebuilds from scratch when earlier history is prepended', () => {
+    const cache = createTrajectoryLayoutCache()
+    deriveTrajectoryLayout({ ...inputAt(session.length), nodes: session.slice(4) }, cache)
+    const input = inputAt(session.length)
+    expect(deriveTrajectoryLayout(input, cache)).toEqual(deriveTrajectoryLayout(input))
   })
 })

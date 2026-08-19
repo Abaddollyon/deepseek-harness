@@ -12,6 +12,15 @@ None, as the trajectory views render session data in the browser; nothing here r
 
 None; this package neither assembles nor sends a provider request.
 
+## Derivation cost
+
+Streaming publishes a new view snapshot per chunk, so both derivations reuse identity rather than rebuilding the session. `TrajectorySnapshotBuilder` folds each freshly built snapshot onto the previously published one: a section whose content did not move keeps its array, map, and member identities, and a flush that moved nothing republishes the same snapshot object. A chunk that only advances the in-flight assistant therefore leaves `eventNodes`, `eventLocations`, `requests`, `callSchemas`, and `runningCalls` unchanged, and every memo below them holds.
+
+`deriveTrajectoryLayout` takes an optional per-view cache from `createTrajectoryLayoutCache()`. With one, a record whose node, tool result, call start, preceding wall time, and tool schema are all unchanged keeps its previously expanded cells; a turn whose groups hold the same cells keeps its model; and a derivation that moved nothing republishes the same turn array. Node-derived indexes extend in place when the new `nodes` array only appended members, and rebuild whenever it did not (loading an earlier page). Without a cache the function expands every record again; the two paths produce equal content and differ only in identity, which is what `tests/layout.client.spec.tsx` asserts at every point of an append sequence.
+
+The timeline model is derived once per frame by `TrajectoryView` and passed to both the overview and `trajectoryTimelineFocusIndexes`. Live search keeps the finalized match set in its own memo so a streaming token rescans only the in-flight tail.
+
 ## Known Limitations and Deferred Work
 
 - **In-flight Time stays blank** — `partial` and `runningCalls` rows show their running state without a fabricated duration, so the Overview renders a start marker rather than inventing a live span. Record and timeline selection are local to Trajectory, with no anchor deep links.
+- **Client plugins carry no cordis.yml config** — the browser boot graph (`window.__DSH_BOOT__`) passes `id`/`url`/`rev`/`inject`/`immediately` only, and the shell creates each entry with `loader.create({ name })`, so a browser-half `Config` export would never be read. The virtualization threshold, overscan, and search-index throttle stay module constants until `dsh-client-modules` carries entry config onto the wire.

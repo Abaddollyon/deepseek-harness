@@ -12,6 +12,15 @@ Trajectory 渲染按轮次组织的事件记录表，其中可选择用户、助
 
 无；该包既不组装也不发送提供方请求。
 
+## 派生开销
+
+流式输出每个分片都会发布新的视图快照，因此两处派生都通过复用标识（identity）而非重建整个会话来降低开销。`TrajectorySnapshotBuilder` 会把新构建的快照折叠到上一次发布的快照上：内容未发生变化的分区保留其数组、Map 及成员标识；若一次刷新没有任何移动，则原样重新发布同一个快照对象。因此，仅推进进行中助手内容的分片不会改变 `eventNodes`、`eventLocations`、`requests`、`callSchemas` 与 `runningCalls`，其下游的每个 memo 都会命中。
+
+`deriveTrajectoryLayout` 接受一个来自 `createTrajectoryLayoutCache()` 的按视图缓存。启用后，只要某条记录的节点、工具结果、调用起始时间、前序墙钟时间与工具 schema 均未变化，就沿用上次展开得到的单元格；分组内单元格不变的轮次沿用其模型；没有任何移动的派生则重新发布同一个轮次数组。当新的 `nodes` 数组只是追加成员时，节点派生索引就地扩展；否则（例如加载更早的一页）重建。不传缓存时，函数会重新展开每条记录；两条路径产出的内容相等，只有标识不同——`tests/layout.client.spec.tsx` 会在一次追加序列的每个时点上断言这一点。
+
+时间线模型由 `TrajectoryView` 每帧派生一次，并同时传给概览与 `trajectoryTimelineFocusIndexes`。实时搜索把已定稿匹配集合放在独立的 memo 中，因此一个流式 token 只重新扫描进行中的尾部。
+
 ## 已知限制与暂缓事项
 
 - **进行中时，Time 保持空白**：`partial` 与 `runningCalls` 行会显示运行状态，但不会虚构耗时，因此 Overview 区域只渲染开始标记，而不会杜撰实时跨度。记录选择与时间线选择位于 Trajectory 内部，不提供锚点深链接。
+- **客户端插件不接收 cordis.yml 配置**：浏览器启动图（`window.__DSH_BOOT__`）只传递 `id`/`url`/`rev`/`inject`/`immediately`，且外壳以 `loader.create({ name })` 创建每个 entry，因此浏览器半侧导出的 `Config` 永远不会被读取。在 `dsh-client-modules` 把 entry 配置送上线路之前，虚拟化阈值、overscan 与搜索索引节流仍为模块常量。
