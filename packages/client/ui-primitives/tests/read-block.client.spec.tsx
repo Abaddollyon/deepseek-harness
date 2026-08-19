@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DEFAULT_READ_MAX_LINES, ReadBlock, type ReadBlockLine } from '../src/index.ts'
-import { grammarLoadCount, highlightLines, subscribeGrammarLoaded } from '../src/markdown/highlight.ts'
+import { grammarLoadSource, highlightLines } from '../src/markdown/highlight.ts'
 
 afterEach(cleanup)
 
@@ -77,18 +77,49 @@ describe('highlightLines', () => {
     // not, so the first call renders plain and imports the grammar, and a
     // subscriber fires once it registers, after which the same call highlights.
     let notified = 0
-    const stop = subscribeGrammarLoaded(() => { notified += 1 })
+    const python = grammarLoadSource('py')
+    const stop = python.subscribe(() => { notified += 1 })
     // First touch: grammar not loaded yet, so plain fallback while it imports.
     expect(highlightLines('def f(): pass', 'py')).toBeUndefined()
     // The import + loadLanguageSync resolve on a microtask; wait for the notify.
     await vi.waitFor(() => { expect(notified).toBeGreaterThan(0) })
-    expect(grammarLoadCount()).toBeGreaterThan(0)
+    expect(python.getSnapshot()).toBeGreaterThan(0)
     const result = highlightLines('def f(): pass', 'py')
     expect(result).not.toBeUndefined()
     // `def` is a python keyword and carries a --shiki-* color once highlighted.
     const keyword = result!.flat().find(span => span.text === 'def')
     expect(keyword?.style?.color).toContain('var(--shiki-')
     stop()
+  })
+
+  it('keeps one grammar load out of every other language\'s subscription', async () => {
+    // The storm this replaces: one global counter meant a lazy grammar landing
+    // invalidated the memo of every mounted fence in the transcript.
+    const typescript = grammarLoadSource('ts')
+    const ruby = grammarLoadSource('rb')
+    const unknown = grammarLoadSource('cobol')
+    let typescriptNotifications = 0
+    let unknownNotifications = 0
+    let rubyNotifications = 0
+    const stopTypescript = typescript.subscribe(() => { typescriptNotifications += 1 })
+    const stopUnknown = unknown.subscribe(() => { unknownNotifications += 1 })
+    const stopRuby = ruby.subscribe(() => { rubyNotifications += 1 })
+    const typescriptBefore = typescript.getSnapshot()
+
+    expect(highlightLines('puts 1', 'rb')).toBeUndefined()
+    await vi.waitFor(() => { expect(rubyNotifications).toBe(1) })
+
+    expect(typescriptNotifications).toBe(0)
+    expect(unknownNotifications).toBe(0)
+    expect(typescript.getSnapshot()).toBe(typescriptBefore)
+    stopTypescript()
+    stopUnknown()
+    stopRuby()
+  })
+
+  it('hands the same source object back for a language, so a re-render never resubscribes', () => {
+    expect(grammarLoadSource('ts')).toBe(grammarLoadSource('typescript'))
+    expect(grammarLoadSource(undefined)).toBe(grammarLoadSource('cobol'))
   })
 })
 

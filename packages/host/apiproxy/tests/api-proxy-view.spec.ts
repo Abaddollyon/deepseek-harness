@@ -287,7 +287,13 @@ describe('mux live view computation', () => {
 
   it('paginates a message with many provenance sources without variadic argument expansion', async () => {
     const { ctx } = await harness()
-    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    // Raw pagination under test: the settled-delta projection is off so the cut
+    // is visible as the complete source range it selected.
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+      historyElideSettledDeltas: false,
+    })
     const session = ctx.sessions.create()
     ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
     session.append('turn/start', { turn: 1 })

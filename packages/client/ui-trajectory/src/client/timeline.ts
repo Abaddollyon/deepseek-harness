@@ -43,6 +43,24 @@ export function formatTimelineOffset(milliseconds: number): string {
   return formatDurationMillis(milliseconds)
 }
 
+function minimum<T>(values: readonly T[], of: (value: T) => number): number {
+  let lowest = Number.POSITIVE_INFINITY
+  for (const value of values) {
+    const candidate = of(value)
+    if (candidate < lowest) lowest = candidate
+  }
+  return lowest
+}
+
+function maximum<T>(values: readonly T[], of: (value: T) => number): number {
+  let highest = Number.NEGATIVE_INFINITY
+  for (const value of values) {
+    const candidate = of(value)
+    if (candidate > highest) highest = candidate
+  }
+  return highest
+}
+
 function laneFor(kind: TrajectoryCellKind): number {
   if (kind === 'tool' || kind === 'subtool') return 2
   if (kind === 'message' || kind === 'compacted') return 1
@@ -166,14 +184,16 @@ function deriveTimedTimeline(
     if (turn.turn !== null) {
       turnBoundaries.push({
         turn: turn.turn,
-        time: Math.min(...projected.map(span => span.start)),
+        // A loop, not `Math.min(...spans)`: one turn can hold every cell of a
+        // long session, and an argument spread over it overflows the stack.
+        time: minimum(projected, span => span.start),
       })
     }
   }
 
   return {
-    start: Math.min(...spans.map(span => span.start)),
-    end: Math.max(...spans.map(span => span.end)),
+    start: minimum(spans, span => span.start),
+    end: maximum(spans, span => span.end),
     spans,
     turnBoundaries,
   }
@@ -181,17 +201,18 @@ function deriveTimedTimeline(
 
 /**
  * Identify records active at any point inside an inclusive selected interval.
- * @param turns - Unfiltered trajectory layout.
+ *
+ * Takes the already-derived model rather than the layout, so a frame that
+ * renders the overview and resolves its focus projects the domain once.
+ *
+ * @param model - Timeline model from {@link deriveTrajectoryTimeline}, or `null` when no record is visible.
  * @param range - Selected interval in the active projection.
- * @param mode - Independent equal/recorded duration and compressed/complete time projection.
  * @returns Record indexes inside the focus interval.
  */
 export function trajectoryTimelineFocusIndexes(
-  turns: readonly TrajectoryTurnModel[],
+  model: TrajectoryTimelineModel | null,
   range: TrajectoryTimeRange,
-  mode: TrajectoryTimelineMode = 'sequence',
 ): ReadonlySet<number> {
-  const model = deriveTrajectoryTimeline(turns, mode)
   return new Set(
     model?.spans
       .filter(span => span.start <= range.end && span.end >= range.start)

@@ -444,9 +444,11 @@ export class ClientModuleRegistry extends Service {
     }
     try {
       const body = await readFile(path)
+      // No cache directive here: the bundle URL carries the content hash the
+      // boot graph minted (?rev=<hash>), so the webserver's response policy
+      // pins it and leaves the hash-less source map revalidated.
       res.writeHead(200, {
         'content-type': isSourceMap ? 'application/json; charset=utf-8' : 'text/javascript; charset=utf-8',
-        'cache-control': 'no-cache',
       })
       res.end(body)
     } catch {

@@ -88,6 +88,13 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
   return { view, props, store }
 }
 
+/** The group's header row, the element carrying its `aria-expanded` fold state. */
+function groupHeader(label: string): HTMLElement {
+  const header = screen.getByText(label).closest<HTMLElement>('[role="treeitem"]')
+  if (header === null) throw new Error(`group "${label}" has no header row`)
+  return header
+}
+
 /** Re-render with (possibly) changed props — WorkspaceBrowser has no side channel. */
 function rerender(b: ReturnType<typeof mount>, overrides: Partial<WorkspaceBrowserProps>) {
   Object.assign(b.props, overrides)
@@ -251,6 +258,52 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
   })
 
+  it('keeps running sessions reachable through a collapse without inflating the overflow count', () => {
+    // 8 members: 2 running. Folded shows the 2 live rows; expanded shows 5 plus
+    // the overflow control for the remaining 3.
+    const items = Array.from({ length: 8 }, (_, index) => summary(
+      `session-${index + 1}`, 8 - index, index === 1 || index === 6 ? { running: true } : {},
+    ))
+    const b = mount({
+      useSessions: hook(sessionState(items)),
+      useWorkspaces: hook(workspaceState([workspace('alpha', items.map(item => item.id))])),
+    })
+
+    // Folded: only the live rows survive, and the remainder is counted honestly.
+    expect(screen.getByText('session-2')).toBeTruthy()
+    expect(screen.getByText('session-7')).toBeTruthy()
+    expect(screen.queryByText('session-1')).toBeNull()
+    expect(screen.getByText('另有 6 个会话已折叠')).toBeTruthy()
+    // The overflow control belongs to the expanded list; pinned rows never feed it.
+    expect(screen.queryByRole('button', { name: /展开其余|收起/ })).toBeNull()
+
+    fireEvent.click(screen.getByText('alpha'))
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
+    // Expanded: 8 rows minus the 5 shown = 3, unchanged by the pinning behavior,
+    // and no live row is duplicated by its earlier pinned rendering.
+    expect(screen.getByRole('button', { name: '展开其余 3 个会话' })).toBeTruthy()
+    expect(screen.queryByText('另有 6 个会话已折叠')).toBeNull()
+    expect(screen.getAllByText('session-2')).toHaveLength(1)
+    expect(screen.queryByText('session-7')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '展开其余 3 个会话' }))
+    expect(screen.getAllByText('session-7')).toHaveLength(1)
+  })
+
+  it('folds a group away entirely once its last live row stops running', () => {
+    const running = sessionState([summary('busy', 2, { running: true }), summary('quiet', 1)])
+    const b = mount({
+      useSessions: hook(running),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['busy', 'quiet'])])),
+    })
+    expect(screen.getByText('busy')).toBeTruthy()
+    expect(screen.getByText('另有 1 个会话已折叠')).toBeTruthy()
+
+    // The pinned row is derived from the live snapshot, so it leaves with the run.
+    rerender(b, { useSessions: hook(sessionState([summary('busy', 2, { completed: true }), summary('quiet', 1)])) })
+    expect(screen.queryByText('busy')).toBeNull()
+    expect(screen.queryByText('另有 1 个会话已折叠')).toBeNull()
+  })
+
   it('shares one editable order across modes and promotes only while Last updated is active', async () => {
     const initial = sessionState([summary('one', 3), summary('two', 2)])
     const b = mount({
@@ -387,38 +440,111 @@ describe('WorkspaceBrowser', () => {
     expect(startSession).toHaveBeenCalledWith(wid('alpha'))
   })
 
-  it('keeps the Ungrouped bucket folded for a loose current session; its header has no menu and its ＋ is inert', () => {
+  it('reveals the Ungrouped bucket holding a loose current session; its header has no menu and its ＋ is inert', async () => {
     const startSession = vi.fn()
-    mount({
+    const b = mount({
       useSessions: hook(sessionState([summary('loose', 1)], { current: sid('loose') })),
       useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
       startSession,
     })
-    // Groups start closed, even the one holding the current session.
-    expect(screen.queryByText('loose')).toBeNull()
+    // The bucket is a group like any other: navigating into it opens it, and
+    // the persisted fold bit records that.
+    await waitFor(() => { expect(screen.getByText('loose')).toBeTruthy() })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
     expect(screen.queryByRole('button', { name: '工作区“未分组”的操作' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '在“未分组”中新建会话' }))
     expect(startSession).not.toHaveBeenCalled()
   })
 
-  it('starts the current session\'s group closed and keeps an explicit expansion when the selection moves within it', () => {
+  it('opens the current session\'s group on navigation and never re-opens it against a deliberate fold', async () => {
     const first = sessionState([summary('a', 2), summary('b', 1)], { current: sid('a') })
     const b = mount({
       useSessions: hook(first),
       useWorkspaces: hook(workspaceState([workspace('alpha', ['a', 'b'])])),
     })
-    // Groups start closed, even the one holding the current session.
-    expect(screen.queryByText('a')).toBeNull()
+    // Navigation opened the group; the persisted bit and the header agree.
+    await waitFor(() => { expect(screen.getByText('a')).toBeTruthy() })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+
+    // A deliberate fold of the current group stands: neither a re-render nor a
+    // new sessions snapshot for the same selection bounces it back open.
     fireEvent.click(screen.getByText('alpha'))
-    expect(screen.getByText('a')).toBeTruthy()
-    // Selection hop inside the same group leaves the expansion unchanged.
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: false })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('false')
+    rerender(b, { useSessions: hook({ ...first }) })
+    await waitFor(() => { expect(screen.queryByText('a')).toBeNull() })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: false })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('false')
+
+    // Selecting the other session in that folded group is navigation again, so
+    // the row it selected becomes reachable.
     rerender(b, { useSessions: hook({ ...first, current: sid('b') }) })
-    expect(screen.getByText('b')).toBeTruthy()
-    fireEvent.click(screen.getByText('alpha'))
-    expect(screen.queryByText('b')).toBeNull()
+    await waitFor(() => { expect(screen.getByText('b')).toBeTruthy() })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+    // A selection hop inside the now-open group writes nothing new.
+    rerender(b, { useSessions: hook({ ...first, current: sid('a') }) })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
   })
 
-  it('shows only the current blank session as the localized New Session, excluded from search', () => {
+  it('reveals the session of a freshly connected Workspace without a manual click', async () => {
+    const b = mount()
+    // The connect lands as the new Workspace plus the blank Session it created,
+    // which the Host selects.
+    const created = summary('fresh-blank', 5, { blank: true })
+    rerender(b, {
+      useSessions: hook(sessionState([created], { current: created.id })),
+      useWorkspaces: hook(workspaceState([workspace('fresh', ['fresh-blank'])])),
+    })
+    await waitFor(() => { expect(screen.getByText('新会话')).toBeTruthy() })
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ fresh: true })
+    expect(groupHeader('fresh').getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('defers the reveal until the Workspace baseline says which group renders the session', async () => {
+    const sessions = sessionState([summary('a', 2)], { current: sid('a') })
+    const b = mount({
+      useSessions: hook(sessions),
+      useWorkspaces: hook({
+        ...workspaceState([]), phase: 'pending' as const, state: 'loading' as const, baselinesReady: false,
+      }),
+    })
+    // Without the baseline every session reads as Ungrouped, so opening a group
+    // would be a guess: nothing is written and nothing claims to be open.
+    expect(b.store.getSnapshot().groupExpansion).toEqual({})
+    expect(groupHeader('未分组').getAttribute('aria-expanded')).toBe('false')
+
+    rerender(b, { useWorkspaces: hook(workspaceState([workspace('alpha', ['a'])])) })
+    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
+    expect(screen.getByText('a')).toBeTruthy()
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('opens only the current session\'s group, leaving other folded groups pinning their live rows', async () => {
+    const b = mount({
+      useSessions: hook(sessionState([
+        summary('alpha-idle', 3), summary('beta-live', 2, { running: true }), summary('beta-idle', 1),
+      ], { current: sid('alpha-idle') })),
+      useWorkspaces: hook(workspaceState([
+        workspace('alpha', ['alpha-idle']), workspace('beta', ['beta-live', 'beta-idle']),
+      ])),
+    })
+    // The reveal is scoped to the navigation: only the current session's group
+    // opens, and an idle current row is exactly the case pinning cannot serve.
+    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
+    expect(screen.getByText('alpha-idle')).toBeTruthy()
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+
+    // beta keeps the folded behavior: its live row stays pinned, its idle row
+    // stays counted, and its header keeps reporting the fold truthfully.
+    expect(groupHeader('beta').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByText('beta-live')).toBeTruthy()
+    expect(screen.queryByText('beta-idle')).toBeNull()
+    expect(screen.getByText('另有 1 个会话已折叠')).toBeTruthy()
+  })
+
+  it('shows only the current blank session as the localized New Session, excluded from search', async () => {
     const currentBlank = summary('alpha-blank', 9, { blank: true })
     const staleBlank = summary('beta-blank', 8, { blank: true })
     const sessions = sessionState(
@@ -431,10 +557,9 @@ describe('WorkspaceBrowser', () => {
         workspace('alpha', ['alpha-blank']), workspace('beta', ['beta-blank']),
       ])),
     })
-    // Groups start closed; the current blank row appears once its group is
-    // explicitly expanded.
-    fireEvent.click(screen.getByText('alpha'))
-    expect(screen.getByText('新会话')).toBeTruthy()
+    // The blank row is the current session, so the navigation reveal opens the
+    // group that renders it.
+    await waitFor(() => { expect(screen.getByText('新会话')).toBeTruthy() })
     expect(screen.queryByText('alpha-blank')).toBeNull()
     expect(screen.queryByText('beta-blank')).toBeNull()
 

@@ -1355,3 +1355,59 @@ describe('ChatView', () => {
     expect(failedView.container.querySelector('[data-state="error"]')).not.toBeNull()
   })
 })
+
+describe('Scroll-event cost', () => {
+  it('measures a logarithmic slice of the mounted rows, not all of them', () => {
+    // The fallback path (no elementsFromPoint: jsdom, and pre-layout or
+    // fast-fling states in a browser) used to measure EVERY mounted row inside
+    // one scroll event. Rows stack in document order, so the search that
+    // replaced it reads O(log n) boxes.
+    const nodes = Array.from({ length: 64 }, (_, index) => user(index + 1, `line ${String(index + 1)}`))
+    const h = makeHarness({ nodes })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+    Object.defineProperty(scroller, 'scrollHeight', { value: 4_000, writable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 400, writable: true })
+
+    const measured = new Set<string>()
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const key = this.dataset.chatAnchorKey
+      if (key === undefined) return { top: 0, bottom: 400, left: 0, right: 800 } as DOMRect
+      measured.add(key)
+      const index = Number(key.split(':').pop()) - 1
+      return { top: index * 40, bottom: index * 40 + 40, left: 0, right: 800 } as DOMRect
+    })
+    try {
+      readerScroll(scroller, 1_200)
+      expect(h.chatScroll.read()).not.toBeNull()
+      // log2(64) = 6 probes plus the confirming read of the row that won.
+      expect(measured.size).toBeLessThanOrEqual(8)
+      expect(measured.size).toBeLessThan(nodes.length)
+    } finally {
+      rect.mockRestore()
+    }
+  })
+
+  it('records the first row reaching the scrollport, the row the old full scan chose', () => {
+    // Behavior parity with the removed filter: same winner, fewer measurements.
+    const nodes = Array.from({ length: 16 }, (_, index) => user(index + 1, `line ${String(index + 1)}`))
+    const h = makeHarness({ nodes })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1_600, writable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 400, writable: true })
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const key = this.dataset.chatAnchorKey
+      if (key === undefined) return { top: 0, bottom: 400, left: 0, right: 800 } as DOMRect
+      const index = Number(key.split(':').pop()) - 1
+      // Rows 0-4 sit entirely above the scrollport; row 5 is the first to reach it.
+      return { top: index * 40 - 200, bottom: index * 40 - 160, left: 0, right: 800 } as DOMRect
+    })
+    try {
+      readerScroll(scroller, 800)
+      expect(h.chatScroll.read()?.anchorKey).toBe('fixture:user:6')
+    } finally {
+      rect.mockRestore()
+    }
+  })
+})

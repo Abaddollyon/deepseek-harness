@@ -224,6 +224,18 @@ export interface ClientModuleLoader {
    * @param id - entry name to invalidate.
    */
   invalidate(id: string): void
+  /**
+   * Point one graph row at a rebuilt bundle by replacing the content hash in
+   * its URL's `rev` parameter.
+   *
+   * The host pins a bundle answer to the hash the URL carries, so a reload
+   * that reused the boot hash would be served the pre-rebuild bytes from the
+   * browser's own cache without reaching the host at all. {@link invalidate}
+   * clears this page's tables; this clears the address they refetch from.
+   * @param id - graph entry name.
+   * @param rev - the rebuilt bundle's content hash.
+   */
+  revise(id: string, rev: string): void
 }
 
 /** Options for {@link ClientModuleSystem} (assembled by the web shell kernel at boot). */

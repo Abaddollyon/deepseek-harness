@@ -8,7 +8,25 @@ import type {
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '../src/api-path.ts'
-import { WebSocketDownlinks } from '../src/websocket-downlink.ts'
+import {
+  DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT,
+  DEFAULT_WEBSOCKET_COMPRESS_LEVEL,
+  DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD,
+  WebSocketDownlinks,
+  type WebSocketCompression,
+} from '../src/websocket-downlink.ts'
+
+const DEFLATE: WebSocketCompression = {
+  enabled: true,
+  threshold: DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD,
+  level: DEFAULT_WEBSOCKET_COMPRESS_LEVEL,
+  concurrencyLimit: DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT,
+}
+
+/** Build downlinks carrying the shipped compression settings. */
+function downlinksFor(proxy: ApiProxy, compression: WebSocketCompression = DEFLATE): WebSocketDownlinks {
+  return new WebSocketDownlinks(proxy, compression)
+}
 
 type MuxSource = (signal: AbortSignal) => AsyncIterable<RpcRequest<MuxFrame>>
 type HostSource = (signal: AbortSignal) => AsyncIterable<RpcRequest<HostFrame>>
@@ -79,7 +97,7 @@ describe('WebSocket downlinks', () => {
   it('carries mux and host over independent downstream sockets and cancels each source on close', async () => {
     let muxAborted = false
     let hostAborted = false
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * (signal) {
         try {
           yield {
@@ -131,9 +149,36 @@ describe('WebSocket downlinks', () => {
     })
   })
 
+  it('negotiates permessage-deflate and drops it when the deployment turns it off', async () => {
+    const row: MuxFrame = { type: 'session/subscribed', sessionId: 'session-deflate' as never, lastSeq: 0 }
+    const source = async function * (signal: AbortSignal): AsyncGenerator<RpcRequest<MuxFrame>> {
+      yield { rpcId: RpcId('deflate-1'), payload: row }
+      await untilAbort(signal)
+    }
+
+    const compressed = downlinksFor(api(source, idle))
+    const compressedHost = await serve(compressed)
+    running.push(compressedHost.close)
+    const compressedSocket = new WebSocket(`${compressedHost.origin}${MUX_EVENTS_PATH}`, { perMessageDeflate: true })
+    const compressedFrame = read(compressedSocket)
+    await once(compressedSocket, 'open')
+    expect(compressedSocket.extensions).toContain('permessage-deflate')
+    // The extension is transparent to the frame: the client still reads JSON.
+    expect((await compressedFrame).payload).toEqual(row)
+
+    const plain = downlinksFor(api(source, idle), { ...DEFLATE, enabled: false })
+    const plainHost = await serve(plain)
+    running.push(plainHost.close)
+    const plainSocket = new WebSocket(`${plainHost.origin}${MUX_EVENTS_PATH}`, { perMessageDeflate: true })
+    const plainFrame = read(plainSocket)
+    await once(plainSocket, 'open')
+    expect(plainSocket.extensions).not.toContain('permessage-deflate')
+    expect((await plainFrame).payload).toEqual(row)
+  })
+
   it('rejects client messages because upstream remains HTTP', async () => {
     let aborted = false
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * (signal) {
         try {
           await untilAbort(signal)
@@ -156,7 +201,7 @@ describe('WebSocket downlinks', () => {
   })
 
   it('sends stream/error before closing when a source fails', async () => {
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * () {
         throw new Error('mux source failed')
       },
@@ -176,7 +221,7 @@ describe('WebSocket downlinks', () => {
 
   it('aborts the source when an accepted socket reports a transport error', async () => {
     let aborted = false
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * (signal) {
         try {
           await untilAbort(signal)
@@ -203,7 +248,7 @@ describe('WebSocket downlinks', () => {
     let finish!: () => void
     const finished = new Promise<void>((resolve) => { finish = resolve })
     let sourceSignal: AbortSignal | undefined
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * (signal) {
         sourceSignal = signal
         try {
@@ -233,7 +278,7 @@ describe('WebSocket downlinks', () => {
   it('contains socket send callback failures and closes the downlink', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * () {
         await gate
         yield {
@@ -266,7 +311,7 @@ describe('WebSocket downlinks', () => {
   })
 
   it('rejects when its acceptor has already closed', async () => {
-    const downlinks = new WebSocketDownlinks(api(idle, idle))
+    const downlinks = downlinksFor(api(idle, idle))
     await downlinks.close()
     await expect(downlinks.close()).rejects.toThrow('The server is not running')
   })
@@ -277,7 +322,7 @@ describe('WebSocket downlinks', () => {
     let releaseCleanup!: () => void
     const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve })
     let cleaned = false
-    const downlinks = new WebSocketDownlinks(api(
+    const downlinks = downlinksFor(api(
       async function * (signal) {
         try {
           await untilAbort(signal)

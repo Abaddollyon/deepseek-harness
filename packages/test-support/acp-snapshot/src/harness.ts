@@ -30,6 +30,7 @@ import {
   type RequestPermissionResponse,
   type SessionNotification,
 } from '@agentclientprotocol/sdk'
+import { anchorWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import { launchAcpTestAgent, type AgentUnderTest, type LaunchedAcpTestAgent } from './launcher.ts'
 
 export type { AgentUnderTest } from './launcher.ts'
@@ -183,8 +184,10 @@ export interface RunOptions {
    * Parent directory for the generated session cwd. Defaults to
    * `os.tmpdir()`. A scenario that must distinguish its workspace from the
    * sandbox's always-writable temporary roots can place the generated child
-   * under `os.homedir()` instead. The harness removes only that generated
-   * child, never the supplied parent.
+   * under `os.homedir()` instead; the generated cwd is anchored as its own
+   * project root either way, so the parent contributes no instructions or
+   * skills. The harness removes only that generated child, never the supplied
+   * parent.
    */
   workspaceParent?: string
   /**
@@ -239,6 +242,11 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
   let sessionId: string | undefined
   let sessionLogs: HarvestedLog[] = []
   const outcome = await (async (): Promise<RunResult> => {
+    // The generated cwd is the scenario's whole project: anchoring its project root
+    // keeps instruction and skill discovery from climbing into the workspace parent
+    // (the platform temp root, or `os.homedir()` for a scenario that must sit outside
+    // the always-writable temp roots) and reading that machine's AGENTS.md or skills.
+    await anchorWorkspaceProjectRoot(cwd)
     // Seed the workspace if the scenario ships one (a file the agent reads/edits).
     // Copied into the generated cwd so the agent's bash tools see it; the expected outputs
     // normalize the cwd, so the seeded paths stay stable across runs.

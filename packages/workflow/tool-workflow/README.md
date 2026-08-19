@@ -6,7 +6,7 @@ The model-facing **`workflow` tool**: run a JavaScript orchestration script that
 
 ## What the model sees
 
-Three parameters: `meta` (required identity data: `name`, `description`, and optional progress annotations), `script` (required plain JavaScript body — no `export const meta` statement; the tool description carries the complete authoring contract), and `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest). The plugin also contributes a `tool:<toolName>` system-prompt section carrying the usage policy — use the tool only on an explicit user ask for a workflow / large orchestration; prefer plain subagent calls for one or two delegations — per the convention that tool guidance ships with the tool plugin, never in the deployment persona.
+Three parameters: `meta` (required identity data: `name`, `description`, and optional progress annotations, including the per-phase `provider`/`model`/`reasoningEffort` a phase declares it expects to use), `script` (required plain JavaScript body — no `export const meta` statement; the tool description carries the complete authoring contract), and `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest). The plugin also contributes a `tool:<toolName>` system-prompt section carrying the usage policy — use the tool only on an explicit user ask for a workflow / large orchestration; prefer plain subagent calls for one or two delegations — per the convention that tool guidance ships with the tool plugin, never in the deployment persona.
 
 ## Lifecycle
 
@@ -81,5 +81,6 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 - **The parent turn blocks until the whole workflow settles** — there is no background start/poll API, and cancellation discards partial output as an error.
 - **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays/scalars in a field; the canonical workflow result remains complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
-- **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
+- **Run-wide workflow policy is fixed per tool registration** — the subagent backend, caps, and tool name are deployment config, not model-call arguments. Each `agent()` call still selects its own LLM target (`provider`, `model`, `reasoningEffort`) independently.
+- **A per-agent LLM target only binds for in-process children** — the shipped `spawn` backend applies the selected provider, model, and reasoning effort to the child agent; a remote subagent backend that ignores `agentOptions` ignores all three alike.
 - **Durable records are top-level and observational** — nested Code Mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.

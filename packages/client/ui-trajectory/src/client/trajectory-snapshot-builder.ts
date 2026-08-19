@@ -8,6 +8,7 @@ import type {
   TrajectoryConversationViewNode, TrajectoryRequestHeaderState,
   TrajectorySnapshot,
 } from './trajectory-contract.ts'
+import { reuseArray, reuseMap, reuseValue } from './derived-identity.ts'
 
 const EMPTY_LIST: readonly never[] = []
 type AssistantRequest = Extract<RequestView, { purpose: 'assistant' }>
@@ -134,7 +135,15 @@ function applyTurnErrors(
   }
 }
 
-/** Simple keyed adapter retaining the old Trajectory snapshot and stage layout. */
+/**
+ * Simple keyed adapter retaining the old Trajectory snapshot and stage layout.
+ *
+ * Every flush rebuilds the snapshot from the contributions, then publishes it
+ * through {@link publish}, which folds it onto the previous snapshot so an
+ * unchanged section keeps its identity. Consumers memoize on those
+ * identities, so a chunk that only advances the in-flight assistant must not
+ * mint new `eventNodes` / `requests` / `callSchemas` identities.
+ */
 export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
   TrajectoryConversationViewNode,
   TrajectorySnapshot
@@ -142,6 +151,7 @@ export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
   private readonly nodes = new Map<string, TrajectoryConversationViewNode>()
   private readonly positions = new Map<string, number>()
   private contributions: TrajectoryConversationViewNode[] = []
+  private published: TrajectorySnapshot | null = null
   readonly empty = EMPTY_TRAJECTORY_SNAPSHOT
 
   replace(input: {
@@ -244,15 +254,54 @@ export class TrajectorySnapshotBuilder implements ConversationViewBuilder<
     interruptCompactions(requests, boundaries)
     applyTurnErrors(requests, turnEndings)
     finalized.sort((left, right) => left.seq - right.seq)
-    const eventNodes = finalized
-    return {
-      eventNodes,
+    return this.publish({
+      eventNodes: finalized,
       eventLocations,
       requests,
       callSchemas,
       partial,
       runningCalls,
+    })
+  }
+
+  /**
+   * Fold a freshly built snapshot onto the previously published one so every
+   * section whose content did not move keeps its identity, and republish the
+   * previous snapshot itself when nothing moved at all.
+   */
+  private publish(next: {
+    eventNodes: ConversationNode[]
+    eventLocations: Map<number, TrajectoryConversationViewNode['location']>
+    requests: RequestView[]
+    callSchemas: Map<string, ToolSchema>
+    partial: TrajectorySnapshot['partial']
+    runningCalls: TrajectorySnapshot['runningCalls'][number][]
+  }): TrajectorySnapshot {
+    const previous = this.published
+    if (previous === null) {
+      this.published = next
+      return next
     }
+    const folded: TrajectorySnapshot = {
+      eventNodes: reuseArray(next.eventNodes, previous.eventNodes),
+      eventLocations: reuseMap(next.eventLocations, previous.eventLocations),
+      requests: reuseArray(next.requests, previous.requests),
+      callSchemas: reuseMap(next.callSchemas, previous.callSchemas),
+      partial: next.partial === null
+        ? null
+        : reuseValue(next.partial, previous.partial ?? undefined),
+      runningCalls: reuseArray(next.runningCalls, previous.runningCalls),
+    }
+    const snapshot = folded.eventNodes === previous.eventNodes
+      && folded.eventLocations === previous.eventLocations
+      && folded.requests === previous.requests
+      && folded.callSchemas === previous.callSchemas
+      && folded.partial === previous.partial
+      && folded.runningCalls === previous.runningCalls
+      ? previous
+      : folded
+    this.published = snapshot
+    return snapshot
   }
 
   private rebuildContributions(): void {

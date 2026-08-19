@@ -18,7 +18,7 @@ afterEach(cleanup)
 
 describe('tails', () => {
   it('node-half apply tolerates a Host without settings', () => {
-    expect(() => { nodeApply(new Context()) }).not.toThrow()
+    expect(() => { nodeApply(new Context(), { rendering: {} }) }).not.toThrow()
   })
 
   it('AssistantMarkdown renders reasoning as a Think row and unknown blocks as JSON fallback', () => {

@@ -10,7 +10,7 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 
 ## `/api` WebSocket 下行
 
-`/api/events.mux` 与 `/api/events.host` 各接受一条 WebSocket upgrade，并只向浏览器发送对应的 `ServerRequest` 文本消息；客户端不会在这些 socket 上发送业务数据。任一 socket 结束都会使当前 connection generation 失败并重建两条流，连接就绪仍要求两条 socket 均已打开且 `host.describe` HTTP 调用成功。Host teardown 会终止两条 socket、中止各自的 source，并等待 source 清理完成后再返回。普通网络 GET 这些路径会返回 426，不保留 SSE（Server-Sent Events）回退；`toFetchHandler` 的 SSE 编解码只服务进程内同构载体。
+`/api/events.mux` 与 `/api/events.host` 各接受一条 WebSocket upgrade，并只向浏览器发送对应的 `ServerRequest` 文本消息；客户端不会在这些 socket 上发送业务数据。两条 socket 都提供 permessage-deflate（RFC 7692），因为下行反复发送同一种 JSON 封装格式：`webSocketCompress`（默认 `true`）开关该扩展，`webSocketCompressThreshold`（`1024`）是被 deflate 的最小帧，`webSocketCompressLevel`（`6`）是 deflate 等级，`webSocketCompressConcurrencyLimit`（`10`）限制所有 socket 上并发的 zlib 工作量。context takeover 保持 RFC 默认，滑动窗口因此跨帧延续——代价是每条 socket 每个方向一份 zlib 上下文，承担不起的部署可关闭该扩展。任一 socket 结束都会使当前 connection generation 失败并重建两条流，连接就绪仍要求两条 socket 均已打开且 `host.describe` HTTP 调用成功。Host teardown 会终止两条 socket、中止各自的 source，并等待 source 清理完成后再返回。普通网络 GET 这些路径会返回 426，不保留 SSE（Server-Sent Events）回退；`toFetchHandler` 的 SSE 编解码只服务进程内同构载体。
 
 ## 模型体验
 

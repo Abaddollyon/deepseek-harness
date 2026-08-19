@@ -7,10 +7,12 @@
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
+import { request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { brotliDecompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -65,6 +67,21 @@ async function loadComposition(port = 0): Promise<Context> {
 async function request(port: number, path: string, init?: RequestInit): Promise<{ status: number; body: string }> {
   const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
   return { status: response.status, body: (await response.text()).slice(0, 80) }
+}
+
+/** GET one path with an exact Accept-Encoding, reading the bytes on the wire undecoded. */
+async function rawRequest(
+  port: number, path: string, headers: Record<string, string> = {},
+): Promise<{ headers: Record<string, string | string[] | undefined>; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ port, host: '127.0.0.1', path, headers }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => { resolve({ headers: res.headers, body: Buffer.concat(chunks) }) })
+    })
+    req.on('error', reject)
+    req.end()
+  })
 }
 
 /** Open one raw upgrade request and return after the handler writes its response. */
@@ -198,6 +215,63 @@ describe('real Loader composition', () => {
     expect(upgradedServerClosed).toBe(true)
     upgraded.destroy()
     await expect(request(port, '/probe')).rejects.toThrow()
+  })
+
+  it('encodes what browsers accept and pins only content-addressed URLs', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition()
+    const server = loaded.webServer
+    const port = server.port
+    const bundle = `export const rows = ${JSON.stringify(Array.from({ length: 600 }, (_, at) => ({ id: at, label: 'conversation row' })))}\n`
+    const shell = `<!doctype html><html><head></head><body>${'<div class="dsw-row">shell</div>'.repeat(400)}</body></html>`
+    server.register({
+      kind: 'prefix',
+      path: '/assets',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+        res.end(bundle)
+      },
+    })
+    server.register({
+      kind: 'prefix',
+      path: '/plugins',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+        res.end(bundle)
+      },
+    })
+    server.registerFallback((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(server.applyIndexTaps(shell))
+    })
+
+    // A browser's own Accept-Encoding: the entry document, a hashed asset, and
+    // a content-hashed plugin bundle all arrive brotli-encoded.
+    const browser = { 'accept-encoding': 'gzip, deflate, br, zstd' }
+    const html = await rawRequest(port, '/', browser)
+    const asset = await rawRequest(port, '/assets/index-Dqw48FrP.js', browser)
+    const plugin = await rawRequest(port, '/plugins/@deepseek-ai/dsh-client-web/client.js?rev=0a227ebc8767', browser)
+    for (const answer of [html, asset, plugin]) {
+      expect(answer.headers['content-encoding']).toBe('br')
+      expect(answer.headers.vary).toBe('Accept-Encoding')
+    }
+    expect(brotliDecompressSync(html.body).toString('utf8')).toContain('shell')
+    expect(brotliDecompressSync(asset.body).toString('utf8')).toBe(bundle)
+
+    // The old cost: the same three answers to a client offering nothing are
+    // the full identity bodies, and each encoded answer is a fraction of them.
+    const htmlPlain = await rawRequest(port, '/')
+    const assetPlain = await rawRequest(port, '/assets/index-Dqw48FrP.js')
+    expect(htmlPlain.headers['content-encoding']).toBeUndefined()
+    expect(htmlPlain.body.byteLength).toBe(Buffer.byteLength(shell))
+    expect(html.body.byteLength * 10).toBeLessThan(htmlPlain.body.byteLength)
+    expect(asset.body.byteLength * 4).toBeLessThan(assetPlain.body.byteLength)
+
+    // Caching: hashed URLs are pinned, the entry document always revalidates.
+    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(plugin.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(html.headers['cache-control']).toBe('no-cache')
+    const unhashedPlugin = await rawRequest(port, '/plugins/@deepseek-ai/dsh-client-web/client.js', browser)
+    expect(unhashedPlugin.headers['cache-control']).toBe('no-cache')
   })
 
   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {

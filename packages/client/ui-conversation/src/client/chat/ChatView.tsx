@@ -48,6 +48,35 @@ function flowTop(row: HTMLElement, scrollport: HTMLElement): number {
   return row.getBoundingClientRect().top - scrollport.getBoundingClientRect().top
 }
 
+/**
+ * First mounted anchor row whose box reaches the scrollport, found by binary
+ * search. Rows stack in document order, so their bottom edges increase
+ * monotonically and the search costs O(log n) layout reads instead of one per
+ * mounted row — the difference between 13 and 5,677 forced layouts inside a
+ * single scroll event on a long transcript.
+ * @param rows - mounted anchor rows in document order.
+ * @param viewportTop - scrollport top in viewport coordinates.
+ * @param visibleBottom - first occluded edge (composer top, else scrollport bottom).
+ * @returns the first row intersecting the visible band, or null when none does.
+ */
+function firstVisibleRow(rows: readonly HTMLElement[], viewportTop: number, visibleBottom: number): HTMLElement | null {
+  let low = 0
+  let high = rows.length - 1
+  let reaching: HTMLElement | null = null
+  while (low <= high) {
+    const middle = (low + high) >> 1
+    const row = rows[middle] as HTMLElement
+    if (row.getBoundingClientRect().bottom > viewportTop) {
+      reaching = row
+      high = middle - 1
+    } else {
+      low = middle + 1
+    }
+  }
+  if (reaching === null) return null
+  return reaching.getBoundingClientRect().top < visibleBottom ? reaching : null
+}
+
 /** Select a visible stable node/call identity, falling back only when layout
  * has not exposed a visible box yet. */
 function pagingAnchor(list: HTMLElement, scrollport: HTMLElement): HTMLElement | null {
@@ -74,11 +103,7 @@ function pagingAnchor(list: HTMLElement, scrollport: HTMLElement): HTMLElement |
     }
   }
   const rows = [...list.querySelectorAll<HTMLElement>('[data-chat-anchor-key]')]
-  const visibleRows = rows.filter((row) => {
-    const rect = row.getBoundingClientRect()
-    return rect.bottom > viewport.top && rect.top < visibleBottom
-  })
-  return visibleRows[0] ?? rows[0] ?? null
+  return firstVisibleRow(rows, viewport.top, visibleBottom) ?? rows[0] ?? null
 }
 
 type ChatScrollPosition = NonNullable<ReturnType<ChatViewSlotProps['chatScroll']['read']>>
@@ -95,6 +120,7 @@ function scrollPosition(list: HTMLElement, scrollport: HTMLElement): ChatScrollP
   }
 }
 
+/** Scan the timeline for the open turn's logged start; only a running turn has one. */
 function runningTurnStartTime(timeline: ConversationTimelineSnapshot): number | null {
   let latest: number | null = null
   for (const turn of timeline.turns.values()) {
@@ -164,7 +190,38 @@ export function ChatView({
     () => inbox.filter(item => item.placement === 'steering'),
     [inbox],
   )
-  const runningTurnStart = useMemo(() => runningTurnStartTime(timeline), [timeline])
+  // The scan grows with session length while only the single open turn matters,
+  // so it is skipped outright whenever no turn is running — which is every
+  // timeline publication outside an active turn.
+  const runningTurnStart = useMemo(
+    () => (running ? runningTurnStartTime(timeline) : null),
+    [running, timeline],
+  )
+
+  // Element construction for the whole flow, memoized on the seat inputs. Every
+  // ChatNodeSeat is memo'd, but re-running this map still allocates one element
+  // per mounted Node; the scroll-threshold flip (setAtBottom) and every
+  // unrelated publication re-render ChatView, so without this the list's
+  // element cost is paid per scroll tick on a transcript of any length.
+  const seats = useMemo(() => order.map(nodeKey => (
+    <ChatNodeSeat
+      key={nodeKey}
+      nodeKey={nodeKey}
+      useSession={useSession}
+      selectedCallId={selectedCallId}
+      cwd={cwd}
+      openFile={openFile}
+      inspectCall={inspectCall}
+      forkAt={forkAt}
+      loadImage={loadImage}
+      fileMentions={fileMentions}
+      renderSlot={renderSlot}
+      t={t}
+    />
+  )), [
+    order, useSession, selectedCallId, cwd, openFile, inspectCall, forkAt, loadImage,
+    fileMentions, renderSlot, t,
+  ])
 
   const listRef = useRef<HTMLDivElement | null>(null)
   const columnRef = useRef<HTMLDivElement | null>(null)
@@ -379,22 +436,7 @@ export function ChatView({
               </button>
             </div>
           )}
-          {order.map(nodeKey => (
-            <ChatNodeSeat
-              key={nodeKey}
-              nodeKey={nodeKey}
-              useSession={useSession}
-              selectedCallId={selectedCallId}
-              cwd={cwd}
-              openFile={openFile}
-              inspectCall={inspectCall}
-              forkAt={forkAt}
-              loadImage={loadImage}
-              fileMentions={fileMentions}
-              renderSlot={renderSlot}
-              t={t}
-            />
-          ))}
+          {seats}
           {/* No pending placeholders: questions (ui-user-questions) and approvals
               (ApprovalPanel) both take over the composer, so a flow card would
               double-render the same wait. */}

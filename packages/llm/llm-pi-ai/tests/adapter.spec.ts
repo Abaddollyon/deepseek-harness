@@ -596,6 +596,40 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
   })
 
+  it('uses a system message when a reasoning endpoint rejects developer messages', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'kimi-code': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: server.url + '/v1',
+          compat: { supportsDeveloperRole: false },
+          models: [{
+            id: 'k3',
+            contextWindow: 1_048_576,
+            maxTokens: 4096,
+            reasoningEfforts: { low: 'low', high: 'high' },
+          }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      provider: 'kimi-code',
+      model: 'k3',
+      reasoningEffort: ReasoningEffortId('high'),
+      system: 'system prompt',
+      messages: [],
+    })
+
+    expect(server.requests[0]).toMatchObject({
+      messages: [{ role: 'system', content: 'system prompt' }],
+    })
+  })
+
   it('sends a declared off value as the effort parameter instead of omitting it', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])

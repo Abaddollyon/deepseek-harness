@@ -767,16 +767,20 @@ describe('reasoning-dispatch compat switches', () => {
       'acme-gateway': {
         api: 'openai-completions',
         baseURL: 'https://acme.test',
-        compat: { thinkingFormat: 'deepseek' },
+        compat: { thinkingFormat: 'deepseek', supportsDeveloperRole: false },
         models: [
           { id: 'dialect-default', reasoningEfforts: { off: null, high: 'high' } },
-          { id: 'dialect-odd', compat: { thinkingFormat: 'openai', supportsReasoningEffort: false } },
+          { id: 'dialect-odd', compat: { thinkingFormat: 'openai', supportsReasoningEffort: false, supportsDeveloperRole: true } },
         ],
       },
     }, 'acme-gateway')
 
-    expect(models.get('dialect-default')?.compat).toEqual({ thinkingFormat: 'deepseek' })
-    expect(models.get('dialect-odd')?.compat).toEqual({ thinkingFormat: 'openai', supportsReasoningEffort: false })
+    expect(models.get('dialect-default')?.compat).toEqual({ thinkingFormat: 'deepseek', supportsDeveloperRole: false })
+    expect(models.get('dialect-odd')?.compat).toEqual({
+      thinkingFormat: 'openai',
+      supportsReasoningEffort: false,
+      supportsDeveloperRole: true,
+    })
   })
 
   it('merges the switches over the catalog entry’s own compat instead of replacing it', () => {
@@ -817,6 +821,11 @@ describe('reasoning-dispatch compat switches', () => {
     expect(() => resolveProfiles({
       anthropic: {
         models: [{ id: 'claude-sonnet-4-5', compat: { thinkingFormat: 'openai' } }],
+      },
+    })).toThrow(/exist only on openai-completions/)
+    expect(() => resolveProfiles({
+      anthropic: {
+        models: [{ id: 'claude-sonnet-4-5', compat: { supportsDeveloperRole: false } }],
       },
     })).toThrow(/exist only on openai-completions/)
   })

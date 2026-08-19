@@ -9,7 +9,13 @@ import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
-import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
+import {
+  DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT,
+  DEFAULT_WEBSOCKET_COMPRESS_LEVEL,
+  DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD,
+  rejectWebSocketUpgrade,
+  WebSocketDownlinks,
+} from './websocket-downlink.ts'
 
 export type {
   ConnectionRpcAuthority,
@@ -59,11 +65,27 @@ export interface ConnectionConfig {
   trustedHosts?: string[]
   /** Maximum buffered JSON body for every `/api` request. */
   maxRequestBodyBytes?: number
+  /**
+   * Whether the downlink WebSockets negotiate permessage-deflate. The frames
+   * are repetitive JSON envelopes, so the extension is on by default; turn it
+   * off where per-socket zlib contexts cost more than the bandwidth they save.
+   */
+  webSocketCompress?: boolean
+  /** Smallest downlink frame that is deflated. */
+  webSocketCompressThreshold?: number
+  /** Deflate level for downlink frames, 0-9. */
+  webSocketCompressLevel?: number
+  /** Cap on concurrent zlib operations across every downlink socket. */
+  webSocketCompressConcurrencyLimit?: number
 }
 
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
+  webSocketCompress: z.boolean().default(true),
+  webSocketCompressThreshold: z.natural().default(DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD),
+  webSocketCompressLevel: z.natural().max(9).default(DEFAULT_WEBSOCKET_COMPRESS_LEVEL),
+  webSocketCompressConcurrencyLimit: z.natural().min(1).default(DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT),
 })
 
 /**
@@ -131,6 +153,12 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
+  const webSocketCompression = {
+    enabled: config?.webSocketCompress ?? true,
+    threshold: config?.webSocketCompressThreshold ?? DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD,
+    level: config?.webSocketCompressLevel ?? DEFAULT_WEBSOCKET_COMPRESS_LEVEL,
+    concurrencyLimit: config?.webSocketCompressConcurrencyLimit ?? DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT,
+  }
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
@@ -173,7 +201,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['apiProxy'], (apiCtx) => {
     assertImageBodyCapacity(apiCtx, maxRequestBodyBytes)
-    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy)
+    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy, webSocketCompression)
     const registerDownlink = (
       path: string,
       handle: WebUpgradeRoute['handler'],

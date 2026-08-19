@@ -52,6 +52,13 @@ export interface GroupNode {
   containsCurrent: boolean
   /** Visible session rows (empty while the group is folded). */
   sessions: readonly SessionNode[]
+  /**
+   * Live rows kept reachable while the group is folded, in the same order they
+   * hold in {@link sessions}. Empty while the group is expanded, so a session
+   * never appears in both arrays; reorder and overflow paths read
+   * {@link sessions} only and therefore never target a pinned row.
+   */
+  pinned: readonly SessionNode[]
 }
 
 /** One flat search row combining list metadata with an optional content match. */
@@ -101,6 +108,17 @@ export function workspaceLabel(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return UNGROUPED_LABEL
   const base = cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop()
   return base !== undefined && base !== '' ? base : cwd
+}
+
+/**
+ * The group key whose section renders the selected Session's row: the
+ * Workspace accounting for it, or the Ungrouped bucket when none does.
+ * @param current - the selected Session.
+ * @param workspaces - real workspaces in stable Host order.
+ * @returns the workspace id as a group key, or {@link UNGROUPED_KEY}.
+ */
+export function currentGroupKey(current: SessionId, workspaces: readonly WorkspaceView[]): string {
+  return (workspaces.find(w => w.sessionIds.includes(current))?.workspaceId as string | undefined) ?? UNGROUPED_KEY
 }
 
 /** Recency comparator: newest first, id as the deterministic tiebreak (ids are unique per group). */
@@ -228,11 +246,22 @@ function sessionNode(
 }
 
 /**
+ * A row whose work is still in flight: its own run, or a run in a descendant
+ * reached through uninterrupted subagent-origin lineage. The finished-but-unopened
+ * reminder is a settled state and is deliberately excluded.
+ */
+function isLive(node: SessionNode): boolean {
+  return node.running || node.runningSubagentCount > 0
+}
+
+/**
  * Derive the workspace browser groups with every session as a top-level row.
  *
  * Every group shows; sessions populate under expanded groups in the selected
- * local order. Blank sessions are excluded except for the selected
- * provisional New Session row; archived sessions are excluded everywhere.
+ * local order. A folded group keeps no `sessions`, but still exposes its live
+ * rows as `pinned` so running work never disappears behind a collapse. Blank
+ * sessions are excluded except for the selected provisional New Session row;
+ * archived sessions are excluded everywhere.
  * Content search lives outside this derivation
  * (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot (`current` feeds containsCurrent).
@@ -250,13 +279,11 @@ export function deriveGroups(
   const archived = new Set(archivedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
   const descendants = indexSubagentDescendants(list.byId)
-  const currentGroup = list.current === undefined
-    ? undefined
-    : (workspaces.find(w => w.sessionIds.includes(list.current as SessionId))?.workspaceId as string | undefined)
-        ?? UNGROUPED_KEY
+  const currentGroup = list.current === undefined ? undefined : currentGroupKey(list.current, workspaces)
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
     const expanded = expandedGroups.has(g.key)
+    const rows = g.sessions.map(session => sessionNode(session, descendants))
     groups.push({
       key: g.key,
       workspaceId: g.workspaceId,
@@ -266,7 +293,8 @@ export function deriveGroups(
       sessionCount: g.sessions.length,
       expanded,
       containsCurrent: g.key === currentGroup,
-      sessions: expanded ? g.sessions.map(session => sessionNode(session, descendants)) : [],
+      sessions: expanded ? rows : [],
+      pinned: expanded ? [] : rows.filter(isLive),
     })
   }
   return groups

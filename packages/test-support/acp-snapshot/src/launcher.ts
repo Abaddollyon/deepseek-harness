@@ -19,7 +19,7 @@ import {
   type RequestPermissionResponse,
   type SessionNotification,
 } from '@agentclientprotocol/sdk'
-import { resolveExampleLaunch } from '@deepseek-ai/dsh-loader-smoke'
+import { isolatedSubprocessEnv, resolveExampleLaunch } from '@deepseek-ai/dsh-loader-smoke'
 
 const EXIT_MARKER_GRACE_MS = 250
 
@@ -43,7 +43,11 @@ export interface AcpTestLaunchOptions {
   cwd: string
   /** Alternate leaf config for this launch. */
   configPath?: string
-  /** Extra environment values layered over the parent environment. */
+  /**
+   * Deployment environment for this launch, layered over the isolated DSH homes.
+   * Inherited `DSH_*` entries are dropped ({@link isolatedSubprocessEnv}), so a value the
+   * boot reads is declared here rather than absorbed from the developer's shell.
+   */
   env?: NodeJS.ProcessEnv
   /** Permission handler; omitted requests fail closed as `cancelled`. */
   requestPermission?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>
@@ -93,7 +97,7 @@ export function launchAcpTestAgent(options: AcpTestLaunchOptions): LaunchedAcpTe
     launch.args,
     {
       cwd,
-      env: { ...process.env, ...launch.env },
+      env: isolatedSubprocessEnv(launch.env),
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   )

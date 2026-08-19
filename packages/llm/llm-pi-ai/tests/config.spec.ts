@@ -32,6 +32,17 @@ describe('reasoning schema boundary', () => {
     expect(absent.providers['acme-gateway']?.models?.[0]?.reasoningEfforts).toBeUndefined()
   })
 
+  it('preserves the developer-role compatibility switch at route and model levels', () => {
+    type Compat = { supportsDeveloperRole?: boolean }
+    type Materialized = {
+      providers: Record<string, { compat?: Compat; models?: { compat?: Compat }[] }>
+    }
+    const route = routeWith({ compat: { supportsDeveloperRole: false } })() as Materialized
+    expect(route.providers['acme-gateway']?.compat?.supportsDeveloperRole).toBe(false)
+    const model = configWith({ compat: { supportsDeveloperRole: false } })() as Materialized
+    expect(model.providers['acme-gateway']?.models?.[0]?.compat?.supportsDeveloperRole).toBe(false)
+  })
+
   it('rejects a thinking format outside the offered set', () => {
     expect(configWith({ compat: { thinkingFormat: 'quantum' } })).toThrow(/expected/)
   })

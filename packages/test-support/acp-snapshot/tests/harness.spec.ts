@@ -456,6 +456,22 @@ describe('runScenario', () => {
     expect(env.childFiles).toBe(childFiles.join(delimiter))
   })
 
+  it('keeps an ambient DSH deployment value out of the scenario subprocess', { timeout: 20_000 }, async () => {
+    const { fixtureFile } = await scenario({ echoEnv: true })
+    vi.stubEnv('DSH_PERMISSION_MODE', 'danger-full-access')
+    try {
+      const result = await runScenario(
+        { steps: [...boot, { op: 'prompt', text: 'env?' }] },
+        { agent: AGENT, mode: 'replay', fixtureFile },
+      )
+      // A developer's exported deployment value is not a scenario declaration, so the
+      // subprocess sees only what the scenario table asks for.
+      expect(environmentEcho(result.rawStdout).permissionMode).toBeNull()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('gives concurrent scenarios distinct equal-length spill roots', { timeout: 20_000 }, async () => {
     const [first, second] = await Promise.all([scenario({ echoEnv: true }), scenario({ echoEnv: true })])
     const results = await Promise.all([first, second].map(({ fixtureFile }) => runScenario(
@@ -483,7 +499,9 @@ describe('runScenario', () => {
       { steps: [...boot, { op: 'prompt', text: 'ls' }] },
       { agent: AGENT, mode: 'replay', fixtureFile, workspaceDir },
     )
-    expect(result.rawStdout).toContain('workspace:seeded.txt')
+    // The listing leads with the project-root marker the harness anchors the
+    // generated cwd with, so discovery cannot climb into the workspace parent.
+    expect(result.rawStdout).toContain('workspace:.git,seeded.txt')
   })
 
   it('prepares the generated workspace after copying committed fixtures', { timeout: 20_000 }, async () => {
@@ -507,7 +525,7 @@ describe('runScenario', () => {
       },
     )
 
-    expect(result.rawStdout).toContain('workspace:committed.txt,runtime.txt')
+    expect(result.rawStdout).toContain('workspace:.git,committed.txt,runtime.txt')
   })
 
   it('creates the generated workspace under an explicit parent', { timeout: 20_000 }, async () => {

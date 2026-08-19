@@ -6,6 +6,7 @@ import type {
   AssistantBlock,
   AssistantMessageNode,
   ConversationLocation,
+  ConversationPromptSnapshot,
   ConversationSnapshot,
   RequestInspectionSnapshot,
   RequestPromptChange,
@@ -42,6 +43,9 @@ export interface TrajectoryLayoutInput {
   callSchemas?: RequestInspectionSnapshot['callSchemas']
 }
 
+const EMPTY_DEPS: readonly unknown[] = []
+const EMPTY_CALL_IDS: ReadonlySet<string> = new Set()
+
 interface UsageLike {
   inputTokens?: number
   cacheReadTokens?: number
@@ -66,6 +70,293 @@ interface LaidGroup {
 
 interface TurnBucket {
   groups: LaidGroup[]
+  /** Step groups by title, so a step's later contributions do not rescan the turn. */
+  stepGroups: Map<string, LaidGroup>
+}
+
+type ToolSchema = ConversationPromptSnapshot['tools'][number]
+
+/** One memoized expansion: the cells a single input produced, plus what they read. */
+interface LaidRecord {
+  startIndex: number
+  deps: readonly unknown[]
+  /** Tool schema attached to each produced cell, aligned to `laid`. */
+  schemas: readonly (ToolSchema | undefined)[]
+  laid: LaidCell[]
+}
+
+/**
+ * The node-derived indexes of one derivation, extended in place when the next
+ * derivation's `nodes` array starts with exactly the same members.
+ */
+interface NodeIndexRecord {
+  nodes: ConversationSnapshot['nodes']
+  /** `kind: 'node'` layout entries, one per node, in `nodes` order. */
+  entries: OrderedLayoutEntry[]
+  /** True while `nodes` is ordered by `seq`, which lets entries merge instead of sort. */
+  ordered: boolean
+  results: Map<string, ToolResultNode>
+  callStarts: Map<string, number>
+  emittedCallIds: Set<string>
+  /** Next assistant node at a higher index, per node index. */
+  following: (AssistantMessageNode | undefined)[]
+  /** `turn\0step` keys already carrying an assistant node. */
+  represented: Set<string>
+}
+
+/** One memoized turn: the buckets it was built from, and the model they produced. */
+interface TurnRecord {
+  groups: readonly LaidGroup[]
+  model: TrajectoryTurnModel
+}
+
+/**
+ * Per-view memo that makes an append extend the previous layout instead of
+ * rebuilding it.
+ *
+ * The fold stays whole — every derivation still walks every entry — but the
+ * expensive per-record expansion, the per-turn model, and the result array are
+ * reused whenever the inputs they read did not move. A cache is therefore
+ * never load-bearing for correctness: dropping it changes identities only, and
+ * {@link deriveTrajectoryLayout} without one is the reference path the
+ * equivalence tests compare against.
+ *
+ * One cache belongs to one view: it holds that view's previous derivation.
+ */
+export interface TrajectoryLayoutCache {
+  /** Expansions keyed by the input record that produced them. */
+  readonly laid: WeakMap<object, LaidRecord>
+  /** Serialized tool schemas keyed by the schema object. */
+  readonly schemaText: WeakMap<object, string>
+  /** Previous derivation's node-derived indexes. */
+  nodeIndexes: NodeIndexRecord | undefined
+  /** Previous derivation's turn models, keyed by turn identity. */
+  turns: Map<string, TurnRecord>
+  /** Previous derivation's result array. */
+  result: readonly TrajectoryTurnModel[] | undefined
+}
+
+/**
+ * Create the memo one trajectory view passes to every derivation it makes.
+ *
+ * @returns An empty cache; pass the same one on each derivation of that view.
+ */
+export function createTrajectoryLayoutCache(): TrajectoryLayoutCache {
+  return {
+    laid: new WeakMap(),
+    schemaText: new WeakMap(),
+    nodeIndexes: undefined,
+    turns: new Map(),
+    result: undefined,
+  }
+}
+
+/** Assign each node index the next assistant above it, and backfill the shorter prefix. */
+function extendFollowing(
+  following: (AssistantMessageNode | undefined)[],
+  nodes: ConversationSnapshot['nodes'],
+  from: number,
+): void {
+  let assistant: AssistantMessageNode | undefined
+  for (let index = nodes.length - 1; index >= from; index--) {
+    following[index] = assistant
+    const node = nodes[index]
+    if (node?.kind === 'assistant') assistant = node
+  }
+  if (assistant === undefined) return
+  for (let index = from - 1; index >= 0 && following[index] === undefined; index--) {
+    following[index] = assistant
+  }
+}
+
+/** Fold `nodes[from..]` into the record's indexes. */
+function extendNodeIndexes(record: NodeIndexRecord, nodes: ConversationSnapshot['nodes'], from: number): void {
+  for (let index = from; index < nodes.length; index++) {
+    const node = nodes[index]
+    if (node === undefined) continue
+    const previous = record.entries.at(-1)
+    if (previous !== undefined && node.seq < previous.seq) record.ordered = false
+    record.entries.push({ kind: 'node', seq: node.seq, node, nodeIndex: index })
+    if (node.kind === 'tool-result') {
+      record.results.set(node.callId, node)
+      const startedAt = finiteTime(node.callTime)
+      if (startedAt !== null) record.callStarts.set(node.callId, startedAt)
+      continue
+    }
+    if (node.kind !== 'assistant') continue
+    for (const block of node.blocks) {
+      if (block.kind === 'tool-call') record.emittedCallIds.add(block.callId)
+    }
+    if (node.step > 0) record.represented.add(stepKey(node.turn, node.step))
+  }
+  extendFollowing(record.following, nodes, from)
+  record.nodes = nodes
+}
+
+/**
+ * Reuse the previous derivation's node-derived indexes, extending them when
+ * the new `nodes` array only appended members, and rebuilding otherwise.
+ */
+function nodeIndexesFor(
+  cache: TrajectoryLayoutCache | undefined,
+  nodes: ConversationSnapshot['nodes'],
+): NodeIndexRecord {
+  const cached = cache?.nodeIndexes
+  if (cached !== undefined && nodes.length >= cached.nodes.length) {
+    let shared = true
+    for (let index = 0; index < cached.nodes.length; index++) {
+      if (cached.nodes[index] !== nodes[index]) {
+        shared = false
+        break
+      }
+    }
+    if (shared) {
+      extendNodeIndexes(cached, nodes, cached.nodes.length)
+      return cached
+    }
+  }
+  const record: NodeIndexRecord = {
+    nodes: [],
+    entries: [],
+    ordered: true,
+    results: new Map(),
+    callStarts: new Map(),
+    emittedCallIds: new Set(),
+    following: [],
+    represented: new Set(),
+  }
+  extendNodeIndexes(record, nodes, 0)
+  if (cache !== undefined) cache.nodeIndexes = record
+  return record
+}
+
+function stepKey(turn: number, step: number): string {
+  return `${turn}\u0000${step}`
+}
+
+/** Merge the node entries with the request-derived entries, both already ordered. */
+function mergeLayoutEntries(
+  nodeEntries: readonly OrderedLayoutEntry[],
+  requestEntries: readonly OrderedLayoutEntry[],
+): OrderedLayoutEntry[] {
+  const merged: OrderedLayoutEntry[] = []
+  let left = 0
+  let right = 0
+  while (left < nodeEntries.length && right < requestEntries.length) {
+    const nodeEntry = nodeEntries[left] as OrderedLayoutEntry
+    const requestEntry = requestEntries[right] as OrderedLayoutEntry
+    if (layoutEntryOrder(nodeEntry) <= layoutEntryOrder(requestEntry)) {
+      merged.push(nodeEntry)
+      left++
+      continue
+    }
+    merged.push(requestEntry)
+    right++
+  }
+  for (; left < nodeEntries.length; left++) merged.push(nodeEntries[left] as OrderedLayoutEntry)
+  for (; right < requestEntries.length; right++) {
+    merged.push(requestEntries[right] as OrderedLayoutEntry)
+  }
+  return merged
+}
+
+function schemaDetailText(schema: ToolSchema, cache: TrajectoryLayoutCache | undefined): string {
+  const cached = cache?.schemaText.get(schema)
+  if (cached !== undefined) return cached
+  const text = JSON.stringify(schema, null, 2)
+  cache?.schemaText.set(schema, text)
+  return text
+}
+
+/** Attach each cell's tool schema and report the schema every cell read. */
+function attachSchemas(
+  laid: readonly LaidCell[],
+  callSchemas: TrajectoryLayoutInput['callSchemas'],
+  cache: TrajectoryLayoutCache | undefined,
+): readonly (ToolSchema | undefined)[] {
+  const schemas: (ToolSchema | undefined)[] = []
+  for (const entry of laid) {
+    const schema = entry.callId === undefined ? undefined : callSchemas?.get(entry.callId)
+    schemas.push(schema)
+    if (schema !== undefined) entry.cell.schemaDetail = schemaDetailText(schema, cache)
+  }
+  return schemas
+}
+
+function sameDeps(cached: readonly unknown[], deps: readonly unknown[]): boolean {
+  if (cached.length !== deps.length) return false
+  for (const [index, value] of deps.entries()) {
+    if (cached[index] !== value) return false
+  }
+  return true
+}
+
+function sameSchemas(
+  record: LaidRecord,
+  callSchemas: TrajectoryLayoutInput['callSchemas'],
+): boolean {
+  for (const [index, entry] of record.laid.entries()) {
+    const schema = entry.callId === undefined ? undefined : callSchemas?.get(entry.callId)
+    if (record.schemas[index] !== schema) return false
+  }
+  return true
+}
+
+/**
+ * Reuse the cells one input produced last time, or expand it again.
+ *
+ * The cells are shared with the previous derivation's result, so nothing may
+ * mutate them afterwards; every value a producer reads outside `key` must
+ * appear in `deps`, or a stale expansion survives an input change.
+ */
+function laidFor(
+  cache: TrajectoryLayoutCache | undefined,
+  key: object,
+  startIndex: number,
+  deps: readonly unknown[],
+  callSchemas: TrajectoryLayoutInput['callSchemas'],
+  produce: () => LaidCell[],
+): LaidCell[] {
+  const cached = cache?.laid.get(key)
+  if (
+    cached !== undefined
+    && cached.startIndex === startIndex
+    && sameDeps(cached.deps, deps)
+    && sameSchemas(cached, callSchemas)
+  ) return cached.laid
+  const laid = produce()
+  const schemas = attachSchemas(laid, callSchemas, cache)
+  cache?.laid.set(key, { startIndex, deps, schemas, laid })
+  return laid
+}
+
+function sameBucket(record: TurnRecord, groups: readonly LaidGroup[]): boolean {
+  if (record.groups.length !== groups.length) return false
+  for (const [index, group] of groups.entries()) {
+    const cached = record.groups[index]
+    if (cached === undefined || cached.title !== group.title) return false
+    if (cached.laid.length !== group.laid.length) return false
+    for (const [position, entry] of group.laid.entries()) {
+      if (cached.laid[position] !== entry) return false
+    }
+  }
+  return true
+}
+
+/** Reuse the turn model whose groups hold exactly the same cells as last time. */
+function turnModelFor(
+  cache: TrajectoryLayoutCache | undefined,
+  turns: Map<string, TurnRecord>,
+  key: string,
+  turn: number | null,
+  entry: TurnBucket,
+): TrajectoryTurnModel {
+  const cached = cache?.turns.get(key)
+  const model = cached !== undefined && sameBucket(cached, entry.groups)
+    ? cached.model
+    : toTurnModel(turn, entry)
+  turns.set(key, { groups: entry.groups, model })
+  return model
 }
 
 type AssistantRequestView = Extract<RequestView, { purpose: 'assistant' }>
@@ -133,25 +424,36 @@ function inputCellDetail(node: InputNode): Pick<
 /**
  * Fold a snapshot into turn → Message/Step groups with expanded cells.
  * @param input - nodes plus in-flight partial/runningCalls.
+ * @param cache - Optional per-view memo from {@link createTrajectoryLayoutCache}.
+ *   With one, a record whose inputs did not move keeps its previously expanded
+ *   cells and its turn keeps its model, so appending one event costs the tail
+ *   rather than the session. Without one, every record is expanded again; the
+ *   two paths produce equal content and differ only in identity.
  * @returns turns ordered by first appearance.
  */
-export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly TrajectoryTurnModel[] {
+export function deriveTrajectoryLayout(
+  input: TrajectoryLayoutInput,
+  cache?: TrajectoryLayoutCache,
+): readonly TrajectoryTurnModel[] {
   const {
     nodes, eventLocations, partial, runningCalls, requests = [], callSchemas,
   } = input
-  const resultByCall = indexResults(nodes)
-  const callById = new Map<string, ToolCallBlock>(resultByCall)
-  for (const call of runningCalls) callById.set(call.callId, call)
-  const emittedCallIds = indexAssistantCallIds(nodes)
-  const followingAssistants = indexFollowingAssistants(nodes)
-  const callStartById = new Map<string, number>()
-  for (const result of resultByCall.values()) {
-    const startedAt = finiteTime(result.callTime)
-    if (startedAt !== null) callStartById.set(result.callId, startedAt)
-  }
-  for (const call of runningCalls) {
-    const startedAt = finiteTime(call.time)
-    if (startedAt !== null) callStartById.set(call.callId, startedAt)
+  const indexes = nodeIndexesFor(cache, nodes)
+  const resultByCall = indexes.results
+  const emittedCallIds = indexes.emittedCallIds
+  const followingAssistants = indexes.following
+  let callById: ReadonlyMap<string, ToolCallBlock> = resultByCall
+  let callStartById: ReadonlyMap<string, number> = indexes.callStarts
+  if (runningCalls.length > 0) {
+    const calls = new Map<string, ToolCallBlock>(resultByCall)
+    const starts = new Map<string, number>(indexes.callStarts)
+    for (const call of runningCalls) {
+      calls.set(call.callId, call)
+      const startedAt = finiteTime(call.time)
+      if (startedAt !== null) starts.set(call.callId, startedAt)
+    }
+    callById = calls
+    callStartById = starts
   }
   const turns = new Map<number, TurnBucket>()
   const standaloneCompactions: TurnBucket[] = []
@@ -162,7 +464,7 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
   const bucket = (turn: number) => {
     let entry = turns.get(turn)
     if (entry === undefined) {
-      entry = { groups: [] }
+      entry = { groups: [], stepGroups: new Map() }
       turns.set(turn, entry)
     }
     return entry
@@ -177,24 +479,29 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
     }
     groups.push({ title: 'Message', laid: [laid] })
   }
+  const openStep = (turn: number, step: number) => {
+    const entry = bucket(turn)
+    const title = `Step ${step}`
+    return { entry, title, existing: entry.stepGroups.get(title) }
+  }
   const pushStep = (turn: number, step: number, laid: readonly LaidCell[]) => {
     if (laid.length === 0) return
-    const groups = bucket(turn).groups
-    const title = `Step ${step}`
-    const existing = groups.find(group => group.title === title)
+    const { entry, title, existing } = openStep(turn, step)
     if (existing !== undefined) {
       existing.laid.push(...laid)
       return
     }
-    groups.push({ title, laid: [...laid] })
+    const group = { title, laid: [...laid] }
+    entry.groups.push(group)
+    entry.stepGroups.set(title, group)
   }
   const pushStepInput = (turn: number, step: number, laid: readonly LaidCell[]) => {
     if (laid.length === 0) return
-    const groups = bucket(turn).groups
-    const title = `Step ${step}`
-    const existing = groups.find(group => group.title === title)
+    const { entry, title, existing } = openStep(turn, step)
     if (existing === undefined) {
-      groups.push({ title, laid: [...laid] })
+      const group = { title, laid: [...laid] }
+      entry.groups.push(group)
+      entry.stepGroups.set(title, group)
       return
     }
     const request = existing.laid.findIndex(entry => entry.cell.requestOnly === true)
@@ -202,26 +509,19 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
     else existing.laid.splice(request, 0, ...laid)
   }
 
-  const representedRequests = new Set<string>()
-  for (const node of nodes) {
-    if (node.kind === 'assistant' && node.step > 0) {
-      representedRequests.add(`${node.turn}\u0000${node.step}`)
-    }
-  }
+  const liveRepresented = new Set<string>()
   if (partial !== null && partial.step > 0) {
-    representedRequests.add(`${partial.turn}\u0000${partial.step}`)
+    liveRepresented.add(stepKey(partial.turn, partial.step))
   }
   for (const call of runningCalls) {
-    if (call.step > 0) representedRequests.add(`${call.turn}\u0000${call.step}`)
+    if (call.step > 0) liveRepresented.add(stepKey(call.turn, call.step))
+  }
+  const isRepresented = (turn: number, step: number): boolean => {
+    const key = stepKey(turn, step)
+    return indexes.represented.has(key) || liveRepresented.has(key)
   }
 
-  const entries: OrderedLayoutEntry[] = [
-    ...nodes.map((node, nodeIndex) => ({
-      kind: 'node' as const,
-      seq: node.seq,
-      node,
-      nodeIndex,
-    })),
+  const requestEntries: OrderedLayoutEntry[] = [
     ...requests
       .filter((request): request is CompactionRequestView =>
         request.purpose === 'compaction')
@@ -243,23 +543,27 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
     ...requests
       .filter((request): request is AssistantRequestView =>
         request.purpose === 'assistant')
-      .filter(request =>
-        !representedRequests.has(`${request.turn}\u0000${request.step}`),
-      )
+      .filter(request => !isRepresented(request.turn, request.step))
       .map(request => ({
         kind: 'request' as const,
         seq: request.startSeq,
         request,
       })),
   ].sort((left, right) => layoutEntryOrder(left) - layoutEntryOrder(right))
+  const entries: readonly OrderedLayoutEntry[] = requestEntries.length === 0
+    ? indexes.entries
+    : indexes.ordered
+      ? mergeLayoutEntries(indexes.entries, requestEntries)
+      : [...indexes.entries, ...requestEntries]
+        .sort((left, right) => layoutEntryOrder(left) - layoutEntryOrder(right))
 
   for (const entry of entries) {
     if (entry.kind === 'request') {
       const { request } = entry
-      pushStep(request.turn, request.step, [{
+      const laid = laidFor(cache, request, index + 1, EMPTY_DEPS, callSchemas, () => [{
         absTime: finiteTime(request.startedAt),
         cell: {
-          index: ++index,
+          index: index + 1,
           kind: 'message',
           text: '',
           sourceSeq: request.startSeq,
@@ -271,6 +575,8 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
           ...(request.status === 'error' ? { isError: true } : {}),
         },
       }])
+      index += laid.length
+      pushStep(request.turn, request.step, laid)
       prevAbsTime = finiteTime(request.completedAt)
         ?? finiteTime(request.startedAt)
         ?? prevAbsTime
@@ -281,10 +587,10 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
       const turn = change.kind === 'initial'
         ? firstVisibleTurn(nodes, partial)
         : enclosingPromptTurn(nodes, change.seq, partial)
-      pushMessage(turn, {
+      const laid = laidFor(cache, change, index + 1, [request], callSchemas, () => [{
         absTime: finiteTime(change.time),
         cell: {
-          index: ++index,
+          index: index + 1,
           kind: 'system',
           text: promptChangeLabel(change),
           sourceSeq: change.seq,
@@ -295,58 +601,56 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
           timeSeconds: 0,
           startedAt: finiteTime(change.time),
         },
-      })
+      }])
+      index += laid.length
+      for (const cell of laid) pushMessage(turn, cell)
       prevAbsTime = finiteTime(change.time) ?? prevAbsTime
       continue
     }
     if (entry.kind === 'compaction') {
       const request = entry.request
-      const rawOutput = request.rawOutput ?? request.summary
-      const thinkingDetail = rawOutput === undefined
-        ? ''
-        : detailReasoning(rawOutput)
-      const cell: TrajectoryCellProps = {
-        index: ++index,
-        kind: 'compacted',
-        text: request.status === 'running'
-          ? 'Compacting context…'
-          : request.status === 'error'
-            ? request.error ?? 'Compaction failed'
-            : request.summary === undefined
-              ? 'Context compacted'
-              : '',
-        ...(request.status === 'complete' && request.summary !== undefined
-          ? previewContentProperty(request.summary)
-          : {}),
-        sourceSeq: request.startSeq,
-        ...(request.summary === undefined
-          ? {}
-          : {
-            outputDetail: detailContent(request.summary),
-            outputBlocks: request.summary.map(block => sourceBlock(block)),
-          }),
-        ...(thinkingDetail === '' ? {} : { thinkingDetail }),
-        ...(rawOutput === undefined
-          ? {}
-          : { sourceBlocks: rawOutput.map(block => sourceBlock(block)) }),
-        ...(request.status === 'error' ? { isError: true } : {}),
-        timeSeconds: request.completedAt === null
-          ? null
-          : durationSeconds(request.completedAt, request.startedAt),
-        startedAt: finiteTime(request.startedAt),
-      }
-      attachUsage(cell, request.usage as UsageLike | undefined)
-      const compaction: TurnBucket = {
-        groups: [{
-          title: `Compaction ${request.startSeq}`,
-          laid: [{
-            absTime: finiteTime(request.startedAt),
-            cell,
-          }],
-        }],
-      }
-      if (request.turn === null) standaloneCompactions.push(compaction)
-      else bucket(request.turn).groups.push(...compaction.groups)
+      const laid = laidFor(cache, request, index + 1, EMPTY_DEPS, callSchemas, () => {
+        const rawOutput = request.rawOutput ?? request.summary
+        const thinkingDetail = rawOutput === undefined
+          ? ''
+          : detailReasoning(rawOutput)
+        const cell: TrajectoryCellProps = {
+          index: index + 1,
+          kind: 'compacted',
+          text: request.status === 'running'
+            ? 'Compacting context…'
+            : request.status === 'error'
+              ? request.error ?? 'Compaction failed'
+              : request.summary === undefined
+                ? 'Context compacted'
+                : '',
+          ...(request.status === 'complete' && request.summary !== undefined
+            ? previewContentProperty(request.summary)
+            : {}),
+          sourceSeq: request.startSeq,
+          ...(request.summary === undefined
+            ? {}
+            : {
+              outputDetail: detailContent(request.summary),
+              outputBlocks: request.summary.map(block => sourceBlock(block)),
+            }),
+          ...(thinkingDetail === '' ? {} : { thinkingDetail }),
+          ...(rawOutput === undefined
+            ? {}
+            : { sourceBlocks: rawOutput.map(block => sourceBlock(block)) }),
+          ...(request.status === 'error' ? { isError: true } : {}),
+          timeSeconds: request.completedAt === null
+            ? null
+            : durationSeconds(request.completedAt, request.startedAt),
+          startedAt: finiteTime(request.startedAt),
+        }
+        attachUsage(cell, request.usage as UsageLike | undefined)
+        return [{ absTime: finiteTime(request.startedAt), cell }]
+      })
+      index += laid.length
+      const groups: LaidGroup[] = [{ title: `Compaction ${request.startSeq}`, laid: [...laid] }]
+      if (request.turn === null) standaloneCompactions.push({ groups, stepGroups: new Map() })
+      else bucket(request.turn).groups.push(...groups)
       prevAbsTime = finiteTime(request.completedAt) ?? finiteTime(request.startedAt) ?? prevAbsTime
       continue
     }
@@ -355,15 +659,17 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
       // user/message has no turn on the wire; enclose it in the next assistant
       // (or partial) turn, else open the turn after the last assistant.
       const turn = enclosingUserTurn(followingAssistants[i], partial, lastAssistantTurn)
-      pushMessage(turn, {
+      const laid = laidFor(cache, node, index + 1, EMPTY_DEPS, callSchemas, () => [{
         absTime: finiteTime(node.time),
         cell: {
-          index: ++index,
+          index: index + 1,
           kind: 'user',
           ...inputCellDetail(node),
           opensTurn: true,
         },
-      })
+      }])
+      index += laid.length
+      for (const cell of laid) pushMessage(turn, cell)
       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
       continue
     }
@@ -374,22 +680,32 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
         lastAssistantTurn,
         eventLocations?.get(node.seq),
       )
-      const laid = {
+      const laid = laidFor(cache, node, index + 1, EMPTY_DEPS, callSchemas, () => [{
         absTime: finiteTime(node.time),
         cell: {
-          index: ++index,
+          index: index + 1,
           kind: 'user' as const,
           ...inputCellDetail(node),
         },
-      }
-      if (placement.step === undefined) pushMessage(placement.turn, laid)
-      else pushStepInput(placement.turn, placement.step, [laid])
+      }])
+      index += laid.length
+      if (placement.step === undefined) for (const cell of laid) pushMessage(placement.turn, cell)
+      else pushStepInput(placement.turn, placement.step, laid)
       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
       continue
     }
     if (node.kind === 'assistant') {
-      const laidList = withSubCalls(
-        expandAssistant(node, index + 1, prevAbsTime, resultByCall, callStartById, callById),
+      const startIndex = index + 1
+      const previousAbsTime = prevAbsTime
+      const laidList = laidFor(
+        cache,
+        node,
+        startIndex,
+        assistantDeps(node, previousAbsTime, resultByCall, callStartById, callById),
+        callSchemas,
+        () => withSubCalls(expandAssistant(
+          node, startIndex, previousAbsTime, resultByCall, callStartById, callById,
+        )),
       )
       if (node.step > 0) pushStep(node.turn, node.step, laidList)
       else for (const laid of laidList) pushMessage(node.turn, laid)
@@ -401,14 +717,16 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
     }
     if (node.kind === 'context') {
       const turn = enclosingUserTurn(followingAssistants[i], partial, lastAssistantTurn)
-      pushMessage(turn, {
+      const laid = laidFor(cache, node, index + 1, EMPTY_DEPS, callSchemas, () => [{
         absTime: finiteTime(node.time),
         cell: {
-          index: ++index,
+          index: index + 1,
           kind: 'context',
           ...inputCellDetail(node),
         },
-      })
+      }])
+      index += laid.length
+      for (const cell of laid) pushMessage(turn, cell)
       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
       continue
     }
@@ -420,34 +738,41 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
     }
     if (node.kind === 'tool-result') {
       if (!emittedCallIds.has(node.callId)) {
-        const toolName = node.call?.name
-        const resultPreview = summarizeResult(node)
-        const laidList: LaidCell[] = [{
-          absTime: finiteTime(node.callTime ?? node.time),
-          ...(toolName !== undefined ? { toolName } : {}),
-          callId: node.callId,
-          subCalls: node.subCalls,
-          cell: {
-            index: ++index,
-            kind: 'tool',
-            sourceSeq: node.seq,
-            ...(node.call !== null
-              ? summarizeCall(node.call.name, node.call.argsRaw)
-              : resultAsText(resultPreview)),
-            ...(node.call !== null ? { inputDetail: node.call.argsRaw } : {}),
-            outputDetail: detailResult(node),
-            outputBlocks: node.content.map(block => sourceBlock(block)),
-            ...resultPreview,
+        const startIndex = index + 1
+        const laidList = laidFor(cache, node, startIndex, EMPTY_DEPS, callSchemas, () => {
+          let local = startIndex
+          const toolName = node.call?.name
+          const resultPreview = summarizeResult(node)
+          const out: LaidCell[] = [{
+            absTime: finiteTime(node.callTime ?? node.time),
+            ...(toolName !== undefined ? { toolName } : {}),
             callId: node.callId,
-            isError: node.isError,
-            timeSeconds: durationSeconds(node.time, node.callTime),
-            startedAt: finiteTime(node.callTime),
-          },
-        }]
-        for (const laid of expandSubCalls(node.subCalls, index)) {
-          laidList.push(laid)
-          index = laid.cell.index
-        }
+            subCalls: node.subCalls,
+            cell: {
+              index: local,
+              kind: 'tool',
+              sourceSeq: node.seq,
+              ...(node.call !== null
+                ? summarizeCall(node.call.name, node.call.argsRaw)
+                : resultAsText(resultPreview)),
+              ...(node.call !== null ? { inputDetail: node.call.argsRaw } : {}),
+              outputDetail: detailResult(node),
+              outputBlocks: node.content.map(block => sourceBlock(block)),
+              ...resultPreview,
+              callId: node.callId,
+              isError: node.isError,
+              timeSeconds: durationSeconds(node.time, node.callTime),
+              startedAt: finiteTime(node.callTime),
+            },
+          }]
+          for (const laid of expandSubCalls(node.subCalls, local)) {
+            out.push(laid)
+            local = laid.cell.index
+          }
+          return out
+        })
+        const last = laidList[laidList.length - 1]
+        if (last !== undefined) index = last.cell.index
         pushStep(0, 1, laidList)
       }
       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
@@ -468,13 +793,14 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
       callById,
       { streaming: true },
     ))
+    attachSchemas(laidList, callSchemas, cache)
     if (partial.step > 0) pushStep(partial.turn, partial.step, laidList)
     else for (const laid of laidList) pushMessage(partial.turn, laid)
     const last = laidList[laidList.length - 1]
     if (last !== undefined) index = last.cell.index
   }
 
-  const seenCalls = collectCallIds(turns)
+  const seenCalls = runningCalls.length === 0 ? EMPTY_CALL_IDS : collectCallIds(turns)
   for (const call of runningCalls) {
     if (seenCalls.has(call.callId)) continue
     const laidList: LaidCell[] = [{
@@ -496,6 +822,7 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
       laidList.push(laid)
       index = laid.cell.index
     }
+    attachSchemas(laidList, callSchemas, cache)
     if (call.step > 0) pushStep(call.turn, call.step, laidList)
     else for (const laid of laidList) pushMessage(call.turn, laid)
   }
@@ -504,22 +831,51 @@ export function deriveTrajectoryLayout(input: TrajectoryLayoutInput): readonly T
   const prologue = turns.get(0)
   if (prologue !== undefined) {
     turns.delete(0)
-    const emptyTurn = (): TurnBucket => ({ groups: [] })
+    const emptyTurn = (): TurnBucket => ({ groups: [], stepGroups: new Map() })
     const first = turns.get(1) ?? emptyTurn()
     first.groups = [...prologue.groups, ...first.groups]
     turns.set(1, first)
   }
 
-  for (const entry of [...turns.values(), ...standaloneCompactions]) {
-    for (const group of entry.groups) {
-      for (const laid of group.laid) attachToolSchema(laid, callSchemas)
-    }
-  }
+  const ordered = [
+    ...[...turns.entries()].map(([turn, entry]) => ({ key: `turn:${turn}`, turn, entry })),
+    ...standaloneCompactions.map(entry => ({
+      key: `compaction:${entry.groups[0]?.title ?? ''}`,
+      turn: null,
+      entry,
+    })),
+  ]
+    .map(item => ({ ...item, order: firstBucketCellIndex(item.entry) }))
+    .sort((left, right) => left.order - right.order)
+  const retained = new Map<string, TurnRecord>()
+  const models = ordered.map(item =>
+    turnModelFor(cache, retained, item.key, item.turn, item.entry))
+  if (cache === undefined) return models
+  cache.turns = retained
+  const previous = cache.result
+  if (
+    previous !== undefined
+    && previous.length === models.length
+    && models.every((model, at) => previous[at] === model)
+  ) return previous
+  cache.result = models
+  return models
+}
 
-  return [
-    ...[...turns.entries()].map(([turn, entry]) => toTurnModel(turn, entry)),
-    ...standaloneCompactions.map(entry => toTurnModel(null, entry)),
-  ].sort((left, right) => firstCellIndex(left) - firstCellIndex(right))
+/** Dependencies an assistant expansion reads outside the node itself. */
+function assistantDeps(
+  node: AssistantMessageNode,
+  prevAbsTime: number | null,
+  results: ReadonlyMap<string, ToolResultNode>,
+  callStarts: ReadonlyMap<string, number>,
+  calls: ReadonlyMap<string, ToolCallBlock>,
+): readonly unknown[] {
+  const deps: unknown[] = [prevAbsTime]
+  for (const block of node.blocks) {
+    if (block.kind !== 'tool-call') continue
+    deps.push(results.get(block.callId), callStarts.get(block.callId), calls.get(block.callId))
+  }
+  return deps
 }
 
 /**
@@ -582,16 +938,6 @@ export function appendTrajectoryPartialLayout(
   return updated
 }
 
-function attachToolSchema(
-  laid: LaidCell,
-  callSchemas: RequestInspectionSnapshot['callSchemas'] | undefined,
-): void {
-  if (laid.callId === undefined || callSchemas === undefined) return
-  const schema = callSchemas.get(laid.callId)
-  if (schema === undefined) return
-  laid.cell.schemaDetail = JSON.stringify(schema, null, 2)
-}
-
 function toTurnModel(
   turn: number | null,
   entry: TurnBucket,
@@ -608,11 +954,14 @@ function toTurnModel(
 }
 
 /** Chronological section position from the fold's monotonically assigned cell indexes. */
-function firstCellIndex(turn: TrajectoryTurnModel): number {
-  return Math.min(
-    ...turn.groups.flatMap(group => group.cells.map(cell => cell.index)),
-    Number.POSITIVE_INFINITY,
-  )
+function firstBucketCellIndex(entry: TurnBucket): number {
+  let first = Number.POSITIVE_INFINITY
+  for (const group of entry.groups) {
+    for (const laid of group.laid) {
+      if (laid.cell.index < first) first = laid.cell.index
+    }
+  }
+  return first
 }
 
 /** Wall-span duration + tool histogram, e.g. `1.5 s bash×6`. */
@@ -891,19 +1240,6 @@ function steeringPlacement(
   return { turn: lastAssistantTurn ?? 1 }
 }
 
-function indexFollowingAssistants(
-  nodes: ConversationSnapshot['nodes'],
-): readonly (AssistantMessageNode | undefined)[] {
-  const following = new Array<AssistantMessageNode | undefined>(nodes.length)
-  let assistant: AssistantMessageNode | undefined
-  for (let index = nodes.length - 1; index >= 0; index--) {
-    following[index] = assistant
-    const node = nodes[index]
-    if (node?.kind === 'assistant') assistant = node
-  }
-  return following
-}
-
 function enclosingPromptTurn(
   nodes: ConversationSnapshot['nodes'],
   seq: number,
@@ -937,25 +1273,6 @@ function attachUsage(cell: TrajectoryCellProps, usage: UsageLike | undefined): v
   if (usage.cacheWriteTokens !== undefined) cell.cacheWrite = usage.cacheWriteTokens
   if (usage.outputTokens !== undefined) cell.output = usage.outputTokens
   if (usage.reasoningTokens !== undefined) cell.think = usage.reasoningTokens
-}
-
-function indexResults(nodes: ConversationSnapshot['nodes']): Map<string, ToolResultNode> {
-  const map = new Map<string, ToolResultNode>()
-  for (const node of nodes) {
-    if (node.kind === 'tool-result') map.set(node.callId, node)
-  }
-  return map
-}
-
-function indexAssistantCallIds(nodes: ConversationSnapshot['nodes']): ReadonlySet<string> {
-  const ids = new Set<string>()
-  for (const node of nodes) {
-    if (node.kind !== 'assistant') continue
-    for (const block of node.blocks) {
-      if (block.kind === 'tool-call') ids.add(block.callId)
-    }
-  }
-  return ids
 }
 
 function collectCallIds(

@@ -178,7 +178,13 @@ export async function listChildrenAndDescendants(
   return { children, descendants }
 }
 
-/** Enumerate direct children while preserving the historical public method. */
+/**
+ * Enumerate direct children while preserving the historical public method.
+ * @param ctx - Plugin context the listing reads its session corpus through.
+ * @param parentSessionId - Session whose immediate children are listed.
+ * @param signal - Cancels the underlying corpus read.
+ * @returns One entry per direct child, in corpus order.
+ */
 export async function listChildren(
   ctx: Context,
   parentSessionId: SessionId,

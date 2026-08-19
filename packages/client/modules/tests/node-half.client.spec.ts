@@ -143,10 +143,9 @@ describe('client bundle activation', () => {
     } as IncomingMessage, response)
 
     expect(status).toBe(200)
-    expect(headers).toEqual({
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-cache',
-    })
+    // Caching is the carrier's: the route states only the media type, and the
+    // webserver's response policy decides from the URL whether it is pinned.
+    expect(headers).toEqual({ 'content-type': 'application/json; charset=utf-8' })
     expect(body).toBe(map)
   })
 })

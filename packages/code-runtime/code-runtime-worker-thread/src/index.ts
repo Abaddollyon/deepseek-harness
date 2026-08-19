@@ -2,7 +2,7 @@
  * Worker-thread code runtime: a fresh worker runs each host-type-stripped TypeScript program
  * and bridges bindings over its message port. This is containment, not a security boundary:
  * model code has bash-equivalent trust despite an empty environment, a heap cap, measured
- * event-loop busy-time and wall-time budgets, and termination that also stops synchronous loops.
+ * event-loop busy-time and idle-time budgets, and termination that also stops synchronous loops.
  * @module @deepseek-ai/dsh-code-runtime-worker-thread
  */
 
@@ -34,9 +34,14 @@ export interface Config {
    */
   computeMs?: number
   /**
-   * Wall-clock ceiling in milliseconds; never pauses for anything. The
-   * backstop for what busy-time cannot see (a program awaiting a promise
-   * nobody will resolve). At most `2_147_483_647` (Node's maximum
+   * Idle ceiling in milliseconds: the run fails with kind `'timeout'` once the
+   * time it spent with NO host binding dispatch outstanding reaches this. The
+   * backstop for what busy time cannot see (a program awaiting a promise
+   * nobody will resolve). Symmetric with {@link Config.computeMs}: a program
+   * waiting on a host dispatch accrues against neither budget, because the
+   * host is running sanctioned work on its behalf. The accumulated total
+   * survives each suspension, so alternating short dispatches with idle gaps
+   * still reaches the ceiling. At most `2_147_483_647` (Node's maximum
    * `setTimeout` delay, about 24.9 days): a longer value is rejected at load
    * because `setTimeout` would clamp it to 1 ms.
    */
@@ -238,7 +243,7 @@ class OutputLedger {
 export class WorkerThreadCodeRuntime extends CodeRuntime {
   static Config: z<Config> = z.object({
     computeMs: z.number().default(60_000),
-    maxWallMs: z.number().default(600_000),
+    maxWallMs: z.number().default(3_600_000),
     maxOutputBytes: z.number().default(67_108_864),
     maxOldGenerationSizeMb: z.number().default(512),
   })
@@ -261,9 +266,11 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
     if (!Number.isSafeInteger(this.config.maxOutputBytes) || this.config.maxOutputBytes < MIN_OUTPUT_BYTES) {
       throw new Error(`dsh-code-runtime-worker-thread: config.maxOutputBytes must be a safe integer of at least ${MIN_OUTPUT_BYTES}, got ${String(this.config.maxOutputBytes)}`)
     }
-    // maxWallMs reaches setTimeout, which clamps any delay above
-    // MAX_TIMER_DELAY_MS to 1 ms; the positivity check above accepts such a
-    // value, so a 25-day ceiling would time the run out immediately.
+    // maxWallMs reaches setTimeout — as the initial delay and again as the
+    // remainder after each idle suspension, both at most maxWallMs — and
+    // setTimeout clamps any delay above MAX_TIMER_DELAY_MS to 1 ms; the
+    // positivity check above accepts such a value, so a 25-day ceiling would
+    // time the run out immediately.
     if (this.config.maxWallMs > MAX_TIMER_DELAY_MS) {
       throw new Error(`dsh-code-runtime-worker-thread: config.maxWallMs must be at most ${MAX_TIMER_DELAY_MS} (Node clamps a longer setTimeout delay to 1ms), got ${String(this.config.maxWallMs)}`)
     }
@@ -417,6 +424,15 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
       worker.stdout.on('data', captureStray)
       worker.stderr.on('data', captureStray)
 
+      // Idle-ceiling state. `idleConsumedMs` is the run's charged idle total,
+      // `idleSince` the start of the currently charged stretch (meaningful only
+      // while `wallTimer` is armed), and `outstanding` the number of host
+      // binding dispatches in flight.
+      let outstanding = 0
+      let idleConsumedMs = 0
+      let idleSince = 0
+      let wallTimer: ReturnType<typeof setTimeout> | undefined
+
       // Exactly one outcome wins. Every path cleans up, terminates, and awaits the worker;
       // logs captured before timeout, abort, or failure remain in the result.
       let finishResolve!: () => void
@@ -426,6 +442,7 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
         settled = true
         clearInterval(eluTimer)
         clearTimeout(wallTimer)
+        wallTimer = undefined
         request.signal?.removeEventListener('abort', onAbort)
         this.live.delete(live)
         // Let the poll phase deliver pipe bytes already queued independently
@@ -459,6 +476,38 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
         }
       }
 
+      // The idle ceiling charges only stretches with NO host dispatch
+      // outstanding: while the host runs a binding the program asked for, the
+      // run is waiting on sanctioned work, not idling, exactly as the compute
+      // budget already treats it. Re-arming with the REMAINDER — never a fresh
+      // budget — keeps a program that alternates short dispatches with idle
+      // gaps bounded by the same total.
+      const armWall = (): void => {
+        idleSince = Date.now()
+        // The remainder never exceeds maxWallMs, which the load-time check
+        // bounds by MAX_TIMER_DELAY_MS.
+        wallTimer = setTimeout(() => {
+          finish(() => output.failure([...logs, ...strayLogs], { kind: 'timeout', message: `wall-clock ceiling reached (${this.config.maxWallMs}ms)` }))
+        }, this.config.maxWallMs - idleConsumedMs)
+      }
+
+      // One dispatch, one begin and one end: onCall counts a call id at most
+      // once (a duplicate id never reaches here) and answers it through exactly
+      // one `reply`, which ends the dispatch before its own post-settlement
+      // drop. Re-arming only before settlement keeps finish's cleanup final —
+      // a reply that lands afterwards leaves no timer.
+      const beginDispatch = (): void => {
+        outstanding += 1
+        if (outstanding > 1) return
+        clearTimeout(wallTimer)
+        wallTimer = undefined
+        idleConsumedMs += Date.now() - idleSince
+      }
+      const endDispatch = (): void => {
+        outstanding -= 1
+        if (outstanding === 0 && !settled) armWall()
+      }
+
       const onCall = (message: WorkerToHost): void => {
         if (message.type !== 'call' || settled) return
         // Hostile-peer rules: a duplicate id is ignored, an unknown name is
@@ -466,7 +515,9 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
         // program-side rejection — contained here, never a host crash.
         if (answered.has(message.id)) return
         answered.add(message.id)
+        beginDispatch()
         const reply = (payload: ReplyMessage): void => {
+          endDispatch()
           if (settled) return
           // Canonical resolutions were snapshotted as lossless JSON before
           // this point, so this payload is structured-cloneable by contract.
@@ -486,23 +537,25 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
           reply({ type: 'reply', id: message.id, ok: false, message: 'binding arguments must be lossless JSON' })
           return
         }
+        // The invocation resolves to the payload instead of replying inside its
+        // own try/catch, so no path can answer one call id twice.
         void (async () => {
-          try {
-            const resolved = await fn(args)
-            let value: CodeJsonValue | undefined
+          const answer = async (): Promise<ReplyMessage> => {
             try {
-              value = snapshotJsonValue(resolved)
-            } catch {
-              value = undefined
+              const resolved = await fn(args)
+              let value: CodeJsonValue | undefined
+              try {
+                value = snapshotJsonValue(resolved)
+              } catch {
+                value = undefined
+              }
+              if (value === undefined) return { type: 'reply', id: message.id, ok: false, message: 'binding resolution must be lossless JSON' }
+              return { type: 'reply', id: message.id, ok: true, value: encodeWorkerJson(value) }
+            } catch (error: unknown) {
+              return { type: 'reply', id: message.id, ok: false, message: messageOf(error) }
             }
-            if (value === undefined) {
-              reply({ type: 'reply', id: message.id, ok: false, message: 'binding resolution must be lossless JSON' })
-            } else {
-              reply({ type: 'reply', id: message.id, ok: true, value: encodeWorkerJson(value) })
-            }
-          } catch (error: unknown) {
-            reply({ type: 'reply', id: message.id, ok: false, message: messageOf(error) })
           }
+          reply(await answer())
         })()
       }
 
@@ -540,9 +593,7 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
           finish(() => output.failure([...logs, ...strayLogs], { kind: 'timeout', message: `compute budget exhausted (${this.config.computeMs}ms busy)` }))
         }
       }, ELU_POLL_INTERVAL_MS)
-      const wallTimer = setTimeout(() => {
-        finish(() => output.failure([...logs, ...strayLogs], { kind: 'timeout', message: `wall-clock ceiling reached (${this.config.maxWallMs}ms)` }))
-      }, this.config.maxWallMs)
+      armWall()
       const onAbort = (): void => {
         finish(() => output.failure([...logs, ...strayLogs], { kind: 'abort', message: String(request.signal?.reason) }))
       }

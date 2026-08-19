@@ -67,9 +67,9 @@ describe('session rename through the assembled browser', () => {
     await runtime.mount({ inject: [...inject], apply })
     const view = runtime.renderRoot()
 
-    // Groups start closed: expand the session's group, then open the row's
-    // action menu.
-    fireEvent.click(await view.findByText('alpha'))
+    // Groups start closed, but the added session is the current one, so the
+    // navigation reveal opens the group that renders it; go straight to the
+    // row's action menu.
     const row = (await view.findByText('旧标题')).closest('[role="treeitem"]')!
     fireEvent.click(within(row as HTMLElement).getByLabelText('会话“旧标题”的操作'))
     fireEvent.click(view.getByRole('menuitem', { name: '重命名', hidden: true }))
@@ -117,7 +117,6 @@ describe('session rename through the assembled browser', () => {
     const view = runtime.renderRoot()
     await runtime.flush()
 
-    fireEvent.click(await view.findByText('alpha'))
     const row = (await view.findByText('旧标题')).closest('[role="treeitem"]')!
     fireEvent.click(within(row as HTMLElement).getByLabelText('会话“旧标题”的操作'))
     fireEvent.click(view.getByRole('menuitem', { name: '重命名', hidden: true }))

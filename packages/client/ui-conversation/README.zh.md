@@ -46,6 +46,8 @@ Host 带 placement 的 `session/queue` 快照也会携带待处理 steering。Qu
 
 完成的一轮会物化一个有序的 `turn-tail` Conversation Node。它由引擎维护的 `TurnLocation` 提供收尾 Assistant 和 Turn data；renderer 在该 Node 的 IconActions 之前渲染 `conversation.chat.turnTail` chain，并派发包含 Turn、收尾 seq 和 `openFile` 的 `TurnTailOwnerProps`。本包只拥有空位；`@deepseek-ai/dsh-client-ui-deliverables` 把改写工具的 `locations` 累积到 Turn data，并拥有产物行、chip 上限和文案，因此把该插件从 cordis.yml 中组合掉即可关闭该交互面，空位以零成本渲染为空。收尾正文经由同一个开关参与其中：chat 视图向可选的 `chatFileMentions` service（ctx.get；由同一插件提供）索取收尾消息的行内代码词表，并把结果接进 MarkdownText 的 `fileMentions` seam——service 缺席时正文保持死文本。
 
+渲染上限是本插件宿主面的 `Config`。`rendering.highlightMaxChars`、`rendering.highlightCacheEntries` 与 `rendering.markdownCacheEntries` 会成为 `ui-conversation-rendering` 设置命名空间的 base 层，这也是 cordis.yml 中的取值抵达浏览器半边的通道——客户端 boot 图不携带逐条目的 config。浏览器半边绑定该命名空间，并通过插件 effect 把已给出的字段安装到 [`ui-primitives`](../ui-primitives/README.md) 上，因此销毁时共享的渲染模块会回到内置取值；省略的字段保持内置值不变。设置读取仅限 loopback，因此局域网客户端使用内置上限。
+
 ## 模型体验
 
 无。会话 UI 在浏览器中渲染会话历史与流；这里没有任何内容进入模型请求。
@@ -56,6 +58,7 @@ Host 带 placement 的 `session/queue` 快照也会携带待处理 steering。Qu
 
 ## 已知限制与暂缓事项
 
+- **聊天流未做虚拟化**：所有已加载的 Chat Node 都留在 DOM 中，每次 `loadOlder` 分页都会永久性地追加更多节点；实测最大的会话包含 5,677 个节点。滚动路径的单事件开销已被限制（可见锚点查找读取 O(log n) 个盒模型，而非每个已挂载行各读一次），席位列表的元素构造也做了记忆化，但内存与样式重算开销仍随会话长度增长。
 - **统计行的回退折算只覆盖窗口内消息流**：未组合 `sessionStats` 投影单元的装配中，所有数字由快照的 assistant `timing` 与工具 call/result 配对折算，落在已加载事件窗口之外的节点（更早的历史）不计入，数字随加载页数增长。
 - **详情面板没有入口**：`ChatViewInjected.openDetails` 虽已实现却无人调用，因此以原始形式显示已选择调用的那部分在组装后的应用中不可达。没有 Input/Output/Metadata 切换、Prev/Next 步进，也没有 trajectory 深链接。
 - **assistant 逐消息分页是预留 slot**：设计中已有图稿，尚未实现。已定稿的内容 IconActions 行（复制／时钟／分支）只挂在每个已结束轮次中最后一条带 text 内容的 assistant 下；轮次中间的叙述、纯 Think 节点，以及仍在产出步骤的轮次里的所有节点都不带 chrome。除非该消息同时也是已完成轮次的最后一个 transcript 节点，否则分支保持禁用；启用后，它会 fork 到该轮次末尾，在 client 端递增继承标题并打开子会话。fork 或改名失败时源会话保持选中（[决策](../../../.agents/notes/implemented/bug-fix/2026-08-02-message-fork-actions-require-completed-turn-tail.md)）。

@@ -23,7 +23,7 @@ Usage accounting sums disjoint input, cache-read, cache-write, and output bucket
 
 ## Session projections
 
-When the composition provides `ctx.sessionProjections`, token-meter registers three units through an optional child fiber.
+When the composition provides `ctx.sessionProjections`, token-meter registers four units through an optional child fiber.
 
 `tokenUsage` carries the complete durable log's `uncachedInputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens`. Usage chunks are counted even when a request later fails; a final assistant-message usage for the same `(turn, step)` replaces that sample instead of double-counting it. Reasoning remains an output subdivision. The single last-sample slot relies on a session-log ordering property: once a later step reports usage, a legal log never reports usage for an earlier step again.
 
@@ -33,7 +33,9 @@ When the composition provides `ctx.sessionProjections`, token-meter registers th
 
 `contextBreakdown` carries heuristic `systemTokens`, `toolsTokens`, and `messageTokens` — the context's composition rather than its provider-billed size. The envelope figures reprice last-wins on every `request/header`; the message figure replays `surface-fold.ts` — the same positional fold `measure()` runs — so it equals `measure().surfaceTokens` at every event boundary and compaction shrinks it the way it shrinks the next request. All three figures use the measurement service's fixed heuristic and are estimates: they will not sum to `projectedTokens`, whose provider anchor carries exactly the error — CJK text and JSON schemas underprice badly at four characters per token — that the composition rows still contain. Present them as an approximate composition, never as a total.
 
-All three units use the standard projection baseline, live frame, higher-seq-wins store, and JSON checkpoint paths. Unloading token-meter removes all three keys. A composition without the projection seam keeps the measurement service's existing behavior.
+`modelRoute` carries the resolved route of the session's requests — `provider`, `model`, and the `contextWindow` the route advertises — folded last-wins from the same `request/context` record. Every field is copied verbatim, so the value reports whatever route resolved and this package recognizes no provider, model, alias, or capacity of its own. It is `null` until the first request logs a route, and stays `null` for a session that never issues one: no placeholder route is invented. The `null` is a value rather than an absent key so the whole value survives `JSON.stringify` on every transport, matching `subagent`'s sentinel; a repeated identical record leaves the state reference untouched and publishes nothing.
+
+All four units use the standard projection baseline, live frame, higher-seq-wins store, and JSON checkpoint paths. Unloading token-meter removes all four keys. A composition without the projection seam keeps the measurement service's existing behavior.
 
 ### Context occupancy is an approximation, by design
 
@@ -50,7 +52,7 @@ The [Agent Note](../../../.agents/notes/implemented/architecture/2026-07-29-proj
 - name: '@deepseek-ai/dsh-compaction-basic'
 ```
 
-Both plugins have usable defaults. The meter remains independent of model routing and optional compaction. A deployment configures capacity on its LLM adapter and compaction policy on `dsh-compaction-basic`.
+Both plugins have usable defaults. The measurement service resolves no route of its own and compaction stays optional; `modelRoute` only republishes the route the agent loop already logged. A deployment configures capacity on its LLM adapter and compaction policy on `dsh-compaction-basic`.
 
 ## Model Experience
 
@@ -65,4 +67,5 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 - **The fixed heuristic is approximate** — content without reusable provider usage is priced by character count plus structural overhead, not an exact provider tokenizer or request serializer.
 - **Every measurement clones the current surface** — coherent immutable snapshots make reads O(surface), including below-threshold pressure checks.
 - **Provider usage is only reusable for an identical canonical envelope** — prompt, prefix, tools, provider, model, or call-config changes deliberately fall back to full heuristic estimation.
+- **`modelRoute` describes the next request, not a confirmed one** — the agent loop appends `request/context` before dispatch, so a route that every subsequent request fails on still reports as current.
 - **Missing legacy source seqs are handled conservatively** — assistant messages without `sourceEventSeqs` cannot distinguish provider output from listener rewrites, so the fold avoids claiming a known empty or exact chunk stream.
