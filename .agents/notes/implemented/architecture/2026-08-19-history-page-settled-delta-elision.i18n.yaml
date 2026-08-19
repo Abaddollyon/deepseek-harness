@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-19-history-page-settled-delta-elision.md
+2026-08-19-history-page-settled-delta-elision.md: bbbc31d7c2d6be8d7feac90b7068c1581e6197b0
+2026-08-19-history-page-settled-delta-elision.zh.md: 3547929728367d40b8b5e0fa0c017797857d8ebd

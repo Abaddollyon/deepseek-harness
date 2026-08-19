@@ -84,6 +84,9 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // Value edge: the rename impl narrows the title service's validation failure; the import also resolves `ctx.get('sessionTitle')`.
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import type { CallId } from '@deepseek-ai/dsh-llm/brand'
+// The first-token predicate the client's step timing folds; the page read path
+// keeps exactly the deltas that predicate selects for a settled step.
+import { isTokenDelta } from '@deepseek-ai/dsh-llm/message'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import type { ApprovalOutcome, ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
 // Side-effect type import: resolves the `approval/request` waterfall and
@@ -120,6 +123,8 @@ const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
 const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
+/** Default answer to whether a history page omits a settled step's superseded deltas. */
+export const DEFAULT_HISTORY_ELIDE_SETTLED_DELTAS = true
 
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -220,6 +225,25 @@ function isAborted(signal: AbortSignal): boolean {
 }
 
 /**
+ * The first index whose event seq reaches `seq`, or the array length when none
+ * does. The log is strictly seq-ascending, so both pagination bounds are
+ * positions rather than predicates over every element.
+ * @param events - a seq-ascending event array.
+ * @param seq - the sought sequence number.
+ * @returns the lower-bound index.
+ */
+function seqLowerBound(events: readonly SessionEvent[], seq: number): number {
+  let low = 0
+  let high = events.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if ((events[mid] as SessionEvent).seq < seq) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+/**
  * Message-boundary pagination: count maxMessages append-origin messages
  * backwards from the window tail. Replacement copies never entered the
  * conversation a reader sees — they restate a shadowed range for the model
@@ -228,17 +252,20 @@ function isAborted(signal: AbortSignal): boolean {
  * replacement. The cut is the starting seq of the oldest message group (chunks
  * group via sourceEventSeqs — never cut mid-message). The tail page naturally
  * includes the in-progress partial.
+ *
+ * Both bounds are located by {@link seqLowerBound} and the page is one slice,
+ * so cutting 50 messages costs no copy of the whole log.
  */
 function paginate(
   events: readonly SessionEvent[],
   beforeSeq: number | undefined,
   maxMessages: number,
 ): { events: SessionEvent[]; hasMore: boolean } {
-  const window = beforeSeq === undefined ? [...events] : events.filter(event => event.seq < beforeSeq)
+  const upper = beforeSeq === undefined ? events.length : seqLowerBound(events, beforeSeq)
   let count = 0
   let cut = 0
-  for (let i = window.length - 1; i >= 0; i--) {
-    const event = window[i] as SessionEvent
+  for (let i = upper - 1; i >= 0; i--) {
+    const event = events[i] as SessionEvent
     if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
     count++
     const sources = (event as { sourceEventSeqs?: number[] }).sourceEventSeqs
@@ -253,8 +280,77 @@ function paginate(
       break
     }
   }
-  const page = window.filter(event => event.seq >= cut)
-  return { events: page, hasMore: cut > 0 }
+  return { events: events.slice(seqLowerBound(events, cut), upper), hasMore: cut > 0 }
+}
+
+/** Composite identity of one assistant step inside a page. */
+function stepKey(turn: number, step: number): string {
+  return `${turn}\u0000${step}`
+}
+
+/**
+ * Drop the streaming deltas a settled step's terminal `assistant/message`
+ * already restates, and keep every delta of a step still in flight.
+ *
+ * A delta is superseded exactly when its own step's append-origin
+ * `assistant/message` sits later on the same page: that message carries the
+ * complete assembled content, so every `block-start`, `*-delta`, `block-end`
+ * and `finish` chunk before it restates nothing a reader cannot read there.
+ * Deltas of a step with no terminal message on the page — in flight,
+ * interrupted before it produced one, or settled beyond the page's upper bound
+ * — are the only record of that partial content and all survive, as does any
+ * delta recorded after its step's message. A replacement copy settles nothing:
+ * it restates a shadowed range for the model and never entered the transcript.
+ *
+ * Two superseded positions are still emitted because no terminal event
+ * restates them: the first {@link isTokenDelta} chunk of the step, which
+ * stamps its first-token time, and every `usage` chunk, whose per-attempt
+ * counts a retried step accumulates past the final message's own usage.
+ *
+ * Emitting only positions before a step's terminal message also keeps the
+ * page's last event, which the client's window continuity requires to sit at
+ * `beforeSeq - 1` so a page-up neither reports a hole nor triggers live-gap
+ * repair.
+ *
+ * This is a read-path projection only. The log keeps every chunk, so what a
+ * model request reconstructs is unchanged.
+ * @param events - one paginated page, in seq order.
+ * @returns the page with superseded deltas removed.
+ */
+function elideSettledStepDeltas(events: SessionEvent[]): SessionEvent[] {
+  const settledAt = new Map<string, number>()
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i] as SessionEvent
+    if (event.type === 'assistant/message' && isAppendSurfaceEvent(event)) {
+      settledAt.set(stepKey(event.data.turn, event.data.step), i)
+    }
+  }
+  if (settledAt.size === 0) return events
+  const stamped = new Set<string>()
+  const kept: SessionEvent[] = []
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i] as SessionEvent
+    if (event.type !== 'assistant/chunk') {
+      kept.push(event)
+      continue
+    }
+    const key = stepKey(event.data.turn, event.data.step)
+    const settled = settledAt.get(key)
+    if (settled === undefined || i > settled) {
+      kept.push(event)
+      continue
+    }
+    const chunk = event.data.chunk
+    if (chunk.type === 'usage') {
+      kept.push(event)
+      continue
+    }
+    if (isTokenDelta(chunk) && !stamped.has(key)) {
+      stamped.add(key)
+      kept.push(event)
+    }
+  }
+  return kept
 }
 
 /** Wrap an ok result echoing the request's rpcId. */
@@ -606,6 +702,13 @@ export interface ApiProxyDefaults {
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
   /**
+   * Whether a history page omits the streaming deltas a settled step's own
+   * `assistant/message` already restates ({@link elideSettledStepDeltas}).
+   * Defaults to {@link DEFAULT_HISTORY_ELIDE_SETTLED_DELTAS}; a deployment
+   * diagnosing the raw stream sets it false to serve every recorded chunk.
+   */
+  historyElideSettledDeltas?: boolean
+  /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
    * between opening a preset directory and answering its path as text.
@@ -747,18 +850,29 @@ function backscanArgs(events: readonly SessionEvent[], callId: string): { name: 
   return undefined
 }
 
-/** Render one detached history page through the same presenter path as ordinary history. */
+/**
+ * Render one detached history page through the same presenter path as ordinary history.
+ * @param ctx - the composed host context whose presenters render each card.
+ * @param events - the complete seq-ascending source log for this read.
+ * @param beforeSeq - exclusive upper bound for a page-up, absent for the tail page.
+ * @param maxMessages - message-boundary page size; absent uses {@link DEFAULT_MAX_MESSAGES}.
+ * @param elideSettledDeltas - whether {@link elideSettledStepDeltas} trims the page.
+ * @param scope - the registry view scope this transcript's presenters resolve in.
+ * @returns the page entries and whether older events remain.
+ */
 function historyPage(
   ctx: Context,
   events: readonly SessionEvent[],
   beforeSeq: number | undefined,
   maxMessages: number | undefined,
+  elideSettledDeltas: boolean,
   scope?: ScopeKey,
 ): { events: HistoryEntry[]; hasMore: boolean } {
   const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+  const emitted = elideSettledDeltas ? elideSettledStepDeltas(page.events) : page.events
   return {
-    events: page.events.map((event) => {
-      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
+    events: emitted.map((event) => {
+      const view = viewFor(ctx, event, callId => backscanArgs(emitted, callId), scope)
       return { event, ...view === undefined ? {} : { view } }
     }),
     hasMore: page.hasMore,
@@ -1054,6 +1168,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const historyElideSettledDeltas = defaults.historyElideSettledDeltas
+    ?? DEFAULT_HISTORY_ELIDE_SETTLED_DELTAS
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1509,14 +1625,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   function historyCutOf(
     source: HistorySource,
     includeProjections: boolean,
-  ): { events: SessionEvent[]; projections?: SessionProjectionsBlock } {
+  ): { events: readonly SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
       const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
-    const events = [...source.session.events]
     const projections = includeProjections ? projectionsFor(ctx, source.session) : undefined
-    return { events, ...projections === undefined ? {} : { projections } }
+    return { events: source.session.events, ...projections === undefined ? {} : { projections } }
   }
 
   /**
@@ -2168,7 +2283,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
           const cut = historyCutOf(source, beforeSeq === undefined)
-          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
+          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, historyElideSettledDeltas, scope)
           return ok(request, {
             events: page.events,
             hasMore: page.hasMore,
@@ -2688,7 +2803,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { childSessionId },
           })
         }
-        const page = historyPage(ctx, events, beforeSeq, maxMessages)
+        const page = historyPage(ctx, events, beforeSeq, maxMessages, historyElideSettledDeltas)
         return ok(request, { ...page, ...projections === undefined ? {} : { projections } })
       },
 
