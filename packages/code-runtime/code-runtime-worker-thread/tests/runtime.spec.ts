@@ -199,12 +199,70 @@ describe('WorkerThreadCodeRuntime — budgets and containment (real workers)', (
   it('ends an idle-forever run at the wall-clock ceiling', async () => {
     const { runtime } = await setup({ computeMs: 30_000, maxWallMs: 400 })
     const result = await runtime.run({
-      program: 'await tools.never({}); return 1',
+      // Idle with NOTHING outstanding: no binding call, no busy time, a
+      // promise nobody will resolve. This is the one state the ceiling exists
+      // to end, and the only one it charges.
+      program: 'await new Promise(() => {}); return 1',
       bindings: tools({ never: () => new Promise(() => {}) }),
     })
     expect(result.error?.kind).toBe('timeout')
     expect(result.error?.message).toContain('wall-clock ceiling')
   }, 15_000)
+
+  it('does not charge time awaiting an in-flight dispatch against the wall-clock ceiling', async () => {
+    const { runtime } = await setup({ computeMs: 30_000, maxWallMs: 2_000 })
+    const result = await runtime.run({
+      program: 'return await tools.slow({})',
+      bindings: tools({ slow: () => new Promise(resolve => setTimeout(() => { resolve('slow-done') }, 5_000)) }),
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toBe('slow-done')
+  }, 20_000)
+
+  it('keeps the ceiling suspended until the LAST overlapping dispatch replies', async () => {
+    // The early reply would re-arm a per-dispatch flag and expire the run at
+    // 2_500 ms; counting outstanding dispatches keeps it suspended to 5_000.
+    const { runtime } = await setup({ computeMs: 30_000, maxWallMs: 1_500 })
+    const result = await runtime.run({
+      program: 'return (await Promise.all([tools.quick({}), tools.slow({})])).join("+")',
+      bindings: tools({
+        quick: () => new Promise(resolve => setTimeout(() => { resolve('quick') }, 1_000)),
+        slow: () => new Promise(resolve => setTimeout(() => { resolve('slow') }, 5_000)),
+      }),
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.value).toBe('quick+slow')
+  }, 20_000)
+
+  it('charges cumulative idle across dispatches instead of restarting the ceiling', async () => {
+    const { runtime } = await setup({ computeMs: 30_000, maxWallMs: 1_000 })
+    const result = await runtime.run({
+      // Each dispatch suspends the ceiling and each gap charges it: the run
+      // dies once the gaps total the budget, however many replies intervened.
+      program: `
+        for (let round = 0; round < 20; round++) {
+          await tools.tick({});
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        return 'outlived-the-ceiling';
+      `,
+      bindings: tools({ tick: async () => 'ok' }),
+    })
+    expect(result.error?.kind).toBe('timeout')
+    expect(result.error?.message).toContain('wall-clock ceiling')
+  }, 20_000)
+
+  it('ends a hot loop on the compute budget while an outstanding dispatch suspends the ceiling', async () => {
+    // computeMs above maxWallMs: only a suspended ceiling lets the compute
+    // budget be the one that fires.
+    const { runtime } = await setup({ computeMs: 2_500, maxWallMs: 1_000 })
+    const result = await runtime.run({
+      program: 'void tools.slow({}); for (;;) {}',
+      bindings: tools({ slow: () => new Promise(() => {}) }),
+    })
+    expect(result.error?.kind).toBe('timeout')
+    expect(result.error?.message).toContain('compute budget')
+  }, 20_000)
 
   it('reports an abort mid-run and stops the worker', async () => {
     const { runtime } = await setup()
