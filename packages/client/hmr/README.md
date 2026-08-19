@@ -18,4 +18,4 @@ None; this package neither assembles nor sends a provider request.
 
 - **Reload is coarse by design** — a fresh fiber and fresh components; React state inside the reloaded plugin is lost while the data layer (connection/runtime fibers, Session objects) is untouched. react-refresh-grade state preservation conflicts with "re-executing the bundle re-runs the factory" and is deliberately out.
 - **No failure rollback** — a reload that fails leaves the entry FAILED and visible in the loader status projection; the previous bundle is not restored automatically.
-- **Graph rev is not refreshed by rebuilt frames** — the stale rev is harmless because the bundle endpoint serves no-cache; only reconnect refreshes it.
+- **Only the rebuilt row's rev is refreshed** — a `rebuilt` frame moves that one row to the hash it names, which is what keeps the refetch out of the browser's immutable cache; the graph-wide rev anchor still goes stale until a reconnect refreshes it.

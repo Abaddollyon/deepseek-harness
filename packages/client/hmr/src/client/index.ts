@@ -14,18 +14,19 @@
  * cascades into its UI dependents with no HMR-side bookkeeping.
  *
  * Reload order (lazy CJS table): invalidate (drop the stale factory and
- * materialized record) → prefetch (load and register the fresh
- * factory) → registry-first teardown → drain old fiber unload → remove
- * owned `<style data-plugin>` tags → `entry.refresh()` materializes the new
- * factory. Invalidate MUST precede prefetch: a live factory makes prefetch
- * a no-op, and re-executing a bundle over an undeleted registration is a
- * loud duplicate. The swap is safe because execution is pure registration
- * under the lazy model — every module side effect (CSS injection included)
- * lives in the factory closure and runs at materialization, inside
- * refresh(). That also keeps the CSS ordering guarantee: owned styles are
- * removed after the old fiber's disposers drained (SlotCore one-owner
- * unregister) and before materialization re-injects tags under the same
- * stable tag ids.
+ * materialized record) → revise (point the graph row at the rebuilt bundle's
+ * content hash, so the refetch is not answered from the browser's cache) →
+ * prefetch (load and register the fresh factory) → registry-first teardown →
+ * drain old fiber unload → remove owned `<style data-plugin>` tags →
+ * `entry.refresh()` materializes the new factory. Invalidate MUST precede
+ * prefetch: a live factory makes prefetch a no-op, and re-executing a bundle
+ * over an undeleted registration is a loud duplicate. The swap is safe
+ * because execution is pure registration under the lazy model — every module
+ * side effect (CSS injection included) lives in the factory closure and runs
+ * at materialization, inside refresh(). That also keeps the CSS ordering
+ * guarantee: owned styles are removed after the old fiber's disposers drained
+ * (SlotCore one-owner unregister) and before materialization re-injects tags
+ * under the same stable tag ids.
  *
  * Failure window: if prefetch rejects after invalidate, the module is left
  * unregistered while the OLD fiber keeps running untouched (teardown never
@@ -101,7 +102,7 @@ export function apply(ctx: Context): void {
   const modLoader = ctx.modules
   const loader: Loader = ctx.loader
 
-  async function reload(id: string): Promise<void> {
+  async function reload(id: string, rev: string): Promise<void> {
     const entry = findEntry(loader, id)
     if (entry === undefined) {
       ctx.logger.warn(`client-hmr: rebuilt frame for unknown entry "${id}" (not in the loader tree)`)
@@ -113,6 +114,11 @@ export function apply(ctx: Context): void {
     // the fresh factory with zero side effects (lazy CJS — module bodies run
     // at materialization, not execution).
     modLoader.invalidate(id)
+    // The host pins each bundle answer to the content hash its URL carries, so
+    // refetching the boot URL would reload the pre-rebuild bytes out of the
+    // browser's cache. The rebuilt frame names the new hash; the row moves to
+    // it before the fetch.
+    modLoader.revise(id, rev)
     await modLoader.prefetch(id)
 
     const oldFiber = entry.fiber
@@ -145,16 +151,14 @@ export function apply(ctx: Context): void {
   const handle = (frame: PluginsEventFrame): void => {
     switch (frame.type) {
       case 'rebuilt':
-        queue = queue.then(() => reload(frame.id)).catch((error: unknown) => {
+        queue = queue.then(() => reload(frame.id, frame.rev)).catch((error: unknown) => {
           ctx.logger.error(`client-hmr: reload of "${frame.id}" failed`)
           ctx.logger.error(error)
         })
         break
       case 'graph':
-        // Connect-time snapshot, unused. The loader's cached graph rev
-        // goes stale after rebuilds — harmless, since prefetch hits the
-        // network anyway (host serves bundles no-cache); graph rev refresh
-        // lands with the reconnect-handshake mechanism.
+        // Connect-time snapshot, unused: each rebuilt frame carries the one
+        // row's new rev, and reload() moves that row before refetching it.
         break
       default:
         // Merge-extensible frame union: unknown frame types from newer hosts

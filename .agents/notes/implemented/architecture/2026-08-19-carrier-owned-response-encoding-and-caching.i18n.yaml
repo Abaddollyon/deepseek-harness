@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-19-carrier-owned-response-encoding-and-caching.md
+2026-08-19-carrier-owned-response-encoding-and-caching.md: 302069518117dc1613a580e5dd81ce7a2befe0f2
+2026-08-19-carrier-owned-response-encoding-and-caching.zh.md: 6eda1c108cf429c343a1d14a619542b4b93dbf05

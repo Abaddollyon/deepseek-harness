@@ -4,8 +4,11 @@
  * index transform taps, and the single fallback seat for everything no route
  * claims). Knows no harness concepts and serves no files; the composing
  * application's frontend plugin owns dist serving through the fallback hook.
- * Web shape only — Electron loads dist over file:// and carries fetch over an
- * IPC bridge. This package never prints: the URL line belongs to the shell.
+ * The carrier does own what is true of every answer regardless of who wrote
+ * it: Accept-Encoding negotiation and the Cache-Control a request URL earns
+ * (./response-policy.ts). Web shape only — Electron loads dist over file://
+ * and carries fetch over an IPC bridge. This package never prints: the URL
+ * line belongs to the shell.
  */
 
 import { createServer } from 'node:http'
@@ -14,6 +17,33 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { applyResponsePolicy, type ResponsePolicy } from './response-policy.ts'
+
+/**
+ * Smallest body worth encoding. Under roughly one MTU the coding's own framing
+ * and dictionary overhead cancel the saving, and the answer already fits the
+ * packets it would have used.
+ */
+const DEFAULT_COMPRESS_MIN_BYTES = 1024
+
+/**
+ * Brotli quality for on-the-fly encoding. The format's maximum (11) targets
+ * build-time precompression; mid-range quality is the standard choice for
+ * per-request encoding, where the extra CPU per request buys little ratio.
+ */
+const DEFAULT_BROTLI_QUALITY = 5
+
+/** zlib's own default deflate level: the balanced point of its 0-9 range. */
+const DEFAULT_GZIP_LEVEL = 6
+
+/**
+ * Pathname prefix the shipped frontend build writes content-hashed filenames
+ * under (Vite's `assets/[name]-[hash][extname]`).
+ */
+const DEFAULT_IMMUTABLE_PATH_PREFIXES = ['/assets/']
+
+/** One year: the maximum RFC 9111 recommends any cache be told to hold a response. */
+const DEFAULT_IMMUTABLE_MAX_AGE_SECONDS = 31_536_000
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -41,12 +71,32 @@ export interface WebUpgradeRoute {
   handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
 }
 
-/** Gateway config: the listen address. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
+  /**
+   * Whether responses are compressed at all. Turn it off where a reverse proxy
+   * or the platform already encodes, so the bytes are not compressed twice.
+   */
+  compress: boolean
+  /** Smallest body the carrier encodes; smaller answers go out verbatim. */
+  compressMinBytes: number
+  /** Brotli quality, 0-11; higher trades request CPU for ratio. */
+  brotliQuality: number
+  /** Deflate level for gzip, 0-9; higher trades request CPU for ratio. */
+  gzipLevel: number
+  /**
+   * Absolute pathname prefixes whose every file this deployment's build writes
+   * with its content hash in the filename. Answers under them are cached
+   * immutably, so a prefix holding a file the build can rewrite in place would
+   * pin a stale copy in every browser that fetched it.
+   */
+  immutablePathPrefixes: string[]
+  /** Lifetime attached to a content-addressed answer, in seconds. */
+  immutableMaxAgeSeconds: number
 }
 
 /**
@@ -60,6 +110,12 @@ export class WebServer extends Service {
   static Config: z<Config> = z.object({
     host: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).required(),
     port: z.natural().max(65535).required(),
+    compress: z.boolean().default(true),
+    compressMinBytes: z.natural().default(DEFAULT_COMPRESS_MIN_BYTES),
+    brotliQuality: z.natural().max(11).default(DEFAULT_BROTLI_QUALITY),
+    gzipLevel: z.natural().max(9).default(DEFAULT_GZIP_LEVEL),
+    immutablePathPrefixes: z.array(String).default(DEFAULT_IMMUTABLE_PATH_PREFIXES),
+    immutableMaxAgeSeconds: z.natural().default(DEFAULT_IMMUTABLE_MAX_AGE_SECONDS),
   })
 
   private readonly exact = new Map<string, WebRoute>()
@@ -70,9 +126,22 @@ export class WebServer extends Service {
   private fallback: WebRoute['handler'] | undefined
   private server!: Server
   private listenedPort!: number
+  private readonly responsePolicy: ResponsePolicy
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'webServer')
+    this.responsePolicy = {
+      compression: {
+        enabled: config.compress,
+        minBytes: config.compressMinBytes,
+        brotliQuality: config.brotliQuality,
+        gzipLevel: config.gzipLevel,
+      },
+      cache: {
+        immutablePathPrefixes: config.immutablePathPrefixes,
+        immutableMaxAgeSeconds: config.immutableMaxAgeSeconds,
+      },
+    }
   }
 
   /** The listening port (the OS-assigned value when config.port is 0). */
@@ -147,6 +216,11 @@ export class WebServer extends Service {
   /** Listen; resolves once the socket is bound (rejection = FAILED fiber). */
   async [Service.init](): Promise<void> {
     const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      // Carrier-level, before dispatch: encoding negotiation and cache
+      // directives are true of every answer, so no route owns them.
+      applyResponsePolicy(req, res, this.responsePolicy, (error) => {
+        this.ctx.logger.warn(error)
+      })
       /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
       requests; the field is only optional on the client-side IncomingMessage type */
       const rawPath = new URL(req.url ?? '/', 'http://x').pathname

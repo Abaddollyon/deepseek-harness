@@ -3,13 +3,54 @@
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
-import WebSocket, { WebSocketServer } from 'ws'
+import WebSocket, { WebSocketServer, type ServerOptions } from 'ws'
 import type {
   ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 
 type Frame = MuxFrame | HostFrame
+
+/** Smallest frame worth deflating; below it the deflate block costs more than it saves. */
+export const DEFAULT_WEBSOCKET_COMPRESS_THRESHOLD = 1024
+
+/** zlib's own default deflate level: the balanced point of its 0-9 range. */
+export const DEFAULT_WEBSOCKET_COMPRESS_LEVEL = 6
+
+/** Concurrent zlib operations across all downlink sockets, the ws project's documented cap. */
+export const DEFAULT_WEBSOCKET_COMPRESS_CONCURRENCY_LIMIT = 10
+
+/** permessage-deflate settings for the downlink sockets (RFC 7692). */
+export interface WebSocketCompression {
+  /** Whether the server offers the extension at all. */
+  enabled: boolean
+  /** Frames smaller than this are sent uncompressed. */
+  threshold: number
+  /** Deflate level, 0-9. */
+  level: number
+  /** Cap on concurrent zlib operations across every downlink socket. */
+  concurrencyLimit: number
+}
+
+/**
+ * Build the ws server's extension option.
+ *
+ * Context takeover stays on — the RFC 7692 default this server does not
+ * override. The downlink carries one JSON envelope format over and over, so
+ * the sliding window across frames is where most of the ratio comes from; the
+ * cost is one zlib context per direction per socket, which a deployment that
+ * cannot afford it removes by turning the extension off.
+ * @param compression - the deployment's settings.
+ * @returns the ws `perMessageDeflate` option, or false when the extension is disabled.
+ */
+function perMessageDeflate(compression: WebSocketCompression): ServerOptions['perMessageDeflate'] {
+  if (!compression.enabled) return false
+  return {
+    threshold: compression.threshold,
+    concurrencyLimit: compression.concurrencyLimit,
+    zlibDeflateOptions: { level: compression.level },
+  }
+}
 
 function serverRequest(frame: RpcRequest<Frame>): ServerRequest {
   return {
@@ -49,11 +90,19 @@ function failureFrame(error: unknown): RpcRequest<Frame> {
  * remains on HTTP.
  */
 export class WebSocketDownlinks {
-  private readonly server = new WebSocketServer({ noServer: true })
+  private readonly server: WebSocketServer
   private readonly pumps = new Set<Promise<void>>()
 
-  /** @param api - host API supplying the typed event streams. */
-  constructor(private readonly api: ApiProxy) {}
+  /**
+   * @param api - host API supplying the typed event streams.
+   * @param compression - permessage-deflate settings for accepted sockets.
+   */
+  constructor(private readonly api: ApiProxy, compression: WebSocketCompression) {
+    this.server = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: perMessageDeflate(compression),
+    })
+  }
 
   /**
    * Upgrade one socket and pump the mux stream until either side closes.

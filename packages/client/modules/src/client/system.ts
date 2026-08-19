@@ -10,6 +10,18 @@ import type {
   ClientModuleSystemOptions,
 } from './manifest.ts'
 
+/**
+ * Query parameter carrying a bundle's content hash. Fixed: it is the boot
+ * graph's own URL format, minted by the host registry from the bundle bytes.
+ */
+const CONTENT_HASH_PARAM = 'rev'
+
+/**
+ * Origin the row's same-origin path is parsed against so its `rev` parameter
+ * can be replaced by name. Never emitted: only the path and query are kept.
+ */
+const ROW_URL_BASE = 'http://client-modules.invalid'
+
 /** Default bundle-load hook: same-origin external classic script. */
 const defaultLoadBundle = (url: string): Promise<void> => new Promise((resolve, reject) => {
   const el = document.createElement('script')
@@ -216,5 +228,13 @@ export class ClientModuleSystem implements ClientModuleLoader {
     if (this.bootstrapIds.has(normalized)) return
     this.factories.delete(normalized)
     this.loadCache.delete(normalized)
+  }
+
+  revise(id: string, rev: string): void {
+    const row = this.graphRows.get(id)
+    if (row === undefined) throw new Error(`client-modules: revise("${id}") — not a graph entry`)
+    const url = new URL(row.url, ROW_URL_BASE)
+    url.searchParams.set(CONTENT_HASH_PARAM, rev)
+    this.graphRows.set(id, { ...row, rev, url: `${url.pathname}${url.search}` })
   }
 }

@@ -345,6 +345,28 @@ describe('HMR reset', () => {
     expect((first as { generation: number }).generation).toBe(1)
     expect((second as { generation: number }).generation).toBe(2)
   })
+
+  it('revise moves the row to the rebuilt hash so the refetch cannot be answered from cache', async () => {
+    const b = bench([row('a')], { a: () => ({}) })
+    await b.loader.prefetch('a')
+    b.loader.invalidate('a')
+    b.loader.revise('a', 'beef')
+    await b.loader.prefetch('a')
+    expect(b.fetched).toEqual(['/plugins/a/client.js?rev=0', '/plugins/a/client.js?rev=beef'])
+  })
+
+  it('revise keeps the rest of a scoped row address intact', async () => {
+    const scoped = { id: '@scope/a', url: '/plugins/@scope/a/client.js?rev=0', rev: '0', external: [] }
+    const b = bench([scoped], { '@scope/a': () => ({}) })
+    b.loader.revise('@scope/a', 'cafe')
+    await b.loader.prefetch('@scope/a')
+    expect(b.fetched).toEqual(['/plugins/@scope/a/client.js?rev=cafe'])
+  })
+
+  it('an unknown revise id is loud', () => {
+    const b = bench([])
+    expect(() => { b.loader.revise('nope', 'beef') }).toThrow('revise("nope") — not a graph entry')
+  })
 })
 
 describe('style claiming', () => {
