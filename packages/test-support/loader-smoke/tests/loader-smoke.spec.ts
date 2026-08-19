@@ -1,9 +1,16 @@
 import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  LOADER_SMOKE_TEST_TIMEOUT_MS,
+  WORKSPACE_PROJECT_ROOT_MARKER,
+  anchorWorkspaceProjectRoot,
+  isolatedSubprocessEnv,
+  runLoaderSmoke,
+} from '@deepseek-ai/dsh-loader-smoke'
 
 const configPath = '/tmp/fixture.cordis.yml'
 const tsconfigPath = fileURLToPath(new URL('../../../../tsconfig.json', import.meta.url))
@@ -29,6 +36,8 @@ describe('runLoaderSmoke', () => {
       dshHome: string
       agentsHome: string
       marker: string
+      ambientDsh: string | null
+      entries: string[]
       input: string
     }
     expect(output).toMatchObject({
@@ -41,6 +50,30 @@ describe('runLoaderSmoke', () => {
     expect(canonicalTempPath(output.agentsHome)).toBe(canonicalTempPath(join(output.cwd, '.agents')))
     expect(result.stderr).toContain('fixture stderr')
     expect(existsSync(output.cwd)).toBe(false)
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('anchors the workspace as its own project root and hides ambient DSH deployment values', async () => {
+    vi.stubEnv('DSH_LOADER_SMOKE_AMBIENT', 'leaked')
+    try {
+      const result = await runLoaderSmoke({
+        label: 'hermetic fixture',
+        tempDirPrefix: 'loader-smoke-hermetic-',
+        binScript: fixture('success'),
+        libBinScript: fixture('success'),
+        configPath,
+        tsconfigPath,
+        env: { LOADER_SMOKE_MARKER: 'declared' },
+      })
+      const output = JSON.parse(result.stdout) as { entries: string[]; ambientDsh: string | null; marker: string }
+      // The marker terminates instruction and skill discovery inside the generated cwd.
+      expect(output.entries).toEqual([WORKSPACE_PROJECT_ROOT_MARKER])
+      // A DSH_* value exported by the developer's shell never reaches the boot…
+      expect(output.ambientDsh).toBeNull()
+      // …while a value the test declares still does.
+      expect(output.marker).toBe('declared')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('passes an arbitrary bin argv and inspects world state before cleanup', async () => {
@@ -113,5 +146,26 @@ describe('runLoaderSmoke', () => {
       tsconfigPath,
       processTimeoutMs: 100,
     })).rejects.toThrow('hanging fixture did not exit within 0.1s.')
+  })
+})
+
+describe('hermetic workspace helpers', () => {
+  it('anchors a project root idempotently', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'loader-smoke-anchor-'))
+    try {
+      await anchorWorkspaceProjectRoot(cwd)
+      await anchorWorkspaceProjectRoot(cwd)
+      expect((await stat(join(cwd, WORKSPACE_PROJECT_ROOT_MARKER))).isDirectory()).toBe(true)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('drops inherited DSH values, keeps the rest, and lets the launch declare its own', () => {
+    const base = { PATH: '/usr/bin', DSH_PERMISSION_MODE: 'danger-full-access', DSH_HOME: '/home/dev/.dsh' }
+    expect(isolatedSubprocessEnv({ DSH_HOME: '/run/cwd/.dsh' }, base)).toEqual({
+      PATH: '/usr/bin',
+      DSH_HOME: '/run/cwd/.dsh',
+    })
   })
 })

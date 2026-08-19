@@ -8,10 +8,16 @@
  * map) or from built `lib/` under plain Node (resolving bare packages through real `exports`, as an
  * installed consumer does, while Node type-strips relative example-local TypeScript plugins).
  *
+ * It also owns the hermetic-workspace contract every isolated subprocess test shares:
+ * {@link anchorWorkspaceProjectRoot} stops instruction and skill discovery at the generated cwd,
+ * and {@link isolatedSubprocessEnv} drops inherited `DSH_*` deployment variables. With the
+ * per-run `DSH_HOME`/`DSH_AGENTS_HOME`, a run's model-visible input then comes only from the
+ * repository and the test's own declarations.
+ *
  * @module @deepseek-ai/dsh-loader-smoke
  */
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -121,6 +127,57 @@ export function resolveExampleLaunch(options: ExampleLaunchOptions): ExampleLaun
   return { command: process.execPath, args: [options.libBin ?? toLibBin(options.srcBin), ...configArgs], env }
 }
 
+/**
+ * Child directory name that marks a project root. Workspace-instruction discovery
+ * (`dsh-agent-instructions`, whose `projectRootMarkers` default) and skill discovery
+ * (`dsh-skill-filesystem`) both walk upward from the session cwd until they find it.
+ */
+export const WORKSPACE_PROJECT_ROOT_MARKER = '.git'
+
+/**
+ * Make an isolated test workspace its own project root.
+ *
+ * Both discovery walks start at the session cwd and climb, so without a marker inside
+ * the workspace they escape into the host directories above it and read whatever
+ * `AGENTS.md`, `CLAUDE.md`, `.dsh/skills`, and `.agents/skills` the developer keeps
+ * there — model-visible input that differs per machine. The marker terminates both
+ * walks at the workspace, so a test that wants instructions or skills declares them as
+ * files inside this directory instead of inheriting them.
+ *
+ * @param cwd - the isolated workspace directory to anchor.
+ * @returns nothing.
+ */
+export async function anchorWorkspaceProjectRoot(cwd: string): Promise<void> {
+  await mkdir(join(cwd, WORKSPACE_PROJECT_ROOT_MARKER), { recursive: true })
+}
+
+/** Prefix of every harness- and product-read deployment variable. */
+const DSH_ENV_PREFIX = 'DSH_'
+
+/**
+ * Compose the complete environment for an isolated example subprocess: the inherited
+ * environment with every `DSH_*` entry dropped, then the launch's own entries.
+ *
+ * A developer's exported `DSH_PERMISSION_MODE`, `DSH_MODEL`, or `DSH_SESSION_ROOT`
+ * therefore cannot reach the subprocess; its deployment inputs are exactly what the
+ * test declares. Non-`DSH_` entries (`PATH`, `HOME`, `SystemRoot`, `NODE_OPTIONS`)
+ * still pass through, because the child needs a working host environment.
+ *
+ * @param launchEnv - the entries this launch declares.
+ * @param base - the environment inherited from; defaults to `process.env`.
+ * @returns the complete environment to spawn with.
+ */
+export function isolatedSubprocessEnv(
+  launchEnv: NodeJS.ProcessEnv,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const inherited: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(base)) {
+    if (!key.startsWith(DSH_ENV_PREFIX)) inherited[key] = value
+  }
+  return { ...inherited, ...launchEnv }
+}
+
 /** Inputs that vary between real-Loader example smokes. */
 export interface LoaderSmokeOptions {
   /** Human-readable example name used in failure diagnostics. */
@@ -139,7 +196,11 @@ export interface LoaderSmokeOptions {
   readonly tsconfigPath: string
   /** Boot from source via tsx (`src`) or built lib via plain Node (`lib`); defaults to the environment's mode. */
   readonly mode?: ExampleMode
-  /** Environment overrides layered over the parent and isolated DSH homes. */
+  /**
+   * Environment entries layered over the isolated DSH homes. Inherited `DSH_*` entries are
+   * dropped ({@link isolatedSubprocessEnv}), so every deployment variable the boot reads is
+   * declared here.
+   */
   readonly env?: Readonly<NodeJS.ProcessEnv>
   /** Process deadline override for harness tests. */
   readonly processTimeoutMs?: number
@@ -165,9 +226,9 @@ export interface LoaderSmokeResult {
 }
 
 /**
- * Boot one real Loader tree from an isolated cwd, close stdin immediately, and
- * await a clean exit. The helper owns process kill and temp-directory cleanup on
- * every outcome, and picks src/lib via {@link resolveExampleLaunch}.
+ * Boot one real Loader tree from an isolated, project-root-anchored cwd, close stdin
+ * immediately, and await a clean exit. The helper owns process kill and temp-directory
+ * cleanup on every outcome, and picks src/lib via {@link resolveExampleLaunch}.
  * @param options - example paths, mode, environment, and diagnostic identity.
  * @returns captured stdout and stderr after a zero exit.
  */
@@ -175,6 +236,7 @@ export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<Loade
   const cwd = await mkdtemp(join(tmpdir(), options.tempDirPrefix))
   const processTimeoutMs = options.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS
   try {
+    await anchorWorkspaceProjectRoot(cwd)
     await options.prepare?.(cwd)
     const launch = resolveExampleLaunch({
       srcBin: options.binScript,
@@ -190,7 +252,8 @@ export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<Loade
     // diagnostics below embed both streams on every failure.
     const result = await execa(launch.command, launch.args, {
       cwd,
-      env: launch.env,
+      env: isolatedSubprocessEnv(launch.env),
+      extendEnv: false,
       input: '',
       timeout: processTimeoutMs,
       killSignal: 'SIGKILL',

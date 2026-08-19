@@ -6,6 +6,8 @@
 
 `runLoaderSmoke` 接受可执行文件路径和配置路径、可选的完整可执行文件参数、环境变量覆盖、标准输入、运行前准备和清理前检查。它负责隔离工作目录、DSH 主目录、诊断、截止时间、终止、EOF 和清理；进程以零状态退出后返回两个流，失败时则返回拒绝并附带两个流。
 
+`anchorWorkspaceProjectRoot` 和 `isolatedSubprocessEnv` 是所有隔离子进程测试共享的封闭工作区约定，`runLoaderSmoke` 会同时应用两者。anchor 在生成的工作目录内创建 `.git` 项目根标记，使工作区指令查找（`AGENTS.md` / `CLAUDE.md`）和 skill 根查找（`.dsh/skills`、`.agents/skills`）在此终止，而不会向上进入开发者的主目录或临时目录祖先。环境组装函数丢弃所有继承的 `DSH_*` 条目，因此启动只读取其测试声明的部署值。需要指令或 skill 的测试将它们写入工作区自身。
+
 `runFixtureTurn` 通过恰好一个已配置的根 agent（智能体）驱动一项任务，在该任务进入持久收件箱后转发规范事件，刷写会话，并返回最终 assistant 文本和累计用量。示例本地 driver 继续负责配置、渲染和断言。
 
 这是支持层测试基础设施，而非产品 API。
