@@ -34,6 +34,14 @@ export interface WorkflowPhase {
   provider?: string
   /** Optional model override this phase is expected to use (informational). */
   model?: string
+  /**
+   * Optional reasoning effort this phase is expected to use (informational).
+   * Present so a phase can still describe the whole LLM target its `agent()`
+   * calls select: provider, model, and effort are independently settable per
+   * call, and a declaration carrying only two of the three would understate the
+   * phase's cost.
+   */
+  reasoningEffort?: string
 }
 
 /**

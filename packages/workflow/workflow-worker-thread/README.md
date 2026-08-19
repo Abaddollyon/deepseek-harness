@@ -27,10 +27,14 @@ The workflow's `meta` is host-provided data, not evaluated script text. The engi
 
 Inside the worker, the script receives `args` and these hooks:
 
-- `agent(prompt, { label, phase, schema, model })` starts one host-side subagent. With a schema it returns the structured value; otherwise it returns final text. An ordinary failed child yields `null`.
+- `agent(prompt, { label, phase, schema, provider, model, reasoningEffort })` starts one host-side subagent. With a schema it returns the structured value; otherwise it returns final text. An ordinary failed child yields `null`.
 - `parallel(thunks)` runs thunks under the configured concurrency limit.
 - `pipeline(items, ...stages)` passes `(previous, item, index)` without a cross-stage barrier.
 - `phase(title)` and `log(message)` emit observer narration.
+
+`provider`, `model`, and `reasoningEffort` select the child's LLM target and are independently settable: the ones a call omits keep the parent agent's values. The script-facing spelling is `reasoningEffort`, matching `LlmCallConfig.reasoningEffort` rather than a tool-JSON `reasoning_effort`; the bare Claude Code name `effort` is not a name this engine has, and `isolation`/`agentType` remain deferred and rejected by name.
+
+Before any child starts, the host validates a requested effort against the route that child will run on — the per-call override if given, otherwise the inherited parent route — through `ctx.llm.resolveCallConfig`. That query is the LLM seam's own policy: an explicitly requested effort the exact model does not offer is **rejected**, never clamped or aliased (its one substitution materializes an adapter default for a caller that requested none). A refusal, an incomplete route, or a deployment with no LLM capability composed becomes a fatal `AGENT_START` error that kills the script, because a silently lowered effort would make the run's cost and quality unpredictable. The effort then rides `agentOptions` to the child, where the in-process delegation composition applies it as an Agent-scoped model selection.
 
 Unknown options, malformed arguments, unsupported schemas, tripped caps, provider-start failures, and infrastructure result failures are fatal workflow errors. No timers, filesystem API, or Node globals are intentionally injected, though the trust caveat above still applies.
 
