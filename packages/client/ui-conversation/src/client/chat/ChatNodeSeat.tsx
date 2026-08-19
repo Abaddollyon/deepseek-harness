@@ -22,7 +22,11 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
 }: ChatNodeSeatProps) {
   const node = useSession(snapshot => snapshot.chat.nodes.get(nodeKey))
   const routedNode = node as ChatNode | undefined
-  const owner = useMemo<ChatNodeOwnerProps | null>(() => node === undefined
+  // Presence, not the Node itself: the owner object carries no Node field, so a
+  // streaming delta must not mint a new owner identity and defeat the keyed
+  // renderer's own memo.
+  const nodePresent = node !== undefined
+  const owner = useMemo<ChatNodeOwnerProps | null>(() => !nodePresent
     ? null
     : {
       selectedCallId,
@@ -33,7 +37,7 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
       renderMessageImages,
       fileMentions,
     }, [
-    node, selectedCallId, cwd, openFile, inspectCall, forkAt, renderMessageImages, fileMentions,
+    nodePresent, selectedCallId, cwd, openFile, inspectCall, forkAt, renderMessageImages, fileMentions,
   ])
   if (routedNode === undefined || owner === null) return null
   // Runtime dispatch owns the correlation: every Node's discriminant is the

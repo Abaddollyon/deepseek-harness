@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
@@ -75,14 +75,21 @@ function objectCopyMenuItems(labels: JsonTreeLabels): readonly MenuEntry[] {
 
 type JsonPath = readonly (number | string)[]
 
+/** The root value's own path; a module constant so the root row's props stay reference-stable. */
+const ROOT_PATH: JsonPath = []
+
 interface RowTarget {
   path: JsonPath
   value: unknown
 }
 
 interface CopyTarget extends RowTarget {
-  left: number
   side: 'bottom' | 'top'
+}
+
+/** The copy anchor's viewport placement; written straight to the element, never held in state. */
+interface CopyPlacement {
+  left: number
   top: number
 }
 
@@ -250,7 +257,15 @@ interface JsonTreeNodeProps {
   value: unknown
 }
 
-function JsonTreeNode({
+/**
+ * One tree row and, while expanded, its children. Memoized: a hover anywhere
+ * in the tree re-renders the owning JsonTree (the copy affordance follows the
+ * hovered row's value), and without the bailout that re-runs `entriesOf` and
+ * the recursive `previewValue` for every visible row on every row crossing.
+ * The bailout is only real while every prop stays reference-stable, which is
+ * why the callbacks and the per-child path arrays above are memoized.
+ */
+const JsonTreeNode = memo(function JsonTreeNode({
   field,
   initialExpanded,
   labels,
@@ -266,7 +281,13 @@ function JsonTreeNode({
   const [expanded, setExpanded] = useState(initialExpanded)
   const nodeId = pathId(path)
   const container = isExpandableValue(value)
-  const entries = container ? entriesOf(value) : []
+  const entries = useMemo(() => (isExpandableValue(value) ? entriesOf(value) : []), [value])
+  // Child paths are props of memoized children, so they are derived once per
+  // (path, value) rather than freshly allocated on every parent render.
+  const childPaths = useMemo(
+    () => entries.map(([key], index): JsonPath => [...path, Array.isArray(value) ? index : key]),
+    [entries, path, value],
+  )
   const expandable = entries.length > 0
 
   const toggle = () => {
@@ -347,7 +368,7 @@ function JsonTreeNode({
               key={key}
               field={key}
               value={item}
-              path={[...path, Array.isArray(value) ? index : key]}
+              path={childPaths[index] as JsonPath}
               labels={labels}
               lastElement={index === entries.length - 1}
               initialExpanded={false}
@@ -360,7 +381,7 @@ function JsonTreeNode({
       )}
     </>
   ), expanded)
-}
+})
 
 function formattedPath(path: JsonPath): string {
   return path.reduce<string>((result, part) => {
@@ -416,17 +437,28 @@ export function JsonTree({
     () => (labels === undefined ? DEFAULT_LABELS : { ...DEFAULT_LABELS, ...labels }),
     [labels],
   )
-  const rootEntries = entriesOf(data)
-  const firstExpandableIndex = rootEntries.findIndex(([, value]) => (
-    isExpandableValue(value) && entriesOf(value).length > 0
-  ))
-  const firstExpandableEntry = rootEntries[firstExpandableIndex]
-  const initialTabStopId = expandTopLevel
-    ? firstExpandableEntry === undefined
-      ? null
-      : pathId([Array.isArray(data) ? firstExpandableIndex : firstExpandableEntry[0]])
-    : isExpandableValue(data) && rootEntries.length > 0 ? pathId([]) : null
+  const rootEntries = useMemo(() => entriesOf(data), [data])
+  // Top-level child paths, derived once per data identity: they are props of
+  // memoized rows, so a fresh array literal per render would defeat the bailout.
+  const rootPaths = useMemo(
+    () => rootEntries.map(([key], index): JsonPath => [Array.isArray(data) ? index : key]),
+    [data, rootEntries],
+  )
+  const initialTabStopId = useMemo(() => {
+    const firstExpandableIndex = rootEntries.findIndex(([, value]) => (
+      isExpandableValue(value) && entriesOf(value).length > 0
+    ))
+    const firstExpandableEntry = rootEntries[firstExpandableIndex]
+    return expandTopLevel
+      ? firstExpandableEntry === undefined
+        ? null
+        : pathId([Array.isArray(data) ? firstExpandableIndex : firstExpandableEntry[0]])
+      : isExpandableValue(data) && rootEntries.length > 0 ? pathId([]) : null
+  }, [data, expandTopLevel, rootEntries])
   const rootRef = useRef<HTMLDivElement>(null)
+  const copyAnchorRef = useRef<HTMLSpanElement>(null)
+  /** Latest computed placement; the anchor element is written from here, not re-rendered. */
+  const placementRef = useRef<CopyPlacement>({ left: 0, top: 0 })
   const activeRowRef = useRef<HTMLElement>()
   const copyButtonRef = useRef<HTMLButtonElement>(null)
   const copyMenuOpenRef = useRef(false)
@@ -436,21 +468,21 @@ export function JsonTree({
   const [copyMenuOpen, setCopyMenuOpen] = useState(false)
   const [tabStopId, setTabStopId] = useState<string | null>(initialTabStopId)
 
-  const setActiveRow = (row: HTMLElement | undefined) => {
+  const setActiveRow = useCallback((row: HTMLElement | undefined) => {
     activeRowRef.current?.removeAttribute('data-json-copy-active')
     activeRowRef.current = row
     row?.setAttribute('data-json-copy-active', '')
-  }
+  }, [])
 
-  const clearCopyTarget = () => {
+  const clearCopyTarget = useCallback(() => {
     setActiveRow(undefined)
     setCopyTarget(undefined)
     setCopyState('idle')
     copyMenuOpenRef.current = false
     setCopyMenuOpen(false)
-  }
+  }, [setActiveRow])
 
-  const copyPosition = (row: HTMLElement): Pick<CopyTarget, 'left' | 'side' | 'top'> => {
+  const copyPosition = useCallback((row: HTMLElement): CopyPlacement & Pick<CopyTarget, 'side'> => {
     const root = rootRef.current
     /* v8 ignore next -- row events and viewport listeners run only after the root ref mounts. */
     if (root === null) throw new Error('JsonTree root is not mounted')
@@ -461,21 +493,26 @@ export function JsonTree({
       side: rowRect.top - rootRect.top > root.clientHeight / 2 ? 'top' : 'bottom',
       top: rowRect.top,
     }
-  }
+  }, [])
 
-  const positionCopyButton = (row: HTMLElement, target: RowTarget) => {
-    const position = copyPosition(row)
-    setCopyTarget({ ...target, ...position })
-  }
+  /**
+   * Place the anchor by writing its style directly. Position is not React
+   * state: a scroll or resize only moves the affordance, and routing that
+   * through a render would re-render the tree on every scroll event of every
+   * mounted JSON surface.
+   */
+  const writePlacement = useCallback((placement: CopyPlacement) => {
+    placementRef.current = placement
+    const anchor = copyAnchorRef.current
+    if (anchor === null) return
+    anchor.style.left = `${String(placement.left)}px`
+    anchor.style.top = `${String(placement.top)}px`
+  }, [])
 
-  const repositionCopyButton = (row: HTMLElement) => {
-    const position = copyPosition(row)
-    setCopyTarget((current) => {
-      /* v8 ignore next -- an active row and its copy target are installed together. */
-      if (current === undefined) return current
-      return { ...current, ...position }
-    })
-  }
+  const repositionCopyButton = useCallback((row: HTMLElement) => {
+    const { left, top } = copyPosition(row)
+    writePlacement({ left, top })
+  }, [copyPosition, writePlacement])
 
   useEffect(() => () => {
     if (resetTimer.current !== undefined) clearTimeout(resetTimer.current)
@@ -492,28 +529,49 @@ export function JsonTree({
     setTabStopId(initialTabStopId)
   }, [data, expandTopLevel, initialTabStopId])
 
+  // Capture-phase window listeners: EVERY scroll in the document reaches EVERY
+  // mounted JsonTree, so the per-event work is one frame-coalesced style write
+  // and nothing else. Without the coalescing this is two forced layouts per
+  // instance per event while a row is hovered.
   useEffect(() => {
+    let frame = 0
     const reposition = () => {
-      const row = activeRowRef.current
-      if (row !== undefined) repositionCopyButton(row)
+      if (frame !== 0) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const row = activeRowRef.current
+        if (row !== undefined) repositionCopyButton(row)
+      })
     }
     window.addEventListener('scroll', reposition, true)
     window.addEventListener('resize', reposition)
     return () => {
+      if (frame !== 0) cancelAnimationFrame(frame)
       window.removeEventListener('scroll', reposition, true)
       window.removeEventListener('resize', reposition)
     }
-  }, [])
+  }, [repositionCopyButton])
 
-  const handleRowHover = (row: HTMLElement, target: RowTarget) => {
+  // Stable across renders (it reads live values through refs and the copyable
+  // prop only), so the memoized rows below actually bail out on a hover.
+  const handleRowHover = useCallback((row: HTMLElement, target: RowTarget) => {
     if (!copyable || copyMenuOpenRef.current) return
     if (activeRowRef.current === row) return
     setActiveRow(row)
     setCopyState('idle')
     copyMenuOpenRef.current = false
     setCopyMenuOpen(false)
-    positionCopyButton(row, target)
-  }
+    const { left, side, top } = copyPosition(row)
+    placementRef.current = { left, top }
+    setCopyTarget({ ...target, side })
+  }, [copyable, copyPosition, setActiveRow])
+
+  // The anchor is mounted by the render that installed the target, so its
+  // placement is written here rather than through a style prop React would
+  // reset from stale state on any later render.
+  useLayoutEffect(() => {
+    if (copyTarget !== undefined) writePlacement(placementRef.current)
+  }, [copyTarget, writePlacement])
 
   const handleRootMouseOver = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!copyable || copyMenuOpenRef.current) return
@@ -525,6 +583,11 @@ export function JsonTree({
   const handleScroll = (_event: ReactUIEvent<HTMLDivElement>) => {
     const row = activeRowRef.current
     if (row !== undefined) repositionCopyButton(row)
+  }
+
+  const handleRootRowHover = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.stopPropagation()
+    handleRowHover(event.currentTarget, { path: ROOT_PATH, value: data })
   }
 
   const copy = async (mode: 'json' | 'path' | 'prettyJson' | 'value') => {
@@ -565,10 +628,7 @@ export function JsonTree({
             <div
               className={clsx(css.row, css.topLevelBracket)}
               data-json-root-row
-              onMouseOver={(event) => {
-                event.stopPropagation()
-                handleRowHover(event.currentTarget, { path: [], value: data })
-              }}
+              onMouseOver={handleRootRowHover}
             >
               <span className={css.punctuation}>{rootOpen}</span>
             </div>
@@ -582,7 +642,7 @@ export function JsonTree({
                   key={key}
                   field={key}
                   value={value}
-                  path={[Array.isArray(data) ? index : key]}
+                  path={rootPaths[index] as JsonPath}
                   labels={copyLabels}
                   lastElement={index === rootEntries.length - 1}
                   initialExpanded={false}
@@ -601,7 +661,7 @@ export function JsonTree({
           <div aria-label={label} className={css.container} role="tree">
             <JsonTreeNode
               value={data}
-              path={[]}
+              path={ROOT_PATH}
               labels={copyLabels}
               lastElement
               initialExpanded
@@ -612,10 +672,7 @@ export function JsonTree({
           </div>
         )}
       {copyTarget !== undefined && (
-        <span
-          className={css.copyAnchor}
-          style={{ left: copyTarget.left, top: copyTarget.top }}
-        >
+        <span ref={copyAnchorRef} className={css.copyAnchor}>
           <Menu
             open={copyMenuOpen}
             compact

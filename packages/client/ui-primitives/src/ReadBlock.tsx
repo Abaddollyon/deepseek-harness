@@ -13,9 +13,8 @@ import { useCallback, useMemo, useState, useSyncExternalStore } from 'react'
 import clsx from 'clsx'
 import { writeClipboard } from './clipboard.ts'
 import {
-  grammarLoadCount,
+  grammarLoadSource,
   highlightLines,
-  subscribeGrammarLoaded,
   type HighlightSpan,
 } from './markdown/highlight.ts'
 import css from './ReadBlock.module.css'
@@ -80,10 +79,12 @@ export function ReadBlock({
   // Highlighting the whole window in one call (not line by line) keeps grammar
   // context across lines — a multi-line string or comment stays one construct.
   const raw = useMemo(() => lines.map(line => line.text).join('\n'), [lines])
-  // Re-render when a lazy grammar finishes loading, so a read card that showed
-  // plain text while its language's grammar imported picks up highlighting. The
-  // snapshot value is opaque; only its change across renders drives the memo.
-  const loaded = useSyncExternalStore(subscribeGrammarLoaded, grammarLoadCount, grammarLoadCount)
+  // Re-render when THIS card's grammar finishes loading, so a read card that
+  // showed plain text while its language's grammar imported picks up
+  // highlighting. The source is per-grammar, so an unrelated language landing
+  // does not invalidate this memo; the snapshot value is opaque.
+  const grammar = grammarLoadSource(lang)
+  const loaded = useSyncExternalStore(grammar.subscribe, grammar.getSnapshot, grammar.getSnapshot)
   // Per-line highlighted runs aligned 1:1 with `lines`; undefined for an
   // unknown/absent (or not-yet-loaded) language, when every line renders as
   // bare text.

@@ -1,6 +1,7 @@
 /** Registers the conversation components, shared store, and service callbacks. */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveSlotLabel, type BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
+import { configureHighlighting, configureMarkdownRendering } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   resolveWorkspacePath, type ISessions, type SessionId,
 } from '@deepseek-ai/dsh-client-runtime/client'
@@ -39,6 +40,9 @@ import { en, NS, zh, type ConversationKey } from './locales.ts'
 import { registerConversationNodes } from './conversation-nodes/register.ts'
 import { registerChatNodeRenderers } from './chat/register-node-renderers.ts'
 import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
+import {
+  RENDERING_SETTINGS_NAMESPACE, type ConversationRenderingSettings,
+} from '../rendering-settings.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -133,6 +137,42 @@ export function apply(ctx: Context): void {
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
+
+  // Render bounds: the host publishes them as the rendering namespace's base
+  // layer, and ui-primitives owns the built-in values an absent field keeps.
+  // Each application is undone before the next one so bounds always compose
+  // from the built-ins rather than stacking, and the effect's teardown returns
+  // the shared renderer modules to their built-in state.
+  const renderingScope = ctx.settingsScope.bind<ConversationRenderingSettings>({
+    namespace: RENDERING_SETTINGS_NAMESPACE,
+  })
+  ctx.effect(() => {
+    let undo: (() => void)[] = []
+    const release = (): void => {
+      for (const dispose of undo.reverse()) dispose()
+      undo = []
+    }
+    const applyBounds = (): void => {
+      release()
+      const bounds = renderingScope.getSnapshot().value
+      if (bounds === undefined) return
+      undo = [
+        configureHighlighting({
+          ...(bounds.highlightMaxChars === undefined ? {} : { maxSourceChars: bounds.highlightMaxChars }),
+          ...(bounds.highlightCacheEntries === undefined ? {} : { cacheEntries: bounds.highlightCacheEntries }),
+        }),
+        configureMarkdownRendering(
+          bounds.markdownCacheEntries === undefined ? {} : { settledCacheEntries: bounds.markdownCacheEntries },
+        ),
+      ]
+    }
+    const stop = renderingScope.subscribe(applyBounds)
+    applyBounds()
+    return () => {
+      stop()
+      release()
+    }
+  }, 'ui-conversation: markdown render bounds')
 
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item',

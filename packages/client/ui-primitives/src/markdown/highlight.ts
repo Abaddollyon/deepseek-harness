@@ -13,9 +13,15 @@
  * is requested, so a session that never opens a read card in one of those
  * languages pays neither the ~1.6 MB of grammar modules nor their synchronous
  * init. The first render of a lazy language falls back to plain text while its
- * grammar loads, then {@link onGrammarLoaded} notifies subscribers to re-render
- * with highlighting. An unknown or absent language falls back to plain text (no
- * highlighting, still monospace) — never an error.
+ * grammar loads, then that grammar's own {@link grammarLoadSource} notifies its
+ * subscribers to re-render with highlighting — a load never disturbs surfaces
+ * written in another language. An unknown or absent language falls back to plain
+ * text (no highlighting, still monospace) — never an error.
+ *
+ * Tokenizing is a synchronous main-thread task linear in the source length, so
+ * {@link HighlightConfig} bounds both the largest source this module will scan
+ * and the number of results it retains; the owning plugin publishes those
+ * bounds through {@link configureHighlighting}.
  */
 
 import { createHighlighterCoreSync, createCssVariablesTheme } from 'shiki/core'
@@ -25,6 +31,7 @@ import langBash from '@shikijs/langs/shellscript'
 import langJson from '@shikijs/langs/json'
 import type { HighlighterCore } from 'shiki/core'
 import type { CSSProperties } from 'react'
+import { BoundedCache } from '../bounded-cache.ts'
 
 /** A shiki grammar module's default export (a `LanguageRegistration[]`), taken
  *  from a boot grammar so no direct `@shikijs/types` dependency is needed. */
@@ -185,43 +192,165 @@ function highlighter(): HighlighterCore {
   return singleton
 }
 
-/** Grammar ids whose lazy import is in flight or done, so it is requested once. */
-const requested = new Set<string>()
-/** Subscribers re-rendered after a lazy grammar registers (React callers). */
-const listeners = new Set<() => void>()
-/** Bumped on each lazy-grammar load; the `useSyncExternalStore` snapshot. */
-let loadCount = 0
-
 /**
- * Subscribe to lazy-grammar load completions; `listener` fires after a
- * {@link LAZY_GRAMMARS} grammar finishes registering on the singleton, so a
- * caller that rendered its plain fallback while the grammar loaded can
- * re-highlight. Uses the `useSyncExternalStore` subscribe signature; pair it with
- * {@link grammarLoadCount} as the snapshot. Returns an unsubscribe function.
- * @param listener - invoked (no args) on each grammar-load completion.
- * @returns a disposer that removes the listener.
+ * Deployment-tunable bounds on the shared highlighter. Both are costs the
+ * DEPLOYMENT trades, not protocol constants: the cap trades highlighting on
+ * very large surfaces against main-thread latency, and the cache size trades
+ * retained memory against re-tokenization. The owning plugin publishes them
+ * through {@link configureHighlighting}; this package is cordis-free and never
+ * reads configuration itself.
  */
-export function subscribeGrammarLoaded(listener: () => void): () => void {
-  listeners.add(listener)
-  return () => { listeners.delete(listener) }
+export interface HighlightConfig {
+  /**
+   * Longest source, in characters, this highlighter will tokenize. Tokenizing
+   * is one synchronous main-thread task whose cost is linear in the source
+   * (measured ≈10 ms per 1,000 characters of TSX on a desktop), so an
+   * unbounded call freezes the tab. Above the cap {@link highlightToHtml} and
+   * {@link highlightLines} report "no highlighting" and the caller draws its
+   * plain fallback.
+   */
+  maxSourceChars: number
+  /**
+   * Highlighted results retained per output form (HTML and line runs keep one
+   * cache each). A cached result makes a re-render a map lookup instead of a
+   * re-scan; retained bytes are bounded by this count times
+   * {@link HighlightConfig.maxSourceChars}. Zero disables caching.
+   */
+  cacheEntries: number
 }
 
 /**
- * The lazy-grammar load counter — a value that changes on every load, so a
- * `useSyncExternalStore` snapshot re-renders the subscriber when a grammar
- * registers. Opaque: only its identity across renders matters.
- * @returns the current load count.
+ * Built-in bounds. `maxSourceChars` holds one tokenization near 100 ms on the
+ * measured desktop; `cacheEntries` covers a long transcript's live fence set
+ * without retaining a session's worth of source.
  */
-export function grammarLoadCount(): number {
-  return loadCount
+export const DEFAULT_HIGHLIGHT_CONFIG: HighlightConfig = {
+  maxSourceChars: 10_000,
+  cacheEntries: 128,
+}
+
+let activeConfig: HighlightConfig = { ...DEFAULT_HIGHLIGHT_CONFIG }
+
+const cacheLimit = (): number => activeConfig.cacheEntries
+const htmlCache = new BoundedCache<string>(cacheLimit)
+const lineCache = new BoundedCache<HighlightSpan[][]>(cacheLimit)
+
+/**
+ * Apply deployment bounds to the shared highlighter. Caches are dropped on
+ * both edges so no result outlives the bounds it was produced under. Calls
+ * nest by restore order (the disposer reinstates the values that were active
+ * when it was taken), matching the plugin-effect teardown it is registered as.
+ * @param next - fields to override; omitted fields keep their current value.
+ * @returns a disposer restoring the previous bounds.
+ */
+export function configureHighlighting(next: Partial<HighlightConfig>): () => void {
+  const previous = activeConfig
+  activeConfig = { ...activeConfig, ...next }
+  htmlCache.clear()
+  lineCache.clear()
+  return () => {
+    activeConfig = previous
+    htmlCache.clear()
+    lineCache.clear()
+  }
+}
+
+/**
+ * Retained-result counts, for tests asserting the cache is bounded and used.
+ * @returns the entry count of each output form's cache.
+ */
+export function highlightCacheSizes(): { html: number; lines: number } {
+  return { html: htmlCache.size, lines: lineCache.size }
+}
+
+/** @param lang - a fence info string or caller id. @returns the grammar id it names, or undefined. */
+function resolveGrammar(lang: string | undefined): string | undefined {
+  return lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
+}
+
+/** Cache key: the grammar id cannot contain a newline, so the join is unambiguous. */
+function cacheKey(resolved: string, code: string): string {
+  return `${resolved}\n${code}`
+}
+
+/** Grammar ids whose lazy import is in flight or done, so it is requested once. */
+const requested = new Set<string>()
+
+/**
+ * A `useSyncExternalStore` source for ONE grammar's load state. Both members
+ * are identity-stable for the lifetime of the document, so a component may
+ * call {@link grammarLoadSource} on every render without churning its
+ * subscription.
+ */
+export interface GrammarLoadSource {
+  /** `useSyncExternalStore` subscribe: fires only when THIS grammar registers. */
+  subscribe: (listener: () => void) => () => void
+  /** `useSyncExternalStore` snapshot: opaque counter, changes only on this grammar's load. */
+  getSnapshot: () => number
+}
+
+interface GrammarLoadState {
+  listeners: Set<() => void>
+  count: number
+  source: GrammarLoadSource
+}
+
+/** Per-grammar load state, created on first request for that grammar id. */
+const grammarLoads = new Map<string, GrammarLoadState>()
+
+/**
+ * The source handed to callers whose language resolves to no grammar at all.
+ * Such a caller can never gain highlighting, so its snapshot is a constant and
+ * a subscription would only cost a set entry per mounted plain fence.
+ */
+const INERT_LOAD_SOURCE: GrammarLoadSource = {
+  subscribe: () => () => {},
+  getSnapshot: () => 0,
+}
+
+function grammarLoadState(resolved: string): GrammarLoadState {
+  let state = grammarLoads.get(resolved)
+  if (state === undefined) {
+    const listeners = new Set<() => void>()
+    state = {
+      listeners,
+      count: 0,
+      source: {
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        /* v8 ignore next -- the closure reads the live record it was created for. */
+        getSnapshot: () => grammarLoads.get(resolved)?.count ?? 0,
+      },
+    }
+    grammarLoads.set(resolved, state)
+  }
+  return state
+}
+
+/**
+ * The lazy-grammar load source for `lang`, scoped to the ONE grammar that
+ * language resolves to. A grammar landing therefore re-renders only the
+ * surfaces that asked for it: a `python` module arriving leaves every mounted
+ * TypeScript, shell, and JSON surface untouched instead of re-tokenizing them.
+ * The returned object is cached per resolved grammar id, so calling this on
+ * every render is free and never resubscribes.
+ * @param lang - the language hint (a markdown fence info string or a fixed caller id).
+ * @returns a stable subscribe/snapshot pair for that grammar, or an inert pair for an unknown language.
+ */
+export function grammarLoadSource(lang: string | undefined): GrammarLoadSource {
+  const resolved = resolveGrammar(lang)
+  if (resolved === undefined) return INERT_LOAD_SOURCE
+  return grammarLoadState(resolved).source
 }
 
 /**
  * Ensure the grammar `resolved` names is registered. A boot grammar (not in
  * {@link LAZY_GRAMMARS}) and an already-loaded lazy grammar report ready
  * synchronously; a lazy grammar not yet loaded starts its import (once) and
- * reports not-ready, so the caller renders plain until a
- * {@link subscribeGrammarLoaded} listener fires.
+ * reports not-ready, so the caller renders plain until that grammar's own
+ * {@link grammarLoadSource} listeners fire.
  * @param resolved - the grammar id an alias resolved to.
  * @returns whether the grammar is registered and ready to tokenize now.
  */
@@ -234,8 +363,9 @@ function ensureGrammar(resolved: string): boolean {
     requested.add(resolved)
     void load().then((mod) => {
       highlighter().loadLanguageSync(mod.default)
-      loadCount += 1
-      for (const listener of listeners) listener()
+      const state = grammarLoadState(resolved)
+      state.count += 1
+      for (const listener of state.listeners) listener()
     })
   }
   return false
@@ -255,16 +385,25 @@ const warmupTimer = setTimeout(() => { highlighter() }, 0)
  * when `lang` maps to a registered grammar; `undefined` means the caller
  * renders its plain fallback. A lazy grammar not yet loaded returns `undefined`
  * for this call and loads in the background; subscribe with
- * {@link onGrammarLoaded} to re-highlight once it registers.
+ * {@link grammarLoadSource} to re-highlight once it registers. Sources longer
+ * than {@link HighlightConfig.maxSourceChars} report `undefined` without
+ * tokenizing and without requesting a grammar. Results are retained in a
+ * bounded cache, so repeated renders of the same fence cost one lookup.
  * @param code - the source text.
  * @param lang - the language hint (a markdown fence info string or a fixed caller id).
- * @returns the highlighted HTML, or `undefined` for unknown or not-yet-loaded languages.
+ * @returns the highlighted HTML, or `undefined` for unknown, over-cap, or not-yet-loaded languages.
  */
 export function highlightToHtml(code: string, lang: string | undefined): string | undefined {
-  const resolved = lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
+  const resolved = resolveGrammar(lang)
   if (resolved === undefined) return undefined
+  if (code.length > activeConfig.maxSourceChars) return undefined
+  const key = cacheKey(resolved, code)
+  const cached = htmlCache.get(key)
+  if (cached !== undefined) return cached
   if (!ensureGrammar(resolved)) return undefined
-  return highlighter().codeToHtml(code, { lang: resolved, theme: 'css-variables' })
+  const html = highlighter().codeToHtml(code, { lang: resolved, theme: 'css-variables' })
+  htmlCache.set(key, html)
+  return html
 }
 
 /**
@@ -289,13 +428,19 @@ export interface HighlightSpan {
  * css-variables theme carries no font-style bits, matching that path's
  * color-only output. The trailing newline shiki appends as a final empty line
  * is dropped so the run count matches the caller's own line array.
+ * Sources longer than {@link HighlightConfig.maxSourceChars} report
+ * `undefined` without tokenizing, and results are retained in a bounded cache.
  * @param code - the source text.
  * @param lang - the language hint (a file-extension-derived language id).
- * @returns one entry per source line (each an array of runs), or `undefined` for unknown or not-yet-loaded languages.
+ * @returns one entry per source line (each an array of runs), or `undefined` for unknown, over-cap, or not-yet-loaded languages.
  */
 export function highlightLines(code: string, lang: string | undefined): HighlightSpan[][] | undefined {
-  const resolved = lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
+  const resolved = resolveGrammar(lang)
   if (resolved === undefined) return undefined
+  if (code.length > activeConfig.maxSourceChars) return undefined
+  const key = cacheKey(resolved, code)
+  const cached = lineCache.get(key)
+  if (cached !== undefined) return cached
   if (!ensureGrammar(resolved)) return undefined
   const { tokens } = highlighter().codeToTokens(code, { lang: resolved, theme: 'css-variables' })
   // shiki tokenizes `a\nb` into two lines; a trailing newline (`a\n`) adds a
@@ -307,5 +452,7 @@ export function highlightLines(code: string, lang: string | undefined): Highligh
   const lines = tokens.length > 1 && last !== undefined && last.length === 0
     ? tokens.slice(0, -1)
     : tokens
-  return lines.map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
+  const runs = lines.map(line => line.map(token => ({ text: token.content, style: { color: token.color } })))
+  lineCache.set(key, runs)
+  return runs
 }

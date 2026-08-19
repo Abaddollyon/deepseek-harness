@@ -7,7 +7,7 @@
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import clsx from 'clsx'
 import { writeClipboard } from '../clipboard.ts'
-import { grammarLoadCount, highlightToHtml, subscribeGrammarLoaded } from './highlight.ts'
+import { grammarLoadSource, highlightToHtml } from './highlight.ts'
 import css from './CodeBlock.module.css'
 
 export interface CodeBlockProps {
@@ -25,10 +25,12 @@ export interface CodeBlockProps {
 
 export function CodeBlock({ code, lang, className, copyLabel = '复制', copiedLabel = '复制成功' }: CodeBlockProps) {
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
-  // Re-render when a lazy grammar finishes loading, so a fence that showed plain
-  // text while its language's grammar imported picks up highlighting. The
-  // snapshot value is opaque; only its change across renders drives the memo.
-  const loaded = useSyncExternalStore(subscribeGrammarLoaded, grammarLoadCount, grammarLoadCount)
+  // Re-render when THIS fence's grammar finishes loading, so a fence that showed
+  // plain text while its language's grammar imported picks up highlighting. The
+  // source is per-grammar, so an unrelated language landing does not invalidate
+  // this memo; the snapshot value is opaque, only its change drives the memo.
+  const grammar = grammarLoadSource(lang)
+  const loaded = useSyncExternalStore(grammar.subscribe, grammar.getSnapshot, grammar.getSnapshot)
   const html = useMemo(() => highlightToHtml(trimmed, lang), [trimmed, lang, loaded])
   const rootRef = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
