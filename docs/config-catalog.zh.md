@@ -411,10 +411,22 @@ export interface ConnectionConfig {
   trustedHosts?: string[]
   /** Maximum buffered JSON body for every `/api` request. */
   maxRequestBodyBytes?: number
+  /**
+   * Whether the downlink WebSockets negotiate permessage-deflate. The frames
+   * are repetitive JSON envelopes, so the extension is on by default; turn it
+   * off where per-socket zlib contexts cost more than the bandwidth they save.
+   */
+  webSocketCompress?: boolean
+  /** Smallest downlink frame that is deflated. */
+  webSocketCompressThreshold?: number
+  /** Deflate level for downlink frames, 0-9. */
+  webSocketCompressLevel?: number
+  /** Cap on concurrent zlib operations across every downlink socket. */
+  webSocketCompressConcurrencyLimit?: number
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:56`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -431,6 +443,40 @@ export interface Config {
 ```
 
 来源：[`packages/client/hmr/src/index.ts:31`](../packages/client/hmr/src/index.ts)
+
+<a id="deepseek-aidsh-client-ui-conversation"></a>
+
+## `@deepseek-ai/dsh-client-ui-conversation`
+
+```ts config-catalog
+/**
+ * Plugin config: the deployment's conversation render bounds. Each field
+ * becomes the base layer of the `ui-conversation-rendering` settings
+ * namespace, which is how a host-plane value reaches the browser half; an
+ * omitted field leaves the browser's built-in bound in place.
+ */
+export interface ConversationHostConfig {
+  /** Render bounds published to the browser half. */
+  rendering: ConversationRenderingSettings
+}
+
+/** Render bounds a deployment may tune; an omitted field keeps the built-in value. */
+export interface ConversationRenderingSettings {
+  /**
+   * Longest source, in characters, the syntax highlighter will tokenize.
+   * Tokenizing is one synchronous main-thread task linear in the source, so a
+   * larger value trades interaction latency for highlighting on large fences
+   * and read cards; above it a surface renders plain monospace.
+   */
+  highlightMaxChars?: number
+  /** Highlighted results retained per output form (HTML and per-line runs each keep this many). */
+  highlightCacheEntries?: number
+  /** Settled Markdown messages whose rendered element trees are retained across mounts. */
+  markdownCacheEntries?: number
+}
+```
+
+来源：[`packages/client/ui-conversation/src/index.ts:28`](../packages/client/ui-conversation/src/index.ts)
 
 <a id="deepseek-aidsh-code-runtime-worker-thread"></a>
 
@@ -450,9 +496,14 @@ export interface Config {
    */
   computeMs?: number
   /**
-   * Wall-clock ceiling in milliseconds; never pauses for anything. The
-   * backstop for what busy-time cannot see (a program awaiting a promise
-   * nobody will resolve). At most `2_147_483_647` (Node's maximum
+   * Idle ceiling in milliseconds: the run fails with kind `'timeout'` once the
+   * time it spent with NO host binding dispatch outstanding reaches this. The
+   * backstop for what busy time cannot see (a program awaiting a promise
+   * nobody will resolve). Symmetric with {@link Config.computeMs}: a program
+   * waiting on a host dispatch accrues against neither budget, because the
+   * host is running sanctioned work on its behalf. The accumulated total
+   * survives each suspension, so alternating short dispatches with idle gaps
+   * still reaches the ceiling. At most `2_147_483_647` (Node's maximum
    * `setTimeout` delay, about 24.9 days): a longer value is rejected at load
    * because `setTimeout` would clamp it to 1 ms.
    */
@@ -816,10 +867,19 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Whether `session.history` and `subagent.history` omit the streaming
+   * deltas a settled step's own `assistant/message` already restates. The log
+   * is untouched either way; this decides only what a page carries to a
+   * client. Set `false` to serve every recorded chunk while diagnosing the
+   * raw stream.
+   * @default true
+   */
+  historyElideSettledDeltas?: boolean
 }
 ```
 
-来源：[`packages/host/apiproxy/src/index.ts:41`](../packages/host/apiproxy/src/index.ts)
+来源：[`packages/host/apiproxy/src/index.ts:45`](../packages/host/apiproxy/src/index.ts)
 
 <a id="deepseek-aidsh-host-directory-picker-browse"></a>
 
@@ -856,16 +916,36 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-webserver`
 
 ```ts config-catalog
-/** Gateway config: the listen address. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
+  /**
+   * Whether responses are compressed at all. Turn it off where a reverse proxy
+   * or the platform already encodes, so the bytes are not compressed twice.
+   */
+  compress: boolean
+  /** Smallest body the carrier encodes; smaller answers go out verbatim. */
+  compressMinBytes: number
+  /** Brotli quality, 0-11; higher trades request CPU for ratio. */
+  brotliQuality: number
+  /** Deflate level for gzip, 0-9; higher trades request CPU for ratio. */
+  gzipLevel: number
+  /**
+   * Absolute pathname prefixes whose every file this deployment's build writes
+   * with its content hash in the filename. Answers under them are cached
+   * immutably, so a prefix holding a file the build can rewrite in place would
+   * pin a stale copy in every browser that fetched it.
+   */
+  immutablePathPrefixes: string[]
+  /** Lifetime attached to a content-addressed answer, in seconds. */
+  immutableMaxAgeSeconds: number
 }
 ```
 
-来源：[`packages/host/webserver/src/index.ts:45`](../packages/host/webserver/src/index.ts)
+来源：[`packages/host/webserver/src/index.ts:75`](../packages/host/webserver/src/index.ts)
 
 <a id="deepseek-aidsh-invariants"></a>
 
@@ -2088,10 +2168,18 @@ export interface Config {
 export interface Config {
   /** Directory holding one `<unit>.json` file per unit. */
   root: string
+  /**
+   * Largest compact document, in UTF-8 bytes, that is still published
+   * pretty-printed; larger units publish compact. Deployment choice: legible
+   * files cost about 50% more bytes on every whole-file publish, which is
+   * worth paying for a unit someone reads and not for one only the host
+   * writes. `0` publishes every unit compact.
+   */
+  prettyPrintMaxBytes?: number
 }
 ```
 
-来源：[`packages/storage/storage-json/src/index.ts:27`](../packages/storage/storage-json/src/index.ts)
+来源：[`packages/storage/storage-json/src/index.ts:39`](../packages/storage/storage-json/src/index.ts)
 
 <a id="deepseek-aidsh-storage-sqlite"></a>
 
@@ -3200,7 +3288,6 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-attachment`（[`packages/client/ui-attachment/src/index.ts`](../packages/client/ui-attachment/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-brand-official`（[`packages/client/ui-brand-official/src/index.ts`](../packages/client/ui-brand-official/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-commands`（[`packages/client/ui-commands/src/index.ts`](../packages/client/ui-commands/src/index.ts)）
-- `@deepseek-ai/dsh-client-ui-conversation`（[`packages/client/ui-conversation/src/index.ts`](../packages/client/ui-conversation/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-cordis`（[`packages/extensions/ui-cordis/src/index.ts`](../packages/extensions/ui-cordis/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-deliverables` — 需要 `systemPrompt`（[`packages/client/ui-deliverables/src/index.ts`](../packages/client/ui-deliverables/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-directory-picker-browse`（[`packages/client/ui-directory-picker-browse/src/index.ts`](../packages/client/ui-directory-picker-browse/src/index.ts)）
