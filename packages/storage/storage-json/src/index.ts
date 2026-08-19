@@ -1,7 +1,7 @@
 /**
- * JSON storage backend: one human-readable file per unit under a configured
- * root, published by atomic whole-file rewrite. Registers as backend `json`
- * on the storage hub.
+ * JSON storage backend: one file per unit under a configured root, published
+ * by atomic whole-file rewrite and pretty-printed while it stays small enough
+ * to read. Registers as backend `json` on the storage hub.
  * @module @deepseek-ai/dsh-storage-json
  */
 
@@ -12,11 +12,23 @@ import z from '@deepseek-ai/schemastery'
 import { StorageError, UNIT_NAME_RE, storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import type { KvFacet, KvUnit, KvUnitDescriptor, StorageBackend } from '@deepseek-ai/dsh-storage'
 import { openJsonUnit } from './unit.ts'
+import type { FormatPolicy } from './format.ts'
+
+export type { FormatPolicy } from './format.ts'
 
 /** Cordis plugin name. */
 export const name = 'storage-json'
 /** The hub must exist before the backend can register. */
 export const inject = ['storage']
+
+/**
+ * Pretty-print ceiling used when an assembly states none: two orders of
+ * magnitude above the settings-sized units a maintainer actually opens
+ * (`workspace.json` is a few kilobytes) and two below the machine-written
+ * caches that dominate write cost (`session_projcache.json` grows past a
+ * megabyte with session count).
+ */
+const DEFAULT_PRETTY_PRINT_MAX_BYTES = 65_536
 
 /**
  * Plugin configuration.
@@ -27,11 +39,20 @@ export const inject = ['storage']
 export interface Config {
   /** Directory holding one `<unit>.json` file per unit. */
   root: string
+  /**
+   * Largest compact document, in UTF-8 bytes, that is still published
+   * pretty-printed; larger units publish compact. Deployment choice: legible
+   * files cost about 50% more bytes on every whole-file publish, which is
+   * worth paying for a unit someone reads and not for one only the host
+   * writes. `0` publishes every unit compact.
+   */
+  prettyPrintMaxBytes?: number
 }
 
 /** Config schema. */
 export const Config: z<Config> = z.object({
   root: z.string().required(),
+  prettyPrintMaxBytes: z.natural().max(Number.MAX_SAFE_INTEGER).default(DEFAULT_PRETTY_PRINT_MAX_BYTES),
 })
 
 /** JSON backend: owns the file-tree root and serves the `kv` facet. */
@@ -42,7 +63,11 @@ export class JsonStorageBackend implements StorageBackend {
   private readonly opening = new Map<string, Promise<KvUnit>>()
   private closed = false
 
-  constructor(private readonly root: string) {}
+  /**
+   * @param root - Directory holding one `<unit>.json` file per unit.
+   * @param format - Formatting policy every unit under this root publishes with.
+   */
+  constructor(private readonly root: string, private readonly format: FormatPolicy) {}
 
   readonly kv: KvFacet = {
     // The body up to the first await runs synchronously, so the opening-slot
@@ -63,7 +88,7 @@ export class JsonStorageBackend implements StorageBackend {
   private async openUnit(descriptor: KvUnitDescriptor): Promise<KvUnit> {
     await mkdir(this.root, { recursive: true, mode: 0o700 })
     const path = join(this.root, `${descriptor.name}.json`)
-    const unit = await openJsonUnit(descriptor, path, () => this.open.delete(descriptor.name))
+    const unit = await openJsonUnit(descriptor, path, () => this.open.delete(descriptor.name), this.format)
     if (this.closed) {
       // The backend closed while this open was in flight: do not hand out a
       // live unit past close().
@@ -102,7 +127,9 @@ function validateDescriptor(descriptor: KvUnitDescriptor): void {
  * @param config - Validated configuration.
  */
 export function apply(ctx: Context, config: Config) {
-  const backend = new JsonStorageBackend(config.root)
+  // Schemastery fills the ceiling from Config's default; the coalesce records that
+  // for TypeScript, which sees only the optional authoring field.
+  const backend = new JsonStorageBackend(config.root, { prettyPrintMaxBytes: config.prettyPrintMaxBytes ?? DEFAULT_PRETTY_PRINT_MAX_BYTES })
   ctx.effect(() => {
     const unregister = ctx.storage.backend.register('json', backend)
     return async () => {

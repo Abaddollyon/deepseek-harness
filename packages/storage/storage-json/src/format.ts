@@ -1,10 +1,16 @@
 /**
- * On-disk JSON unit format: the file is always the current net state, kept
- * human-readable (pretty-printed, stable key order from insertion) — that
- * legibility is this backend's reason to exist.
+ * On-disk JSON unit format: the file is always the current net state, with
+ * stable key order from insertion. A unit small enough to read stays
+ * pretty-printed — that legibility is this backend's reason to exist — while
+ * a unit whose document exceeds the configured pretty-print ceiling is
+ * published compact: pretty printing a machine-written multi-megabyte unit
+ * costs about half its bytes again on every whole-file publish and buys no
+ * reader anything. Both forms parse identically ({@link parse} reads whatever
+ * is on the medium), so the ceiling can move without touching stored files.
  * @module @deepseek-ai/dsh-storage-json/src/format
  */
 
+import { Buffer } from 'node:buffer'
 import { StorageError } from '@deepseek-ai/dsh-storage'
 import type { KvUnitDescriptor } from '@deepseek-ai/dsh-storage'
 
@@ -15,13 +21,26 @@ export interface UnitState {
   tables: Map<string, Map<string, unknown>>
 }
 
+/** How published files are formatted; the backend resolves it once from plugin config. */
+export interface FormatPolicy {
+  /**
+   * Largest compact document, in UTF-8 bytes, that is still pretty-printed.
+   * A unit above the ceiling publishes compact. `0` publishes every unit
+   * compact; a ceiling above every unit's size keeps the backend
+   * pretty-printing everything.
+   */
+  prettyPrintMaxBytes: number
+}
+
 /**
  * Serialize a unit state to file content.
  * @param name - Unit name, stamped into the header.
  * @param state - Authoritative in-memory state.
- * @returns pretty-printed JSON document with a trailing newline.
+ * @param policy - Formatting policy deciding pretty-printed vs compact.
+ * @returns the JSON document with a trailing newline, pretty-printed while
+ * its compact form fits `policy.prettyPrintMaxBytes`.
  */
-export function serialize(name: string, state: UnitState): string {
+export function serialize(name: string, state: UnitState, policy: FormatPolicy): string {
   const tables: Record<string, Record<string, unknown>> = {}
   for (const [table, records] of state.tables) {
     tables[table] = Object.fromEntries(records)
@@ -31,6 +50,8 @@ export function serialize(name: string, state: UnitState): string {
     global: state.global,
     tables,
   }
+  const compact = JSON.stringify(document)
+  if (Buffer.byteLength(compact, 'utf8') > policy.prettyPrintMaxBytes) return `${compact}\n`
   return `${JSON.stringify(document, null, 2)}\n`
 }
 

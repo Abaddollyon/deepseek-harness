@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-19-json-unit-publish-coalescing-and-format-ceiling.md
+2026-08-19-json-unit-publish-coalescing-and-format-ceiling.md: 67acd27d45650df881d334bf92548e32dcd0e17e
+2026-08-19-json-unit-publish-coalescing-and-format-ceiling.zh.md: f52e4e14a16e67df7c784deeaae534064a7172e8
