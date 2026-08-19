@@ -852,16 +852,12 @@ export class SessionRuntime implements ISessions {
     const stableCurrentAddress = sameSubagentAddress(currentAddress, previous.currentAddress)
       ? previous.currentAddress
       : currentAddress
-    if (stableIds === previous.ids
-      && stableById === previous.byId
-      && current === previous.current
-      && phase === previous.phase
-      && stableSubagentsByParent === previous.subagentsByParent
-      && stableJobsBySession === previous.jobsBySession
-      && stableCurrentAddress === previous.currentAddress) {
-      this.pruneScopes()
-      return
-    }
+    // Every projection publishes, including one whose values all held: the
+    // manager also notifies for gestures that move nothing in the list (opening
+    // the session that is already current, a Workspace connect that reuses the
+    // current blank session), and subscribers waiting for such a gesture would
+    // never hear it. Reused field identities are what keep the cost down —
+    // consumers reading rows or catalogs bail out on the unchanged reference.
     this.list.set({
       ids: stableIds,
       byId: stableById,

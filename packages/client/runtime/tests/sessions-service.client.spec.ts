@@ -88,6 +88,29 @@ describe('list store projection', () => {
     expect(second.jobsBySession).toBe(first.jobsBySession)
   })
 
+  it('publishes an equivalent projection so a gesture that moves nothing still reaches subscribers', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 's1', blank: true }])
+    // The first open mints the session scope, whose projection values reach the
+    // row on the next pass; the second settles the projection.
+    b.svc.open(sid('s1'))
+    b.svc.open(sid('s1'))
+    const before = b.svc.list.getSnapshot()
+    const notified = vi.fn()
+    b.svc.list.subscribe(notified)
+
+    // Opening the session that is already current moves no list value, and so
+    // does a Workspace connect that reuses the current blank session — the
+    // surfaces waiting for that session (the agent-preset hero chip stages its
+    // pick before the session starts) hear the gesture only through this echo.
+    b.svc.open(sid('s1'))
+
+    expect(notified).toHaveBeenCalledTimes(1)
+    const after = b.svc.list.getSnapshot()
+    expect(after.ids).toBe(before.ids)
+    expect(after.byId).toBe(before.byId)
+  })
+
   it('refreshes a hidden one-shot branch status while preserving equivalent sidebar identity', async () => {
     const b = bench()
     let running = true
