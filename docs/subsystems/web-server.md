@@ -29,16 +29,36 @@ Match order is fixed: exact table first, then longest matching prefix, then the 
 ## Config
 
 ```ts type-equiv
-/** Gateway config: the listen address. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
+  /**
+   * Whether responses are compressed at all. Turn it off where a reverse proxy
+   * or the platform already encodes, so the bytes are not compressed twice.
+   */
+  compress: boolean
+  /** Smallest body the carrier encodes; smaller answers go out verbatim. */
+  compressMinBytes: number
+  /** Brotli quality, 0-11; higher trades request CPU for ratio. */
+  brotliQuality: number
+  /** Deflate level for gzip, 0-9; higher trades request CPU for ratio. */
+  gzipLevel: number
+  /**
+   * Absolute pathname prefixes whose every file this deployment's build writes
+   * with its content hash in the filename. Answers under them are cached
+   * immutably, so a prefix holding a file the build can rewrite in place would
+   * pin a stale copy in every browser that fetched it.
+   */
+  immutablePathPrefixes: string[]
+  /** Lifetime attached to a content-addressed answer, in seconds. */
+  immutableMaxAgeSeconds: number
 }
 ```
 
-`host` accepts only `127.0.0.1` (default posture) and `0.0.0.0` (deliberate network exposure); there is no TLS, auth, or origin policy, so a non-loopback bind exposes the server to that network. The dist location is an assembly fact of the frontend plugin that claims the seat.
+`host` accepts only `127.0.0.1` (default posture) and `0.0.0.0` (deliberate network exposure); there is no TLS, auth, or origin policy, so a non-loopback bind exposes the server to that network. The dist location is an assembly fact of the frontend plugin that claims the seat. The response-policy fields are carrier-wide: `compress` disables encoding entirely for a deployment whose reverse proxy already encodes, `compressMinBytes`/`brotliQuality`/`gzipLevel` set the negotiated encoding's floor and cost, and `immutablePathPrefixes` names the prefixes whose filenames carry a content hash, so only answers under them take the `immutableMaxAgeSeconds` lifetime.
 
 ## The service
 
@@ -104,5 +124,5 @@ tapIndex(transform: (html: string) => string): () => void
 applyIndexTaps(html: string): string
 ```
 
-Source: [`packages/host/webserver/src/index.ts:59`](../../packages/host/webserver/src/index.ts)
+Source: [`packages/host/webserver/src/index.ts:109`](../../packages/host/webserver/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -29,16 +29,36 @@ interface WebRoute {
 ## 配置
 
 ```ts type-equiv
-/** Gateway config: the listen address. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
+  /**
+   * Whether responses are compressed at all. Turn it off where a reverse proxy
+   * or the platform already encodes, so the bytes are not compressed twice.
+   */
+  compress: boolean
+  /** Smallest body the carrier encodes; smaller answers go out verbatim. */
+  compressMinBytes: number
+  /** Brotli quality, 0-11; higher trades request CPU for ratio. */
+  brotliQuality: number
+  /** Deflate level for gzip, 0-9; higher trades request CPU for ratio. */
+  gzipLevel: number
+  /**
+   * Absolute pathname prefixes whose every file this deployment's build writes
+   * with its content hash in the filename. Answers under them are cached
+   * immutably, so a prefix holding a file the build can rewrite in place would
+   * pin a stale copy in every browser that fetched it.
+   */
+  immutablePathPrefixes: string[]
+  /** Lifetime attached to a content-addressed answer, in seconds. */
+  immutableMaxAgeSeconds: number
 }
 ```
 
-`host` 只接受 `127.0.0.1`（默认姿态）和 `0.0.0.0`（刻意的网络暴露）；没有 TLS、认证或 origin 策略，因此绑定到非回环地址会把服务器暴露给该网络。dist 位置是认领席位的前端插件的组装事实。
+`host` 只接受 `127.0.0.1`（默认姿态）和 `0.0.0.0`（刻意的网络暴露）；没有 TLS、认证或 origin 策略，因此绑定到非回环地址会把服务器暴露给该网络。dist 位置是认领席位的前端插件的组装事实。响应策略字段作用于整个载体：`compress` 可为反向代理已完成编码的部署整体关闭编码，`compressMinBytes`／`brotliQuality`／`gzipLevel` 决定协商编码的下限与开销，`immutablePathPrefixes` 点名文件名自带内容哈希的路径前缀，因此只有其下的响应会取得 `immutableMaxAgeSeconds` 的生存期。
 
 ## 服务
 
@@ -104,5 +124,5 @@ tapIndex(transform: (html: string) => string): () => void
 applyIndexTaps(html: string): string
 ```
 
-Source: [`packages/host/webserver/src/index.ts:59`](../../packages/host/webserver/src/index.ts)
+Source: [`packages/host/webserver/src/index.ts:109`](../../packages/host/webserver/src/index.ts)
 <!-- END GENERATED cordis-surface -->
