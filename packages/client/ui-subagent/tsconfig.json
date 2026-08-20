@@ -30,6 +30,9 @@
       "path": "../../llm/token-meter"
     },
     {
+      "path": "../../session/session-stats"
+    },
+    {
       "path": "../../subagent/subagent"
     },
     {
