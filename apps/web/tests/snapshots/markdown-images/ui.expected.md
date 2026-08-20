@@ -7,6 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
+    - tab "Swarm"
 - text: Show the Markdown image policy. {{clock}}
 - button "Copy":
   - img
