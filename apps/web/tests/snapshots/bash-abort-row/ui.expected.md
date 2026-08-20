@@ -7,7 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: "Run two shell commands: wait for cancellation, then write skipped.txt. {{date}} {{clock}}"
 - button "Copy":
   - img

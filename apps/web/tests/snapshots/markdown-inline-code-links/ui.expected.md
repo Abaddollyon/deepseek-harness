@@ -7,7 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: Show the local preview URL. {{clock}}
 - button "Copy":
   - img

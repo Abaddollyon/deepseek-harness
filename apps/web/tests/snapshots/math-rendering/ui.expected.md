@@ -7,7 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: Render this mathematical proof. {{clock}}
 - button "Copy":
   - img

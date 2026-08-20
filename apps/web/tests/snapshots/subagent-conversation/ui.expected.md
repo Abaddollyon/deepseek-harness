@@ -14,7 +14,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: Explain event sourcing in one sentence. {{clock}}
 - button "Copy":
   - img

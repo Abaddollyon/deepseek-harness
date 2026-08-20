@@ -7,7 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: Render adjacent CJK strong emphasis. {{clock}}
 - button "Copy":
   - img

@@ -7,7 +7,7 @@
   - tablist:
     - tab "Chat" [selected]
     - tab "Trajectory"
-    - tab "Swarm"
+    - tab "Agents"
 - text: Research notes what changed? Referenced session · Research notes {{clock}}
 - button "Copy":
   - img
