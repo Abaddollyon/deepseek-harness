@@ -11,6 +11,7 @@ import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-c
 import {
   SubagentCatalogAction, type SubagentCatalogInjected,
 } from '../src/client/SubagentCatalogAction.tsx'
+import { AgentFlowView } from '../src/client/AgentFlowView.tsx'
 import {
   SubagentReadOnlyComposer, type SubagentReadOnlyMatch,
 } from '../src/client/SubagentReadOnlyComposer.tsx'
@@ -49,6 +50,10 @@ function sessionsWith(sessions: SessionSummary[]) {
     setSubagentCatalogOpen: (parentSessionId: SessionId, open: boolean) => {
       actionCalls.push({ method: 'setSubagentCatalogOpen', args: [parentSessionId, open] })
     },
+    open: (id: SessionId) => {
+      actionCalls.push({ method: 'open', args: [id] })
+    },
+    subagentAddress: () => undefined,
   }
 }
 
@@ -58,6 +63,7 @@ async function provideSlotFaces(ctx: Context): Promise<void> {
     name: 'root',
     children: {
       'conversation.session.header.actions': { kind: 'list', scope: 'session' },
+      'conversation.view': { kind: 'list', scope: 'session' },
       'conversation.composer': { kind: 'chain', scope: 'session' },
     },
   } as never, () => null)
@@ -73,8 +79,9 @@ async function fullBench(sessions: SessionSummary[]) {
   ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   await provideSlotFaces(ctx)
   await ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
-  await ctx.plugin({ inject: [...inject], apply }).await()
-  return { face, ctx }
+  const fiber = ctx.plugin({ inject: [...inject], apply })
+  await fiber.await()
+  return { face, ctx, fiber }
 }
 
 const FAMILY: SessionSummary[] = [
@@ -90,6 +97,41 @@ const FAMILY: SessionSummary[] = [
 describe('apply', () => {
   it('declares the services it binds', () => {
     expect(inject).toEqual(['sessions', 'slots', 'locale'])
+  })
+
+  it('registers the swarm flow view and disposes it with the plugin fiber', async () => {
+    const { ctx, fiber, face } = await fullBench(FAMILY)
+    const flowEntry = ctx.slots.entries('conversation.view').find(entry => entry.component === AgentFlowView)
+    expect(flowEntry?.options.id).toBe('swarm')
+    expect(flowEntry?.options.order).toBe(25)
+    expect(ctx.slots.entries('conversation.view')).toHaveLength(1)
+
+    const actions = (flowEntry?.inject as unknown as (id: SessionId) => {
+      openChild: (address: SubagentAddress) => void
+      openSession: (id: SessionId) => void
+      addressOf: (id: SessionId) => SubagentAddress | undefined
+      refresh: (id: SessionId) => void
+      setCatalogOpen: (id: SessionId, open: boolean) => void
+    })(sid('parent'))
+    const address: SubagentAddress = {
+      parentSessionId: sid('parent'),
+      childSessionId: sid('c1'),
+      mode: 'continuable',
+    }
+    actions.openChild(address)
+    actions.openSession(sid('parent'))
+    expect(actions.addressOf(sid('c1'))).toBeUndefined()
+    actions.refresh(sid('parent'))
+    actions.setCatalogOpen(sid('parent'), true)
+    expect(face.actionCalls).toEqual([
+      { method: 'openSubagent', args: [address] },
+      { method: 'open', args: [sid('parent')] },
+      { method: 'refreshSubagents', args: [sid('parent')] },
+      { method: 'setSubagentCatalogOpen', args: [sid('parent'), true] },
+    ])
+
+    await fiber.dispose()
+    expect(ctx.slots.entries('conversation.view')).toHaveLength(0)
   })
 
   it('registers catalog actions and selects read-only subagent composers from session facts', async () => {
