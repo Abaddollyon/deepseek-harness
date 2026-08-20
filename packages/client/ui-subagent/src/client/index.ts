@@ -3,6 +3,7 @@ import type {
   ClientContext, SessionId, SubagentAddress,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { AgentFlowView, type AgentFlowInjected } from './AgentFlowView.tsx'
 import { SubagentCatalogAction, type SubagentCatalogInjected } from './SubagentCatalogAction.tsx'
 import {
   SubagentReadOnlyComposer, type SubagentReadOnlyMatch,
@@ -17,6 +18,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+export type { AgentFlowInjected, AgentFlowViewProps } from './AgentFlowView.tsx'
 export type {
   SubagentCatalogActionProps, SubagentCatalogInjected,
 } from './SubagentCatalogAction.tsx'
@@ -46,6 +48,14 @@ function selectReadOnlySubagent(owner: ComposerChainProps): SubagentReadOnlyMatc
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-subagent: dictionaries')
   const sessions = ctx.sessions
+  const t = ctx.locale.bind(NS)
+  const flowActions = (_sessionId: SessionId): AgentFlowInjected => ({
+    openChild(address: SubagentAddress) { sessions.openSubagent(address) },
+    openSession(id: SessionId) { sessions.open(id) },
+    addressOf(id: SessionId) { return sessions.subagentAddress(id) },
+    refresh(parentSessionId: SessionId) { void sessions.refreshSubagents(parentSessionId) },
+    setCatalogOpen(parentSessionId: SessionId, open: boolean) { sessions.setSubagentCatalogOpen(parentSessionId, open) },
+  })
   const catalogActions = (_parentSessionId: SessionId): SubagentCatalogInjected => ({
     openChild(address: SubagentAddress) {
       sessions.openSubagent(address)
@@ -66,6 +76,17 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: catalogActions,
     }, SubagentCatalogAction),
+  )
+  ctx.slots.inject(
+    'conversation.view',
+    () => ctx.slots.register({
+      name: 'conversation.view',
+      id: 'swarm',
+      order: 25,
+      locale: NS,
+      label: () => t('view.swarm'),
+      inject: flowActions,
+    }, AgentFlowView),
   )
   ctx.slots.inject(
     'conversation.composer',
