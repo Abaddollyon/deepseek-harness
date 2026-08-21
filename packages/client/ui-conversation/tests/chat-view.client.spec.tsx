@@ -377,6 +377,75 @@ describe('Chat node rendering', () => {
 })
 
 describe('ChatView', () => {
+  it('mounts only a bounded measured window for ten thousand logical rows', async () => {
+    const nodes = Array.from({ length: 10_000 }, (_, index) => user(index + 1, `row-${String(index + 1)}`))
+    const h = makeHarness({ nodes })
+    const host = document.createElement('div')
+    host.setAttribute('data-conversation-scroll', '')
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, value: 176_000 })
+    Object.defineProperty(host, 'clientHeight', { configurable: true, value: 600 })
+    Object.defineProperty(host, 'scrollTop', { configurable: true, value: 0, writable: true })
+    document.body.appendChild(host)
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute('data-index')
+        ? { top: 0, bottom: 40, left: 0, right: 800, width: 800, height: 40 } as DOMRect
+        : { top: 0, bottom: 600, left: 0, right: 800, width: 800, height: 600 } as DOMRect
+    })
+    const view = render(<h.ChatView {...h.props} />, { container: host })
+    const flow = view.container.querySelector<HTMLElement>('[data-chat-flow]')
+    expect(flow?.dataset.chatFlowCount).toBe('10000')
+    await waitFor(() => {
+      expect(view.container.querySelectorAll('[data-chat-flow-key]').length).toBeGreaterThan(0)
+    })
+    const mounted = view.container.querySelectorAll('[data-chat-flow-key]')
+    expect(mounted.length).toBeLessThan(64)
+    expect(view.container.querySelector('[data-chat-virtual-list]')).toBeTruthy()
+    rect.mockRestore()
+    host.remove()
+  })
+
+  it('preserves a virtualized prepend anchor and keeps bottom-follow authoritative', async () => {
+    const nodes = Array.from({ length: 180 }, (_, index) => user(index + 101, `row-${String(index + 101)}`))
+    const h = makeHarness({ nodes, hasMore: true })
+    h.chatScroll.save({ scrollTop: 26_000, anchorKey: 'fixture:user:280', anchorTop: 50 })
+    const host = document.createElement('div')
+    host.setAttribute('data-conversation-scroll', '')
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, value: 40_000, writable: true })
+    Object.defineProperty(host, 'clientHeight', { configurable: true, value: 600 })
+    Object.defineProperty(host, 'scrollTop', { configurable: true, value: 26_000, writable: true })
+    document.body.appendChild(host)
+    let prependShift = 0
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const key = this.dataset.chatAnchorKey
+      if (this.hasAttribute('data-index')) {
+        return { top: 0, bottom: 40, left: 0, right: 800, width: 800, height: 40 } as DOMRect
+      }
+      if (key !== undefined) {
+        const seq = Number(key.split(':').pop())
+        const top = (seq - 280) * 40 + 50 + prependShift
+        return { top, bottom: top + 40, left: 0, right: 800, width: 800, height: 40 } as DOMRect
+      }
+      return { top: 0, bottom: 600, left: 0, right: 800, width: 800, height: 600 } as DOMRect
+    })
+    const view = render(<h.ChatView {...h.props} />, { container: host })
+    await waitFor(() => {
+      expect(view.container.querySelector('[data-chat-flow-key="fixture:user:280"]')).toBeTruthy()
+    })
+    fireEvent.click(view.getByText('加载更早'))
+    prependShift = 800
+    const older = Array.from({ length: 20 }, (_, index) => user(index + 1, `older-${String(index + 1)}`))
+    act(() => { h.set({ nodes: [...older, ...nodes] }) })
+    expect(host.scrollTop).toBe(26_800)
+
+    fireEvent.click(view.getByLabelText('回到底部'))
+    expect(host.scrollTop).toBe(40_000)
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, value: 41_000, writable: true })
+    act(() => { h.set({ nodes: [...older, ...nodes, user(400, 'tail')] }) })
+    expect(host.scrollTop).toBe(41_000)
+    rect.mockRestore()
+    host.remove()
+  })
+
   it('hands a windowless tool result to the Tool seat with an empty tool name', () => {
     const h = makeHarness({
       nodes: [{ ...toolResult(3, 'w1'), call: null }],
@@ -862,12 +931,23 @@ describe('ChatView', () => {
     expect(rowRenders).toBe(afterMount)
   })
 
-  it('updates the selected call id handed to the Tool seat', () => {
-    const h = makeHarness({ nodes: [toolResult(3, 'a')] })
+  it('updates only the previously and newly selected Tool root seats', () => {
+    const h = makeHarness({ nodes: [user(1, 'q'), toolResult(3, 'a'), toolResult(4, 'b')] })
     render(<h.ChatView {...h.props} />)
-    expect(h.toolOwners.at(-1)?.selectedCallId).toBeUndefined()
+    const renders = (callId: string) => h.toolOwners.filter(owner => owner.callId === callId)
+    expect(renders('a')).toHaveLength(1)
+    expect(renders('b')).toHaveLength(1)
+
     act(() => { h.setSelection({ turnSeq: 3, callId: 'a', toolName: 'bash' }) })
-    expect(h.toolOwners.at(-1)?.selectedCallId).toBe('a')
+    expect(renders('a').at(-1)?.selectedCallId).toBe('a')
+    expect(renders('a')).toHaveLength(2)
+    expect(renders('b')).toHaveLength(1)
+
+    act(() => { h.setSelection({ turnSeq: 4, callId: 'b', toolName: 'bash' }) })
+    expect(renders('a').at(-1)?.selectedCallId).toBeUndefined()
+    expect(renders('b').at(-1)?.selectedCallId).toBe('b')
+    expect(renders('a')).toHaveLength(3)
+    expect(renders('b')).toHaveLength(2)
   })
 
   it('hands running calls to a live Tool group', () => {

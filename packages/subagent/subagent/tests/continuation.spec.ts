@@ -2079,6 +2079,44 @@ describe('continuable settlement delivery', () => {
     expect(parent.status).toBe('idle')
   })
 
+  it('does not re-open a turn on a parent its user stopped', async () => {
+    const releaseParent = Promise.withResolvers<undefined>()
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('parent works'), gate: releaseParent.promise },
+      { chunks: textResponse('child works'), gate: releaseChild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parent.followup(createUserMessage({ content: message('start working'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(parent.status).toBe('running') })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+
+    // Exactly what the GUI stop button issues.
+    parent.cancel({ kind: 'user' }, { keepInbox: true })
+    releaseParent.resolve(undefined)
+    await parent.whenIdle()
+    expect(parent.status).toBe('idle')
+    const stoppedTurns = parent.session.events
+      .filter(event => event.type === 'turn/end')
+      .map(event => event.data.reason.kind)
+    expect(stoppedTurns).toEqual(['aborted'])
+
+    const turnStarts: number[] = []
+    ctx.on('session/event', (session, event) => {
+      if (session.id === parent.id && event.type === 'turn/start') turnStarts.push(event.data.turn)
+    })
+    releaseChild.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    // Delivered durably, but the stop stands: the settling child opened no turn,
+    // so the session the user ended stays ended until the user says otherwise.
+    expect(turnStarts).toEqual([])
+    expect(parent.status).toBe('idle')
+    expect(parent.inbox.nextStep).toHaveLength(1)
+  })
+
   it('does not wake a parent below a scoped teardown root', async () => {
     const hold = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('interrupted'), gate: hold.promise }])
@@ -2493,7 +2531,48 @@ describe('SubagentRuntime.interrupt', () => {
     expect(turnEnds).toEqual(['aborted', 'completed', 'completed', 'completed'])
   })
 
-  it('interrupts only the target while its resident descendant keeps running', async () => {
+  it('interrupts only the target for an ancestor caller while its resident descendant keeps running', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const releaseGrandchild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child'), gate: releaseChild.promise },
+      { chunks: textResponse('grandchild'), gate: releaseGrandchild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)!
+    const grandchild = await ctx.subagents.startContinuable(startSpec(child))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    const grandchildAgent = ctx.agents.get(grandchild.childId)!
+    const childCancel = vi.spyOn(child, 'cancel')
+    const grandchildCancel = vi.spyOn(grandchildAgent, 'cancel')
+
+    // Ancestor authority is one agent stopping another agent's turn: the agents
+    // that target started were not addressed and keep running.
+    ctx.subagents.interrupt(started.childId, { kind: 'ancestor', agent: parent })
+
+    expect(childCancel).toHaveBeenCalledTimes(1)
+    expect(childCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+    releaseChild.resolve(undefined)
+    await child.whenIdle()
+    // The target parks as a waiting owner; the published descendant was never
+    // signalled and keeps its own turn open.
+    expect(grandchildCancel).not.toHaveBeenCalled()
+    expect(ctx.agents.get(started.childId)).toBe(child)
+    expect(ctx.agents.get(grandchild.childId)).toBe(grandchildAgent)
+
+    releaseGrandchild.resolve(undefined)
+    await waitNoActivation(ctx, grandchild.childId)
+    await waitNoActivation(ctx, started.childId)
+    const loaded = await ctx.sessionPersistence.load(grandchild.childId)
+    const turnEnds = loaded.events
+      .filter(event => event.type === 'turn/end')
+      .map(event => (event).data.reason.kind)
+    expect(turnEnds).toEqual(['completed'])
+  })
+
+  it('stops the target\'s whole live subtree for a human caller', async () => {
     const releaseChild = Promise.withResolvers<undefined>()
     const releaseGrandchild = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([
@@ -2512,23 +2591,59 @@ describe('SubagentRuntime.interrupt', () => {
 
     ctx.subagents.interrupt(started.childId, { kind: 'user', parentSessionId: parent.id })
 
-    expect(childCancel).toHaveBeenCalledTimes(1)
-    releaseChild.resolve(undefined)
-    await child.whenIdle()
-    // The target parks as a waiting owner; the published descendant was never
-    // signalled and keeps its own turn open.
-    expect(grandchildCancel).not.toHaveBeenCalled()
-    expect(ctx.agents.get(started.childId)).toBe(child)
-    expect(ctx.agents.get(grandchild.childId)).toBe(grandchildAgent)
+    // The addressed target carries the human cause; everything below it is
+    // stopped as a consequence of its parent stopping.
+    expect(childCancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
+    expect(grandchildCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
 
+    releaseChild.resolve(undefined)
+    releaseGrandchild.resolve(undefined)
+    await waitNoActivation(ctx, grandchild.childId)
+    await waitNoActivation(ctx, started.childId)
+    // The descendant's own turn ended aborted rather than completing: the stop
+    // reached it, it did not merely finish first.
+    const loaded = await ctx.sessionPersistence.load(grandchild.childId)
+    expect(loaded.events
+      .filter(event => event.type === 'turn/end')
+      .map(event => event.data.reason.kind)).toEqual(['aborted'])
+  })
+
+  it('stops the live subtree below a top-level session without touching that session', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const releaseGrandchild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child'), gate: releaseChild.promise },
+      { chunks: textResponse('grandchild'), gate: releaseGrandchild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)!
+    const grandchild = await ctx.subagents.startContinuable(startSpec(child))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    const grandchildAgent = ctx.agents.get(grandchild.childId)!
+    const parentCancel = vi.spyOn(parent, 'cancel')
+    const childCancel = vi.spyOn(child, 'cancel')
+    const grandchildCancel = vi.spyOn(grandchildAgent, 'cancel')
+
+    // A session with no live descendants is an accepted no-op, and the
+    // top-level session itself is never signalled by this call — the host's own
+    // Agent.cancel() owns that half.
+    ctx.subagents.cancelDescendants(SessionId('nobody-here'))
+    ctx.subagents.cancelDescendants(parent.id)
+
+    expect(parentCancel).not.toHaveBeenCalled()
+    expect(childCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+    expect(grandchildCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+
+    releaseChild.resolve(undefined)
     releaseGrandchild.resolve(undefined)
     await waitNoActivation(ctx, grandchild.childId)
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(grandchild.childId)
-    const turnEnds = loaded.events
+    expect(loaded.events
       .filter(event => event.type === 'turn/end')
-      .map(event => (event).data.reason.kind)
-    expect(turnEnds).toEqual(['completed'])
+      .map(event => event.data.reason.kind)).toEqual(['aborted'])
   })
 
   it('authorizes the human address against the live target\'s durable direct parent', async () => {

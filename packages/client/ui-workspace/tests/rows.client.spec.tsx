@@ -13,6 +13,7 @@ afterEach(cleanup)
 
 // Standard locale seat stub mirroring the real ns → common → key chain (zh default).
 const t = makeTranslate(zh, commonZh) as never
+const alternateT = makeTranslate(zh, commonZh) as never
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -27,7 +28,7 @@ function stubRect(row: HTMLElement): void {
 
 function dragProps(overrides: Partial<RowDragProps> = {}): RowDragProps {
   return {
-    start: vi.fn(), active: false, marker: null,
+    start: vi.fn(), active: false,
     hover: vi.fn(), drop: vi.fn(), end: vi.fn(),
     ...overrides,
   }
@@ -83,7 +84,7 @@ describe('workspace browser rows', () => {
       completed: false,
       snippet: 'matching message excerpt',
     }
-    render(<SearchResultItem result={result} currentId={result.id} onOpen={onOpen} t={t} />)
+    const view = render(<SearchResultItem result={result} currentId={result.id} onOpen={onOpen} t={t} />)
     const row = screen.getByRole('treeitem')
     expect(row.getAttribute('aria-selected')).toBe('true')
     expect(screen.getByText('Workspace context')).toBeTruthy()
@@ -93,6 +94,10 @@ describe('workspace browser rows', () => {
     expect(row.hasAttribute('draggable')).toBe(false)
     fireEvent.click(row)
     expect(onOpen).toHaveBeenCalledWith(result.id)
+
+    view.rerender(<SearchResultItem result={result} currentId={undefined} onOpen={onOpen} t={t} />)
+    view.rerender(<SearchResultItem result={result} currentId={undefined} onOpen={onOpen} t={alternateT} />)
+    view.rerender(<SearchResultItem result={result} currentId={undefined} onOpen={vi.fn()} t={t} />)
   })
 
   it.each([
@@ -575,25 +580,24 @@ describe('workspace browser rows', () => {
     fireEvent.dragEnd(row)
     expect(inactive.end).toHaveBeenCalledOnce()
 
-    const active = dragProps({ active: true, marker: 'before' })
+    const active = dragProps({ active: true })
     rerender(
       <SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
         onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} drag={active} t={t} />,
     )
     stubRect(screen.getByRole('treeitem'))
+    // The marker is row-local: dragOver, not a parent prop, drives its visible class.
     // Top half hovers/drops 'before'; bottom half 'after' (row mid = 117).
     fireDrag(screen.getByRole('treeitem'), 'dragOver', 105)
-    expect(active.hover).toHaveBeenCalledWith('before')
+    expect(active.hover).toHaveBeenCalledWith('before', expect.any(Function))
     fireDrag(screen.getByRole('treeitem'), 'dragOver', 130)
-    expect(active.hover).toHaveBeenCalledWith('after')
+    expect(active.hover).toHaveBeenCalledWith('after', expect.any(Function))
+    expect(screen.getByRole('treeitem').className).toMatch(/dropAfter/)
+    fireEvent.dragLeave(screen.getByRole('treeitem'))
+    expect(screen.getByRole('treeitem').className).not.toMatch(/dropAfter/)
+    fireDrag(screen.getByRole('treeitem'), 'dragOver', 130)
     fireDrag(screen.getByRole('treeitem'), 'drop', 130)
     expect(active.drop).toHaveBeenCalledWith('after')
-
-    const after = dragProps({ active: true, marker: 'after' })
-    rerender(
-      <SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
-        onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} drag={after} t={t} />,
-    )
-    expect(screen.getByRole('treeitem').className).toMatch(/dropAfter/)
+    expect(screen.getByRole('treeitem').className).not.toMatch(/dropAfter/)
   })
 })

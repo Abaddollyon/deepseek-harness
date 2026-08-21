@@ -41,7 +41,9 @@ declare module '@deepseek-ai/cordis' {
  * Implementations must honor these semantics:
  * - Registrations outlive producer and controller fibers. Owner and
  *   service disposal cancel live work and await compliant producers; a
- *   throwing teardown cancel force-fails only the record. Teardown
+ *   throwing teardown cancel force-fails only the record. Implementations
+ *   may bound that teardown join with a validated grace, force-settling a
+ *   producer whose cancel returned but never settled `done`. Teardown
  *   cancellation also marks the record reported, because a record its owner
  *   is being destroyed for has no reader left.
  * - Owned-job access is fenced by the owner's session id. Ids are
@@ -58,6 +60,12 @@ declare module '@deepseek-ai/cordis' {
  *   than process-wide: registrations made from an unscoped context serve
  *   every owner, and registrations made under an agent composition's scope
  *   serve exactly the agents composed under it.
+ * - Implementations may bound how many terminal records stay retained (a
+ *   validated bound such as a maximum settled count). An evicted record
+ *   behaves as an unknown id for {@link get}, {@link read}, {@link kill}, and
+ *   {@link wait}, and its removal is a visible-set change announced through
+ *   {@link onJobsChanged}. Live (`running`/`stopping`) records are never
+ *   evicted.
  */
 export abstract class JobRegistry extends Service {
   constructor(ctx: Context) {
@@ -99,9 +107,9 @@ export abstract class JobRegistry extends Service {
   abstract get(id: JobId, caller?: Agent): JobSnapshot
 
   /**
-   * Read the next stream delta, or the idempotent final output after settlement.
-   * A terminal read marks the job reported. Throws for an unknown or foreign
-   * job.
+   * Read the next stream delta, or the idempotent final output after settlement
+   * while the record stays retained. A terminal read marks the job reported.
+   * Throws for an unknown, evicted, or foreign job.
    * @param id - job to read.
    * @param caller - reading agent checked against the owner.
    * @returns output text and the post-read snapshot.
@@ -147,9 +155,9 @@ export abstract class JobRegistry extends Service {
    * Register an effect-scoped observer of visible-set changes. It fires after
    * every commit that changes what {@link list} returns for that owner —
    * registration, every stopping transition (including the one teardown
-   * performs before it awaits a slow producer), settlement, owner-disposal
-   * removal, and the emptying that service disposal commits — so an observer
-   * re-reads rather than accumulating deltas.
+   * performs before it awaits a slow producer), settlement, bounded-retention
+   * eviction, owner-disposal removal, and the emptying that service disposal
+   * commits — so an observer re-reads rather than accumulating deltas.
    *
    * Delivery is owner-relative on the same terms as {@link onJobDone}: an
    * observer registered from an unscoped context — a host composition's own

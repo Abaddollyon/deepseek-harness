@@ -1,5 +1,5 @@
 /**
- * Schema-17 physical chunk-row codec. This package owns the durable tags,
+ * Schema-18 physical chunk-row codec. This package owns the durable tags,
  * validation, and row-size limits independently from other persistence formats.
  * @module @deepseek-ai/dsh-session-persistence-sqlite/codec
  */
@@ -29,13 +29,13 @@ interface ToolCallRunData extends RunDataBase {
   readonly args: string[]
 }
 
-/** One schema-17 packed physical record. */
+/** One schema-18 packed physical record. */
 export type ChunkRow =
   | { readonly type: 'text-chunks'; readonly seq0: number; readonly time0: number; readonly data: TextRunData }
   | { readonly type: 'reasoning-chunks'; readonly seq0: number; readonly time0: number; readonly data: TextRunData }
   | { readonly type: 'tool-call-chunks'; readonly seq0: number; readonly time0: number; readonly data: ToolCallRunData }
 
-/** One scalar event or schema-17 packed physical record. */
+/** One scalar event or schema-18 packed physical record. */
 export type StorageRecord = SessionEvent | ChunkRow
 
 /** Minimum eligible members in a packed physical record. */

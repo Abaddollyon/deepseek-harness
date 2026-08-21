@@ -5,7 +5,7 @@
  * except workspace Rename/Delete and session Rename/Fork/Archive; the session
  * and workspace hover cards are suppressed while a menu is open.
  */
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import clsx from 'clsx'
 import {
   HoverCard, IconArchiveOutline20, IconBranchOutline16, IconEditOutline16,
@@ -76,10 +76,8 @@ export interface RowDragProps {
   start: () => void
   /** A compatible row drag is in flight. */
   active: boolean
-  /** Current marker on this row: insert line above, below, or none. */
-  marker: 'before' | 'after' | null
   /** Report the hovered half while a compatible drag passes over this row. */
-  hover: (half: 'before' | 'after') => void
+  hover: (half: 'before' | 'after', clear: () => void) => void
   drop: (half: 'before' | 'after') => void
   end: () => void
 }
@@ -109,7 +107,7 @@ function rowHalf(e: { clientY: number; currentTarget: HTMLElement }): 'before' |
  * @param props.t - the browser root's locale seat.
  * @returns the row element.
  */
-export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t }: {
+export const ProjectRowItem = memo(function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t }: {
   group: GroupNode
   onToggle: () => void
   onCreate: () => void
@@ -212,7 +210,7 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home,
       copiedLabel={t('hover.copied')}
     />
   )
-}
+}, (previous, next) => previous.group === next.group && previous.home === next.home && previous.t === next.t)
 
 /* v8 ignore next 3 -- closed-union backstop; only reached if the status is forged */
 function assertNever(value: never): never {
@@ -309,7 +307,7 @@ function SessionHoverContent({ node, now, t }: { node: SessionNode; now: number;
  * @param props.t - Workspace-browser translation seat.
  * @returns the result button.
  */
-export function SearchResultItem({ result, currentId, onOpen, t }: {
+export const SearchResultItem = memo(function SearchResultItem({ result, currentId, onOpen, t }: {
   result: SearchResultNode
   currentId: string | undefined
   onOpen: (id: SearchResultNode['id']) => void
@@ -342,7 +340,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
       </span>
     </button>
   )
-}
+}, (previous, next) => previous.result === next.result && previous.currentId === next.currentId && previous.t === next.t)
 
 /**
  * One top-level 34px session row: status dot (pending user interaction outranks
@@ -360,7 +358,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, pinned = false, t }: {
+export const SessionNodeItem = memo(function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, pinned = false, t }: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -389,6 +387,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const primaryStatus = statuses[0]
   const showStatus = primaryStatus.state !== 'done' || row.completed
   const [menuOpen, setMenuOpen] = useState(false)
+  const [dragMarker, setDragMarker] = useState<'before' | 'after' | null>(null)
   // Archive hides the row through the registry-global archive set and never
   // touches the session log, so it is not styled as destructive and needs no
   // confirmation dialog.
@@ -405,7 +404,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
         css.sessionRow, selected && css.selected, menuOpen && css.menuOpen,
         pinned && css.pinnedSessionRow,
         flat && !showStatus && css.flatSessionRowWithoutStatus,
-        drag?.marker === 'before' && css.dropBefore, drag?.marker === 'after' && css.dropAfter,
+        dragMarker === 'before' && css.dropBefore, dragMarker === 'after' && css.dropAfter,
       )}
       role="treeitem"
       aria-selected={selected}
@@ -418,21 +417,26 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
           e.dataTransfer.setData('text/plain', node.id)
           drag.start()
         }}
-      onDragEnd={drag?.end}
+      onDragEnd={drag === undefined ? undefined : () => { setDragMarker(null); drag.end() }}
+      onDragLeave={drag === undefined ? undefined : () => { setDragMarker(null) }}
       onDragOver={drag === undefined
         ? undefined
         : (e) => {
           if (!drag.active) return
           e.preventDefault()
           e.dataTransfer.dropEffect = 'move'
-          drag.hover(rowHalf(e))
+          const half = rowHalf(e)
+          setDragMarker(half)
+          drag.hover(half, () => { setDragMarker(null) })
         }}
       onDrop={drag === undefined
         ? undefined
         : (e) => {
           if (!drag.active) return
           e.preventDefault()
-          drag.drop(rowHalf(e))
+          const half = rowHalf(e)
+          setDragMarker(null)
+          drag.drop(half)
         }}
     >
       {/* Pending interaction and own or descendant activity outrank the
@@ -488,4 +492,11 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
       copiedLabel={t('hover.copied')}
     />
   )
-}
+}, (previous, next) => {
+  if (previous.node !== next.node || previous.currentId !== next.currentId
+    || previous.drag !== next.drag || previous.flat !== next.flat
+    || previous.pinned !== next.pinned || previous.t !== next.t) return false
+  const previousTime = relativeTime(previous.node.updatedAt, previous.now)
+  const nextTime = relativeTime(next.node.updatedAt, next.now)
+  return previousTime.unit === nextTime.unit && previousTime.n === nextTime.n
+})

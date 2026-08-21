@@ -32,6 +32,15 @@ const noArchive: readonly SessionId[] = []
 const archived = (...ids: string[]): readonly SessionId[] => ids.map(sid)
 
 describe('deriveGroups', () => {
+  it('reuses the derived tree for identical narrow input identities', () => {
+    const sessions = list(summary('one', 1))
+    const workspaces = [workspace('project', ['one'])]
+    const archived: SessionId[] = []
+    const view = { expandedGroups: ['project'] }
+
+    const first = deriveGroups(sessions, workspaces, archived, view)
+    expect(deriveGroups(sessions, workspaces, archived, view)).toBe(first)
+  })
   it('keeps Host Workspace and sessionIds order without Client recency sorting', () => {
     const sessions = list(summary('newer', 20), summary('older', 10))
     const workspaces = [workspace('first', ['older', 'newer']), workspace('empty', [])]

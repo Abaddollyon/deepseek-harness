@@ -50,6 +50,79 @@ function userTexts(agent: Agent): string[] {
 }
 
 describe('agent loop', () => {
+  it('returns to the event loop between steps and between turns, leaving the event sequence unchanged', async () => {
+    const adapter = new MockAdapter([
+      toolCallResponse('c1', 'noop', {}),
+      textResponse('first turn done'),
+      textResponse('second turn done'),
+    ])
+    const ctx = await harness(adapter)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'noop',
+      description: 'settles without touching I/O',
+      parameters: {},
+      // Deliberately I/O-free: the whole step boundary is then crossed through
+      // resolved promises alone, which is exactly the starving shape.
+      execute: () => Promise.resolve([{ type: 'text' as const, text: 'done' }]),
+    }))
+    const agent = ctx.agentLoop.create(SessionId('yield-s'), { provider: 'mock', model: 'mock' })
+
+    // One ordered trace of structural events and of two probes armed at the
+    // step/end and turn/end boundaries. A microtask probe always precedes the
+    // next event; a macrotask probe only does so if the driver actually leaves
+    // the microtask queue before starting more model work.
+    const order: string[] = []
+    let armedStep = false
+    let armedTurn = false
+    const spine = new Set([
+      'turn/start', 'step/start', 'user/message',
+      'assistant/message', 'tool/call', 'tool/result', 'step/end', 'turn/end',
+    ])
+    ctx.on('session/event', (session, event) => {
+      if (session.id !== agent.id || !spine.has(event.type)) return
+      order.push(event.type === 'step/start' || event.type === 'step/end'
+        ? `${event.type}:${event.data.step}`
+        : event.type)
+      if (event.type === 'step/end' && !armedStep) {
+        armedStep = true
+        queueMicrotask(() => order.push('microtask-after-step'))
+        setImmediate(() => order.push('macrotask-after-step'))
+      }
+      if (event.type === 'turn/end' && !armedTurn) {
+        armedTurn = true
+        setImmediate(() => order.push('macrotask-after-turn'))
+      }
+    })
+
+    send(agent, 'first')
+    // Queued before the first turn opens, so the driver crosses a turn boundary
+    // without any inbox wait of its own.
+    send(agent, 'second')
+    await waitForIdle(ctx, agent)
+    await new Promise(resolve => setImmediate(resolve))
+
+    // Inter-step drain: the macrotask probe armed at step/end ran BEFORE the
+    // next step opened. Without the boundary yield it would land after the
+    // whole burst, because the loop never leaves the microtask queue.
+    expect(order.indexOf('macrotask-after-step')).toBeLessThan(order.indexOf('step/start:2'))
+    expect(order.indexOf('microtask-after-step')).toBeLessThan(order.indexOf('macrotask-after-step'))
+    // Inter-turn drain: same guarantee across the turn boundary.
+    expect(order.indexOf('macrotask-after-turn')).toBeLessThan(order.lastIndexOf('turn/start'))
+
+    // Turn semantics and event order are untouched: the probes are interleaved
+    // around boundaries, never inside a step, and the durable sequence is exact.
+    expect(order.filter(entry => !entry.startsWith('macrotask') && !entry.startsWith('microtask'))).toEqual([
+      'turn/start',
+      'step/start:1', 'user/message', 'assistant/message', 'tool/call', 'tool/result', 'step/end:1',
+      'step/start:2', 'assistant/message', 'step/end:2',
+      'turn/end',
+      'turn/start',
+      'step/start:1', 'user/message', 'assistant/message', 'step/end:1',
+      'turn/end',
+    ])
+    expect(userTexts(agent)).toEqual(['first', 'second'])
+  })
+
   it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid AgentOptions.maxTokens %s before publication',
     async (maxTokens) => {

@@ -112,6 +112,18 @@ describe('Session tail-page seeding', () => {
     expect(session.projections.get('test/marks')).toEqual({ marks: ['from-baseline'] })
   })
 
+  it('still fetches projection baselines for a known-empty client-created session', async () => {
+    const api = new FakeApiClient()
+    const session = new Session(SID, api, fakeRemote(), { knownEmpty: true })
+    api.onHistory = () => Promise.resolve(ok({
+      events: [], hasMore: false,
+      projections: { asOfSeq: 0, values: { imageLimits: { maxImagesPerMessage: 20 } } },
+    } as never))
+    await session.open()
+    expect(api.callsOf('session.history')).toHaveLength(1)
+    expect(session.projections.get('imageLimits')).toEqual({ maxImagesPerMessage: 20 })
+  })
+
   it('a resync serving a stale block keeps the newer pushed value (seq rule end to end)', async () => {
     const api = new FakeApiClient()
     const session = new Session(SID, api, fakeRemote())

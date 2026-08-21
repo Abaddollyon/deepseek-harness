@@ -3,7 +3,7 @@ import type { SessionId, SubagentAddress } from '@deepseek-ai/dsh-client-runtime
 import { IconChevronDownOutline14, IconChevronRightOutline14, IconRefreshOutline14, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { activityDuration, formatDuration, formatExactDuration, formatTokens } from './subagent-metrics.ts'
-import { buildAgentFlowModel, type AgentFlowModel, type AgentFlowRow, type FlowDiagnosticReason } from './agent-flow-model.ts'
+import { createAgentFlowModelBuilder, type AgentFlowModel, type AgentFlowRow, type FlowDiagnosticReason } from './agent-flow-model.ts'
 import { NS } from './locales.ts'
 import css from './AgentFlowView.module.css'
 
@@ -303,14 +303,18 @@ export function AgentFlowView({
   const latestSetCatalogOpen = useRef(setCatalogOpen)
   latestSetCatalogOpen.current = setCatalogOpen
   const ordinaryOpenableIds = useMemo(() => new Set(ids), [ids])
-  const model = useMemo<AgentFlowModel>(() => buildAgentFlowModel({
+  // Retained builder: session-list snapshots republish wholesale per
+  // streaming batch, so the derivation memoizes on the narrow lineage inputs
+  // it reads and keeps unchanged rows (and the whole model) identity-stable.
+  const builder = useMemo(() => createAgentFlowModelBuilder(), [])
+  const model = useMemo<AgentFlowModel>(() => builder.build({
     rootSessionId: sessionId,
     summaries,
     catalogs,
     expanded,
     ordinaryOpenableIds,
     addressOf,
-  }), [addressOf, catalogs, expanded, ordinaryOpenableIds, sessionId, summaries])
+  }), [addressOf, builder, catalogs, expanded, ordinaryOpenableIds, sessionId, summaries])
   const activeTiming = useMemo(() => hasActiveTiming(model.rows), [model.rows])
   const treeRef = useRef<HTMLDivElement>(null)
 

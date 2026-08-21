@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-持久投影缓存（`ctx.sessionProjectionCache`）：把每个已注册投影单元的状态持久化为检查点，基于域数据形态（domain data form）每会话一条记录（`session_projcache` 域——出厂 JSON 后端将其落在配置的存储根目录下、`workspace.json` 旁边）。设计权威：[session-projection RFC](../../../.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md)（persisted projection cache 一节）。
+持久投影缓存（`ctx.sessionProjectionCache`）：把每个已注册投影单元的状态持久化为检查点，在 `session_projcache` 域中每会话一条记录。出厂 Web 组合仅将该域路由到 `<storage root>/session-projcache.db` 的 SQLite；每次检查点写入一个按键索引的 SQLite 行，因此改动一个会话不会重写其他会话的缓存。`workspace`、消息反馈等其他域仍使用 JSON 后端。数据库缺失时从冷缓存启动，之前的 `session_projcache.json` 缓存会被忽略。设计权威：[session-projection RFC](../../../.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md)（persisted projection cache 一节）。
 
 一条存储行 `(key → {ver, seq, val})` 是折叠捷径，绝不是权威：可能陈旧（`seq` 精确说明陈旧到哪），但绝不会错。实现据此承诺：
 
@@ -10,7 +10,7 @@
 - **`ver` 与当前运行单元的 `stateVersion` 不匹配即丢弃，绝不迁移。** 单元递增版本会在读取时使其行失效；该 key 从日志重新折叠。
 - **整记录写入。** 每次写入替换该会话的完整检查点（注册表切面始终是完整的），并经无损 JSON 边界快照——违反纯 JSON 约定的单元状态会显式失败并报错。
 - **记录绑定到日志生命周期，而不只是 id。** 每条记录存储其折叠来源的 header 身份（`createdAt`、`cwd`）；每次读取先以活 header 或存储 header 为证验证它，再接受任何行——被删后重建的 id、或缓存幸存而持久化存储被换掉时，无关记录被整体丢弃，绝不播种幻影值。
-- **日志领先，缓存跟随。** 活会话检查点先把缓冲事件持久 flush，缓存行才落地，因此崩溃只会让缓存落后于日志（更长的尾部回放），绝不领先于它。
+- **必写检查点排空日志；流式检查点不排空。** `turn/end` 和 detach 会在缓存行落地前 flush 缓冲事件。计数和间隔检查点在流式期间避免这个屏障，因此崩溃可能让缓存行领先于已存日志；冷读 restore 守卫会拒绝这种越界并从 seq 0 重放。
 
 ## 写策略
 
@@ -20,8 +20,8 @@
 |---|---|
 | `turn/end` | 必写——冷读要的正是轮次终值。 |
 | 会话释放（detach） | 必写——live 转 cold 的时刻；此后冷读阶梯接管该会话。 |
-| 累计 `writeEveryEvents` 个已提交事件 | 配置节流（条数）。 |
-| 距首个脏事件 `writeIntervalMs` 毫秒 | 配置节流（间隔）。 |
+| 累计 `writeEveryEvents` 个推进投影的事件 | 配置节流（条数）。 |
+| 距首个推进投影的事件 `writeIntervalMs` 毫秒 | 配置节流（间隔）。 |
 
 两个 `Config` 字段均必填（无默认值）：写入节奏是部署选择，没有普适正确值，由 cordis.yml 明示。
 
@@ -33,7 +33,7 @@
 
 读取阶梯，正常路径无需加载全量日志：缓存行 → `sessionProjections.restoreFloor`（锚定在最低可用水位之前一个事件的位置）→ 持久化 `readFrom(id, floor)` → `sessionProjections.restore` → 刷新行的 fail-soft 写回。这个锚使缩短的日志（崩溃修复截断）可被证明：越界的行恰好触发一次从 seq 0 的全量重读，而不是把幽灵值当现值服务。无已注册单元时直接服务 `{asOfSeq: -1, values: {}}`，不触碰持久化；无持久日志的会话以 seam 的 `not found` 拒绝。
 
-`write(session)` 是两个必写点共用的同步切面检查点；载体可以直接调用（非 fail-soft——由 fail-soft 包装层负责遏制）。
+`write(session)` 是同步切面的流式检查点，不会排空会话日志；载体可以直接调用（非 fail-soft——由 fail-soft 包装层负责遏制）。必写路径使用私有的排空日志检查点。
 
 ## 组合
 

@@ -21,6 +21,7 @@ import {
   type SessionPersistenceSnapshot,
   type StoredPrefix,
   type StoredSuffix,
+  type StoredTail,
 } from '@deepseek-ai/dsh-session-persistence'
 import {
   MAX_PACKED_ROW_MEMBERS,
@@ -168,6 +169,43 @@ export class SqliteStore implements PersistenceBackend<number> {
     if (snapshot === undefined) return undefined
     const { preserved } = scanRows(snapshot.eventRows, snapshot.base)
     return { meta: rowToMeta(snapshot.row), events: preserved.filter(event => event.seq >= fromSeq) }
+  }
+
+  /**
+   * Load a bounded, ascending logical page ending before an optional sequence.
+   * Packed rows are decoded only until this page and its older-event sentinel
+   * are known.
+   */
+  async loadStoredTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
+    await this.observe(signal)
+    const snapshot = this.readTransaction(() => {
+      const row = this.rowFor(id)
+      if (row === undefined) return undefined
+      return { row, eventRows: this.tailPageRows(id, beforeSeq, limit) }
+    })
+    signal?.throwIfAborted()
+    if (snapshot === undefined) return undefined
+
+    const newestFirst: SessionEvent[] = []
+    let hasMore = false
+    rows: for (const row of snapshot.eventRows) {
+      const logical = decodeRow(row)
+      for (let index = logical.length - 1; index >= 0; index -= 1) {
+        const event = logical[index] as SessionEvent
+        if (beforeSeq !== undefined && event.seq >= beforeSeq) continue
+        if (newestFirst.length === limit) {
+          hasMore = true
+          break rows
+        }
+        newestFirst.push(event)
+      }
+    }
+    return { meta: rowToMeta(snapshot.row), events: newestFirst.reverse(), hasMore }
   }
 
   async appendBatch(
@@ -318,6 +356,19 @@ export class SqliteStore implements PersistenceBackend<number> {
     const tail = this.db.prepare(sql('select-tail-events')).all(id, 2).map(decodeEventRow).reverse()
     if (tail.length === 0) return []
     return this.physicalSpanFrom(id, (tail[0] as EventRow).seq).eventRows
+  }
+
+  /** Select no more physical rows than needed for a logical page and sentinel. */
+  private tailPageRows(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+  ): EventRow[] {
+    const physicalLimit = limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1
+    const rows = beforeSeq === undefined
+      ? this.db.prepare(sql('select-tail-events')).all(id, physicalLimit)
+      : this.db.prepare(sql('select-tail-events-before')).all(id, beforeSeq, physicalLimit)
+    return rows.map(decodeEventRow)
   }
 
   /** Select the bounded physical span that may represent `fromSeq`. */

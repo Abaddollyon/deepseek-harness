@@ -53,6 +53,7 @@ export const sessionSummarySchema = z.object({
   sessionId: sessionIdSchema,
   updatedAt: z.number(),
   running: z.boolean(),
+  activity: z.enum(['stopping', 'maintenance']).optional(),
   blank: z.boolean(),
   parentSessionId: sessionIdSchema.optional(),
   origin: z.literal('subagent').optional(),

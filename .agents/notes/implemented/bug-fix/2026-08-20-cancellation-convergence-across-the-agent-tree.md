@@ -1,0 +1,63 @@
+# Agent Note: Make a stop actually stop — cancellation convergence across the agent tree
+
+Status: implemented
+
+English | [中文](2026-08-20-cancellation-convergence-across-the-agent-tree.zh.md)
+
+## Problem
+
+Three independent defects made the Web GUI stop button unreliable, and they compound: each one either hides, undoes, or fails to deliver a cancellation the user already requested. All three were found by tracing the whole path — composer click, `session.cancel`, `Agent.cancel`, abort signal, LLM `fetch` — which is itself clean and synchronous on the host. Every real failure is downstream of the abort.
+
+**A refused initiator boundary stranded the agent permanently `running`.** `wakeDriver()` published its driver reservation — `activityDone` plus the `running` phase — before calling `ctx.agents.withInitiator(this, () => this.kick())`. That call throws *synchronously* once the registry stops accepting boundaries (`AgentRegistry.runWithInitiator` guards `initiatorState !== 'active'`, which `internal/status` flips to `'closing'` on a lifecycle-ancestor fiber unloading). The `.then` never attached, so `driver.promise` never settled: the phase stayed `running` forever, `cancel()` aborted a controller nothing awaited, and `whenIdle()` — with it every `AgentHandle.dispose()` — hung. Reachable from any `followup()` landing in the teardown window, which is exactly where a settlement notice or a `send_message` lands.
+
+**A settling child re-opened the turn its user had just stopped.** `notifySettlement` delivers through `Agent.followup()`, and `followup()` on a quiescent Agent *opens a turn*. After a stop the parent is quiescent, so every background child settling afterwards restarted the session the user had ended — once per child, which is why the symptom scaled with the number of subagents and read as "the stop button does nothing".
+
+**A stop reached one Agent and left its subtree running.** `interrupt()` cancelled only the named target; `session.cancel` on a top-level session cancelled only that session's Agent. Continuable children are independent Activations disposed by their own settlement watcher, not by the parent's turn, so they kept spending model calls after the stop — and then triggered the defect above.
+
+**The loop could not say it was stopping.** It still drains started tool calls before an aborted turn ends (`executeToolCalls`), because `dsh-tools` contracts that cancellation never abandons a started body. That is honest waiting, not a lost stop — but `AgentStatus` is only `idle | running`, so the interval between asking an agent to stop and its status reaching `idle` is indistinguishable from ordinary work, and a user with no feedback reasonably concludes the control is broken and clicks again.
+
+**A maintenance task ran a whole model request while the agent reported `idle`.** `runMaintenance` holds a `maintenance` phase whose `status` getter answers `idle`, because no turn is open. Manual compaction and scheduled jobs run there. A host that renders its stop control from `running` therefore offers no control at all for the length of a compaction, even though `Agent.cancel()` already aborts that task's signal — the capability existed with no way to reach it.
+
+## Decision
+
+**Publish the driver reservation inside the initiator boundary.** `runWithInitiator` throws its guard before invoking the operation, so moving `activityDone` and `setPhase` into the callback makes a refusal commit nothing — no rollback code and no new branch. This is the "publish state only at its commit point" rule applied literally; the try/catch-and-revert alternative would publish a `running` status only to retract it, emitting a spurious `running → idle` pair that live `agent/status` listeners would see.
+
+**Let the sender, not the loop, decide whether a notice wakes.** `notifySettlement` extends its existing draining-parent arm — which already chooses the non-waking `Agent.inject()` — to also cover a quiescent parent whose newest durable `turn/end` is `{ kind: 'aborted', reason: { kind: 'user' } }`. The notice still lands durably in the inbox and is claimed by whatever turn the user opens next; it just does not open one itself.
+
+**Give the two interrupt authorities the reach each one means.** An `ancestor` interrupt is one agent stopping another agent's current turn and stays single-target — an orchestrator that stopped a worker did not ask to stop that worker's workers, and `interrupt_agent` tells the model so. A `user` interrupt is a human ending a session and cancels the target's whole live subtree with the `parent` cause. `SubagentRuntime.cancelDescendants(parentSessionId)` is the top-level companion the host calls beside its own `Agent.cancel()`, since an ordinary session has no Activation and so owns no `ownedChildren` edge.
+
+**Report the two invisible states through a second facet, not a third status.** `AgentActivity` is `'stopping' | 'maintenance'`, or `undefined` when `AgentStatus` alone describes the agent; `Agent` exposes it as a readable property for baseline reads and publishes each change on its own scoped `agent/activity` event. `stopping` is set by `cancel()` on any non-idle phase and cleared when that phase retires; `maintenance` is derived from the phase itself in `setPhase`. The activity is published **before** the status, so no listener observes an `idle` agent that still claims to be `stopping`. No session event is added: this is live transport state, so the model-visible ⟺ logged rule is untouched — a stop's durable account remains `turn/end` with an `aborted` reason.
+
+**Return to the event loop at step and turn boundaries.** A boundary crossed through already-resolved promises never leaves the microtask queue, which Node drains completely before it reaches timers or I/O. A host driving several in-process agents therefore spent whole bursts without servicing a socket: an inbound cancel was never read, so no abort could be observed, and queued stream frames were not flushed. One `setImmediate` hop at each boundary — the check-phase hop whose next iteration passes through the poll phase — makes the drain a guarantee. It costs one macrotask per model request, so it is unconditional and has no tunable.
+
+## Alternatives considered
+
+**Revert the phase in a `catch` around `withInitiator`.** Rejected: it publishes a `running` status it must then retract, and adds an unreachable-in-practice branch that the per-file coverage gate cannot satisfy honestly. Committing inside the boundary needs neither.
+
+**Suppress the wake in `wakeDriver` by cancel cause.** Rejected, and the reason is load-bearing: `cancel.spec.ts` deliberately pins latching a **human** re-prompt that lands in the abort-to-idle window ([cancel-convergence wake latch](2026-08-07-cancel-convergence-wake-latch.md), whose production `keepInbox` consumer is [web stop preserves queue](2026-07-31-web-stop-preserves-queue.md)). The loop cannot tell a human re-prompt from a runtime notice, and it should not learn to — the distinction is the sender's. Choosing `inject()` also sidesteps the latch for free, because `inject` is `send(..., 'next-step', wakeup: false)` and never reaches `wakeDriver` at all.
+
+**Read live state instead of the log for "the user stopped this".** Rejected: a converged cancellation leaves an ordinary `idle` phase behind, indistinguishable from a completion. The durable `turn/end` is the only account of the stop, which is the model-visible ⟺ logged rule paying for itself.
+
+**Cascade on every interrupt authority.** Rejected: it would silently change the documented `interrupt_agent` contract the model is prompted with, and an orchestrator stopping one worker has no reason to kill that worker's own delegations.
+
+**Walk `ownedChildren` in the cascade.** Rejected for the entry level only: a top-level session has no Activation and therefore no such set. Resolving each level from the durable `parentSession` every Activation records handles both callers with one loop, and because that relation is a tree — one recorded parent per Activation — the walk terminates without visited-set bookkeeping.
+
+**A third `AgentStatus` value `'stopping'`.** Rejected on evidence from every reader. `goal-round-driver`, the `schedule` runtime, and `compaction-basic` each branch on `status === 'idle'`, so a third value silently withholds the transition they act on — a cancelled goal would never pause, a schedule would never drive. `sdk/server` forwards the value verbatim as its `session.status` notification, making the enum a wire contract whose SDK expected outputs would have to change with it. Every one of those lives in a package this change does not own. A second facet is additive: existing readers receive exactly what they received before.
+
+**Carry the facet as an extra field on `agent/status`.** Rejected: activity changes without a status change (idle→maintenance, running→stopping), so the event would have to fire on either — and those extra emissions reach the same `status === 'idle'` consumers as duplicate transitions, and the SDK wire as duplicate notifications. The agent invariant's no-op-transition check would also have to be relaxed to a pair comparison, weakening a real guarantee to carry an unrelated fact.
+
+**Set `stopping` from the tool-call scheduler's abort latch.** Rejected as both narrower and more plumbing: `executeToolCalls` is a module function that would need a writer into the agent's private phase, and the tool-drain window is only part of the interval. `cancel()` on a non-idle phase is the exact instant the stop is requested, and it also covers LLM-stream teardown and the unwritten turn ending — one line, in the method that already owns the transition.
+
+**Yield per LLM chunk or per tool-call settlement.** Rejected: every chunk already arrives from a socket read, so the loop is in the poll phase already and a yield there buys nothing; a per-tool yield fires N times per step for no drain beyond the step boundary and adds suspension points inside the ordered-commit window.
+
+## Consequences
+
+`wakeDriver` now propagates the registry's refusal to its caller with the agent untouched: the waking message stays queued, the phase stays `idle`, and both `whenIdle()` and handle disposal settle. A settlement notice arriving at a user-stopped idle parent is injected rather than woken, so a stopped session stays stopped; an unstopped parent's behavior is unchanged, and a parent running a turn the user opened *after* the stop still carries the stopped ending as its newest one and keeps the ordinary steering — hence the `status === 'idle'` conjunct. A `user` interrupt now signals every live descendant, so a resumed subtree resumes from a stopped turn rather than from a turn that ran on after the stop.
+
+The turn-boundary yield sits **after** `phase.abort` is replaced with a fresh controller. That placement is load-bearing: a cancel landing in the window must abort the controller the next turn reads, and one aborted before the swap would be discarded with the old one. Both boundaries were already asynchronous suspension points, no session append moves, and every cancellation landing window stays as `cancel.spec.ts` pins it.
+
+`AgentActivity` is additive: `AgentStatus` keeps both values and every existing reader keeps its behavior, while a consumer that wants the qualifier subscribes to `agent/activity` and seeds itself from `Agent.activity`. The agent invariant now rejects a repeated activity transition as it does a repeated status, and treats a first `undefined` as a real transition — a never-published facet is not the same fact as a just-cleared one. Two generated artifacts follow the new event mechanically and were regenerated by their own commands rather than hand-edited: `packages/core/scope/src/scoped-events.generated.ts` gains its subject resolver (`pnpm run gen-scoped-events`), and the cordis API catalog gains the event and type rows (`pnpm run gen-cordis-api`, after classifying `AgentActivity` in `LINK_MAP` beside `AgentStatus`).
+
+The host and client halves — forwarding the facet on the session-status frame, mirroring it in the client runtime, and rendering a disabled stopping affordance plus a stop control during maintenance — are not in this change and belong to their own owners. Until they land, the facet is published and readable but nothing renders it.
+
+The host half of the top-level cascade — the `cancelDescendants` call beside `session.cancel`'s `Agent.cancel` in `dsh-host-apiproxy` — is not in this change and is tracked for the apiproxy owner. Until it lands, a human stop on an ordinary session still leaves its background children running, though it no longer lets them restart that session.

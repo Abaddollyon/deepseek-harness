@@ -73,6 +73,39 @@ describe('list store projection', () => {
     expect(state.byId[sid('s2')]?.title).toBeUndefined()
   })
 
+  it('coalesces a burst of projection frames across sessions into one rAF list publication', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const b = bench()
+    await feedList(b, [{ id: 's1' }, { id: 's2' }])
+    const notified = vi.fn()
+    b.svc.list.subscribe(notified)
+
+    for (let index = 1; index <= 100; index++) {
+      const sessionId = index % 2 === 0 ? 's2' : 's1'
+      b.svc.handleMuxEnvelope({
+        rpcId: `projection-${index}` as never,
+        payload: {
+          type: 'session/projection', sessionId: sid(sessionId), key: 'title',
+          value: `title-${index}`, seq: index,
+        } as never,
+      })
+    }
+
+    await Promise.resolve()
+    expect(notified).not.toHaveBeenCalled()
+    expect(frames).toHaveLength(1)
+    frames.shift()!(0)
+    expect(notified).toHaveBeenCalledTimes(1)
+    const snapshot = b.svc.list.getSnapshot()
+    expect(snapshot.byId[sid('s1')]?.projectionValues).toEqual({ title: 'title-99' })
+    expect(snapshot.byId[sid('s2')]?.projectionValues).toEqual({ title: 'title-100' })
+    vi.unstubAllGlobals()
+  })
+
   it('reuses list and row identities after an equivalent refresh', async () => {
     const b = bench()
     await feedList(b, [{ id: 's1', cwd: '/home/u/proj-a/' }])

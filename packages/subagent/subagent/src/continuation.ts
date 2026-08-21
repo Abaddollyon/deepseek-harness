@@ -535,10 +535,21 @@ export class SubagentContinuationManager {
    * synchronous and the effect is asynchronous: this authorizes the caller,
    * requests `Agent.cancel(cause, { keepInbox: true })` on the target, and
    * returns without waiting for the target to observe the signal or reach
-   * quiescence. The Activation, its handle, accepted unclaimed inbox work, and
-   * already-published descendants are untouched; work already claimed into the
-   * interrupted turn is not requeued. Once the interrupted driver is idle, a
-   * waking send resumes the parked queue.
+   * quiescence. The Activation, its handle, and accepted unclaimed inbox work
+   * are untouched; work already claimed into the interrupted turn is not
+   * requeued. Once the interrupted driver is idle, a waking send resumes the
+   * parked queue.
+   *
+   * How far the stop reaches depends on who asked, because the two authorities
+   * mean different things. `ancestor` is one agent stopping another agent's
+   * current turn, which is a single-target operation: an orchestrator that
+   * stopped one worker did not ask to stop the workers that worker started, and
+   * `interrupt_agent` says so to the model. `user` is a human stopping this
+   * session, which can only mean the whole live subtree below it — a stop that
+   * left the descendants running would keep spending model calls the human just
+   * ended, and each one settling afterwards would deliver a notice to the target
+   * it was supposed to stop. Descendants are cancelled with `{ kind: 'parent' }`
+   * because their own turn was not what the human addressed.
    *
    * An absent target is an accepted no-op, which uniformly covers natural
    * completion races, repeated requests, one-shot ids, and unknown ids without
@@ -591,6 +602,57 @@ export class SubagentContinuationManager {
       authority.kind === 'user' ? { kind: 'user' } : { kind: 'parent' },
       { keepInbox: true },
     )
+    if (authority.kind === 'user') this.cancelSubtree(targetSessionId)
+  }
+
+  /**
+   * Stop every live Activation below one session, top-down.
+   *
+   * Cancellation only — the ownership graph, every handle, and each descendant's
+   * unclaimed inbox survive, so a later send resumes a descendant exactly as it
+   * resumes the root. Teardown stays the settlement watcher's business: a
+   * descendant left idle and childless settles through its ordinary path.
+   *
+   * Levels are resolved from the durable `parentSession` each Activation
+   * records rather than from `ownedChildren`, because the root may be a
+   * top-level session that has no Activation and therefore owns no such edge.
+   * The relation is a tree — every Activation records exactly one parent — so
+   * the walk terminates without visited-set bookkeeping, and cancelling a
+   * descendant whose own teardown is already open is a no-op on a handle that
+   * teardown cancelled first.
+   * @param rootSessionId - the session whose live descendants stop; it is not
+   *   itself cancelled here.
+   */
+  private cancelSubtree(rootSessionId: SessionId): void {
+    const pending: SessionId[] = [rootSessionId]
+    while (pending.length > 0) {
+      const parentId = pending.pop()
+      for (const child of this.activations.values()) {
+        if (child.parentSession !== parentId) continue
+        child.handle.agent.cancel({ kind: 'parent' }, { keepInbox: true })
+        pending.push(child.childId)
+      }
+    }
+  }
+
+  /**
+   * Stop the live continuable subtree below one session on its human owner's
+   * behalf, without interrupting that session itself.
+   *
+   * This is the top-level companion to {@link interrupt}: a human stopping an
+   * ordinary session cancels that session's own Agent through the host, which
+   * knows nothing about the children it started. Those children are separate
+   * Activations that outlive the stopped turn, so without this they keep
+   * spending model calls and then wake the stopped parent back up as each one
+   * settles.
+   *
+   * Fire-and-return, like {@link interrupt}: every target is signalled before
+   * this returns and none is awaited. A session with no live descendants is an
+   * accepted no-op.
+   * @param parentSessionId - the durable session whose live descendants stop.
+   */
+  cancelDescendants(parentSessionId: SessionId): void {
+    this.cancelSubtree(parentSessionId)
   }
 
   /**
@@ -906,6 +968,23 @@ export class SubagentContinuationManager {
       if (members.has(agent) || lineage.includes(root)) return root
     }
     return undefined
+  }
+
+  /**
+   * Whether this agent's newest recorded turn was stopped by its human owner.
+   *
+   * Read from the durable log rather than from live state, because the stop is
+   * a fact about the turn that ended, and `Agent.cancel()` leaves no live trace
+   * once the driver converges: the phase is plain `idle` again, exactly as it
+   * would be after an ordinary completion.
+   * @param agent - the agent whose last turn ending is tested.
+   * @returns true when the newest `turn/end` is an abort caused by the user.
+   */
+  private userStopped(agent: Agent): boolean {
+    const end = agent.session.events.findLast(event => event.type === 'turn/end')
+    return end?.type === 'turn/end'
+      && end.data.reason.kind === 'aborted'
+      && end.data.reason.reason.kind === 'user'
   }
 
   /** Reject new admission once the manager or this exact parent tree began draining. */
@@ -1488,7 +1567,19 @@ export class SubagentContinuationManager {
       // reading its inbox and records the account in the log either way; it
       // does NOT survive that parent's own disposal, whose `keepInbox: false`
       // cancel durably clears whatever it never claimed.
-      if (this.closingTeardownFor(parent) !== undefined) {
+      //
+      // A parent its user just stopped is delivered the same way, and for the
+      // same reason: waking it would undo the stop. `followup()` on a quiescent
+      // Agent opens a turn, so a child settling after the stop would restart the
+      // session the user had ended — once per settling child, which is why a
+      // stopped parent with several background children looks like a stop
+      // button that does nothing. The notice still lands durably in the inbox
+      // and is claimed by whatever turn the user opens next. The liveness test
+      // is deliberately `status === 'idle'`: a parent already running a turn the
+      // user started after the stop still carries that stopped `turn/end` as its
+      // newest one, and must keep the ordinary steering below.
+      if (this.closingTeardownFor(parent) !== undefined
+        || (parent.status === 'idle' && this.userStopped(parent))) {
         parent.inject(message)
         return
       }

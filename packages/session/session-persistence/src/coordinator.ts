@@ -114,6 +114,12 @@ export interface StoredSuffix {
   events: SessionEvent[]
 }
 
+/** A bounded logical tail returned by a seek-capable persistence backend. */
+export interface StoredTail extends StoredSuffix {
+  /** Whether at least one valid stored event precedes this page. */
+  hasMore: boolean
+}
+
 /**
  * The storage contract between {@link PersistenceCoordinator} and a concrete
  * backend: the minimal set of durable primitives the orchestration calls. A
@@ -174,6 +180,23 @@ export interface PersistenceBackend<TornMarker = unknown> {
    * @param signal - optional cancellation for backend read work.
    */
   loadStoredFrom?(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<StoredSuffix | undefined>
+
+  /**
+   * Read at most `limit` logical events immediately before an exclusive seq bound.
+   * Seek-capable backends implement this without materializing the complete log;
+   * sequential backends omit it and the coordinator slices a complete prefix.
+   * @param id - persisted session id to resolve.
+   * @param beforeSeq - exclusive seq bound, or `undefined` for the current tail.
+   * @param limit - positive safe-integer maximum number of returned events.
+   * @param signal - optional cancellation for backend read work.
+   * @returns a seq-ascending page and whether older valid events remain.
+   */
+  loadStoredTail?(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined>
 
   /**
    * Durably append a CONTIGUOUS batch, lazily materializing the session first
@@ -867,6 +890,78 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     const whole = await this.readStoredPrefix(id, signal)
     // Sequential fallback: contiguous seqs from 0 make the suffix an index slice.
     return { meta: whole.meta, events: whole.events.slice(fromSeq) }
+  }
+
+  /**
+   * Read one bounded stored tail through a seek hook or complete-prefix fallback.
+   * @param id - persisted session id to resolve.
+   * @param beforeSeq - exclusive seq bound, or undefined for the latest tail.
+   * @param limit - positive safe-integer maximum event count.
+   * @param signal - optional cancellation for queued and backend work.
+   * @returns detached metadata, a seq-ascending event page, and older-event status.
+   */
+  readTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0)) {
+      return Promise.reject(new TypeError(`readTail beforeSeq must be a non-negative safe integer or undefined, got ${String(beforeSeq)}`))
+    }
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      return Promise.reject(new TypeError(`readTail limit must be a positive safe integer, got ${String(limit)}`))
+    }
+    const retired = Promise.resolve(this.retirements.get(id))
+    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
+    return waited.then(() => this.serialize(id, () => this.readTailCore(id, beforeSeq, limit, signal), signal))
+  }
+
+  /** Read one bounded stored tail after validation and per-session serialization. */
+  private async readTailCore(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    signal?.throwIfAborted()
+    if (this.backend.loadStoredTail !== undefined) {
+      let tail: StoredTail | undefined
+      try {
+        tail = await this.backend.loadStoredTail(id, beforeSeq, limit, signal)
+      } catch (error: unknown) {
+        if (signal?.aborted) signal.throwIfAborted()
+        throw error
+      }
+      signal?.throwIfAborted()
+      if (tail === undefined) throw new Error(`session "${id}" not found`)
+      this.assertStoredId(id, tail.meta)
+      this.assertVersion(tail.meta)
+      if (tail.events.length > limit) {
+        throw new Error(`session "${id}" tail backend returned ${tail.events.length} events for limit ${limit}`)
+      }
+      if (tail.events.some(event => beforeSeq !== undefined && event.seq >= beforeSeq)) {
+        throw new Error(`session "${id}" tail backend returned an event outside beforeSeq ${String(beforeSeq)}`)
+      }
+      if (tail.events.some(needsLegacyPrefix)) return this.readTailFallback(id, beforeSeq, limit, signal)
+      const events = snapshotStoredEvents(tail.events, id)
+      this.assertEventsSupported(tail.meta, events)
+      return { meta: structuredClone(tail.meta), events, hasMore: tail.hasMore }
+    }
+    return this.readTailFallback(id, beforeSeq, limit, signal)
+  }
+
+  /** Slice a tail page from a complete validated stored prefix. */
+  private async readTailFallback(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    const whole = await this.readStoredPrefix(id, signal)
+    const upper = Math.min(beforeSeq ?? whole.events.length, whole.events.length)
+    const start = Math.max(0, upper - limit)
+    return { meta: whole.meta, events: whole.events.slice(start, upper), hasMore: start > 0 }
   }
 
   /** Read one detached physical prefix without logical recovery or caching. */

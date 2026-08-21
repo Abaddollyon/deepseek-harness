@@ -146,6 +146,109 @@ const hostileProjectionDefinition: ProjectionDefinition<'subagentListHostileProb
 }
 
 describe('SubagentRuntime.listChildren', () => {
+  it('reuses one cold corpus scan across unchanged listings', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = await authorChild(ctx, '00000000-0000-4000-8000-00000000ca01', {
+      parentSession: parent.id,
+      origin: 'subagent',
+    }, childEvents(descriptorPayload('cached child')))
+    const list = vi.spyOn(ctx.sessionPersistence, 'list')
+
+    const first = await ctx.subagents.listChildren(parent.id)
+    const second = await ctx.subagents.listChildren(parent.id)
+
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(second).toEqual(first)
+    expect(first).toEqual([{
+      kind: 'child', id: childId, label: 'cached child', mode: 'continuable',
+      activity: 'inactive', hasChildren: false,
+    }])
+  })
+
+  it('invalidates the cold scan on child creation and settlement', async () => {
+    const { ctx, parent } = await setup([])
+    const list = vi.spyOn(ctx.sessionPersistence, 'list')
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([])
+
+    const childId = SessionId('catalog-lifecycle-child')
+    const child = ctx.sessions.prepare(childId, {
+      meta: { createdAt: 1, parentSession: parent.id, origin: 'subagent' },
+    })
+    const detach = ctx.sessions.enter(child)
+    ctx.sessions.announce(child)
+    child.append('turn/start', { turn: 1 })
+    child.append('subagent/descriptor', descriptorPayload('lifecycle child'))
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
+      kind: 'child', id: childId, label: 'lifecycle child', mode: 'continuable',
+      activity: 'running', hasChildren: false,
+    }])
+    expect(list).toHaveBeenCalledTimes(2)
+
+    await ctx.sessions.flush(child)
+    detach()
+    await vi.waitFor(async () => {
+      const inspected = await ctx.sessionPersistence.inspect(childId)
+      expect(inspected.meta.id).toBe(childId)
+    })
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
+      kind: 'child', id: childId, label: 'lifecycle child', mode: 'continuable',
+      activity: 'inactive', hasChildren: false,
+    }])
+    expect(list).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retain a cold scan invalidated while it is in flight', async () => {
+    const { ctx, parent } = await setup([])
+    const originalList = ctx.sessionPersistence.list.bind(ctx.sessionPersistence)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const list = vi.spyOn(ctx.sessionPersistence, 'list').mockImplementationOnce(async (signal) => {
+      entered.resolve(undefined)
+      await release.promise
+      return originalList(signal)
+    })
+
+    const first = ctx.subagents.listChildren(parent.id)
+    await entered.promise
+    const childId = SessionId('catalog-racing-child')
+    const child = ctx.sessions.create(childId, {
+      meta: { createdAt: 1, parentSession: parent.id, origin: 'subagent' },
+    })
+    child.append('turn/start', { turn: 1 })
+    child.append('subagent/descriptor', descriptorPayload('racing child'))
+    release.resolve(undefined)
+    await first
+
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
+      kind: 'child', id: childId, label: 'racing child', mode: 'continuable',
+      activity: 'running', hasChildren: false,
+    }])
+    expect(list).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds a 500-child fan-out to one scan and one resolution per child per call', { timeout: 20_000 }, async () => {
+    const { ctx, parent } = await setup([])
+    const childCount = 500
+    for (let index = childCount - 1; index >= 0; index -= 1) {
+      const child = ctx.sessions.create(SessionId(`wide-child-${index.toString().padStart(3, '0')}`), {
+        meta: { createdAt: index, parentSession: parent.id, origin: 'subagent' },
+      })
+      child.append('turn/start', { turn: 1 })
+      child.append('subagent/descriptor', descriptorPayload(`wide ${index}`))
+    }
+    const list = vi.spyOn(ctx.sessionPersistence, 'list')
+    const snapshot = vi.spyOn(ctx.sessionProjections, 'snapshot')
+
+    const first = await ctx.subagents.listChildren(parent.id)
+    const second = await ctx.subagents.listChildren(parent.id)
+
+    expect(first).toHaveLength(childCount)
+    expect(second).toEqual(first)
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(snapshot).toHaveBeenCalledTimes(childCount * 2)
+    expect(first[0]).toEqual(expect.objectContaining({ id: SessionId('wide-child-000') }))
+    expect(first.at(-1)).toEqual(expect.objectContaining({ id: SessionId('wide-child-499') }))
+  })
   it('lists live children without persistence, query services, or the continuation runtime', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -974,6 +1077,19 @@ describe('SubagentRuntime.listChildren', () => {
 })
 
 describe('SubagentRuntime.listChildrenAndDescendants', () => {
+  it('omits a live creation-window child from both catalog views', async () => {
+    const { ctx, parent } = await setup([])
+    const pending = ctx.sessions.create(SessionId('combined-creation-window'), {
+      meta: { parentSession: parent.id, origin: 'subagent' },
+    })
+    pending.append('turn/start', { turn: 1 })
+
+    await expect(ctx.subagents.listChildrenAndDescendants(parent.id)).resolves.toEqual({
+      children: [],
+      descendants: [],
+    })
+  })
+
   it('shares one persistence listing across direct and descendant projections', async () => {
     const { ctx, parent } = await setup([textResponse('done')])
     const childId = await startChild(ctx, parent, 'direct child')

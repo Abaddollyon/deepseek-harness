@@ -101,13 +101,14 @@ export class WorkspaceRuntime implements IWorkspaces {
     // would open a session no grouping surface shows under this workspace.
     // An archived blank is never reused either: reuse would open a session
     // no grouping surface can show, so New Session mints a fresh one instead.
-    const archived = this.list.getSnapshot().archivedSessionIds
+    const archived = new Set(this.list.getSnapshot().archivedSessionIds)
+    const workspaceSessionIds = new Set(workspace.sessionIds)
     const sessions = this.sessions.list.getSnapshot()
     for (const id of sessions.ids) {
       const summary = sessions.byId[id]
       if (summary !== undefined && summary.blank && summary.cwd === workspace.path
-        && workspace.sessionIds.includes(summary.id)
-        && !archived.includes(summary.id)) return summary.id
+        && workspaceSessionIds.has(summary.id)
+        && !archived.has(summary.id)) return summary.id
     }
     const attempt = this.sessions.create({ workspaceId })
       .finally(() => { this.connecting.delete(workspaceId) })
@@ -133,9 +134,14 @@ export class WorkspaceRuntime implements IWorkspaces {
     const reconcile = (): void => {
       if (disposed || state !== 'waiting') return
       const workspace = this.list.getSnapshot()
-      if (!workspace.baselinesReady) return
-      const current = this.sessions.list.getSnapshot().current
-      const target = workspace.recentWorkspaceId
+      if (workspace.phase !== 'ready') return
+      const sessions = this.sessions.list.getSnapshot()
+      const current = sessions.current
+      const target = recentWorkspace(workspace.items, sessions.byId)
+      // A non-empty workspace membership is evidence that an existing session
+      // may be restored; wait for its rows before allowing a create.
+      const targetWorkspace = target === undefined ? undefined : workspace.items.find(item => item.workspaceId === target)
+      if (sessions.phase === 'pending' && (targetWorkspace?.sessionIds.length ?? 0) > 0) return
       if (current !== undefined || target === undefined) {
         state = 'done'
         return
@@ -179,7 +185,7 @@ export class WorkspaceRuntime implements IWorkspaces {
     const current = this.sessions.list.getSnapshot().current
     const currentWorkspaceId = current === undefined
       ? undefined
-      : workspace.items.find(item => item.sessionIds.includes(current))?.workspaceId
+      : workspace.items.find(item => new Set(item.sessionIds).has(current))?.workspaceId
     const target = workspaceId ?? currentWorkspaceId ?? workspace.recentWorkspaceId
     if (target === undefined) {
       this.sessions.clear()
@@ -349,6 +355,8 @@ export class WorkspaceRuntime implements IWorkspaces {
       phase: workspace.phase,
       error: workspace.error,
       baselinesReady,
+      // Workspace membership and creation-time echoes are enough to choose a target;
+      // the full session baseline progressively improves recency and reuse later.
       recentWorkspaceId: baselinesReady ? recentWorkspace(workspace.items, sessions.byId) : undefined,
     })
   }

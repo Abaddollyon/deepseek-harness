@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-20-pure-type-outlet-for-wire-facing-agent-types.md
+2026-08-20-pure-type-outlet-for-wire-facing-agent-types.md: b1b851fb36cd92b0b8fea9d0419dbc6f46d2265a
+2026-08-20-pure-type-outlet-for-wire-facing-agent-types.zh.md: 4737f8dbc5ac3e3b0a9b237788684b2e03216dea

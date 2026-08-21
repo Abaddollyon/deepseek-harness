@@ -141,6 +141,58 @@ describe('incremental parsing is actually in effect', () => {
     expect(totalParsed).toBeLessThan(text.length * 5)
   })
 
+  it.each([
+    ['a long paragraph', 'word '.repeat(14_000)],
+    ['an unclosed fence', `\`\`\`\n${'const value = 1\n'.repeat(4_000)}`],
+  ])('bounds live grammar work for %s and fully parses settlement', (_label, doc) => {
+    const calls: string[] = []
+    const parser = new IncrementalMarkdownParser((text) => {
+      calls.push(text)
+      return parseGfm(text)
+    })
+    for (let end = 128; end < doc.length + 128; end += 128) {
+      parser.update(doc.slice(0, Math.min(end, doc.length)))
+    }
+    const liveCalls = calls.length
+    const liveParsed = calls.reduce((sum, text) => sum + text.length, 0)
+    expect(liveCalls).toBeLessThan(90)
+    expect(liveParsed).toBeLessThan(doc.length * 12)
+
+    const settled = parser.settle(doc)
+    expect(calls).toHaveLength(liveCalls + 1)
+    expect(calls.at(-1)).toBe(doc)
+    expect([...settled.frozen, ...settled.tail].map(block => block.node))
+      .toEqual(parseGfm(doc).children)
+  })
+
+  it.each([
+    ['a long paragraph', 'word '.repeat(10_000)],
+    ['an unclosed fence', `\`\`\`\n${'plain fence content\n'.repeat(2_500)}`],
+  ])('settles streamed %s to the same DOM as a cold full parse', (_label, doc) => {
+    const live = render(<MarkdownText text="" streaming />)
+    for (let end = 256; end < doc.length + 256; end += 256) {
+      live.rerender(<MarkdownText text={doc.slice(0, Math.min(end, doc.length))} streaming />)
+    }
+    live.rerender(<MarkdownText text={doc} />)
+    const cold = render(<MarkdownText text={doc} />)
+    expect(live.container.innerHTML).toBe(cold.container.innerHTML)
+    cold.unmount()
+    live.unmount()
+  })
+
+  it('resets an oversized checkpoint tail after a genuine rewrite', () => {
+    const parser = new IncrementalMarkdownParser(parseGfm)
+    const original = 'alpha '.repeat(8_000)
+    for (let end = 128; end < original.length + 128; end += 128) {
+      parser.update(original.slice(0, Math.min(end, original.length)))
+    }
+    const before = parser.update(original)
+    const rewritten = `omega${original.slice(5)}`
+    const after = parser.update(rewritten)
+    expect(after.generation).toBe(before.generation + 1)
+    expect([...after.frozen, ...after.tail].map(block => block.node)).toEqual(parseGfm(rewritten).children)
+  })
+
   it('shows the documented streaming fingerprint: a definition frozen earlier no longer resolves a new reference, and settling heals it', () => {
     const doc = [
       '[ref]: https://example.com/target',

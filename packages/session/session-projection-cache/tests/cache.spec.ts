@@ -6,11 +6,16 @@
  * write-back; version bump and shrunk-log rows degrade to a full re-read).
  */
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import { SqliteStorageBackend } from '@deepseek-ai/dsh-storage-sqlite'
+import { SqliteKvUnit } from '../../../storage/storage-sqlite/src/unit.ts'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -21,16 +26,19 @@ import SessionProjectionCache from '../src/index.ts'
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
+    'cache-test/count': { count: number }
   }
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'cache-test/mark': { marks: string[] }
+    'cache-test/noop': Record<never, never>
   }
 
   interface OutOfBandSessionEventMap {
     'cache-test/mark': true
+    'cache-test/noop': true
   }
 }
 
@@ -89,11 +97,38 @@ async function harness(options: HarnessOptions = {}) {
   return { ctx, pool, logs, fiber, persistence, cache: ctx.sessionProjectionCache }
 }
 
+/** Open the cache against a persistent SQLite KV backend for restart and write-count tests. */
+async function sqliteHarness(path: string) {
+  const ctx = new Context()
+  contexts.push(ctx)
+  await ctx.plugin(Storage)
+  const backend = new SqliteStorageBackend({ path, journalMode: 'delete' })
+  ctx.storage.backend.register('sqlite', backend)
+  const facility = new DomainFacility(ctx, { backend: 'sqlite', routes: {} })
+  ctx.storage.mount('domain', facility)
+  ctx.provide('storageDomain', facility)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
+  ctx.sessionProjections.register(marksUnit())
+  ctx.provide('sessionPersistence', fakePersistence(new Map()) as never)
+  await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+  return {
+    ctx,
+    cache: ctx.sessionProjectionCache,
+    dispose: async () => {
+      await ctx.fiber.dispose()
+      await backend.close()
+    },
+  }
+}
+
 const mark = (session: Session, marks: string[]): SessionEvent =>
   session.append('cache-test/mark', { marks })
 
 const endTurn = (session: Session): SessionEvent =>
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+const noOp = (session: Session): SessionEvent => session.append('cache-test/noop', {})
 
 /** The stored medium record for one session id (undefined = never written). */
 function storedRecord(pool: MemoryMediaPool, id: Session['id']) {
@@ -141,6 +176,47 @@ describe('SessionProjectionCache write policy', () => {
     await owner.dispose()
     await settle()
     expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
+  })
+
+  it('does not checkpoint streaming events that leave every projection unchanged', async () => {
+    const { ctx, pool } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
+    const session = ctx.sessions.create(SessionId('noop'))
+    noOp(session)
+    noOp(session)
+    await settle()
+    expect(storedRows(pool, session.id)).toBeUndefined()
+  })
+
+  it('counts one event once when multiple projection units move', async () => {
+    const { ctx, pool } = await harness({ config: { writeEveryEvents: 2, writeIntervalMs: 60_000 } })
+    ctx.sessionProjections.register({
+      key: 'cache-test/count',
+      schema: z.object({ count: z.number() }),
+      init: () => 0,
+      apply: (state, event) => event.type === 'cache-test/mark' ? state + 1 : state,
+      view: count => ({ count }),
+      stateVersion: 1,
+    })
+    const session = ctx.sessions.create(SessionId('multi-unit'))
+    mark(session, ['one'])
+    await settle()
+    expect(storedRows(pool, session.id)).toBeUndefined()
+    mark(session, ['two'])
+    await settle()
+    expect(storedRows(pool, session.id)?.['cache-test/count']?.val).toEqual(2)
+  })
+
+  it('does not drain the session log for a mid-stream checkpoint, but does at turn/end', async () => {
+    const { ctx, pool } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
+    const flush = vi.spyOn(ctx.sessions, 'flush')
+    const session = ctx.sessions.create(SessionId('barrier'))
+    mark(session, ['stream'])
+    await settle()
+    expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['stream'] })
+    expect(flush).not.toHaveBeenCalled()
+    endTurn(session)
+    await settle()
+    expect(flush).toHaveBeenCalledWith(session)
   })
 
   it('flushes when the in-turn event count reaches the configured threshold', async () => {
@@ -383,5 +459,66 @@ describe('SessionProjectionCache cold read', () => {
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('absent'))).rejects.toThrow('not found')
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('bare')))
       .resolves.toEqual({ asOfSeq: 2, values: {} })
+  })
+})
+
+describe('SessionProjectionCache SQLite persistence', () => {
+  it('updates one keyed row after 1,000 checkpoints and restores it after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-projection-cache-'))
+    const path = join(directory, 'session-projcache.db')
+    const first = await sqliteHarness(path)
+    try {
+      const ids = Array.from({ length: 1_000 }, (_, index) => SessionId(`cached-${index}`))
+      const headers = new Map<string, Session['header']>()
+      for (const id of ids) {
+        const session = first.ctx.sessions.create(id)
+        headers.set(String(id), session.header)
+        mark(session, [String(id)])
+        await first.cache.write(session)
+      }
+      const put = vi.spyOn(SqliteKvUnit.prototype, 'putRecord')
+      const changedId = ids[500]
+      if (changedId === undefined) throw new Error('seeded session identifier is unavailable')
+      const changed = first.ctx.sessions.get(changedId)
+      if (changed === undefined) throw new Error('seeded session is unavailable')
+      mark(changed, ['changed'])
+      await first.cache.write(changed)
+      expect(put).toHaveBeenCalledTimes(1)
+      expect(put).toHaveBeenCalledWith('sessions', changedId, expect.objectContaining({
+        rows: expect.objectContaining({ 'cache-test/marks': expect.objectContaining({ val: { marks: ['changed'] } }) }),
+      }))
+      put.mockRestore()
+      await first.dispose()
+
+      const second = await sqliteHarness(path)
+      try {
+        const unchangedHeader = headers.get(String(ids[499]))
+        const changedHeader = headers.get(String(ids[500]))
+        if (unchangedHeader === undefined || changedHeader === undefined) throw new Error('seeded headers are unavailable')
+        expect(second.cache.cachedSnapshot(unchangedHeader)?.values['cache-test/marks']).toEqual({ marks: [String(ids[499])] })
+        expect(second.cache.cachedSnapshot(changedHeader)?.values['cache-test/marks']).toEqual({ marks: ['changed'] })
+      } finally {
+        await second.dispose()
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('starts cold when the SQLite database is missing and ignores corrupt legacy JSON cache content', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-projection-cache-'))
+    const path = join(directory, 'session-projcache.db')
+    await writeFile(join(directory, 'session_projcache.json'), '{not json')
+    const runtime = await sqliteHarness(path)
+    try {
+      expect(runtime.cache.cachedSnapshot(headerOf(SessionId('legacy')))).toBeUndefined()
+      const session = runtime.ctx.sessions.create(SessionId('fresh'))
+      mark(session, ['fresh'])
+      await runtime.cache.write(session)
+      expect(runtime.cache.cachedSnapshot(session.header)?.values['cache-test/marks']).toEqual({ marks: ['fresh'] })
+    } finally {
+      await runtime.dispose()
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 })

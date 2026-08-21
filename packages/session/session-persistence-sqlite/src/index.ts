@@ -122,6 +122,15 @@ export class SqliteSessionPersistence extends SessionPersistence {
     return this.coordinator.readFrom(id, fromSeq, signal)
   }
 
+  override readTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }> {
+    return this.coordinator.readTail(id, beforeSeq, limit, signal)
+  }
+
   list(signal?: AbortSignal): Promise<SessionHeader[]> {
     return this.store.list(signal)
   }

@@ -64,6 +64,7 @@ async function harness(): Promise<RuntimeHarness> {
     session,
     inbox,
     status: 'idle',
+    activity: undefined,
     ctx: new Context(),
     send(_message: UserMessage, _target: InboxTarget, _wakeup: boolean) {},
     runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {

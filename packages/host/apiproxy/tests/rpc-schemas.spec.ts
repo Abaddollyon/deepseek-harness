@@ -139,9 +139,15 @@ describe('sessions domain schemas', () => {
     expect(sessionIdSchema.parse('s1')).toBe('s1')
     expect(() => sessionIdSchema.parse('')).toThrow()
     expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false, blank: true })).toMatchObject({ sessionId: 's1', blank: true })
-    expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: true, blank: false, parentSessionId: 'p', cwd: '/x' }).cwd).toBe('/x')
+    expect(sessionSummarySchema.parse({
+      sessionId: 's1', updatedAt: 1, running: true, activity: 'stopping',
+      blank: false, parentSessionId: 'p', cwd: '/x',
+    })).toMatchObject({ cwd: '/x', activity: 'stopping' })
     // blank is mandatory: a summary without it fails the parse.
     expect(() => sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false })).toThrow()
+    expect(() => sessionSummarySchema.parse({
+      sessionId: 's1', updatedAt: 1, running: false, activity: 'other', blank: false,
+    })).toThrow()
     const event = sessionEventSchema.parse({
       type: 'user/message',
       seq: 0,
@@ -519,6 +525,8 @@ describe('events frame schemas', () => {
       { type: 'host/session-added', sessionId: 's', blank: true },
       { type: 'host/session-removed', sessionId: 's' },
       { type: 'host/session-status', sessionId: 's', running: true },
+      { type: 'host/session-status', sessionId: 's', running: false, activity: 'stopping' },
+      { type: 'host/session-status', sessionId: 's', running: false, activity: 'maintenance' },
       { type: 'host/agent-error', sessionId: 's', message: 'boom' },
       { type: 'host/workspace-changed', workspace: {
         workspaceId: 'w', path: '/w', title: 'w', sessionIds: [],
@@ -532,6 +540,9 @@ describe('events frame schemas', () => {
       { type: 'stream/error', error: { code: 'internal', message: 'm', details: {} } },
     ]
     for (const frame of frames) expect(hostFrameSchema.parse(frame)).toMatchObject({ type: frame.type })
+    expect(() => hostFrameSchema.parse({
+      type: 'host/session-status', sessionId: 's', running: false, activity: 'other',
+    })).toThrow()
   })
 })
 

@@ -10,7 +10,10 @@ import type { TrajectorySnapshot } from '../src/client/trajectory-contract.ts'
 import { registerTrajectoryMessageDefinitions } from '../src/client/trajectory-message-definitions.ts'
 import { registerTrajectoryRequestHeaderDefinition } from '../src/client/trajectory-request-header-definition.ts'
 import { trajectoryViewDefinition } from '../src/client/trajectory-snapshot-builder.ts'
-import { registerTrajectoryToolDefinition } from '../src/client/trajectory-tool-definition.ts'
+import {
+  registerTrajectoryToolDefinition,
+  setTrajectoryToolProjectionOperationHook,
+} from '../src/client/trajectory-tool-definition.ts'
 
 const DEFINITIONS: ConversationNodeDefinition[] = []
 const registrationContext = {
@@ -216,6 +219,69 @@ describe('Trajectory conversation Definitions', () => {
       callId: 'child',
       call: { name: 'read' },
     }])
+  })
+
+  it('reprojects only the changed leaf-to-root path for wide fan-out', () => {
+    const fanout = Array.from({ length: 32 }, (_, index) => at(index + 3, 'tool/code-dispatch-start', {
+      rootCallId: 'root', parentCallId: 'root', subCallId: 'child-' + index,
+      name: 'read', arguments: { index },
+    }))
+    let operations = 0
+    setTrajectoryToolProjectionOperationHook(() => { operations++ })
+    try {
+      const value = assembler([
+        at(1, 'turn/start', { turn: 1 }),
+        at(2, 'tool/call', { turn: 1, step: 1, callId: 'root', name: 'code', arguments: '{}' }),
+        ...fanout,
+        at(40, 'tool/result', {
+          message: { content: [{ content: [], isError: false }], source: { callId: 'root' } },
+          meta: {},
+        }),
+      ])
+      const nodeOf = (candidate: { kind: string; callId?: string } | undefined) =>
+        candidate !== undefined && candidate.kind === 'tool-result' && 'subCalls' in candidate
+          ? candidate as { subCalls: readonly unknown[] }
+          : undefined
+      const first = nodeOf(snapshot(value).eventNodes.find(node => node.kind === 'tool-result' && node.callId === 'root'))
+      expect(first?.subCalls).toHaveLength(32)
+      expect(operations).toBe(33)
+      const firstChild = first?.subCalls[0]
+      value.append(at(41, 'tool/code-dispatch-start', {
+        rootCallId: 'root', parentCallId: 'root', subCallId: 'child-32',
+        name: 'read', arguments: { index: 32 },
+      }))
+      value.flush()
+      const second = nodeOf(snapshot(value).eventNodes.find(node => node.kind === 'tool-result' && node.callId === 'root'))
+      expect(second?.subCalls[0]).toBe(firstChild)
+      expect(second?.subCalls).toHaveLength(33)
+      expect(operations).toBe(35)
+    } finally {
+      setTrajectoryToolProjectionOperationHook(undefined)
+    }
+  })
+
+  it('keeps deep-chain projection bounded and caches unchanged descendants', () => {
+    const chain = Array.from({ length: 255 }, (_, index) => at(index + 3, 'tool/code-dispatch-start', {
+      rootCallId: 'root', parentCallId: index === 0 ? 'root' : 'child-' + (index - 1),
+      subCallId: 'child-' + index, name: 'read', arguments: { index },
+    }))
+    let operations = 0
+    setTrajectoryToolProjectionOperationHook(() => { operations++ })
+    try {
+      const current = snapshot(assembler([
+        at(1, 'turn/start', { turn: 1 }),
+        at(2, 'tool/call', { turn: 1, step: 1, callId: 'root', name: 'code', arguments: '{}' }),
+        ...chain,
+        at(258, 'tool/result', {
+          message: { content: [{ content: [], isError: false }], source: { callId: 'root' } },
+          meta: {},
+        }),
+      ]))
+      expect(operations).toBe(256)
+      expect(current.eventNodes.find(node => node.kind === 'tool-result' && node.callId === 'root')).toBeDefined()
+    } finally {
+      setTrajectoryToolProjectionOperationHook(undefined)
+    }
   })
 
   it('assembles compaction lifecycle, checkpoint replacement, and orphan interruption', () => {

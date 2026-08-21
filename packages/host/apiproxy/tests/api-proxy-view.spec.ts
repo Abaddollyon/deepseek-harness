@@ -102,7 +102,80 @@ async function collect(iterable: AsyncIterable<RpcRequest<MuxFrame>>, count: num
   return frames
 }
 
+/** Read one named live event and close its mux stream. */
+async function collectEvent(
+  iterable: AsyncIterable<RpcRequest<MuxFrame>>,
+  type: SessionEvent['type'],
+  abort: AbortController,
+): Promise<RpcRequest<MuxFrame>> {
+  for await (const envelope of iterable) {
+    if (envelope.payload.type !== 'session/event' || envelope.payload.event.type !== type) continue
+    abort.abort()
+    return envelope
+  }
+  throw new Error(`mux closed before ${type}`)
+}
+
 describe('mux live view computation', () => {
+  it('drops only still-queued chunks when turn/end enters a session queue', async () => {
+    const { ctx } = await harness()
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const abort = new AbortController()
+    const iterator = api.events.mux({ rpcId: RpcId('t-coalesced-mux'), payload: {} }, abort.signal)[Symbol.asyncIterator]()
+    const session = ctx.sessions.create()
+    expect((await iterator.next()).value?.payload.type).toBe('session/subscribed')
+
+    session.append('assistant/chunk', {
+      turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'already sent' },
+    })
+    const sent = await iterator.next()
+    expect(sent.value?.payload.type === 'session/event' && sent.value.payload.event.type).toBe('assistant/chunk')
+
+    session.append('assistant/chunk', {
+      turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'superseded' },
+    })
+    appendAssistantText(session, 'settled', 1)
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const remaining: MuxFrame[] = []
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      remaining.push(next.value.payload)
+      if (next.value.payload.type === 'session/event' && next.value.payload.event.type === 'turn/end') break
+    }
+    abort.abort()
+    await iterator.next()
+    const remainingEvents = remaining.filter(frame => frame.type === 'session/event')
+    expect(remainingEvents.map(frame => frame.event.type)).toEqual(['assistant/message', 'turn/end'])
+  })
+
+  it('computes one view and shares one envelope across connected mux streams', async () => {
+    const { ctx } = await harness()
+    const presentCall = vi.fn(() => ({ card: 'generic' as const, title: 'shared call' }))
+    ctx.tools.register(tool('shared', { presentCall }))
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const firstAbort = new AbortController()
+    const secondAbort = new AbortController()
+    const first = collectEvent(
+      api.events.mux({ rpcId: RpcId('t-shared-mux-1'), payload: {} }, firstAbort.signal),
+      'tool/call',
+      firstAbort,
+    )
+    const second = collectEvent(
+      api.events.mux({ rpcId: RpcId('t-shared-mux-2'), payload: {} }, secondAbort.signal),
+      'tool/call',
+      secondAbort,
+    )
+
+    const session = ctx.sessions.create()
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('c-shared'), name: 'shared', arguments: '{}' })
+
+    const [firstEnvelope, secondEnvelope] = await Promise.all([first, second])
+    expect(presentCall).toHaveBeenCalledOnce()
+    expect(firstEnvelope).toBe(secondEnvelope)
+  })
+
   it('attaches the three standard card views, omits view without a presenter, soft-falls on throw', async () => {
     const { ctx } = await harness()
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })

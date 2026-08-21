@@ -38,6 +38,7 @@ function stubAgentForSession(session: Session): StubAgent {
     inbox,
     ctx: new Context(),
     status: 'idle',
+    activity: undefined,
     send: () => {},
     followup: () => {},
     steer: () => {},

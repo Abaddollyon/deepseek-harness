@@ -3,7 +3,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { TrajectoryTable } from '../src/client/TrajectoryTable.tsx'
+import { createTrajectoryTableProjectionCache, TrajectoryTable } from '../src/client/TrajectoryTable.tsx'
 import type { TrajectoryTurnModel } from '../src/client/layout.ts'
 
 afterEach(() => {
@@ -65,6 +65,86 @@ const FOLD_PROPS = {
 }
 
 describe('TrajectoryTable', () => {
+  it('counts full projection tail operations and rebuilds prepends equivalently', () => {
+    const cache = createTrajectoryTableProjectionCache()
+    const turns = Array.from({ length: 1_000 }, (_, index): TrajectoryTurnModel => ({
+      turn: index + 1,
+      groups: [{ title: 'Step 1', cells: [{
+        index: index + 1, kind: 'message', text: String(index), timeSeconds: 0,
+      }] }],
+    }))
+    const input = { sessionNumbers: undefined, search: null, ...FOLD_PROPS }
+    cache.project({ turns, ...input })
+    const tail = { turn: 1_001, groups: [{ title: 'Step 1', cells: [{
+      index: 1_001, kind: 'message' as const, text: 'tail', timeSeconds: 0,
+    }] }] }
+    cache.project({ turns: [...turns, tail], ...input })
+
+    expect(cache.operationCount).toBe(5_003)
+    const prepended = [tail, ...turns]
+    const rebuilt = cache.project({ turns: prepended, ...input })
+    const fresh = createTrajectoryTableProjectionCache().project({ turns: prepended, ...input })
+    expect(rebuilt).toEqual(fresh)
+  })
+
+  it('patches an immutable replacement of the final turn', () => {
+    const cache = createTrajectoryTableProjectionCache()
+    const first: TrajectoryTurnModel = { turn: 1, groups: [{ title: 'Step 1', cells: [{ index: 1, kind: 'message', text: 'first', timeSeconds: 0 }] }] }
+    const partial: TrajectoryTurnModel = { turn: 2, groups: [{ title: 'Step 1', cells: [{ index: 2, kind: 'message', text: 'partial', timeSeconds: 0 }] }] }
+    const final: TrajectoryTurnModel = { turn: 2, groups: [{ title: 'Step 1', cells: [{ index: 2, kind: 'message', text: 'final', timeSeconds: 0 }] }] }
+    const input = { sessionNumbers: undefined, search: null, ...FOLD_PROPS }
+    cache.project({ turns: [first, partial], ...input })
+    expect(cache.project({ turns: [first, final], ...input })).toEqual(
+      createTrajectoryTableProjectionCache().project({ turns: [first, final], ...input }),
+    )
+    expect(cache.operationCount).toBe(9)
+  })
+
+  it('merges a terminal request boundary with appended content', () => {
+    const cache = createTrajectoryTableProjectionCache()
+    const boundary: TrajectoryTurnModel = { turn: 1, groups: [{ title: 'Step 1', cells: [{ index: 1, kind: 'message', text: '', requestOnly: true, timeSeconds: 0 }] }] }
+    const content: TrajectoryTurnModel = { turn: 2, groups: [{ title: 'Step 1', cells: [{ index: 2, kind: 'message', text: 'content', timeSeconds: 0 }] }] }
+    const input = { sessionNumbers: undefined, search: null, ...FOLD_PROPS }
+    cache.project({ turns: [boundary], ...input })
+    const patched = cache.project({ turns: [boundary, content], ...input })
+    expect(patched).toEqual(createTrajectoryTableProjectionCache().project({ turns: [boundary, content], ...input }))
+    expect(patched.projectedVirtualRows[0]?.entries).toHaveLength(2)
+  })
+
+  it('preserves the visible prefix when a finalized tail is appended', () => {
+    const cells = Array.from({ length: 99 }, (_, index) => ({
+      index: index + 1,
+      kind: 'context' as const,
+      sourceSeq: index + 1,
+      text: `Context ${index + 1}`,
+      timeSeconds: 0,
+    }))
+    const initial: readonly TrajectoryTurnModel[] = [{
+      turn: 1,
+      groups: [{ title: 'Context', cells }],
+    }]
+    const view = render(<TrajectoryTable turns={initial} {...FOLD_PROPS} />)
+    const firstKey = view.container.querySelector('tr[data-trajectory-row-key]')
+      ?.getAttribute('data-trajectory-row-key')
+    const appended = {
+      index: 100,
+      kind: 'context' as const,
+      sourceSeq: 100,
+      text: 'Context 100',
+      timeSeconds: 0,
+    }
+
+    view.rerender(<TrajectoryTable turns={[...initial, {
+      turn: 2,
+      groups: [{ title: 'Context', cells: [appended] }],
+    }]} {...FOLD_PROPS} />)
+
+    expect(screen.getByText('Context 1')).toBeTruthy()
+    expect(screen.getByText('Context 100')).toBeTruthy()
+    expect(view.container.querySelector('tr[data-trajectory-row-key]')
+      ?.getAttribute('data-trajectory-row-key')).toBe(firstKey)
+  })
+
   it('shows a muted placeholder for an assistant response containing only tool calls', () => {
     const turns: readonly TrajectoryTurnModel[] = [{
       turn: 1,

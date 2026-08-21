@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The persisted projection cache (`ctx.sessionProjectionCache`): durable checkpoints of every registered projection unit's state, one record per session on the domain data form (`session_projcache` domain — the shipped json backend lands it beside `workspace.json` under the configured storage root). Design authority: the [session-projection RFC](../../../.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md) (persisted projection cache section).
+The persisted projection cache (`ctx.sessionProjectionCache`): durable checkpoints of every registered projection unit's state, one record per session on the `session_projcache` domain. The shipped Web composition routes that domain alone to SQLite at `<storage root>/session-projcache.db`; every checkpoint is one keyed SQLite row, so changing one session does not rewrite other cached sessions. Other domains, including `workspace` and message feedback, remain on the JSON backend. A missing database starts cold, and the previous `session_projcache.json` cache is ignored. Design authority: the [session-projection RFC](../../../.agents/notes/proposed/architecture/2026-07-27-session-projection-and-command-log.md) (persisted projection cache section).
 
 A stored row `(key → {ver, seq, val})` is a fold shortcut, never an authority: possibly stale (`seq` says exactly how stale) but never wrong. Consequences the implementation commits to:
 
@@ -10,7 +10,7 @@ A stored row `(key → {ver, seq, val})` is a fold shortcut, never an authority:
 - **A `ver` mismatch against the live unit's `stateVersion` discards, never migrates.** A unit bump invalidates its rows at read time; the key refolds from the log.
 - **Whole-record writes.** Each write replaces the session's full checkpoint (the registry cut is always complete), snapshotted through the lossless-JSON boundary — a unit state violating the plain-JSON contract fails loud.
 - **Records are bound to a log lifecycle, not just an id.** Each record stores the header identity (`createdAt`, `cwd`) it was folded from; every read validates it (the live or stored header is the witness) before accepting a row, so a deleted-then-recreated id or a persistence store swapped under a surviving cache discards the unrelated record instead of seeding phantom values.
-- **The log leads, the cache follows.** A live checkpoint flushes the session's buffered events durably BEFORE the cache row lands, so a crash can leave the cache behind the log (a longer tail replay) but never ahead of it.
+- **Mandatory checkpoints drain the log; mid-stream checkpoints do not.** `turn/end` and detach flush buffered events before their cache rows land. Count and interval checkpoints avoid that barrier during streaming, so a crash can leave a cache row ahead of the stored log; the cold-read restore guard rejects that overreach and replays from seq 0.
 
 ## Write policy
 
@@ -20,8 +20,8 @@ Two mandatory points, throttled in between:
 |---|---|
 | `turn/end` | Mandatory — the turn-final value is what cold reads want. |
 | Session disposal (detach) | Mandatory — the live-to-cold moment; after it the cold ladder serves this session. |
-| `writeEveryEvents` committed events | Config throttle (count). |
-| `writeIntervalMs` since the first dirty event | Config throttle (interval). |
+| `writeEveryEvents` projection-moving events | Config throttle (count). |
+| `writeIntervalMs` since the first projection-moving event | Config throttle (interval). |
 
 Both `Config` fields are required (no defaults): flush cadence is a deployment choice with no universally correct value, stated in cordis.yml.
 
@@ -33,7 +33,7 @@ The zero-I/O rung: whole values viewed straight from the identity-matching store
 
 The read ladder, zero full-log load on the happy path: cached rows → `sessionProjections.restoreFloor` (anchored one event below the lowest usable watermark) → persistence `readFrom(id, floor)` → `sessionProjections.restore` → fail-soft write-back of the refreshed rows. The anchor makes a shrunk log (crash-repair truncation) provable: an overreaching row triggers exactly one full re-read from seq 0 instead of serving a ghost value. No registered units serve `{asOfSeq: -1, values: {}}` without touching persistence; a session with no persisted log rejects with the seam's `not found`.
 
-`write(session)` is the synchronous-cut checkpoint both mandatory points use; carriers may call it directly (not fail-soft — the fail-soft wrappers own containment).
+`write(session)` is the synchronous-cut mid-stream checkpoint and does not drain the session log; carriers may call it directly (not fail-soft — the fail-soft wrappers own containment). Mandatory paths use the private log-draining checkpoint.
 
 ## Composition
 

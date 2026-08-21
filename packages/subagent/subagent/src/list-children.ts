@@ -10,8 +10,10 @@
  * is the single classification authority — this module parses no descriptor
  * itself. Absent persistence, enumeration is live-only: a cold child is
  * unreachable for resume anyway, so its absence is capability absence, not an
- * error. The module owns no catalog state and does not consult Activation,
- * Agent-registry, continuation-manager, or provider state.
+ * error. Cold headers and root-scoped sorted topology are cached across
+ * unchanged listings and invalidated by session lifecycle edges. The module
+ * does not consult Activation, Agent-registry, continuation-manager, or
+ * provider state.
  *
  * @module @deepseek-ai/dsh-subagent
  */
@@ -112,8 +114,88 @@ interface ListingRuntime {
   readonly projections: SessionProjectionRegistry
   readonly persistence: SessionPersistence | undefined
   readonly cache: SessionProjectionCache | undefined
-  readonly corpus: ReadonlyMap<SessionId, CorpusRecord>
+  readonly topology: CatalogTopology
+}
+
+interface ColdCorpusIndex {
+  readonly byParent: ReadonlyMap<SessionId, readonly CorpusRecord[]>
+}
+
+interface CatalogTopology {
+  readonly directCandidates: readonly CorpusRecord[]
+  readonly positioned: readonly PositionedCandidate[]
   readonly subagentParents: ReadonlySet<SessionId>
+}
+
+/**
+ * Memoizes immutable persistence headers and root-scoped sorted topology until a
+ * session lifecycle edge makes either view stale.
+ */
+export class SubagentCatalogCache {
+  private cold: ColdCorpusIndex | undefined
+  private generation = 0
+  private readonly topologies = new Map<SessionId, CatalogTopology>()
+
+  /** Discard cached persistence and topology after session creation or disposal. */
+  invalidate(): void {
+    this.generation += 1
+    this.cold = undefined
+    this.topologies.clear()
+  }
+
+  /**
+   * Prepare one root's topology, scanning persistence only when invalidated.
+   * @param persistence - optional durable session enumeration service.
+   * @param liveSessions - current live sessions, which replace matching cold headers.
+   * @param rootSessionId - root whose reachable subtree is prepared.
+   * @param signal - caller cancellation forwarded to an uncached persistence scan.
+   * @returns sorted direct children, descendant positions, and child-presence facts.
+   */
+  async prepare(
+    persistence: SessionPersistence | undefined,
+    liveSessions: readonly Session[],
+    rootSessionId: SessionId,
+    signal: AbortSignal | undefined,
+  ): Promise<CatalogTopology> {
+    const cached = this.topologies.get(rootSessionId)
+    if (cached !== undefined) return cached
+    const generation = this.generation
+    const cold = await this.prepareCold(persistence, signal, generation)
+    const topology = buildRootTopology(cold, liveSessions, rootSessionId)
+    if (this.generation === generation) this.topologies.set(rootSessionId, topology)
+    return topology
+  }
+
+  /** Read and index immutable cold headers once. */
+  private async prepareCold(
+    persistence: SessionPersistence | undefined,
+    signal: AbortSignal | undefined,
+    generation: number,
+  ): Promise<ColdCorpusIndex> {
+    if (this.cold !== undefined) return this.cold
+    let headers: readonly SessionHeader[] = []
+    if (persistence !== undefined) {
+      try {
+        headers = await persistence.list(signal)
+      } catch (error: unknown) {
+        assertListingNotCancelled(signal)
+        throw error
+      }
+      assertListingNotCancelled(signal)
+    }
+    const byParent = new Map<SessionId, CorpusRecord[]>()
+    for (const header of headers) {
+      const parentId = header.parentSession
+      if (parentId === undefined) continue
+      const siblings = byParent.get(parentId)
+      const record = { header, live: undefined }
+      if (siblings === undefined) byParent.set(parentId, [record])
+      else siblings.push(record)
+    }
+    const cold = { byParent }
+    if (this.generation === generation) this.cold = cold
+    return cold
+  }
 }
 
 interface PositionedCandidate {
@@ -128,6 +210,7 @@ interface PositionedCandidate {
  * live-preferred corpus. The two projections share candidate resolution too, so
  * a catalog RPC does not scan persistence twice or fold the same child twice.
  * @param ctx - context carrying the session store, projection registry, and optional persistence/cache.
+ * @param catalogCache - lifecycle-invalidated cold corpus and root topology cache.
  * @param rootSessionId - session whose direct children and descendant tree are listed.
  * @param signal - caller-owned cancellation observed around every persistence read.
  * @returns both public catalog views with their historical ordering preserved.
@@ -135,15 +218,12 @@ interface PositionedCandidate {
  */
 export async function listChildrenAndDescendants(
   ctx: Context,
+  catalogCache: SubagentCatalogCache,
   rootSessionId: SessionId,
   signal?: AbortSignal,
 ): Promise<SubagentCatalogListing> {
-  const listing = await prepareListing(ctx, signal)
-  const directCandidates = [...listing.corpus.values()]
-    .filter(record => record.header.parentSession === rootSessionId
-      && record.header.origin === 'subagent')
-    .sort(compareCorpusRecords)
-  const positioned = descendantCandidates(listing.corpus, rootSessionId)
+  const listing = await prepareListing(ctx, catalogCache, rootSessionId, signal)
+  const { directCandidates, positioned } = listing.topology
 
   // A direct child normally appears in both views. Resolve each candidate once
   // while retaining the direct-list and pre-order traversal projections.
@@ -181,20 +261,19 @@ export async function listChildrenAndDescendants(
 /**
  * Enumerate direct children while preserving the historical public method.
  * @param ctx - Plugin context the listing reads its session corpus through.
+ * @param catalogCache - lifecycle-invalidated cold corpus and root topology cache.
  * @param parentSessionId - Session whose immediate children are listed.
  * @param signal - Cancels the underlying corpus read.
  * @returns One entry per direct child, in corpus order.
  */
 export async function listChildren(
   ctx: Context,
+  catalogCache: SubagentCatalogCache,
   parentSessionId: SessionId,
   signal?: AbortSignal,
 ): Promise<SubagentListEntry[]> {
-  const listing = await prepareListing(ctx, signal)
-  const candidates = [...listing.corpus.values()]
-    .filter(record => record.header.parentSession === parentSessionId
-      && record.header.origin === 'subagent')
-    .sort(compareCorpusRecords)
+  const listing = await prepareListing(ctx, catalogCache, parentSessionId, signal)
+  const candidates = listing.topology.directCandidates
   const rows = await resolveCandidateRows(candidates, listing, signal)
   return rows.filter((row): row is SubagentListEntry => row !== undefined)
 }
@@ -207,6 +286,7 @@ export async function listChildren(
  * resumed.
  * @see SubagentRuntime.listDescendants for the public cancellation and failure contract.
  * @param ctx - context carrying the session store, projection registry, and optional persistence/cache.
+ * @param catalogCache - lifecycle-invalidated cold corpus and root topology cache.
  * @param rootSessionId - session whose complete descendant tree is listed.
  * @param signal - caller-owned cancellation observed around every persistence read.
  * @returns interpreted subagents with durable direct-parent and root-relative depth.
@@ -214,11 +294,12 @@ export async function listChildren(
  */
 export async function listDescendants(
   ctx: Context,
+  catalogCache: SubagentCatalogCache,
   rootSessionId: SessionId,
   signal?: AbortSignal,
 ): Promise<SubagentDescendantListEntry[]> {
-  const listing = await prepareListing(ctx, signal)
-  const positioned = descendantCandidates(listing.corpus, rootSessionId)
+  const listing = await prepareListing(ctx, catalogCache, rootSessionId, signal)
+  const { positioned } = listing.topology
   const rows = await resolveCandidateRows(
     positioned.map(candidate => candidate.record),
     listing,
@@ -265,6 +346,8 @@ function servedParentSubagentLink(
 /** Resolve listing services once and build one live-preferred session corpus. */
 async function prepareListing(
   ctx: Context,
+  catalogCache: SubagentCatalogCache,
+  rootSessionId: SessionId,
   signal: AbortSignal | undefined,
 ): Promise<ListingRuntime> {
   const projections = ctx.get('sessionProjections')
@@ -293,32 +376,9 @@ async function prepareListing(
   // cold candidate takes the authoritative preparation rung, so it carries
   // no error code and no configuration check.
   const cache = ctx.get('sessionProjectionCache')
-  let persistedHeaders: readonly SessionHeader[] = []
-  if (persistence !== undefined) {
-    try {
-      persistedHeaders = await persistence.list(signal)
-    } catch (error: unknown) {
-      // The backend may reject with its own abort failure after observing the
-      // forwarded signal; cancellation stays a stable subagent failure.
-      assertListingNotCancelled(signal)
-      throw error
-    }
-    assertListingNotCancelled(signal)
-  }
-  // Live-preferred merge without header reconciliation: a live record wins
-  // its id wholesale, exactly as a live-preferred corpus would serve it.
-  const corpus = new Map<SessionId, CorpusRecord>()
-  for (const header of persistedHeaders) corpus.set(header.id, { header, live: undefined })
-  for (const session of sessions.list()) {
-    corpus.set(session.header.id, { header: session.header, live: session })
-  }
-  const subagentParents = new Set<SessionId>()
-  for (const record of corpus.values()) {
-    if (record.header.origin === 'subagent' && record.header.parentSession !== undefined) {
-      subagentParents.add(record.header.parentSession)
-    }
-  }
-  return { projections, persistence, cache, corpus, subagentParents }
+  const topology = await catalogCache.prepare(persistence, sessions.list(), rootSessionId, signal)
+  assertListingNotCancelled(signal)
+  return { projections, persistence, cache, topology }
 }
 
 /** Resolve projection-backed rows for aligned candidates with bounded cold reads. */
@@ -327,7 +387,7 @@ async function resolveCandidateRows(
   listing: ListingRuntime,
   signal: AbortSignal | undefined,
 ): Promise<(SubagentListEntry | undefined)[]> {
-  const { projections, persistence, cache, subagentParents } = listing
+  const { projections, persistence, cache, topology: { subagentParents } } = listing
   const rows: (SubagentListEntry | undefined)[] = Array.from({ length: candidates.length })
   const coldReads: { index: number; header: SessionHeader }[] = []
   candidates.forEach((candidate, index) => {
@@ -376,23 +436,34 @@ async function resolveCandidateRows(
   return rows
 }
 
-/** Build origin-classified candidates from the complete tree without recursion. */
-function descendantCandidates(
-  corpus: ReadonlyMap<SessionId, CorpusRecord>,
+/** Build sorted candidates only for the requested root's reachable subtree. */
+function buildRootTopology(
+  cold: ColdCorpusIndex,
+  liveSessions: readonly Session[],
   rootSessionId: SessionId,
-): PositionedCandidate[] {
-  const children = new Map<SessionId, CorpusRecord[]>()
-  for (const record of corpus.values()) {
-    const parentId = record.header.parentSession
+): CatalogTopology {
+  const liveIds = new Set(liveSessions.map(session => session.id))
+  const liveByParent = new Map<SessionId, CorpusRecord[]>()
+  for (const session of liveSessions) {
+    const parentId = session.header.parentSession
     if (parentId === undefined) continue
-    const siblings = children.get(parentId)
-    if (siblings === undefined) children.set(parentId, [record])
+    const siblings = liveByParent.get(parentId)
+    const record = { header: session.header, live: session }
+    if (siblings === undefined) liveByParent.set(parentId, [record])
     else siblings.push(record)
   }
-  for (const siblings of children.values()) siblings.sort(compareCorpusRecords)
+  const childrenOf = (parentId: SessionId): readonly CorpusRecord[] => {
+    return [
+      ...(cold.byParent.get(parentId) ?? []).filter(record => !liveIds.has(record.header.id)),
+      ...(liveByParent.get(parentId) ?? []),
+    ].sort(compareCorpusRecords)
+  }
 
+  const direct = childrenOf(rootSessionId)
+  const directCandidates = direct.filter(record => record.header.origin === 'subagent')
   const positioned: PositionedCandidate[] = []
-  const stack: PositionedCandidate[] = (children.get(rootSessionId) ?? [])
+  const subagentParents = new Set<SessionId>()
+  const stack: PositionedCandidate[] = direct
     .map(record => ({ record, parentId: rootSessionId, depth: 1 }))
     .reverse()
   const visited = new Set<SessionId>([rootSessionId])
@@ -403,12 +474,18 @@ function descendantCandidates(
     const id = position.record.header.id
     if (visited.has(id)) continue
     visited.add(id)
-    if (position.record.header.origin === 'subagent') positioned.push(position)
-    const descendants = children.get(id) ?? []
+    if (position.record.header.origin === 'subagent') {
+      positioned.push(position)
+      subagentParents.add(position.parentId)
+    }
+    const descendants = childrenOf(id)
     const nearestSubagentId = position.record.header.origin === 'subagent'
       ? id
       : position.parentSubagentId
-    for (const record of [...descendants].reverse()) {
+    for (let index = descendants.length - 1; index >= 0; index -= 1) {
+      const record = descendants[index]
+      /* v8 ignore next -- the indexed value exists for the bounded loop. */
+      if (record === undefined) continue
       stack.push({
         record,
         parentId: id,
@@ -417,7 +494,7 @@ function descendantCandidates(
       })
     }
   }
-  return positioned
+  return { directCandidates, positioned, subagentParents }
 }
 
 /** Compare siblings by durable creation time, then id. */

@@ -2,11 +2,13 @@ import { memo, useMemo } from 'react'
 import { JsonBlock } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatNodeOwnerProps, ChatViewSlotProps } from '../contract/slots.ts'
 import type { ChatNode } from '../contract/chat-nodes.ts'
+import { rootNodeKeyForToolCallStore } from './tool-node-reader.ts'
 import css from './ChatView.module.css'
 
-interface ChatNodeSeatProps extends ChatNodeOwnerProps {
+interface ChatNodeSeatProps extends Omit<ChatNodeOwnerProps, 'selectedCallId'> {
   readonly nodeKey: string
   readonly useSession: ChatViewSlotProps['useSession']
+  readonly useStore: ChatViewSlotProps['useStore']
   readonly renderSlot: ChatViewSlotProps['renderSlot']
   readonly t: ChatViewSlotProps['t']
 }
@@ -17,10 +19,17 @@ type RoutedChatNodeOwner = {
 
 /** Subscribe and dispatch one stable Context key without observing sibling Nodes. */
 export const ChatNodeSeat = memo(function ChatNodeSeat({
-  nodeKey, selectedCallId, cwd, openFile, inspectCall, forkAt,
-  renderMessageImages, fileMentions, useSession, renderSlot, t,
+  nodeKey, cwd, openFile, inspectCall, forkAt,
+  renderMessageImages, fileMentions, useSession, useStore, renderSlot, t,
 }: ChatNodeSeatProps) {
+  const nodeStore = useSession(snapshot => snapshot.chat.nodes)
   const node = useSession(snapshot => snapshot.chat.nodes.get(nodeKey))
+  const selectedCallId = useStore((state) => {
+    const callId = state.selection?.callId
+    return callId !== undefined && rootNodeKeyForToolCallStore(nodeStore, callId) === nodeKey
+      ? callId
+      : undefined
+  })
   const routedNode = node as ChatNode | undefined
   // Presence, not the Node itself: the owner object carries no Node field, so a
   // streaming delta must not mint a new owner identity and defeat the keyed

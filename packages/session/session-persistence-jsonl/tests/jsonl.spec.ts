@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import JsonlSessionPersistence, { JSONL_INDEX_FORMAT_VERSION } from '@deepseek-ai/dsh-session-persistence-jsonl'
 import {
   encodeSegment, eventLines, logPath, projectDir, projectKey, scanLog, sessionDir, SessionLogScanner, toHeaderLine,
 } from '../src/format.ts'
@@ -1203,6 +1203,98 @@ describe('JsonlSessionPersistence: edge cases', () => {
 
     const ids = (await ctx.sessionPersistence.list()).map(x => x.id).sort()
     expect(ids).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('serves 1,000 indexed artifacts without rereading artifact headers', async () => {
+    const headers = Array.from({ length: 1_000 }, (_, index) =>
+      meta(`indexed-many-${index}`, `/project-${index % 4}`))
+    await Promise.all(headers.map(async (header) => {
+      const path = rawLogPath(root, header.cwd, header.id)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, `${JSON.stringify(toHeaderLine(header))}\n${eventLines(oneTurnLog(), true)}\n`)
+    }))
+
+    expect(await ctx.sessionPersistence.list()).toHaveLength(1_000)
+    const internals = ctx.sessionPersistence as unknown as {
+      readFirstLine(path: string, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const headerReads = vi.spyOn(internals, 'readFirstLine')
+
+    expect(await ctx.sessionPersistence.list()).toHaveLength(1_000)
+    expect(await ctx.sessionPersistence.listSnapshots()).toHaveLength(1_000)
+    expect(headerReads).not.toHaveBeenCalled()
+  })
+
+  it('resolves an indexed id without a full artifact scan', async () => {
+    const header = meta('indexed-lookup', '/lookup')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const internals = ctx.sessionPersistence as unknown as {
+      scanArtifacts(signal?: AbortSignal): Promise<unknown[]>
+      findPhysicalLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const scan = vi.spyOn(internals, 'scanArtifacts')
+    const fallback = vi.spyOn(internals, 'findPhysicalLog')
+
+    await expect(ctx.sessionPersistence.load(header.id)).resolves.toMatchObject({ meta: header })
+    expect(scan).not.toHaveBeenCalled()
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
+  it('rereads and repairs only a stale index entry', async () => {
+    const first = meta('stale-first', '/stale')
+    const second = meta('stale-second', '/stale')
+    for (const header of [first, second]) {
+      await ctx.sessionPersistence.create(header)
+      await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    }
+    await rewriteHeader(rawLogPath(root, first.cwd, first.id), (header) => { header.createdAt = 2000 })
+    const internals = ctx.sessionPersistence as unknown as {
+      readFirstLine(path: string, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const headerReads = vi.spyOn(internals, 'readFirstLine')
+
+    const listed = await ctx.sessionPersistence.list()
+    expect(listed.find(header => header.id === first.id)?.createdAt).toBe(2000)
+    expect(headerReads).toHaveBeenCalledTimes(1)
+    const index = JSON.parse(await readFile(join(root, 'session-index.json'), 'utf8')) as {
+      entries: Record<string, { header: SessionHeader }>
+    }
+    expect(index.entries[first.id]?.header.createdAt).toBe(2000)
+    expect(index.entries[second.id]?.header).toMatchObject(second)
+  })
+
+  it('logs and rebuilds a corrupt root index from artifacts', async () => {
+    const header = meta('corrupt-index', '/index')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    await writeFile(join(root, 'session-index.json'), '{broken index')
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([header])
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/refusing corrupt or obsolete session index.*rebuilding/))
+    const rebuilt = JSON.parse(await readFile(join(root, 'session-index.json'), 'utf8')) as {
+      formatVersion: number
+      entries: Record<string, unknown>
+    }
+    expect(rebuilt.formatVersion).toBe(JSONL_INDEX_FORMAT_VERSION)
+    expect(rebuilt.entries).toHaveProperty(header.id)
+  })
+
+  it('refuses an old index format and rebuilds without migration', async () => {
+    const header = meta('old-index', '/index')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const path = join(root, 'session-index.json')
+    const old = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+    old.formatVersion = JSONL_INDEX_FORMAT_VERSION - 1
+    await writeFile(path, JSON.stringify(old) + '\n')
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([header])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unsupported session index format'))
+    const rebuilt = JSON.parse(await readFile(path, 'utf8')) as { formatVersion: number }
+    expect(rebuilt.formatVersion).toBe(JSONL_INDEX_FORMAT_VERSION)
   })
 
   it('groups sessions whose cwd paths normalize to the same project directory', async () => {

@@ -56,10 +56,17 @@
       config:
         root: !!js dshHomePath('storages')
 
+    - id: storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      config:
+        path: !!js dshHomePath('storages', 'session-projcache.db')
+
     - id: storage-domain
       name: '@deepseek-ai/dsh-storage-domain'
       config:
         backend: json
+        routes:
+          session_projcache: sqlite
 
     - id: message-feedback
       name: '@deepseek-ai/dsh-message-feedback'

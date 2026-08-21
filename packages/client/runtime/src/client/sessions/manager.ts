@@ -88,6 +88,30 @@ function bufferedRequestKey(envelope: RpcRequest<MuxFrame>): string | undefined 
   }
 }
 
+/**
+ * Mirror a map into a plain record, returning the previous mirror when no
+ * member was added, removed, or replaced (member values are already
+ * identity-stable snapshots, so identity equality is the change test).
+ * @param prev - the previously published mirror.
+ * @param source - the authoritative map.
+ * @returns `prev` when unchanged, otherwise a fresh record.
+ */
+function stableRecordMirror<K extends string, V>(
+  prev: Readonly<Record<K, V>>,
+  source: ReadonlyMap<K, V>,
+): Readonly<Record<K, V>> {
+  let same = Object.keys(prev).length === source.size
+  if (same) {
+    for (const [key, value] of source) {
+      if (prev[key] !== value) {
+        same = false
+        break
+      }
+    }
+  }
+  return same ? prev : Object.fromEntries(source) as Record<K, V>
+}
+
 /** Match ui-user-questions's binary plan-review routing at the wire boundary. */
 function questionInteractionStatus(
   questions: Extract<MuxFrame, { type: 'question/requested' }>['questions'],
@@ -105,6 +129,9 @@ function questionInteractionStatus(
 /** Instance cluster + frame entry + the session list. */
 export class SessionManager {
   private readonly sessions = new Map<SessionId, Session>()
+  /** Fresh-empty shortcut state; evidence always wins and cannot be re-armed by a late echo. */
+  private readonly freshEmpty = new Set<SessionId>()
+  private readonly nonEmptyEvidence = new Set<SessionId>()
   /** Pre-instantiation buffer for answerable requests and the queued-turn snapshot, which history
    *  cannot reconstruct on open. Live requests remain until resolution; queue and replay duplicates
    *  compact by identity. Instantiation replays and clears it, while removal drops it. */
@@ -146,6 +173,10 @@ export class SessionManager {
   private readonly catalogStale = new Set<SessionId>()
   private readonly openCatalogs = new Set<SessionId>()
   private readonly catalogDebounce = new Map<SessionId, ReturnType<typeof setTimeout>>()
+  /** Monotonic access order for bounded closed-catalog eviction. */
+  private readonly catalogAccess = new Map<SessionId, number>()
+  private catalogAccessClock = 0
+  private static readonly MAX_RETAINED_CATALOGS = 128
   /**
    * Background jobs per session, last-wins from `session/jobs`. An empty set
    * is stored as an absent key, so absence and `[]` are one representation.
@@ -160,6 +191,10 @@ export class SessionManager {
    *  must be recovered by value or every SessionListItem memo misses on every refresh. */
   private entryCache = new Map<SessionId, SessionListEntry>()
   private itemsCache: readonly SessionListEntry[] = []
+  /** Record mirrors of {@link catalogs}/{@link jobsBySession} with identity kept while no member moved,
+   *  so selector memos over the snapshot's records survive unrelated list publications. */
+  private subagentsByParentCache: Readonly<Record<SessionId, SubagentCatalogSnapshot>> = {}
+  private jobsBySessionCache: Readonly<Record<SessionId, readonly JobView[]>> = {}
   private readonly notifier = new Notifier(() => {
     this.listSnapshotCache = this.buildListSnapshot()
   })
@@ -192,6 +227,8 @@ export class SessionManager {
       throw new Error(`sessions.select: unknown session ${sessionId}`)
     }
     if (address !== undefined) this.addresses.set(sessionId, address)
+    const previous = this.selected
+    if (previous !== undefined && previous !== sessionId) this.sessions.get(previous)?.suspendConversation()
     this.sessions.get(sessionId)?.configureSubagent(
       address,
       address === undefined
@@ -199,9 +236,12 @@ export class SessionManager {
         : this.catalogs.get(address.parentSessionId)?.parentAvailable ?? false,
     )
     this.selected = sessionId
+    const selectedSession = this.sessions.get(sessionId)
+    void selectedSession?.resumeConversation()
+    // Fresh client-created blanks have no catalog to fetch yet.
+    if (!selectedSession?.isKnownEmpty()) void this.refreshSubagents(sessionId)
     // Looking at the session consumes its completion reminder (dot clears).
     this.completedNotifications.delete(sessionId)
-    void this.refreshSubagents(sessionId)
     this.notifier.notifyNow()
   }
 
@@ -216,8 +256,11 @@ export class SessionManager {
       throw new Error(`sessions.selectSubagent: ${address.childSessionId} is not a healthy catalog child`)
     }
     this.addresses.set(address.childSessionId, address)
+    const previous = this.selected
+    if (previous !== undefined && previous !== address.childSessionId) this.sessions.get(previous)?.suspendConversation()
     this.sessions.get(address.childSessionId)?.configureSubagent(address, catalog?.parentAvailable ?? false)
     this.selected = address.childSessionId
+    void this.sessions.get(address.childSessionId)?.resumeConversation()
     this.completedNotifications.delete(address.childSessionId)
     void this.refreshSubagents(address.childSessionId)
     this.notifier.notifyNow()
@@ -312,6 +355,7 @@ export class SessionManager {
   private createSession(sessionId: SessionId): Session {
     const address = this.addresses.get(sessionId)
     return new Session(sessionId, this.api, this.remote, {
+      knownEmpty: this.freshEmpty.has(sessionId) && !this.nonEmptyEvidence.has(sessionId),
       ...(address === undefined ? {} : {
         address,
         parentAvailable: this.catalogs.get(address.parentSessionId)?.parentAvailable ?? false,
@@ -336,12 +380,23 @@ export class SessionManager {
     let store = this.projectionStores.get(sessionId)
     if (store === undefined) {
       store = new ProjectionValueStore()
-      // List rows project off store keys (title); any-key changes re-enter
-      // the manager's own batched rebuild channel.
-      store.subscribeAny(() => { this.notifier.markDirty() })
+      // List rows project off store keys (title); streaming projection changes
+      // re-enter the manager through the frame-batched rebuild channel.
+      store.subscribeAny(() => { this.notifier.markFrameDirty() })
       this.projectionStores.set(sessionId, store)
     }
     return store
+  }
+
+  /**
+   * Refresh one direct-child catalog for normal navigation, except a verified
+   * client-created blank session whose catalog is known to be empty.
+   * @param parentSessionId - catalog owner session id.
+   * @returns completion of the refresh, or an already-resolved promise when skipped.
+   */
+  refreshSubagentsForOpen(parentSessionId: SessionId): Promise<void> {
+    if (this.sessions.get(parentSessionId)?.isKnownEmpty()) return Promise.resolve()
+    return this.refreshSubagents(parentSessionId)
   }
 
   /**
@@ -349,6 +404,7 @@ export class SessionManager {
    * @param parentSessionId - catalog owner.
    */
   refreshSubagents(parentSessionId: SessionId): Promise<void> {
+    this.catalogAccess.set(parentSessionId, ++this.catalogAccessClock)
     const existing = this.catalogInflight.get(parentSessionId)
     if (existing !== undefined) return existing.promise
     const previous = this.catalogs.get(parentSessionId)
@@ -429,12 +485,60 @@ export class SessionManager {
     return operation
   }
 
+  /** Evict old closed catalog state while preserving current and breadcrumb navigation. */
+  private pruneRetainedState(): void {
+    const live = new Set(this.summaries.map(summary => summary.sessionId))
+    const protectedIds = new Set<SessionId>()
+    const protectedCatalogs = new Set<SessionId>()
+    let cursor = this.selected
+    while (cursor !== undefined && !protectedIds.has(cursor)) {
+      protectedIds.add(cursor)
+      const address = this.navigationAddress(cursor)
+      if (address === undefined) break
+      protectedIds.add(address.parentSessionId)
+      protectedCatalogs.add(address.parentSessionId)
+      cursor = address.parentSessionId
+    }
+    for (const parentSessionId of this.openCatalogs) protectedCatalogs.add(parentSessionId)
+    for (const parentSessionId of this.catalogInflight.keys()) protectedCatalogs.add(parentSessionId)
+    for (const [childId] of this.addresses) {
+      if (live.has(childId) || protectedIds.has(childId)) continue
+      this.addresses.delete(childId)
+      this.projectionStores.delete(childId)
+    }
+    for (const parentSessionId of [...this.catalogs.keys()]) {
+      if (live.has(parentSessionId) || protectedCatalogs.has(parentSessionId)) continue
+      this.catalogs.delete(parentSessionId)
+      this.catalogAccess.delete(parentSessionId)
+      this.catalogStale.delete(parentSessionId)
+      const timer = this.catalogDebounce.get(parentSessionId)
+      if (timer !== undefined) clearTimeout(timer)
+      this.catalogDebounce.delete(parentSessionId)
+    }
+    for (const sessionId of [...this.projectionStores.keys()]) {
+      if (!live.has(sessionId) && !protectedIds.has(sessionId)) this.projectionStores.delete(sessionId)
+    }
+    while (this.catalogs.size > SessionManager.MAX_RETAINED_CATALOGS) {
+      let victim: SessionId | undefined
+      let oldest = Number.POSITIVE_INFINITY
+      for (const parentSessionId of this.catalogs.keys()) {
+        if (protectedCatalogs.has(parentSessionId) || this.catalogInflight.has(parentSessionId)) continue
+        const access = this.catalogAccess.get(parentSessionId) ?? 0
+        if (access < oldest) { oldest = access; victim = parentSessionId }
+      }
+      if (victim === undefined) break
+      this.catalogs.delete(victim)
+      this.catalogAccess.delete(victim)
+    }
+  }
+
   /**
    * Mark whether a catalog menu is consuming live membership updates.
    * @param parentSessionId - catalog owner.
    * @param open - current menu state.
    */
   setSubagentCatalogOpen(parentSessionId: SessionId, open: boolean): void {
+    this.catalogAccess.set(parentSessionId, ++this.catalogAccessClock)
     if (open) {
       this.openCatalogs.add(parentSessionId)
       void this.refreshSubagents(parentSessionId)
@@ -465,6 +569,12 @@ export class SessionManager {
         const { result } = await this.api.sessions.list({})
         if (generation !== this.connectionGeneration) return
         if (result.ok) {
+          for (const s of result.value.items) {
+            if (!s.blank || s.running) {
+              this.nonEmptyEvidence.add(s.sessionId)
+              this.freshEmpty.delete(s.sessionId)
+            }
+          }
           const baseline = this.listPhase === 'pending'
             ? result.value.items
             : mergeOrderedBaseline(established, result.value.items, summary => summary.sessionId)
@@ -473,6 +583,12 @@ export class SessionManager {
           // replayed mutation: an edge that happens entirely between mutations
           // (baseline idle → running → idle) must still arm, which a single
           // sync on the folded result would collapse away.
+          for (const s of result.value.items) {
+            if (!s.blank || s.running) {
+              this.nonEmptyEvidence.add(s.sessionId)
+              this.freshEmpty.delete(s.sessionId)
+            }
+          }
           for (const s of baseline) {
             if (!this.prevRunning.has(s.sessionId)) this.prevRunning.set(s.sessionId, s.running)
           }
@@ -507,6 +623,7 @@ export class SessionManager {
             const values = block.values as Record<string, unknown>
             for (const key of Object.keys(values)) store.apply(key, values[key], block.asOfSeq)
           }
+          this.pruneRetainedState()
         } else {
           this.listState = 'error'
           this.listError = result.error
@@ -565,6 +682,10 @@ export class SessionManager {
         : { ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }), ...shared }
       const { result } = await this.api.sessions.create(payload)
       if (result.ok) {
+        const id = result.value.sessionId
+        if (!this.nonEmptyEvidence.has(id)) this.freshEmpty.add(id)
+        const resident = this.sessions.get(id)
+        if (resident !== undefined && !this.nonEmptyEvidence.has(id)) resident.markKnownEmpty()
         this.recordMutation({ kind: 'upsert', summary: {
           sessionId: result.value.sessionId, updatedAt: Date.now(), running: false, blank: true,
           ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
@@ -718,10 +839,8 @@ export class SessionManager {
     if (frame.type === 'session/projection') {
       // Finished host-computed value: land it in the resident store whether or
       // not the Session is instantiated (list rows read the 'title' key). The
-      // synchronous markDirty keeps the list snapshot same-tick fresh (the
-      // store's own any-key channel is microtask-batched).
+      // store's any-key subscription schedules one cumulative frame publication.
       this.projectionStore(frame.sessionId).apply(frame.key, frame.value, frame.seq)
-      this.notifier.markDirty()
       return
     }
     if (frame.type === 'session/jobs') {
@@ -730,10 +849,15 @@ export class SessionManager {
       // reports as `[]` — both land as an absent key.
       if (frame.jobs.length === 0) this.jobsBySession.delete(frame.sessionId)
       else this.jobsBySession.set(frame.sessionId, frame.jobs)
-      this.notifier.markDirty()
+      this.notifier.markFrameDirty()
       return
     }
     if (frame.type === 'session/subscribed') {
+      if (frame.lastSeq > 0) {
+        this.nonEmptyEvidence.add(frame.sessionId)
+        this.freshEmpty.delete(frame.sessionId)
+        this.sessions.get(frame.sessionId)?.invalidateKnownEmpty()
+      }
       // Rows past the host's durable baseline rode state a restart lost; drop
       // them so last-wins cannot pin a phantom value over recomputed truth.
       this.projectionStores.get(frame.sessionId)?.truncate(frame.lastSeq)
@@ -771,6 +895,15 @@ export class SessionManager {
       this.resolvePending(frame.sessionId, `q:${frame.questionRpcId}`)
     }
     const session = this.sessions.get(frame.sessionId)
+    if (frame.type === 'session/event') {
+      this.nonEmptyEvidence.add(frame.sessionId)
+      this.freshEmpty.delete(frame.sessionId)
+      session?.invalidateKnownEmpty()
+    }
+    if (frame.type === 'session/event' && this.selected !== undefined && frame.sessionId !== this.selected) {
+      session?.suspendConversation()
+      return
+    }
     if (session === undefined) {
       // Answerable requests never hit history: retain each live identity until
       // instantiation, compacting replay duplicates and resolutions so list
@@ -818,6 +951,11 @@ export class SessionManager {
     const frame = envelope.payload
     switch (frame.type) {
       case 'host/session-added': {
+        if (!frame.blank) {
+          this.nonEmptyEvidence.add(frame.sessionId)
+          this.freshEmpty.delete(frame.sessionId)
+          this.sessions.get(frame.sessionId)?.invalidateKnownEmpty()
+        }
         this.mergeSummary({
           sessionId: frame.sessionId, updatedAt: Date.now(), running: false, blank: frame.blank,
           ...(frame.parentSessionId !== undefined ? { parentSessionId: frame.parentSessionId } : {}),
@@ -883,7 +1021,14 @@ export class SessionManager {
         return
       }
       case 'host/session-status': {
+        if (frame.running) {
+          this.nonEmptyEvidence.add(frame.sessionId)
+          this.freshEmpty.delete(frame.sessionId)
+          this.sessions.get(frame.sessionId)?.invalidateKnownEmpty()
+        }
+        const activity = (frame as HostFrame & { activity?: 'stopping' | 'maintenance' }).activity
         this.recordMutation({ kind: 'status', sessionId: frame.sessionId, running: frame.running })
+        this.sessions.get(frame.sessionId)?.handleActivity(activity)
         this.sessions.get(frame.sessionId)?.handleRunning(frame.running)
         this.updateCatalogActivity(frame.sessionId, frame.running)
         return
@@ -908,6 +1053,9 @@ export class SessionManager {
   */
   handleDisconnected(): void {
     this.connectionGeneration += 1
+    for (const session of this.sessions.values()) session.handleActivity(undefined)
+    this.freshEmpty.clear()
+    for (const session of this.sessions.values()) session.clearKnownEmpty()
     if (this.listInflight !== null) this.listStale = true
     for (const parentSessionId of this.catalogInflight.keys()) this.catalogStale.add(parentSessionId)
     if (this.pendingInteractions.size > 0) {
@@ -930,7 +1078,10 @@ export class SessionManager {
     if (selectedAddress !== undefined) void this.refreshSubagents(selectedAddress.parentSessionId)
     if (this.selected !== undefined) void this.refreshSubagents(this.selected)
     for (const parentSessionId of this.openCatalogs) void this.refreshSubagents(parentSessionId)
-    for (const session of this.sessions.values()) void session.resync()
+    for (const [sessionId, session] of this.sessions) {
+      if (this.selected === undefined || sessionId === this.selected) void session.resync()
+      else session.suspendConversation()
+    }
   }
 
   /** Debounce membership refetches while one parent catalog is selected or open. */
@@ -1105,8 +1256,9 @@ export class SessionManager {
       this.entryCache.set(entry.sessionId, entry)
       return entry
     })
+    const liveIds = new Set(items.map(e => e.sessionId))
     for (const id of this.entryCache.keys()) {
-      if (!items.some(e => e.sessionId === id)) this.entryCache.delete(id)
+      if (!liveIds.has(id)) this.entryCache.delete(id)
     }
     const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
     if (!sameOrder) this.itemsCache = items
@@ -1115,16 +1267,28 @@ export class SessionManager {
       && (items.some(item => item.sessionId === selected) || this.addresses.has(selected))
       ? selected
       : undefined
-    return {
+    this.subagentsByParentCache = stableRecordMirror(this.subagentsByParentCache, this.catalogs)
+    this.jobsBySessionCache = stableRecordMirror(this.jobsBySessionCache, this.jobsBySession)
+    const next: SessionListSnapshot = {
       items: this.itemsCache,
       current,
       state: this.listState,
       phase: this.listPhase,
       error: this.listError,
-      subagentsByParent: Object.fromEntries(this.catalogs),
-      jobsBySession: Object.fromEntries(this.jobsBySession),
+      subagentsByParent: this.subagentsByParentCache,
+      jobsBySession: this.jobsBySessionCache,
       currentAddress: current === undefined ? undefined : this.addresses.get(current),
     }
+    // A publication that moved nothing republishes the previous snapshot object,
+    // so whole-snapshot subscribers (selector s => s) see no change at all.
+    const prev = this.listSnapshotCache as SessionListSnapshot | undefined
+    if (
+      prev !== undefined && prev.items === next.items && prev.current === next.current
+      && prev.state === next.state && prev.phase === next.phase && prev.error === next.error
+      && prev.subagentsByParent === next.subagentsByParent && prev.jobsBySession === next.jobsBySession
+      && prev.currentAddress === next.currentAddress
+    ) return prev
+    return next
   }
 }
 

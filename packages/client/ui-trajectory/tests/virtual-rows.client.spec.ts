@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import type { TrajectoryCellProps } from '../src/client/trajectory-record.ts'
 import {
-  groupTrajectoryVirtualRows, trajectoryVirtualRecordKey,
+  createTrajectoryVirtualRowCache, groupTrajectoryVirtualRows, trajectoryVirtualRecordKey,
   type VirtualizableTrajectoryRecord,
 } from '../src/client/trajectory-virtual-rows.ts'
 
@@ -91,5 +91,33 @@ describe('trajectory virtual rows', () => {
     expect(trajectoryVirtualRecordKey(source)).toBe(
       'message%00call%00call%20with%20spaces%2Fand%3Fpunctuation',
     )
+  })
+
+  it('patches a large append with deterministic suffix operations', () => {
+    const cache = createTrajectoryVirtualRowCache<VirtualizableTrajectoryRecord>()
+    const prefix = Array.from({ length: 1_000 }, (_, index) => record(index + 1))
+    const initial = cache.project(prefix)
+    expect(cache.project(prefix)).toBe(initial)
+    expect(cache.operationCount).toBe(0)
+    const appended = record(1_001)
+    const rows = cache.project([...prefix, appended])
+
+    expect(cache.operationCount).toBe(1_002)
+    expect(rows.slice(0, -1)).toEqual(initial)
+    expect(rows[0]).toBe(initial[0])
+    expect(cache.project(rows.flatMap(row => row.entries.map(entry => entry.record)))).toBe(rows)
+    expect(cache.operationCount).toBe(0)
+  })
+
+  it('rebuilds a prepend to the uncached-equivalent rows', () => {
+    const cache = createTrajectoryVirtualRowCache<VirtualizableTrajectoryRecord>()
+    const existing = [record(2), record(3)]
+    cache.project(existing)
+    const prepended = [record(1), ...existing]
+
+    const cached = cache.project(prepended)
+
+    expect(cache.operationCount).toBe(prepended.length)
+    expect(cached).toEqual(groupTrajectoryVirtualRows(prepended))
   })
 })

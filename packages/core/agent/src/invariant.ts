@@ -2,7 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentActivity, AgentStatus } from '@deepseek-ai/dsh-agent'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-agent'
 
@@ -20,6 +20,18 @@ const install: InvariantInstaller = (ctx, fail) => {
       fail(`agent/status repeated ${status} (no-op transition)`)
     }
     lastStatus.set(agent, status)
+  }, { global: true })
+  // The activity facet carries the same transition contract as the status it
+  // qualifies, and its cleared value is a real state: an agent that has never
+  // published an activity is indistinguishable from one that just cleared it,
+  // so the seed is recorded on first sight rather than defaulted.
+  const lastActivity = new WeakMap<Agent, { value: AgentActivity | undefined }>()
+  ctx.on('agent/activity', ({ agent, activity }) => {
+    const previous = lastActivity.get(agent)
+    if (previous !== undefined && previous.value === activity) {
+      fail(`agent/activity repeated ${String(activity)} (no-op transition)`)
+    }
+    lastActivity.set(agent, { value: activity })
   }, { global: true })
 }
 

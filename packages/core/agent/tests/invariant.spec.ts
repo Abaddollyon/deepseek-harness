@@ -35,6 +35,27 @@ describe('agent status invariants', () => {
       .toThrow(/no-op transition/)
   })
 
+  it('accepts activity transitions and rejects a repeated one', async () => {
+    const ctx = await setup()
+    const agent = mockAgent('a7')
+    expect(() => {
+      ctx.emit(scopeTarget(agent, agent), 'agent/activity', { agent, activity: 'maintenance' })
+      ctx.emit(scopeTarget(agent, agent), 'agent/activity', { agent, activity: 'stopping' })
+      ctx.emit(scopeTarget(agent, agent), 'agent/activity', { agent, activity: undefined })
+    }).not.toThrow()
+    expect(() => { ctx.emit(scopeTarget(agent, agent), 'agent/activity', { agent, activity: undefined }) })
+      .toThrow(/no-op transition/)
+  })
+
+  it('records a first cleared activity instead of defaulting it', async () => {
+    const ctx = await setup()
+    const agent = mockAgent('a8')
+    // A never-published facet is not the same fact as a just-cleared one, so
+    // the first emission is a transition even when its value is undefined.
+    expect(() => { ctx.emit(scopeTarget(agent, agent), 'agent/activity', { agent, activity: undefined }) })
+      .not.toThrow()
+  })
+
   it('tracks agents independently', async () => {
     const ctx = await setup()
     const a = mockAgent('a5')

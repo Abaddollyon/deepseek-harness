@@ -171,6 +171,9 @@ describe('render branch tails', () => {
       }],
     }]
     snap.chat = chatSnapshotFixture({ runningCalls: snap.runningCalls })
+    const values = vi.spyOn(snap.chat.nodes, 'values').mockImplementation(() => {
+      throw new Error('Details lookup must not scan every Chat Node')
+    })
     const chat = createChatStore().create()
     chat.actions.select({ turnSeq: 9, callId: 'p1:code:1:code:1', toolName: 'read' } satisfies SelectionTarget)
     const emptyList = createSnapshotStore<SessionListState>(
@@ -208,6 +211,7 @@ describe('render branch tails', () => {
     expect(view.getByText('read')).toBeTruthy()
     expect(view.getByTestId('tool-details-seat')).toBeTruthy()
     expect(owners).toHaveLength(1)
+    expect(values).not.toHaveBeenCalled()
     expect(owners[0]?.block).toMatchObject({
       callId: 'p1:code:1:code:1',
       call: { name: 'read', argsRaw: '{"path":"notes/demo.txt"}' },

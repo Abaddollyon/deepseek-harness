@@ -6,6 +6,7 @@
  * signal is a local stream-control parameter, independent of the request (never on the wire).
  */
 
+import type { AgentActivity } from '@deepseek-ai/dsh-agent/types'
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type { ApprovalOutcome, ApprovalRequestId } from '@deepseek-ai/dsh-user-approval/types'
 import type { Message } from '@deepseek-ai/dsh-llm/types'
@@ -114,6 +115,7 @@ export type MuxFrame =
  * constantly true — clients flip it on the session's first
  * `host/session-status(running:true)` (a blank session never runs), and a
  * reconnecting client takes `session.list`'s summary.blank as authoritative.
+ * Session status frames carry the optional stopping or maintenance qualifier.
  * agent-error is the only outlet for live failures with no turn position;
  * workspace-changed pushes the full new snapshot after every durable
  * workspace mutation (create/attach/order change — the client upserts, while
@@ -135,7 +137,7 @@ export type HostFrame =
     agentPreset?: string
   }
   | { type: 'host/session-removed'; sessionId: SessionId }
-  | { type: 'host/session-status'; sessionId: SessionId; running: boolean }
+  | { type: 'host/session-status'; sessionId: SessionId; running: boolean; activity?: AgentActivity }
   | { type: 'host/agent-error'; sessionId: SessionId; message: string }
   | { type: 'host/workspace-changed'; workspace: WorkspaceView }
   | { type: 'host/workspace-removed'; workspaceId: WorkspaceView['workspaceId'] }

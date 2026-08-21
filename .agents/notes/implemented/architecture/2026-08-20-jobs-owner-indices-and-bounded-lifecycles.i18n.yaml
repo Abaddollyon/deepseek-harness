@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-20-jobs-owner-indices-and-bounded-lifecycles.md
+2026-08-20-jobs-owner-indices-and-bounded-lifecycles.md: 35936dee268650f4a4d1777304af757574ecf836
+2026-08-20-jobs-owner-indices-and-bounded-lifecycles.zh.md: 7091ca6c72de2ead8f6ae92e7e801bd91598c7e1

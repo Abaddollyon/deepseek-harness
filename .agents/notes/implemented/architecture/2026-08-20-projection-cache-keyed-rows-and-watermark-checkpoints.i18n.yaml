@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-20-projection-cache-keyed-rows-and-watermark-checkpoints.md
+2026-08-20-projection-cache-keyed-rows-and-watermark-checkpoints.md: fd8393a54ea092d9a38798002c944c359458e56a
+2026-08-20-projection-cache-keyed-rows-and-watermark-checkpoints.zh.md: 6fc7ea13d58d3307a12752a1aa77948b5536aee3

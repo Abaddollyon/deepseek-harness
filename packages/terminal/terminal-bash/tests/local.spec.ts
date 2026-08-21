@@ -40,6 +40,7 @@ function stubAgent(ctx: Context, rawId: string): Agent {
   return {
     id, options: {}, session, inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',
+    activity: undefined,
     ctx: scope.ctx,
     send: () => {},
     followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},

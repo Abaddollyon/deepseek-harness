@@ -330,6 +330,40 @@ describe('child outlets and the renderSlot binding', () => {
     expect(() => seen[0]!('k.undeclared', {})).toThrow(SlotOwnershipError)
   })
 
+  it('keeps one host subscription per outlet across owner-prop re-renders, still redrawing on registration changes', () => {
+    const h = makeHost()
+    h.declare('k.single', SINGLE_ROOT)
+    const disposeEntry = h.add('k.single', { component: ({ tag }: { tag?: string }) => <b>{tag}</b> })
+    // Spy before mount so the initial subscribe is counted too.
+    const subscribeSpy = vi.spyOn(h.host, 'subscribe')
+    h.add('root', {
+      component: (props: { renderSlot: RenderSlotFn }) => {
+        const [tag, setTag] = useState('a')
+        return <>
+          <button onClick={() => { setTag('z') }}>bump</button>
+          {props.renderSlot('k.single', { tag }, { fallback: <i>none</i> })}
+        </>
+      },
+      children: { 'k.single': SINGLE_ROOT },
+    })
+    const view = render(<>{createSlotRenderer().renderRoot(h.host, {})}</>)
+    expect(view.container.querySelector('b')!.textContent).toBe('a')
+    const countFor = (key: string) => subscribeSpy.mock.calls.filter(call => call[0] === key).length
+    const before = countFor('k.single')
+    fireEvent.click(view.getByText('bump'))
+    expect(view.container.querySelector('b')!.textContent).toBe('z')
+    // The cached subscribe/getVersion pair is identity-stable per (host x
+    // key), so an owner-prop re-render must not unsubscribe/resubscribe.
+    expect(countFor('k.single')).toBe(before)
+    // The retained subscription still delivers registration changes: dispose
+    // falls back, re-register redraws the entry.
+    act(() => { disposeEntry() })
+    expect(view.container.textContent).toContain('none')
+    act(() => { h.add('k.single', { component: () => <b>back</b> }) })
+    expect(view.container.querySelector('b')!.textContent).toBe('back')
+    expect(countFor('root')).toBe(1)
+  })
+
   it('isolates a crashing entry without collapsing siblings', () => {
     const h = makeHost()
     h.declare('k.list', { kind: 'list', scope: 'root' })

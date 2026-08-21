@@ -39,6 +39,7 @@ function liveAgent(ctx: Context, session: Session): Agent {
     inbox,
     ctx,
     get status() { return status },
+    activity: undefined,
     send: () => {},
     followup: () => {},
     steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),

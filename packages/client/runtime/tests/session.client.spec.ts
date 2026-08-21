@@ -499,7 +499,7 @@ describe('prompt and cancel errors', () => {
     })
   })
 
-  it('keeps one-shot history readable without exposing prompt or cancel transport', async () => {
+  it('keeps one-shot history readable while routing cancel through the session transport', async () => {
     const api = new FakeApiClient()
     const session = new Session(SID, api, fakeRemote(), {
       address: { parentSessionId: PARENT, childSessionId: SID, mode: 'one-shot' },
@@ -509,13 +509,13 @@ describe('prompt and cancel errors', () => {
     const cancelled = await session.cancel()
 
     expect(prompted).toMatchObject({ ok: false, error: { code: 'subagent-not-resumable' } })
-    expect(cancelled).toMatchObject({ ok: false, error: { code: 'subagent-delivery-unavailable' } })
+    expect(cancelled).toEqual({ ok: true, value: { accepted: true } })
     expect(api.callsOf('subagent.history')).toEqual([
       { parentSessionId: PARENT, childSessionId: SID, mode: 'one-shot', maxMessages: 50 },
     ])
     expect(api.callsOf('subagent.prompt')).toEqual([])
     expect(api.callsOf('subagent.interrupt')).toEqual([])
-    expect(api.callsOf('session.cancel')).toEqual([])
+    expect(api.callsOf('session.cancel')).toEqual([{ sessionId: SID }])
   })
 
   it('sends content through session.prompt; composerPhase steps blank → engaging synchronously at send entry', async () => {

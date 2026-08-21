@@ -1,8 +1,16 @@
 import type {
-  ConversationSnapshot, ToolCallBlock,
+  ChatNodeStore, ConversationSnapshot, ToolCallBlock,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { conversationContextKey } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNode } from '../contract/chat-nodes.ts'
+
+interface IndexedChatNodeStore {
+  getToolCall(callId: string): { readonly block: ToolCallBlock; readonly rootNodeKey: string } | undefined
+}
+
+function indexedStore(store: ChatNodeStore): Partial<IndexedChatNodeStore> {
+  return store as ChatNodeStore & Partial<IndexedChatNodeStore>
+}
 
 function toolNode(node: ReturnType<ConversationSnapshot['chat']['nodes']['get']>): ChatNode<'tool-call'> | undefined {
   return node?.kind === 'tool-call' ? node as ChatNode<'tool-call'> : undefined
@@ -28,19 +36,15 @@ export function rootToolCall(
  * @returns current Tool lifecycle when materialized in the loaded window.
  */
 export function findToolCall(snapshot: ConversationSnapshot, callId: string): ToolCallBlock | undefined {
-  const visit = (block: ToolCallBlock): ToolCallBlock | undefined => {
-    if (block.callId === callId) return block
-    for (const child of block.subCalls) {
-      const found = visit(child)
-      if (found !== undefined) return found
-    }
-    return undefined
-  }
-  for (const node of snapshot.chat.nodes.values()) {
-    const root = toolNode(node)?.data.root
-    if (root === undefined) continue
-    const found = visit(root)
-    if (found !== undefined) return found
-  }
-  return undefined
+  return indexedStore(snapshot.chat.nodes).getToolCall?.(callId)?.block
+}
+
+/**
+ * Resolve the Chat Node key owning a Tool call through a package-local store capability.
+ * @param store - stable Chat Node store for the loaded window.
+ * @param callId - root or nested call identity.
+ * @returns owning root Node key when indexed.
+ */
+export function rootNodeKeyForToolCallStore(store: ChatNodeStore, callId: string): string | undefined {
+  return indexedStore(store).getToolCall?.(callId)?.rootNodeKey
 }

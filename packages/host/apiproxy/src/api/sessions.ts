@@ -4,6 +4,7 @@
  * else references RequestPayload<'session.*'> / ResponseValue<'session.*'>.
  */
 
+import type { AgentActivity } from '@deepseek-ai/dsh-agent/types'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, ModelModality } from '@deepseek-ai/dsh-llm/types'
@@ -186,6 +187,8 @@ export interface SessionSummary {
   updatedAt: number
   /** Status of the attached agent; always false for cold (unattached) sessions. */
   running: boolean
+  /** Optional live work qualifier for the attached agent. */
+  activity?: AgentActivity
   /**
    * Derived conversation-not-started bit: true while no turn has run.
    * Standalone plugin events — command lifecycle

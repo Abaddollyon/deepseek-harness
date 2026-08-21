@@ -198,7 +198,9 @@ describe('sessions.list cold merge', () => {
         createdAt: meta.createdAt,
       },
     })
-    ctx.agents.register({ id: session.id, session, status: 'running', ctx } as Agent)
+    ctx.agents.register({
+      id: session.id, session, status: 'running', activity: 'maintenance', ctx,
+    } as Agent)
     release.resolve(undefined)
 
     const response = await listing
@@ -208,6 +210,7 @@ describe('sessions.list cold merge', () => {
         sessionId: meta.id,
         blank: false,
         running: true,
+        activity: 'maintenance',
         updatedAt: 300,
       }),
     ])
@@ -531,7 +534,9 @@ describe('subagent ownership fence', () => {
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(UserQuestionService)
     const parentSession = ctx.sessions.create(sid('session-parent'), { meta: { cwd: '/proj' } })
-    const parent = { id: parentSession.id, session: parentSession, status: 'idle', ctx } as Agent
+    const parentCancel = vi.fn()
+    // Deliberately partial: this path reads identity, session, status, and cancel.
+    const parent = { id: parentSession.id, session: parentSession, status: 'idle', ctx, cancel: parentCancel } as unknown as Agent
     ctx.agents.register(parent)
 
     const originSession = ctx.sessions.create(sid('session-origin-child'), {
@@ -556,10 +561,12 @@ describe('subagent ownership fence', () => {
     ctx.agents.enter(startingChild, parent)
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
+    // Human cancellation intentionally supersedes the generic ownership fence:
+    // the addressed child is stopped while its owning parent remains untouched.
     const stopped = await api.sessions.cancel(request({ sessionId: originChild.id }))
-    expect(stopped.result.ok).toBe(false)
-    if (!stopped.result.ok) expect(stopped.result.error.code).toBe('agent-busy')
-    expect(cancel).not.toHaveBeenCalled()
+    expect(stopped.result).toEqual({ ok: true, value: { accepted: true } })
+    expect(cancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+    expect(parentCancel).not.toHaveBeenCalled()
 
     const queued = await api.sessions.updateQueue(request({
       sessionId: originChild.id,
@@ -797,5 +804,110 @@ describe('sessions.prompt synchronous rejection', () => {
         details: { reason: 'use subagent delivery for this child session' },
       })
     }
+  })
+})
+
+describe('detached history tail paging', () => {
+  function userEvent(seq: number, text: string, sourceEventSeqs?: number[]): SessionEvent {
+    return {
+      type: 'user/message', seq, time: seq,
+      data: createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+      surfaceOp: 'append',
+      ...sourceEventSeqs === undefined ? {} : { sourceEventSeqs },
+    } as SessionEvent
+  }
+
+  async function pagedApi(
+    events: SessionEvent[],
+    options: { projectionSeq?: number; inspectEvents?: SessionEvent[] } = {},
+  ): Promise<{
+    api: ReturnType<typeof createApiProxy>
+    readTail: ReturnType<typeof vi.fn>
+    list: ReturnType<typeof vi.fn>
+    inspect: ReturnType<typeof vi.fn>
+  }> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(UserQuestionService)
+    const meta = header('paged-history', 1)
+    const list = vi.fn(() => { throw new Error('keyed history must not list the corpus') })
+    const inspect = vi.fn(() => {
+      if (options.inspectEvents !== undefined) return Promise.resolve({ meta, events: options.inspectEvents })
+      throw new Error('bounded history must not inspect the whole log')
+    })
+    const readTail = vi.fn((id: SessionId, beforeSeq: number | undefined, limit: number) => {
+      expect(id).toBe(meta.id)
+      const upper = Math.min(beforeSeq ?? events.length, events.length)
+      const start = Math.max(0, upper - limit)
+      return Promise.resolve({ meta, events: events.slice(start, upper), hasMore: start > 0 })
+    })
+    ctx.provide('sessionPersistence', { list, inspect, readTail } as never)
+    ctx.provide('sessionProjectionCache', {
+      coldSnapshot: () => Promise.resolve({
+        asOfSeq: options.projectionSeq ?? events.at(-1)?.seq ?? -1,
+        values: {},
+      }),
+    } as never)
+    return {
+      api: createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' }),
+      readTail, list, inspect,
+    }
+  }
+
+  it('reads only bounded suffix pages for a large first page and never lists identities', async () => {
+    const events: SessionEvent[] = []
+    for (let turn = 1; turn <= 100; turn += 1) {
+      events.push({ type: 'turn/start', seq: events.length, time: turn, data: { turn } })
+      events.push(userEvent(events.length, `message-${String(turn)}`))
+      events.push({ type: 'turn/end', seq: events.length, time: turn, data: { turn, reason: { kind: 'completed' } } })
+    }
+    const { api, readTail, list, inspect } = await pagedApi(events)
+
+    const response = await api.sessions.history(request({ sessionId: sid('paged-history'), maxMessages: 2 }))
+    if (!response.result.ok) throw new Error(response.result.error.message)
+    expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([295, 296, 297, 298, 299])
+    expect(response.result.value.hasMore).toBe(true)
+    expect(readTail.mock.calls.every(([, , limit]) => limit === 2)).toBe(true)
+    expect(readTail.mock.calls.length * 2).toBeLessThan(events.length)
+    expect(list).not.toHaveBeenCalled()
+    expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('falls back to one keyed inspection when the cold projection cut is stale', async () => {
+    const events: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
+      userEvent(1, 'prompt'),
+      { type: 'turn/end', seq: 2, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    const { api, inspect, list } = await pagedApi(events, { projectionSeq: 1, inspectEvents: events })
+
+    const response = await api.sessions.history(request({ sessionId: sid('paged-history'), maxMessages: 1 }))
+    expect(response.result.ok).toBe(true)
+    expect(inspect).toHaveBeenCalledOnce()
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('pages beforeSeq exactly across storage chunks and source-event groups', async () => {
+    const events: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
+      userEvent(1, 'prompt'),
+      { type: 'assistant/chunk', seq: 2, time: 2, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } },
+      { type: 'assistant/chunk', seq: 3, time: 3, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } },
+      userEvent(4, 'replacement', [2, 3, 4]),
+      { type: 'turn/end', seq: 5, time: 5, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'turn/start', seq: 6, time: 6, data: { turn: 2 } },
+      userEvent(7, 'newer'),
+      { type: 'turn/end', seq: 8, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    const { api, readTail, list } = await pagedApi(events)
+
+    const response = await api.sessions.history(request({
+      sessionId: sid('paged-history'), beforeSeq: 6, maxMessages: 1,
+    }))
+    if (!response.result.ok) throw new Error(response.result.error.message)
+    expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([2, 3, 4, 5])
+    expect(response.result.value.hasMore).toBe(true)
+    expect(readTail.mock.calls.map(([, beforeSeq]) => beforeSeq)).toEqual([6, 5, 4, 3])
+    expect(list).not.toHaveBeenCalled()
   })
 })

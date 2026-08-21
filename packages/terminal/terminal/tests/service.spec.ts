@@ -28,6 +28,7 @@ function stubAgent(ctx: Context, rawId: string): Agent {
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',
+    activity: undefined,
     ctx: scopeFiber.ctx,
     send: () => {},
     followup: () => {},

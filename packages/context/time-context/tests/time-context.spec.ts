@@ -42,6 +42,7 @@ function sessionAgent(session: Session, id = 'agent'): Agent {
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'running',
+    activity: undefined,
     ctx: new Context(),
     send: () => {},
     followup: () => {},

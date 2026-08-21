@@ -3,10 +3,10 @@ import type {
   ChatConversationViewNode, ChatLocationNodeIndex, ChatNodeStore, ChatSnapshot,
   ConversationLocation, ConversationNode, ConversationTimelineSnapshot,
   ConversationViewBuilder, ConversationViewDefinition, LegacyConversationSlice,
-  PartialAssistant, RunningToolCall,
+  PartialAssistant, RunningToolCall, ToolCallBlock,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { sessionRecallLabels } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ChatNode } from '../contract/chat-nodes.ts'
+import type { ChatNode, ToolChatData } from '../contract/chat-nodes.ts'
 import { isRunningTool } from '../contract/chat-nodes.ts'
 
 const EMPTY_KEYS: readonly string[] = []
@@ -19,6 +19,8 @@ function sameReferences<T>(left: readonly T[], right: readonly T[]): boolean {
 
 class MutableChatNodeStore implements ChatNodeStore {
   private readonly byKey = new Map<string, ChatConversationViewNode>()
+  private readonly toolCalls = new Map<string, { readonly block: ToolCallBlock; readonly rootNodeKey: string }>()
+  private readonly toolCallIdsByNodeKey = new Map<string, readonly string[]>()
   private valuesCache: readonly ChatConversationViewNode[] = EMPTY_LIST
   private valuesDirty = false
 
@@ -34,9 +36,18 @@ class MutableChatNodeStore implements ChatNodeStore {
     return this.valuesCache
   }
 
+  getToolCall(callId: string): { readonly block: ToolCallBlock; readonly rootNodeKey: string } | undefined {
+    return this.toolCalls.get(callId)
+  }
+
   replace(nodes: readonly ChatConversationViewNode[]): void {
     this.byKey.clear()
-    for (const node of nodes) this.byKey.set(node.key, node)
+    this.toolCalls.clear()
+    this.toolCallIdsByNodeKey.clear()
+    for (const node of nodes) {
+      this.byKey.set(node.key, node)
+      this.indexToolNode(node)
+    }
     this.valuesCache = [...this.byKey.values()]
     this.valuesDirty = false
   }
@@ -46,9 +57,35 @@ class MutableChatNodeStore implements ChatNodeStore {
     for (const node of nodes) {
       if (this.byKey.get(node.key) === node) continue
       this.byKey.set(node.key, node)
+      this.indexToolNode(node)
       changed = true
     }
     if (changed) this.valuesDirty = true
+  }
+
+  private indexToolNode(node: ChatConversationViewNode): void {
+    for (const callId of this.toolCallIdsByNodeKey.get(node.key) ?? EMPTY_KEYS) {
+      if (this.toolCalls.get(callId)?.rootNodeKey === node.key) this.toolCalls.delete(callId)
+    }
+    this.toolCallIdsByNodeKey.delete(node.key)
+    const candidate = node as ChatNode
+    if (candidate.kind !== 'tool-call') return
+    const root = (candidate.data as ToolChatData).root
+    const pending = [root]
+    const seen = new Set<string>()
+    const callIds: string[] = []
+    while (pending.length > 0) {
+      const block = pending.pop() as ToolCallBlock
+      if (seen.has(block.callId)) continue
+      seen.add(block.callId)
+      callIds.push(block.callId)
+      this.toolCalls.set(block.callId, { block, rootNodeKey: node.key })
+      for (let index = block.subCalls.length - 1; index >= 0; index--) {
+        const child = block.subCalls[index]
+        if (child !== undefined) pending.push(child)
+      }
+    }
+    this.toolCallIdsByNodeKey.set(node.key, callIds)
   }
 }
 

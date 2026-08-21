@@ -82,6 +82,26 @@ const PUBLIC_TASK_SCHEMA = {
   },
 } as const
 
+/** The durable `turn/end` variant of an owner session's event log. */
+type TurnEndEvent = Extract<Agent['session']['events'][number], { type: 'turn/end' }>
+
+/**
+ * Whether the owner's newest durable `turn/end` closed on a user
+ * cancellation. Only the newest end counts: a turn the user started after
+ * stopping re-arms the ordinary wake semantics. A session with no recorded
+ * end has never been user-stopped.
+ * @param owner - the settled job's owner.
+ * @returns whether an idle wake would re-open a session the user stopped.
+ */
+function lastTurnUserAborted(owner: Agent): boolean {
+  const lastEnd = owner.session.events.findLast(
+    (event): event is TurnEndEvent => event.type === 'turn/end',
+  )
+  if (lastEnd === undefined) return false
+  const reason = lastEnd.data.reason
+  return reason.kind === 'aborted' && reason.reason.kind === 'user'
+}
+
 /** Remove job ownership and notification bookkeeping from a registry snapshot. */
 function publicJob(snapshot: JobSnapshot): PublicJobSnapshot {
   return {
@@ -270,8 +290,11 @@ export function apply(ctx: Context, config: Config): void {
   // A busy owner is injected: the notice waits in its next-step inbox, which
   // the turn cannot close over, so jobs settling together cost one step. An
   // idle owner is woken instead, because an unclaimed notice is a completion
-  // the model never learns about. Either way, disposal before the claim
-  // discards it with the owner, and teardown settlements arrive `reported`.
+  // the model never learns about — unless its newest durable turn ended on a
+  // user cancellation, in which case waking would re-open a session the user
+  // stopped and the notice degrades to next-step injection. Either way,
+  // disposal before the claim discards it with the owner, and teardown
+  // settlements arrive `reported`.
   //
   // The registry routes each settlement to the listeners its owner's scope
   // chain reaches, so a mount under one preset never sees another preset's
@@ -291,7 +314,8 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     const spent = spentWakes.get(owner) ?? 0
-    if (delivery === 'wakeup' && owner.status === 'idle' && spent < wakeBudget) {
+    if (delivery === 'wakeup' && owner.status === 'idle' && spent < wakeBudget
+      && !lastTurnUserAborted(owner)) {
       spentWakes.set(owner, spent + 1)
       owner.followup(message)
       return

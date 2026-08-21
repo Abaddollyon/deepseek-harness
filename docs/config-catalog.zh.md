@@ -977,10 +977,25 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Maximum terminal jobs retained process-wide for `job_output`-style reads;
+   * omission defaults to 256. Settlement beyond the bound evicts the oldest
+   * settled records, releasing their buffered output; an evicted id reads as an
+   * unknown job. Live (`running`/`stopping`) jobs are never evicted.
+   */
+  maxSettledJobs?: number
+  /**
+   * Grace in milliseconds that owner or service teardown awaits producer
+   * settlement after cancellation; omission defaults to 5000. A cancel that
+   * returned without settling `done` is indistinguishable from a slow stop
+   * until the grace expires; the record is then force-settled `failed` and
+   * teardown proceeds without awaiting that producer again.
+   */
+  teardownGraceMs?: number
 }
 ```
 
-来源：[`packages/jobs/jobs-local/src/index.ts:31`](../packages/jobs/jobs-local/src/index.ts)
+来源：[`packages/jobs/jobs-local/src/index.ts:34`](../packages/jobs/jobs-local/src/index.ts)
 
 <a id="deepseek-aidsh-llm-deepseek"></a>
 
@@ -1834,7 +1849,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
  * disposal) are policy, not tunables, and always fire.
  */
 export interface Config {
-  /** Committed events per session that force a durable checkpoint write between mandatory points. */
+  /** Projection-moving events per session that force a checkpoint write between mandatory points. */
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number

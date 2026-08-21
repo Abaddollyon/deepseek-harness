@@ -122,12 +122,11 @@ The persisted projection cache service. Opens the `session_projcache` domain at 
 cachedSnapshot(meta: SessionHeader): ProjectionSnapshot | undefined
 
 /**
- * Durably checkpoint one live session NOW (both mandatory points call
- * this; tests and carriers may too). The registry cut is snapshotted at
- * this boundary (states are live references), then the whole record is
- * replaced. NOT fail-soft — callers on the fail-soft paths contain it.
+ * Checkpoint one live session without forcing its log write-behind drain.
+ * The cache can briefly lead the stored log on this mid-stream path;
+ * {@link coldSnapshot} detects an overreaching row and replays from seq 0.
  * @param session - the live session to checkpoint.
- * @returns resolution after durability and event emission.
+ * @returns resolution after the cache row is durable.
  */
 async write(session: Session): Promise<void>
 
@@ -148,7 +147,7 @@ async coldSnapshot(id: SessionId, signal?: AbortSignal): Promise<ProjectionSnaps
 
 Types: [Session](session.md) · [SessionHeader](persistence.md) · [SessionId](core.md)
 
-Source: [`packages/session/session-projection-cache/src/index.ts:71`](../../packages/session/session-projection-cache/src/index.ts)
+Source: [`packages/session/session-projection-cache/src/index.ts:73`](../../packages/session/session-projection-cache/src/index.ts)
 
 <a id="ctxsessionprojections--sessionprojectionregistry"></a>
 

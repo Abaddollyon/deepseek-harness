@@ -67,6 +67,7 @@ import {
   listChildren as listSubagentChildren,
   listChildrenAndDescendants as listSubagentChildrenAndDescendants,
   listDescendants as listSubagentDescendants,
+  SubagentCatalogCache,
 } from './list-children.ts'
 import type { SubagentCatalogListing, SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 import { snapshotSubagentDescriptor } from './descriptor.ts'
@@ -175,6 +176,8 @@ declare module '@deepseek-ai/cordis' {
 export class SubagentRuntime extends Service {
   private providers = new Map<string, SubagentProvider>()
   private continuations: SubagentContinuationManager | undefined
+  /** Cached cold headers and root-scoped catalog topology. */
+  private readonly catalogCache = new SubagentCatalogCache()
   /** Deployment contributions composed into unpublished continuable children. */
   private readonly setupRegistry = new SubagentActivationSetupRegistry()
   /**
@@ -187,6 +190,8 @@ export class SubagentRuntime extends Service {
   constructor(ctx: Context) {
     super(ctx, 'subagents')
     this.emitLifecycle = createLifecycleEmitter(this.ctx, parent => scopeTarget(this, parent))
+    ctx.on('session/created', () => { this.catalogCache.invalidate() })
+    ctx.on('session/disposed', () => { this.catalogCache.invalidate() })
     ctx.inject(['agents'], (childCtx: Context) => {
       const manager = new SubagentContinuationManager(childCtx, {
         prepareContinuable: (name, request) => this.prepareContinuable(name, request),
@@ -245,12 +250,17 @@ export class SubagentRuntime extends Service {
    * Interrupt one live continuable child's current turn under a human parent
    * address or an exact live ancestor Agent. Fire-and-return: the cancel
    * signal is issued before this returns, but the target may keep running
-   * until it observes the signal. Unclaimed pending inbox work, the Activation,
-   * and published descendants are preserved; claimed work is not requeued.
+   * until it observes the signal. Unclaimed pending inbox work and the
+   * Activation are preserved; claimed work is not requeued.
    * Once the interrupted driver is idle, a waking send resumes the parked FIFO
    * queue. An absent target — including a one-shot or unknown id —
    * is an accepted no-op, as is a manager-less composition, which cannot own a
    * live Activation.
+   *
+   * Reach follows the authority. An `ancestor` interrupt stops the named target
+   * only, leaving the agents that target started running. A `user` interrupt is
+   * a human ending this session and stops the target's whole live subtree, whose
+   * descendants are cancelled with the `parent` cause.
    * @param targetSessionId - the durable child session id to interrupt.
    * @param authority - the human parent address or exact live ancestor Agent.
    * @throws {SubagentError} `UNAUTHORIZED` when the authority does not own the
@@ -258,6 +268,26 @@ export class SubagentRuntime extends Service {
    */
   interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void {
     this.continuations?.interrupt(targetSessionId, authority)
+  }
+
+  /**
+   * Stop the live continuable subtree below one session on its human owner's
+   * behalf, leaving that session's own Agent untouched.
+   *
+   * The host calls this beside its own `Agent.cancel()` when a human stops an
+   * ordinary session: that cancel reaches one Agent, while the background
+   * children the session started are independent Activations that would
+   * otherwise keep spending model calls and then wake the stopped session back
+   * up as each one settled. Descendants are cancelled with the `parent` cause
+   * and keep their unclaimed inbox work, so a later send resumes them.
+   *
+   * Fire-and-return: every target is signalled before this returns and none is
+   * awaited. A session with no live descendants — and a manager-less
+   * composition, which can own no Activation — is an accepted no-op.
+   * @param parentSessionId - the durable session whose live descendants stop.
+   */
+  cancelDescendants(parentSessionId: SessionId): void {
+    this.continuations?.cancelDescendants(parentSessionId)
   }
 
   /**
@@ -357,7 +387,7 @@ export class SubagentRuntime extends Service {
    *   store is not mounted, or the caller cancels the listing.
    */
   listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]> {
-    return listSubagentChildren(this.ctx, parentSessionId, signal)
+    return listSubagentChildren(this.ctx, this.catalogCache, parentSessionId, signal)
   }
 
   /**
@@ -371,7 +401,7 @@ export class SubagentRuntime extends Service {
     rootSessionId: SessionId,
     signal?: AbortSignal,
   ): Promise<SubagentCatalogListing> {
-    return listSubagentChildrenAndDescendants(this.ctx, rootSessionId, signal)
+    return listSubagentChildrenAndDescendants(this.ctx, this.catalogCache, rootSessionId, signal)
   }
 
   /**
@@ -390,7 +420,7 @@ export class SubagentRuntime extends Service {
    * @throws {@link SubagentError} under the same conditions as {@link listChildren}.
    */
   listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]> {
-    return listSubagentDescendants(this.ctx, rootSessionId, signal)
+    return listSubagentDescendants(this.ctx, this.catalogCache, rootSessionId, signal)
   }
 
   /**

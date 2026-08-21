@@ -29,6 +29,7 @@ function stubAgent(ctx: Context, id: string): { agent: Agent; session: Session }
     inbox,
     ctx: new Context(),
     get status() { return status },
+    activity: undefined,
     send: () => {},
     followup: () => {},
     steer: () => {},

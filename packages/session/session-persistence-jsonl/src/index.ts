@@ -9,10 +9,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
-import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { open, mkdir, readFile, readdir, realpath, link, rename, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { performance } from 'node:perf_hooks'
-import { scheduler } from 'node:timers/promises'
 import { randomBytes } from 'node:crypto'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
@@ -28,7 +26,7 @@ import {
   type JsonlCompression,
 } from './format.ts'
 import {
-  compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
+  compressZstdFrame, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames, type ZstdFrameRange,
 } from './zstd.ts'
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 
@@ -36,12 +34,50 @@ export type { JsonlCompression } from './format.ts'
 
 const DEFAULT_PACK_CHUNKS = true
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
-/**
- * Internal scheduling constant, not deployment configuration: balance
- * frame-boundary event-loop yields against `setImmediate` overhead. One frame
- * remains an indivisible synchronous decode.
- */
-const ZSTD_DECODE_YIELD_INTERVAL_MS = 500
+const SESSION_INDEX_FILENAME = 'session-index.json'
+
+/** Current on-disk format for the root-owned session summary index. */
+export const JSONL_INDEX_FORMAT_VERSION = 1
+
+interface IndexFreshness {
+  readonly dev: string
+  readonly ino: string
+  readonly size: string
+  readonly mtimeNs: string
+  readonly ctimeNs: string
+}
+
+interface SessionIndexEntry {
+  readonly path: string
+  readonly project: string
+  readonly header: SessionHeader
+  readonly freshness: IndexFreshness
+}
+
+interface SessionIndex {
+  readonly formatVersion: typeof JSONL_INDEX_FORMAT_VERSION
+  readonly compression: JsonlCompression
+  readonly entries: Record<string, SessionIndexEntry>
+}
+
+interface IndexedArtifact extends SessionIndexEntry {}
+/** Decode one complete frame off-thread while preserving byte-qualified corruption diagnostics. */
+async function decodeCompleteZstdFrame(
+  source: Buffer,
+  frame: ZstdFrameRange,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  signal?.throwIfAborted()
+  try {
+    const plaintext = await decompressZstdFrame(source.subarray(frame.start, frame.end))
+    signal?.throwIfAborted()
+    return plaintext
+  } catch (error) {
+    /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
+    if (signal?.aborted) signal.throwIfAborted()
+    throw new Error(`corrupt Zstandard session log: frame at byte ${frame.start} failed validation`, { cause: error })
+  }
+}
 
 /** Assert that the independently decodable first frame contains only the header record. */
 function assertZstdHeaderFrame(plaintext: Buffer): void {
@@ -96,6 +132,26 @@ interface FileRevisionIdentity {
   readonly ctimeNs: bigint
 }
 
+/** Capture JSON-safe fields that detect replacement, append, and in-place repair. */
+function indexFreshness(identity: FileRevisionIdentity): IndexFreshness {
+  return {
+    dev: identity.dev.toString(),
+    ino: identity.ino.toString(),
+    size: identity.size.toString(),
+    mtimeNs: identity.mtimeNs.toString(),
+    ctimeNs: identity.ctimeNs.toString(),
+  }
+}
+
+/** Whether an index entry still names the same artifact bytes. */
+function sameFreshness(left: IndexFreshness, right: IndexFreshness): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+}
+
 /** Build the source-qualified revision shared by full and lightweight reads. */
 function fileRevision(identity: FileRevisionIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -144,6 +200,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private compression: JsonlCompression
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
   private rootEncodingCheck: Promise<void> | undefined
+  private indexQueue: Promise<void> = Promise.resolve()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -197,6 +254,15 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   // parses the stored prefix (both encodings) and skips forward to fromSeq.
   readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  override readTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }> {
+    return this.coordinator.readTail(id, beforeSeq, limit, signal)
   }
 
   // One method serves both public `list` and the backend hook; delegating it to
@@ -260,13 +326,9 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     if (this.compression === 'zstd') {
       const { frames } = scanZstdFrames(buffer)
       if (frames.length === 0) throw new Error('empty or header-less Zstandard session log')
-      const decoder = createZstdFrameDecoder()
       const plaintexts: Buffer[] = []
-      // The decoder yields views into a reused buffer; copy each frame's
-      // plaintext immediately so a later concat cannot read overwritten memory.
-      for (const plaintext of decoder.decode(buffer, frames)) {
-        signal?.throwIfAborted()
-        plaintexts.push(Buffer.from(plaintext))
+      for (const frame of frames) {
+        plaintexts.push(await decodeCompleteZstdFrame(buffer, frame, signal))
       }
       content = Buffer.concat(plaintexts).toString('utf8')
     } else {
@@ -354,67 +416,43 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     if (frames.length === 0) throw new Error('empty or header-less Zstandard session log')
 
-    const decoder = createZstdFrameDecoder()
-    let yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+    const headerFrame = await decodeCompleteZstdFrame(buffer, frames[0]!, signal)
+    assertZstdHeaderFrame(headerFrame)
+    const scanner = new SessionLogScanner(headerFrame)
+    for (const frame of frames.slice(1)) {
+      scanner.write(await decodeCompleteZstdFrame(buffer, frame, signal))
+    }
+    signal?.throwIfAborted()
+    const complete = scanner.checkpoint()
+    if (complete.committedBytes !== complete.inputBytes) {
+      throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record')
+    }
+    if (tornStart === undefined) {
+      const prefix = scanner.finish()
+      return { meta: prefix.meta, events: prefix.events }
+    }
+
+    let recoveredPlaintext: Buffer = Buffer.alloc(0)
     try {
-      const decodedFrames = decoder.decode(buffer, frames)
       signal?.throwIfAborted()
-      const headerFrame = decodedFrames.next()
-      signal?.throwIfAborted()
-      /* v8 ignore next -- a non-empty structural frame list makes the decoder yield its first frame or throw. */
-      if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
-      assertZstdHeaderFrame(headerFrame.value)
-      const scanner = new SessionLogScanner(headerFrame.value)
-
-      let remainingFrames = frames.length - 1
-      for (const plaintext of decodedFrames) {
-        signal?.throwIfAborted()
-        scanner.write(plaintext)
-        remainingFrames -= 1
-        if (remainingFrames > 0 && performance.now() >= yieldDeadline) {
-          await scheduler.yield()
-          signal?.throwIfAborted()
-          yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
-        }
-      }
-      signal?.throwIfAborted()
-      const complete = scanner.checkpoint()
-      if (complete.committedBytes !== complete.inputBytes) {
-        throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record')
-      }
-      if (tornStart === undefined) {
-        const prefix = scanner.finish()
-        return { meta: prefix.meta, events: prefix.events }
-      }
-
-      let recoveredPlaintext: Buffer = Buffer.alloc(0)
-      try {
-        signal?.throwIfAborted()
-        recoveredPlaintext = await decompressZstdPrefix(buffer.subarray(tornStart))
-      } catch {
-        /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
-        if (signal?.aborted) signal.throwIfAborted()
-        // A structurally incomplete final frame may end before Node's decoder can
-        // emit any plaintext; the complete prior frames remain recoverable.
-      }
-      signal?.throwIfAborted()
-      scanner.write(recoveredPlaintext)
-      const recoveredPrefix = scanner.finish()
-      signal?.throwIfAborted()
-      return {
-        meta: recoveredPrefix.meta,
-        events: recoveredPrefix.events,
-        tornMarker: {
-          truncateTo: tornStart,
-          recoveredEvents: recoveredPrefix.events.slice(complete.eventCount),
-        },
-      }
-    } catch (error) {
+      recoveredPlaintext = await decompressZstdPrefix(buffer.subarray(tornStart))
+    } catch {
       /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
       if (signal?.aborted) signal.throwIfAborted()
-      throw error
-    } finally {
-      decoder.close()
+      // A structurally incomplete final frame may end before Node's decoder can
+      // emit any plaintext; the complete prior frames remain recoverable.
+    }
+    signal?.throwIfAborted()
+    scanner.write(recoveredPlaintext)
+    const recoveredPrefix = scanner.finish()
+    signal?.throwIfAborted()
+    return {
+      meta: recoveredPrefix.meta,
+      events: recoveredPrefix.events,
+      tornMarker: {
+        truncateTo: tornStart,
+        recoveredEvents: recoveredPrefix.events.slice(complete.eventCount),
+      },
     }
   }
 
@@ -473,39 +511,240 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string }> = []
+    return this.withIndexLock(async () => {
+      const index = await this.loadOrBuildIndex(signal)
+      const repaired = await this.repairIndexedArtifacts(index, signal)
+      const discovered = await this.discoverUnindexedArtifacts(repaired, signal)
+      return Object.values(discovered.entries).map(({ header, path }) => ({ header, path }))
+    })
+  }
+
+  /** Serialize index reads and transactional replacements within this backend instance. */
+  private withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.indexQueue.then(operation, operation)
+    this.indexQueue = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Read the current index, rebuilding absent, invalid, or obsolete representations. */
+  private async loadOrBuildIndex(signal?: AbortSignal): Promise<SessionIndex> {
+    const path = join(this.root, SESSION_INDEX_FILENAME)
+    try {
+      signal?.throwIfAborted()
+      const text = await readFile(path, { encoding: 'utf8', signal })
+      signal?.throwIfAborted()
+      return this.parseSessionIndex(text)
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      if (!isENOENT(error)) {
+        this.ctx.logger.warn(`session-persistence-jsonl: refusing corrupt or obsolete session index "${path}": ${String(error)}; rebuilding from artifacts`)
+      }
+      return this.rebuildIndex(signal)
+    }
+  }
+
+  /** Validate durable index data before any indexed path is trusted. */
+  private parseSessionIndex(text: string): SessionIndex {
+    const value: unknown = JSON.parse(text)
+    if (typeof value !== 'object' || value === null) throw new Error('session index must be an object')
+    const record = value as Record<string, unknown>
+    if (record.formatVersion !== JSONL_INDEX_FORMAT_VERSION) {
+      throw new Error(`unsupported session index format v${String(record.formatVersion)}`)
+    }
+    if (record.compression !== this.compression) throw new Error('session index compression does not match the backend')
+    if (typeof record.entries !== 'object' || record.entries === null || Array.isArray(record.entries)) {
+      throw new Error('session index entries must be an object')
+    }
+    const entries: Record<string, SessionIndexEntry> = Object.create(null) as Record<string, SessionIndexEntry>
+    for (const [id, rawEntry] of Object.entries(record.entries)) {
+      entries[id] = this.parseSessionIndexEntry(id, rawEntry)
+    }
+    return { formatVersion: JSONL_INDEX_FORMAT_VERSION, compression: this.compression, entries }
+  }
+
+  /** Validate one id-bound index entry and its root-confined artifact paths. */
+  private parseSessionIndexEntry(id: string, value: unknown): SessionIndexEntry {
+    if (typeof value !== 'object' || value === null) throw new Error(`session index entry "${id}" must be an object`)
+    const entry = value as Record<string, unknown>
+    if (typeof entry.header !== 'object' || entry.header === null) {
+      throw new Error(`session index entry "${id}" has no header`)
+    }
+    const header = parseHeaderMeta(JSON.stringify({ ...(entry.header as object), type: 'session' }))
+    if (header === undefined || header.id !== id) throw new Error(`session index entry "${id}" has an invalid header`)
+    const expectedPath = logPath(this.root, header.cwd, header.id, this.compression)
+    const expectedProject = projectDir(this.root, header.cwd)
+    if (entry.path !== expectedPath || entry.project !== expectedProject) {
+      throw new Error(`session index entry "${id}" does not identify its header artifact`)
+    }
+    const freshness = this.parseIndexFreshness(id, entry.freshness)
+    return { path: expectedPath, project: expectedProject, header, freshness }
+  }
+
+  /** Validate the stat identity persisted for one index entry. */
+  private parseIndexFreshness(id: string, value: unknown): IndexFreshness {
+    if (typeof value !== 'object' || value === null) throw new Error(`session index entry "${id}" has no freshness`)
+    const freshness = value as Record<string, unknown>
+    const fields = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const
+    for (const field of fields) {
+      if (typeof freshness[field] !== 'string' || !/^(0|[1-9]\d*)$/.test(freshness[field])) {
+        throw new Error(`session index entry "${id}" has invalid ${field}`)
+      }
+    }
+    return {
+      dev: freshness.dev as string,
+      ino: freshness.ino as string,
+      size: freshness.size as string,
+      mtimeNs: freshness.mtimeNs as string,
+      ctimeNs: freshness.ctimeNs as string,
+    }
+  }
+
+  /** Build a complete index from artifact headers and publish it transactionally. */
+  private async rebuildIndex(signal?: AbortSignal): Promise<SessionIndex> {
+    const entries: Record<string, SessionIndexEntry> = Object.create(null) as Record<string, SessionIndexEntry>
+    for (const artifact of await this.scanArtifacts(signal)) entries[artifact.header.id] = artifact
+    const index = { formatVersion: JSONL_INDEX_FORMAT_VERSION, compression: this.compression, entries } as const
+    await this.writeSessionIndex(index)
+    return index
+  }
+
+  /** Repair only entries whose artifact stat identity changed or disappeared. */
+  private async repairIndexedArtifacts(index: SessionIndex, signal?: AbortSignal): Promise<SessionIndex> {
+    const entries: Record<string, SessionIndexEntry> = { ...index.entries }
+    let changed = false
+    for (const [id, entry] of Object.entries(index.entries)) {
+      signal?.throwIfAborted()
+      try {
+        const current = indexFreshness(await stat(entry.path, { bigint: true }))
+        signal?.throwIfAborted()
+        if (sameFreshness(current, entry.freshness)) continue
+        const repaired = await this.readIndexedArtifact(entry.path, id as SessionId, current, signal)
+        if (repaired === undefined) delete entries[id]
+        else entries[id] = repaired
+        changed = true
+      } catch (error: unknown) {
+        signal?.throwIfAborted()
+        if (!isENOENT(error)) throw error
+        delete entries[id]
+        changed = true
+      }
+    }
+    if (!changed) return index
+    const repaired = { ...index, entries }
+    await this.writeSessionIndex(repaired)
+    return repaired
+  }
+
+  /** Discover namespace additions while retaining indexed headers for unchanged artifacts. */
+  private async discoverUnindexedArtifacts(index: SessionIndex, signal?: AbortSignal): Promise<SessionIndex> {
+    const entries: Record<string, SessionIndexEntry> = { ...index.entries }
+    const indexedPaths = new Set(Object.values(entries).map(entry => entry.path))
+    let changed = false
+    for (const project of await this.listProjectDirs(signal)) {
+      for (const dir of await this.listSessionDirs(project, signal)) {
+        signal?.throwIfAborted()
+        const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
+        if (await this.exists(opposite)) throw this.encodingMismatch(opposite)
+        const path = join(dir, `session${logSuffix(this.compression)}`)
+        if (indexedPaths.has(path) || !await this.exists(path)) continue
+        const freshness = indexFreshness(await stat(path, { bigint: true }))
+        const artifact = await this.readIndexedArtifact(path, undefined, freshness, signal)
+        if (artifact === undefined) continue
+        const duplicate = entries[artifact.header.id]
+        if (duplicate !== undefined && duplicate.path !== path) {
+          throw new Error(`duplicate JSONL session id "${artifact.header.id}" appears in multiple project directories`)
+        }
+        entries[artifact.header.id] = artifact
+        indexedPaths.add(path)
+        changed = true
+      }
+    }
+    if (!changed) return index
+    const discovered = { ...index, entries }
+    await this.writeSessionIndex(discovered)
+    return discovered
+  }
+
+  /** Read and validate the bounded header for one stale or newly discovered artifact. */
+  private async readIndexedArtifact(
+    path: string,
+    expectedId: SessionId | undefined,
+    freshness: IndexFreshness,
+    signal?: AbortSignal,
+  ): Promise<IndexedArtifact | undefined> {
+    const first = this.compression === 'zstd'
+      ? await this.readFirstZstdLine(path, signal)
+      : await this.readFirstLine(path, signal)
+    signal?.throwIfAborted()
+    if (first === undefined) return undefined
+    const header = parseHeaderMeta(first)
+    if (header === undefined) return undefined
+    await this.assertStoredIdentity(path, header, expectedId, signal)
+    return { header, path, project: projectDir(this.root, header.cwd), freshness }
+  }
+
+  /** Scan artifact directories only when no usable id index exists or keyed lookup misses. */
+  private async scanArtifacts(signal?: AbortSignal): Promise<IndexedArtifact[]> {
+    const artifacts: IndexedArtifact[] = []
     const ids = new Set<SessionId>()
     for (const project of await this.listProjectDirs(signal)) {
       signal?.throwIfAborted()
       for (const dir of await this.listSessionDirs(project, signal)) {
         signal?.throwIfAborted()
         const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
-        const oppositeExists = await this.exists(opposite)
-        signal?.throwIfAborted()
-        if (oppositeExists) throw this.encodingMismatch(opposite)
+        if (await this.exists(opposite)) throw this.encodingMismatch(opposite)
         const path = join(dir, `session${logSuffix(this.compression)}`)
-        const pathExists = await this.exists(path)
-        signal?.throwIfAborted()
-        if (!pathExists) continue
-        // Read only headers so listing scales with session count, not log size.
-        const first = this.compression === 'zstd'
-          ? await this.readFirstZstdLine(path, signal)
-          : await this.readFirstLine(path, signal)
-        signal?.throwIfAborted()
-        if (first === undefined) continue // empty/half-written file
-        const meta = parseHeaderMeta(first)
-        if (meta === undefined) continue // not a session header
-        await this.assertStoredIdentity(path, meta, undefined, signal)
-        signal?.throwIfAborted()
-        if (ids.has(meta.id)) {
-          throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
+        if (!await this.exists(path)) continue
+        const freshness = indexFreshness(await stat(path, { bigint: true }))
+        const artifact = await this.readIndexedArtifact(path, undefined, freshness, signal)
+        if (artifact === undefined) continue
+        if (ids.has(artifact.header.id)) {
+          throw new Error(`duplicate JSONL session id "${artifact.header.id}" appears in multiple project directories`)
         }
-        ids.add(meta.id)
-        artifacts.push({ header: meta, path })
+        ids.add(artifact.header.id)
+        artifacts.push(artifact)
       }
     }
     signal?.throwIfAborted()
     return artifacts
+  }
+
+  /** Replace the root index through an fsync'd temporary file and atomic rename. */
+  private async writeSessionIndex(index: SessionIndex): Promise<void> {
+    try {
+      await stat(this.root)
+    } catch (error: unknown) {
+      if (isENOENT(error)) return
+      throw error
+    }
+    const path = join(this.root, SESSION_INDEX_FILENAME)
+    const tmp = await this.writeSyncedTempFile(path, JSON.stringify(index) + '\n')
+    try {
+      await rename(tmp, path)
+      /* v8 ignore next -- Windows rename is write-through at the namespace layer; POSIX covers directory fsync. */
+      if (process.platform !== 'win32') await this.syncDirPosix(this.root)
+    } catch (error) {
+      await rm(tmp, { force: true })
+      throw error
+    }
+  }
+
+  /** Refresh one immutable header and its post-write artifact identity. */
+  private updateIndexAfterArtifactWrite(meta: SessionHeader, path: string): Promise<void> {
+    return this.withIndexLock(async () => {
+      const index = await this.loadOrBuildIndex()
+      const entries = { ...index.entries }
+      const header = parseHeaderMeta(JSON.stringify(toHeaderLine(meta)))
+      /* v8 ignore next -- append metadata was already validated by the coordinator and serializer. */
+      if (header === undefined) throw new Error('cannot index invalid session header')
+      entries[meta.id] = {
+        header,
+        path,
+        project: projectDir(this.root, meta.cwd),
+        freshness: indexFreshness(await stat(path, { bigint: true })),
+      }
+      await this.writeSessionIndex({ ...index, entries })
+    })
   }
 
   // --- materialization / append / repair (file mechanics) ---
@@ -523,6 +762,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     } else {
       await this.materializePosix(project, dir, finalPath, meta.id, content)
     }
+    await this.updateIndexAfterArtifactWrite(meta, finalPath)
   }
 
   /* v8 ignore start -- Windows uses the Win32 durable-publish path; POSIX coverage exercises this peer. */
@@ -676,6 +916,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     } finally {
       await closeAppendHandle()
     }
+    await this.updateIndexAfterArtifactWrite(meta, path)
   }
 
   private async rollbackAppend(path: string, size: number): Promise<void> {
@@ -698,6 +939,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     } finally {
       await handle.close()
     }
+    await this.updateIndexAfterArtifactWrite(meta, path)
   }
 
   // --- discovery helpers ---
@@ -770,22 +1012,57 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     }
   }
 
-  /** Find the unique physical log for an id across every project directory. */
+  /** Resolve an id through the durable index, scanning all artifacts only after a keyed miss. */
   private async findLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined> {
+    return this.withIndexLock(async () => {
+      signal?.throwIfAborted()
+      let index: SessionIndex
+      try {
+        index = await this.loadOrBuildIndex(signal)
+      } catch (error) {
+        const path = await this.findPhysicalLog(id, signal)
+        if (path !== undefined) return path
+        throw error
+      }
+      const indexed = index.entries[id]
+      if (indexed !== undefined) {
+        if (await this.exists(indexed.path)) {
+          signal?.throwIfAborted()
+          return indexed.path
+        }
+        const entries = { ...index.entries }
+        delete entries[id]
+        index = { ...index, entries }
+        await this.writeSessionIndex(index)
+      }
+
+      try {
+        const artifacts = await this.scanArtifacts(signal)
+        const entries: Record<string, SessionIndexEntry> = Object.create(null) as Record<string, SessionIndexEntry>
+        for (const artifact of artifacts) entries[artifact.header.id] = artifact
+        index = { formatVersion: JSONL_INDEX_FORMAT_VERSION, compression: this.compression, entries }
+        await this.writeSessionIndex(index)
+        if (entries[id] !== undefined) return entries[id].path
+      } catch (error) {
+        const path = await this.findPhysicalLog(id, signal)
+        if (path !== undefined) return path
+        throw error
+      }
+      return this.findPhysicalLog(id, signal)
+    })
+  }
+
+  /** Locate one physical id without parsing its header, preserving artifact corruption diagnostics. */
+  private async findPhysicalLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined> {
     const matches: string[] = []
     for (const project of await this.listProjectDirs(signal)) {
       signal?.throwIfAborted()
       await this.rejectLegacyFlatArtifact(project, id, signal)
-      signal?.throwIfAborted()
       const dir = join(project, encodeSegment(id))
       const path = join(dir, `session${logSuffix(this.compression)}`)
       const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
-      const oppositeExists = await this.exists(opposite)
-      signal?.throwIfAborted()
-      if (oppositeExists) throw this.encodingMismatch(opposite)
-      const pathExists = await this.exists(path)
-      signal?.throwIfAborted()
-      if (pathExists) matches.push(path)
+      if (await this.exists(opposite)) throw this.encodingMismatch(opposite)
+      if (await this.exists(path)) matches.push(path)
     }
     if (matches.length > 1) {
       throw new Error(`duplicate JSONL session id "${id}" appears in multiple project directories`)

@@ -6,6 +6,7 @@
 
 import type {
   Agent,
+  AgentActivity,
   AgentCancelCause,
   AgentEventDispatch,
   AgentOptions,
@@ -51,6 +52,24 @@ type PreparedStep =
   | { kind: 'reject' }
   | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly }
 
+/**
+ * Hand the event loop one poll phase before the driver starts more model work.
+ *
+ * A step or turn boundary crossed through already-resolved promises never
+ * leaves the microtask queue, which Node drains completely before it reaches
+ * timers or I/O. A host driving several in-process agents therefore spends a
+ * whole burst without servicing a socket: an inbound cancel is never read, so
+ * no abort can be observed, and queued stream frames are not flushed.
+ * `setImmediate` is the check-phase hop whose next iteration passes through the
+ * poll phase, which is what makes the drain a guarantee rather than a hope. One
+ * macrotask per model request is immaterial beside the request itself, so this
+ * stays unconditional and needs no tunable.
+ * @returns a promise resolved on the next event-loop iteration.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => { setImmediate(resolve) })
+}
+
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
   if (header.adapterDefaults === undefined) return header.config
@@ -64,6 +83,7 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
 export class ReactLoopAgent implements Agent {
   readonly inbox: Inbox
   private phase: Phase
+  private activityFacet: AgentActivity | undefined
   private activityDone: Promise<void> = Promise.resolve()
 
   /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
@@ -100,10 +120,37 @@ export class ReactLoopAgent implements Agent {
     return this.phase.kind === 'idle' || this.phase.kind === 'maintenance' ? 'idle' : 'running'
   }
 
-  /** Commit a phase and publish its externally visible status transition. */
+  get activity(): AgentActivity | undefined {
+    return this.activityFacet
+  }
+
+  /**
+   * Commit one activity qualifier and publish its transition. A repeat is
+   * dropped rather than emitted: the facet reports state, and the agent
+   * invariant rejects a no-op transition on either facet.
+   * @param next - the qualifier just entered, or `undefined` to clear it.
+   */
+  private setActivity(next: AgentActivity | undefined): void {
+    if (this.activityFacet === next) return
+    this.activityFacet = next
+    this.dispatch.emit('agent/activity', { activity: next })
+  }
+
+  /**
+   * Commit a phase and publish its externally visible transitions.
+   *
+   * The activity qualifier is derived from the phase being entered — a fresh
+   * driver and a retired one carry none, while a maintenance task is busy under
+   * an `idle` status — and it is published BEFORE the status, so no listener
+   * observes an agent that is already `idle` while still claiming `stopping`.
+   * A `stopping` qualifier therefore survives exactly as long as the phase that
+   * was asked to stop.
+   * @param next - the phase to commit.
+   */
   private setPhase(next: Phase): void {
     const previousStatus = this.status
     this.phase = next
+    this.setActivity(next.kind === 'maintenance' ? 'maintenance' : undefined)
     const status = this.status
     if (status !== previousStatus) {
       this.dispatch.emit('agent/status', { status })
@@ -136,7 +183,14 @@ export class ReactLoopAgent implements Agent {
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
     }
-    if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+    if (this.phase.kind === 'idle') return
+    this.phase.abort.abort(cause)
+    // The abort is a request, not the stop: a started tool call still drains,
+    // an LLM stream still tears down, and the turn ending is still unwritten.
+    // Until the phase retires, the agent stays `running` (or `idle` under
+    // maintenance) and this facet is the only account of the difference between
+    // work the user wants and work the user already ended.
+    this.setActivity('stopping')
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -166,8 +220,20 @@ export class ReactLoopAgent implements Agent {
    * activity. A wake sent while idle always opens its turn boundary, even
    * when its message was cleared; only a latched replay is suppressed when
    * the queue no longer holds the wake.
+   *
+   * The driver reservation — `activityDone` plus the running phase — is
+   * published INSIDE the initiator boundary, because `withInitiator` refuses
+   * (throws synchronously) once the registry stops accepting boundaries at
+   * teardown. A reservation published ahead of that refusal would outlive the
+   * driver that never started: `activityDone` would never settle, so the phase
+   * would stay `running` forever, `cancel()` would abort a controller nothing
+   * awaits, and `whenIdle()` — with it every handle disposal — would hang.
+   * Publishing inside the boundary makes a refusal a clean no-op that leaves
+   * the agent idle, cancellable, and disposable, with its queued work intact.
    * @param wakeAfterAbort - the {@link send} classification, captured before
    *   the inbox insertion so a reentrant cancel cannot reclassify it.
+   * @throws when the registry refuses the initiator boundary; the caller's
+   *   waking send has already been queued and no driver was reserved.
    */
   private wakeDriver(wakeAfterAbort = false): void {
     if (this.phase.kind !== 'idle') {
@@ -180,16 +246,19 @@ export class ReactLoopAgent implements Agent {
       }
       return
     }
+    const { lastTurn } = this.phase
     const driver = Promise.withResolvers<void>()
-    this.activityDone = driver.promise
-    this.setPhase({
-      kind: 'running',
-      abort: new AbortController(),
-      turn: this.phase.lastTurn,
-      step: 0,
-      wakeRequested: false,
-    })
-    this.loopCtx.agents.withInitiator(this, () => this.kick()).then(driver.resolve, driver.reject)
+    this.loopCtx.agents.withInitiator(this, () => {
+      this.activityDone = driver.promise
+      this.setPhase({
+        kind: 'running',
+        abort: new AbortController(),
+        turn: lastTurn,
+        step: 0,
+        wakeRequested: false,
+      })
+      return this.kick()
+    }).then(driver.resolve, driver.reject)
   }
 
   async whenIdle(): Promise<void> {
@@ -297,6 +366,10 @@ export class ReactLoopAgent implements Agent {
           signal.throwIfAborted()
         }
         if (turnEnds && this.inbox.nextStep.length === 0) break
+        // Another step of this turn follows: drain I/O first, so a cancel that
+        // arrived while this step ran is read from its socket and observed by
+        // the `throwIfAborted` at the top of the next iteration.
+        await yieldToEventLoop()
         target = 'next-step'
       }
     } catch (error: unknown) {
@@ -326,6 +399,10 @@ export class ReactLoopAgent implements Agent {
     // A fresh controller makes a latch set on the old one stale: the live driver claims the queue itself.
     phase.wakeRequested = false
     phase.step = 0
+    // Turn-boundary drain, placed AFTER the fresh controller is installed: a
+    // cancel landing inside this window must abort the controller the next turn
+    // reads, and one aborted before the swap would be discarded with the old one.
+    await yieldToEventLoop()
     return true
   }
 

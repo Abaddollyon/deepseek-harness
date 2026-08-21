@@ -57,6 +57,19 @@
   display: none;
 }
 
+.virtualList {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.virtualItem {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+}
+
 .callRow {
   border-radius: 6px;
 }

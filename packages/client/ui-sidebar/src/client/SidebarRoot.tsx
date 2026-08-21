@@ -73,6 +73,10 @@ export function SidebarRoot({
   // leaves. A pointer that returns within that window cancels the pending
   // hide rather than restarting from a hidden bar.
   const column = useRef<HTMLDivElement>(null)
+  const columnRect = useRef<DOMRect | undefined>(undefined)
+  const refreshColumnRect = (): void => {
+    columnRect.current = column.current?.getBoundingClientRect()
+  }
   const [pointerInside, setPointerInside] = useState(false)
   const lingerTimer = useRef<number | undefined>(undefined)
   const armLinger = (): void => {
@@ -86,6 +90,19 @@ export function SidebarRoot({
     window.clearTimeout(lingerTimer.current)
     lingerTimer.current = undefined
   }
+  useEffect(() => {
+    refreshColumnRect()
+    const refresh = (): void => { refreshColumnRect() }
+    window.addEventListener('resize', refresh)
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(refresh)
+    /* v8 ignore next -- React assigns the rendered column ref before passive effects run. */
+    if (column.current !== null) observer?.observe(column.current)
+    return () => {
+      window.removeEventListener('resize', refresh)
+      observer?.disconnect()
+    }
+  }, [])
+
   // Leaving is decided by the column's BOX, not by DOM containment, and only
   // while the bars are drawn. ui-settings renders its full-viewport panel as a
   // fixed-position DESCENDANT of this column, so a pointer moved onto that
@@ -95,18 +112,22 @@ export function SidebarRoot({
   // pointer that leaves the window emits no further moves.
   useEffect(() => {
     if (!pointerInside) return
+    refreshColumnRect()
     const onMove = (event: PointerEvent): void => {
-      const rect = column.current?.getBoundingClientRect()
-      /* v8 ignore next -- the listener only exists while the column is mounted and revealed. */
+      const rect = columnRect.current
+      /* v8 ignore next -- activation measures the mounted column before installing this listener. */
       if (rect === undefined) return
       const inside = event.clientX >= rect.left && event.clientX < rect.right
         && event.clientY >= rect.top && event.clientY < rect.bottom
       if (inside) cancelLinger()
       else armLinger()
     }
+    const refresh = (): void => { refreshColumnRect() }
     document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerdown', refresh)
     return () => {
       document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerdown', refresh)
       cancelLinger()
     }
   }, [pointerInside])
@@ -121,6 +142,7 @@ export function SidebarRoot({
       style={wide ? { width: collapsed ? lastWideWidth.current : width } : undefined}
       onPointerEnter={() => {
         cancelLinger()
+        refreshColumnRect()
         setPointerInside(true)
       }}
       onPointerLeave={() => { armLinger() }}

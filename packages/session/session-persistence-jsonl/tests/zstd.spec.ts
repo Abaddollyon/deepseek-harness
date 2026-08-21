@@ -4,7 +4,6 @@ import { appendFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFil
 import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { performance } from 'node:perf_hooks'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -466,7 +465,7 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/frame at byte .* failed validation/)
   })
 
-  it('stops multi-frame inspection when cancellation arrives at a slice deadline', async () => {
+  it('stops multi-frame inspection when cancellation arrives during async decode', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
     const header = meta('cancel-zstd-frames')
@@ -477,61 +476,85 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     const controller = new AbortController()
     const reason = new Error('cancel after Zstandard decode starts')
     const reader = ctx.sessionPersistence as unknown as ZstdReaderInternals
-    vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(501)
     const pending = reader.readZstdPrefix(stream, controller.signal)
     queueMicrotask(() => { controller.abort(reason) })
 
     await expect(pending).rejects.toBe(reason)
   })
 
-  it('continues decoding every frame after a slice deadline yields', async () => {
+  it('matches synchronous multi-frame decoding for complete logs', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
-    const header = meta('yield-zstd-frames')
-    const events = oneTurnLog().slice(0, 2)
+    const header = meta('equivalent-zstd-frames')
+    const events = oneTurnLog()
     const headerFrame = await compressZstdFrame(`${JSON.stringify(toHeaderLine(header))}\n`)
     const eventFrames = await Promise.all(events.map(async event => (
       compressZstdFrame(`${JSON.stringify(event)}\n`)
     )))
     const stream = Buffer.concat([headerFrame, ...eventFrames])
+    const ranges = scanZstdFrames(stream).frames
+    const decoder = createZstdFrameDecoder()
+    let expected: SessionEvent[]
+    try {
+      const plaintext = Array.from(decoder.decode(stream, ranges), chunk => Buffer.from(chunk))
+      expected = scanLog(Buffer.concat(plaintext)).events
+    } finally {
+      decoder.close()
+    }
+
     const reader = ctx.sessionPersistence as unknown as ZstdReaderInternals
-    vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(501)
+    await expect(reader.readZstdPrefix(stream)).resolves.toMatchObject({ events: expected })
+  })
 
-    const prefix = await reader.readZstdPrefix(stream)
+  it('lets timers run while a complete frame decompresses', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('yield-zstd-frame')
+    const events = oneTurnLog()
+    const user = events[1]
+    if (user?.type !== 'user/message') throw new Error('expected user message fixture')
+    events[1] = {
+      ...user,
+      data: { ...user.data, content: [{ type: 'text', text: deterministicNoise(8_000_000) }] },
+    }
+    const stream = Buffer.concat([
+      await compressZstdFrame(`${JSON.stringify(toHeaderLine(header))}\n`),
+      await compressZstdFrame(events.map(event => JSON.stringify(event)).join('\n') + '\n'),
+    ])
+    const reader = ctx.sessionPersistence as unknown as ZstdReaderInternals
+    const turns: string[] = []
 
+    const pending = reader.readZstdPrefix(stream).then((prefix) => {
+      turns.push('decoded')
+      return prefix
+    })
+    await new Promise<void>(resolve => setTimeout(() => {
+      turns.push('timer')
+      resolve()
+    }, 0))
+    const prefix = await pending
+
+    expect(turns).toEqual(['timer', 'decoded'])
     expect(prefix.events).toEqual(events)
   })
 
   it.each(['none', 'zstd'] as const)(
-    'observes cancellation after each async %s header read during listing',
+    'lists indexed %s headers without reading artifact bytes',
     async (compression) => {
       const root = await freshRoot()
       const ctx = await mount(root, compression)
-      const header = meta(`cancel-${compression}-header-read`, '/work')
+      const header = meta(`indexed-${compression}-header-read`, '/work')
       await ctx.sessionPersistence.create(header)
       await ctx.sessionPersistence.append(header.id, oneTurnLog())
       await ctx.sessionPersistence.list()
       const path = logPath(root, header.cwd, header.id, compression)
       const probe = await open(path, 'r')
       const prototype = Object.getPrototypeOf(probe) as { read: HeaderRead }
-      const originalRead = prototype.read
       await probe.close()
-      const controller = new AbortController()
-      const reason = new Error(`cancel ${compression} header read`)
-      const read = vi.spyOn(prototype, 'read').mockImplementation(async function (
-        this: FileHandle,
-        buffer: Buffer,
-        offset: number,
-        length: number,
-        position: number | null,
-      ) {
-        const result = await originalRead.call(this, buffer, offset, length, position)
-        controller.abort(reason)
-        return result
-      })
+      const read = vi.spyOn(prototype, 'read')
 
-      await expect(ctx.sessionPersistence.list(controller.signal)).rejects.toBe(reason)
-      expect(read).toHaveBeenCalledTimes(1)
+      await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([header])
+      expect(read).not.toHaveBeenCalled()
     },
   )
 

@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentActivity, AgentStatus } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -233,6 +234,33 @@ function forwardedSettings(ns: string): HostFrame {
     args: [ns, expect.any(Number)], // oxlint-disable-line typescript/no-unsafe-assignment
   }
 }
+
+describe('agent activity host frames', () => {
+  it('forwards stopping, idle maintenance, and the cleared facet', async () => {
+    const ctx = await harness()
+    const session = ctx.sessions.create()
+    const agent = {
+      id: session.id, session, ctx, status: 'running', activity: 'stopping',
+    } as unknown as Agent & { status: AgentStatus; activity: AgentActivity | undefined }
+    ctx.agents.register(agent)
+    const api = createApiProxy(ctx, DEFAULTS)
+
+    const frames = await collectHost(api, ['host/session-status'], 3, async () => {
+      ctx.emit('agent/activity', { agent, activity: 'stopping' })
+      agent.status = 'idle'
+      agent.activity = 'maintenance'
+      ctx.emit('agent/activity', { agent, activity: 'maintenance' })
+      agent.activity = undefined
+      ctx.emit('agent/activity', { agent, activity: undefined })
+    })
+
+    expect(frames).toEqual([
+      { type: 'host/session-status', sessionId: session.id, running: true, activity: 'stopping' },
+      { type: 'host/session-status', sessionId: session.id, running: false, activity: 'maintenance' },
+      { type: 'host/session-status', sessionId: session.id, running: false },
+    ])
+  })
+})
 
 describe('settings domain', () => {
   it('reports an actionable error when no settings provider is mounted', async () => {

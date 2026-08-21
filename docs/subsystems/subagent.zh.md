@@ -525,18 +525,41 @@ async followup( parent: Agent, childId: SessionId, content: ContentBlock[], opti
  * Interrupt one live continuable child's current turn under a human parent
  * address or an exact live ancestor Agent. Fire-and-return: the cancel
  * signal is issued before this returns, but the target may keep running
- * until it observes the signal. Unclaimed pending inbox work, the Activation,
- * and published descendants are preserved; claimed work is not requeued.
+ * until it observes the signal. Unclaimed pending inbox work and the
+ * Activation are preserved; claimed work is not requeued.
  * Once the interrupted driver is idle, a waking send resumes the parked FIFO
  * queue. An absent target — including a one-shot or unknown id —
  * is an accepted no-op, as is a manager-less composition, which cannot own a
  * live Activation.
+ *
+ * Reach follows the authority. An `ancestor` interrupt stops the named target
+ * only, leaving the agents that target started running. A `user` interrupt is
+ * a human ending this session and stops the target's whole live subtree, whose
+ * descendants are cancelled with the `parent` cause.
  * @param targetSessionId - the durable child session id to interrupt.
  * @param authority - the human parent address or exact live ancestor Agent.
  * @throws {SubagentError} `UNAUTHORIZED` when the authority does not own the
  *   live target.
  */
 interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void
+
+/**
+ * Stop the live continuable subtree below one session on its human owner's
+ * behalf, leaving that session's own Agent untouched.
+ *
+ * The host calls this beside its own `Agent.cancel()` when a human stops an
+ * ordinary session: that cancel reaches one Agent, while the background
+ * children the session started are independent Activations that would
+ * otherwise keep spending model calls and then wake the stopped session back
+ * up as each one settled. Descendants are cancelled with the `parent` cause
+ * and keep their unclaimed inbox work, so a later send resumes them.
+ *
+ * Fire-and-return: every target is signalled before this returns and none is
+ * awaited. A session with no live descendants — and a manager-less
+ * composition, which can own no Activation — is an accepted no-op.
+ * @param parentSessionId - the durable session whose live descendants stop.
+ */
+cancelDescendants(parentSessionId: SessionId): void
 
 /**
  * Deliver selected content from one live continuable child to its durable
@@ -678,7 +701,7 @@ async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 
 Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:175`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:176`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagent-events"></a>
 
@@ -704,7 +727,7 @@ A published child settled. Scope-filtered dispatch uses the same delegating pare
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:170`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:171`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-added--emit"></a>
 
@@ -721,7 +744,7 @@ A provider became resolvable in the registry.
 'subagent/provider-added'(provider: SubagentProvider): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:144`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:145`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-removed--emit"></a>
 
@@ -738,7 +761,7 @@ A provider left the registry. Accepted runs remain holder-owned.
 'subagent/provider-removed'(name: string): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:150`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:151`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentstart--emit"></a>
 
@@ -762,5 +785,5 @@ A provider established a published child. For in-process providers, `ctx.agents.
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:161`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:162`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

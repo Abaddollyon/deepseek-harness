@@ -193,6 +193,37 @@ describe('agent scope lifecycle', () => {
     expect(after.sections.find(s => s.name === 'deployment:persona')?.text).toBe('You are the deployment.')
   })
 
+  it('keeps a live idle agent idle, cancellable, and disposable when the registry refuses a new initiator boundary', async () => {
+    const ctx = await harness()
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('initiator-closed-s'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const { agent } = handle
+
+    // The registry closes its initiator scope the moment a lifecycle-ancestor
+    // fiber starts unloading. The teardown promise is held rather than awaited:
+    // the agent is still live and idle inside that window, which is exactly
+    // where a settlement notice or a send_message lands during host teardown.
+    const rootTeardown = ctx.fiber.dispose()
+
+    expect(() => {
+      agent.followup(createUserMessage({
+        content: text('lands after the initiator scope closed'),
+        source: { kind: 'user' },
+      }))
+    }).toThrow()
+
+    // The refusal reserved no driver, so nothing strands the agent: it stays
+    // idle (not permanently 'running'), `cancel()` still has a phase to act on,
+    // and both quiescence and handle disposal still settle.
+    expect(agent.status).toBe('idle')
+    agent.cancel({ kind: 'user' })
+    await expect(agent.whenIdle()).resolves.toBeUndefined()
+    await expect(handle.dispose()).resolves.toBeUndefined()
+    await rootTeardown
+  })
+
   it('agent.ctx listeners hear only their own agent (scoped dispatch end to end)', async () => {
     const ctx = await harness(new MockAdapter([textResponse('one'), textResponse('two')]))
     const a = ctx.agentLoop.create(SessionId('a'), { provider: 'mock', model: 'mock' })

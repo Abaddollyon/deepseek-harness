@@ -443,6 +443,31 @@ describe('workspace domain round trip', () => {
 })
 
 describe('SSE stream path', () => {
+  it('serializes one shared envelope once across SSE consumers', async () => {
+    const envelope: RpcRequest<MuxFrame> = {
+      rpcId: RpcId('shared-envelope'),
+      payload: { type: 'session/subscribed', sessionId: sid('s1'), lastSeq: 3 },
+    }
+    const api = scriptedApi({
+      events: {
+        async *mux() { yield envelope },
+      },
+    })
+    const handler = toFetchHandler(api)
+    const stringify = vi.spyOn(JSON, 'stringify')
+    try {
+      const [first, second] = await Promise.all([
+        handler.fetch('http://dsh.internal/api/events.mux'),
+        handler.fetch('http://dsh.internal/api/events.mux'),
+      ])
+      const [firstWire, secondWire] = await Promise.all([first.text(), second.text()])
+      expect(firstWire).toBe(secondWire)
+      expect(stringify).toHaveBeenCalledOnce()
+    } finally {
+      stringify.mockRestore()
+    }
+  })
+
   it('yields frames in order and skips the comment preamble', async () => {
     const frames: MuxFrame[] = [
       { type: 'session/subscribed', sessionId: sid('s1'), lastSeq: 3 },

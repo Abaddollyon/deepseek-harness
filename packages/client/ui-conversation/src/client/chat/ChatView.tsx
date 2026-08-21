@@ -14,15 +14,22 @@
 // lifecycle updates replace only their own row without remounting it.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import type { ConversationTimelineSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { Button, IconChevronDownOutline14, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, RenderMessageImages } from '../contract/slots.ts'
 import { PendingSteeringBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { formatRunDuration } from './message-chrome.ts'
+import { rootNodeKeyForToolCallStore } from './tool-node-reader.ts'
 import css from './ChatView.module.css'
 
 const FOLLOW_THRESHOLD = 24
+const VIRTUALIZATION_THRESHOLD = 500
+const VIRTUAL_OVERSCAN_ROWS = 12
+const VIRTUAL_ESTIMATED_ROW_HEIGHT = 160
+const VIRTUAL_ROW_GAP = 16
+const VIRTUAL_INITIAL_VIEWPORT_HEIGHT = 600
 
 /** Active column host when present; otherwise the view-local scroller. */
 function scrollerOf(from: HTMLElement): HTMLElement {
@@ -196,7 +203,6 @@ export function ChatView({
   const openError = useSession(s => s.openError)
   const hasMore = useSession(s => s.hasMore)
   const loadingOlder = useSession(s => s.loadingOlder)
-  const selectedCallId = useStore(s => s.selection?.callId)
   const [fileOpenError, setFileOpenError] = useState<{ path: string; message: string } | null>(null)
   const [fileOpenBusy, setFileOpenBusy] = useState(false)
   // Close/retry must ignore a settlement that started before the latest
@@ -258,7 +264,7 @@ export function ChatView({
       key={nodeKey}
       nodeKey={nodeKey}
       useSession={useSession}
-      selectedCallId={selectedCallId}
+      useStore={useStore}
       cwd={cwd}
       openFile={requestOpenFile}
       inspectCall={inspectCall}
@@ -269,12 +275,13 @@ export function ChatView({
       t={t}
     />
   )), [
-    order, useSession, selectedCallId, cwd, requestOpenFile, inspectCall, forkAt, renderMessageImages,
+    order, useSession, useStore, cwd, requestOpenFile, inspectCall, forkAt, renderMessageImages,
     fileMentions, renderSlot, t,
   ])
 
   const listRef = useRef<HTMLDivElement | null>(null)
   const columnRef = useRef<HTMLDivElement | null>(null)
+  const virtualListRef = useRef<HTMLDivElement | null>(null)
   const atBottomRef = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
   /** Last position delivered or written on the main thread. */
@@ -290,6 +297,116 @@ export function ChatView({
    *  scroll-driven at-bottom chrome re-render (which would snap inertial
    *  scrolls the rest of the way to the floor). */
   const followSigRef = useRef<string | null>(null)
+  const [initialScroll] = useState(() => chatScroll.read())
+  const restoreAnchorKeyRef = useRef(initialScroll?.anchorKey ?? null)
+  const [virtualScrollMargin, setVirtualScrollMargin] = useState(0)
+  const [pinnedVirtualKeys, setPinnedVirtualKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const virtualizationEligible = order.length > VIRTUALIZATION_THRESHOLD
+  const [virtualizationActivated] = useState(
+    () => virtualizationEligible && initialScroll === null,
+  )
+  const virtualizationEnabled = virtualizationEligible && virtualizationActivated
+  const virtualIndexForAnchor = useCallback((anchorKey: string): number => {
+    const direct = order.indexOf(anchorKey)
+    if (direct >= 0) return direct
+    if (!anchorKey.startsWith('call:')) return -1
+    const rootKey = rootNodeKeyForToolCallStore(nodeStore, anchorKey.slice('call:'.length))
+    return rootKey === undefined ? -1 : order.indexOf(rootKey)
+  }, [nodeStore, order])
+  const rangeExtractor = useCallback((range: Parameters<typeof defaultRangeExtractor>[0]) => {
+    const indexes = new Set(defaultRangeExtractor(range))
+    if (indexes.size === 0 && order.length > 0) {
+      indexes.add(Math.min(order.length - 1, Math.max(0, range.startIndex)))
+    }
+    const anchorKey = anchorRef.current?.key
+    const restoreKey = restoreAnchorKeyRef.current
+    if (anchorKey !== undefined) {
+      const index = virtualIndexForAnchor(anchorKey)
+      if (index >= 0) indexes.add(index)
+    }
+    if (restoreKey !== null) {
+      const index = virtualIndexForAnchor(restoreKey)
+      if (index >= 0) indexes.add(index)
+    }
+    for (const key of pinnedVirtualKeys) {
+      const index = order.indexOf(key)
+      if (index >= 0) indexes.add(index)
+    }
+    return [...indexes].sort((left, right) => left - right)
+  }, [order, pinnedVirtualKeys, virtualIndexForAnchor])
+  const getScrollElement = useCallback(() => {
+    const local = listRef.current
+    return local === null ? null : scrollerOf(local)
+  }, [])
+  const estimateVirtualRowSize = useCallback(() => VIRTUAL_ESTIMATED_ROW_HEIGHT, [])
+  const getVirtualRowKey = useCallback((index: number) => order[index] ?? index, [order])
+  const rowVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
+    count: virtualizationEnabled ? order.length : 0,
+    enabled: virtualizationEnabled,
+    estimateSize: estimateVirtualRowSize,
+    gap: VIRTUAL_ROW_GAP,
+    getItemKey: getVirtualRowKey,
+    getScrollElement,
+    initialOffset: () => initialScroll?.scrollTop ?? 0,
+    initialRect: { width: 0, height: VIRTUAL_INITIAL_VIEWPORT_HEIGHT },
+    overscan: VIRTUAL_OVERSCAN_ROWS,
+    rangeExtractor,
+    scrollMargin: virtualScrollMargin,
+    useAnimationFrameWithResizeObserver: true,
+  })
+  const measuredVirtualItems = virtualizationEnabled ? rowVirtualizer.getVirtualItems() : []
+  const restoreVirtualIndex = restoreAnchorKeyRef.current === null
+    ? -1
+    : virtualIndexForAnchor(restoreAnchorKeyRef.current)
+  const fallbackVirtualIndex = restoreVirtualIndex >= 0 ? restoreVirtualIndex : order.length - 1
+  const fallbackVirtualStart = virtualScrollMargin
+    + fallbackVirtualIndex * (VIRTUAL_ESTIMATED_ROW_HEIGHT + VIRTUAL_ROW_GAP)
+  const virtualItems = !virtualizationEnabled || measuredVirtualItems.length > 0 || fallbackVirtualIndex < 0
+    ? measuredVirtualItems
+    : [{
+        index: fallbackVirtualIndex,
+        key: getVirtualRowKey(fallbackVirtualIndex),
+        lane: 0,
+        size: VIRTUAL_ESTIMATED_ROW_HEIGHT,
+        start: fallbackVirtualStart,
+        end: fallbackVirtualStart + VIRTUAL_ESTIMATED_ROW_HEIGHT,
+      }]
+
+  useLayoutEffect(() => {
+    if (!virtualizationEnabled) return
+    const list = virtualListRef.current
+    const local = listRef.current
+    /* v8 ignore next -- both refs commit with the enabled virtual list. */
+    if (list === null || local === null) return
+    const scrollport = scrollerOf(local)
+    const listTop = list.getBoundingClientRect().top
+    const scrollportTop = scrollport.getBoundingClientRect().top
+    const margin = listTop === 0 && scrollportTop === 0
+      ? 0
+      : listTop - scrollportTop + scrollport.scrollTop
+    setVirtualScrollMargin(current => Math.abs(current - margin) < 0.5 ? current : margin)
+  })
+
+  useEffect(() => {
+    if (!virtualizationEnabled || typeof MutationObserver === 'undefined') return
+    const list = virtualListRef.current
+    /* v8 ignore next -- the enabled virtual list commits before effects run. */
+    if (list === null) return
+    const synchronize = (): void => {
+      const next = new Set<string>()
+      for (const expanded of list.querySelectorAll<HTMLElement>('[aria-expanded="true"]')) {
+        const key = expanded.closest<HTMLElement>('[data-chat-virtual-key]')?.dataset.chatVirtualKey
+        if (key !== undefined) next.add(key)
+      }
+      setPinnedVirtualKeys(current => (
+        current.size === next.size && [...current].every(key => next.has(key)) ? current : next
+      ))
+    }
+    synchronize()
+    const observer = new MutationObserver(synchronize)
+    observer.observe(list, { attributes: true, attributeFilter: ['aria-expanded'], subtree: true })
+    return () => { observer.disconnect() }
+  }, [virtualizationEnabled])
 
   const firstKey = order[0]
   const firstSeq = firstKey === undefined ? null : nodeStore.get(firstKey)?.anchorSeq ?? null
@@ -332,6 +449,7 @@ export function ChatView({
         if (isAtBottom) chatScroll.save(null)
         else if (normalized !== null) chatScroll.save(normalized)
       }
+      restoreAnchorKeyRef.current = null
       firstSeqRef.current = firstSeq
       lastKeyRef.current = lastKey
       lastSteeringIdRef.current = lastSteeringId
@@ -472,7 +590,12 @@ export function ChatView({
   return (
     <div className={css.root}>
       <div ref={listRef} className={css.scroll}>
-        <div ref={columnRef} className={css.column} data-chat-flow="">
+        <div
+          ref={columnRef}
+          className={css.column}
+          data-chat-flow=""
+          data-chat-flow-count={order.length}
+        >
           {openState === 'loading' && <div className={css.hint}>{t('chat.loadingHistory')}</div>}
           {openState === 'error' && openError !== null && (
             <div className={css.openError}>
@@ -486,7 +609,30 @@ export function ChatView({
               </button>
             </div>
           )}
-          {seats}
+          {virtualizationEnabled ? (
+            <div
+              ref={virtualListRef}
+              className={css.virtualList}
+              data-chat-virtual-list=""
+              style={{ height: rowVirtualizer.getTotalSize() }}
+            >
+              {virtualItems.map((item) => {
+                const nodeKey = order[item.index] as string
+                return (
+                  <div
+                    key={item.key}
+                    ref={rowVirtualizer.measureElement}
+                    className={css.virtualItem}
+                    data-index={item.index}
+                    data-chat-virtual-key={nodeKey}
+                    style={{ transform: `translateY(${String(item.start - virtualScrollMargin)}px)` }}
+                  >
+                    {seats[item.index]}
+                  </div>
+                )
+              })}
+            </div>
+          ) : seats}
           {/* No pending placeholders: questions (ui-user-questions) and approvals
               (ApprovalPanel) both take over the composer, so a flow card would
               double-render the same wait. */}

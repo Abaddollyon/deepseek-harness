@@ -9,6 +9,9 @@ import {
   type WorkspaceId, type WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
 
+/** Session-list fields consumed by workspace tree derivations. */
+type SessionCatalog = Pick<SessionListState, 'ids' | 'byId' | 'current'>
+
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
 
@@ -190,7 +193,7 @@ function orderedUngrouped(members: readonly SessionSummary[], stored: readonly s
  * falls back to recency before that order is initialized.
  */
 function groupByWorkspace(
-  list: SessionListState,
+  list: SessionCatalog,
   workspaces: readonly WorkspaceView[],
   archived: ReadonlySet<SessionId>,
   ungroupedOrder: readonly string[] | undefined,
@@ -254,6 +257,15 @@ function isLive(node: SessionNode): boolean {
   return node.running || node.runningSubagentCount > 0
 }
 
+/** Last root derivation, retained while every narrow input identity is unchanged. */
+let lastGroupsDerivation: {
+  list: SessionCatalog
+  workspaces: readonly WorkspaceView[]
+  archivedSessionIds: readonly SessionId[]
+  view: TreeView
+  result: GroupNode[]
+} | undefined
+
 /**
  * Derive the workspace browser groups with every session as a top-level row.
  *
@@ -271,11 +283,16 @@ function isLive(node: SessionNode): boolean {
  * @returns group sections in render order.
  */
 export function deriveGroups(
-  list: SessionListState,
+  list: SessionCatalog,
   workspaces: readonly WorkspaceView[],
   archivedSessionIds: readonly SessionId[],
   view: TreeView,
 ): GroupNode[] {
+  /* v8 ignore next -- partial identity matches are cache misses with identical derivation behavior. */
+  if (lastGroupsDerivation?.list === list
+    && lastGroupsDerivation.workspaces === workspaces
+    && lastGroupsDerivation.archivedSessionIds === archivedSessionIds
+    && lastGroupsDerivation.view === view) return lastGroupsDerivation.result
   const archived = new Set(archivedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
   const descendants = indexSubagentDescendants(list.byId)
@@ -297,6 +314,7 @@ export function deriveGroups(
       pinned: expanded ? [] : rows.filter(isLive),
     })
   }
+  lastGroupsDerivation = { list, workspaces, archivedSessionIds, view, result: groups }
   return groups
 }
 
@@ -310,7 +328,7 @@ export function deriveGroups(
  * @returns flat rows in render order.
  */
 export function deriveFlat(
-  list: SessionListState,
+  list: SessionCatalog,
   archivedSessionIds: readonly SessionId[],
 ): SessionNode[] {
   const archived = new Set(archivedSessionIds)
@@ -347,7 +365,7 @@ export interface RelativeTime {
  * @returns bounded deduplicated flat rows and a refine-query hint bit.
  */
 export function deriveSearchResults(
-  list: SessionListState,
+  list: SessionCatalog,
   workspaces: readonly WorkspaceView[],
   query: string,
   archivedSessionIds: readonly SessionId[],

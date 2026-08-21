@@ -684,7 +684,7 @@ export class SessionRuntime implements ISessions {
      * cannot miss; kept so a future current writer cannot crash the notify. */
     if (record !== undefined) {
       void record.session.open()
-      void this.manager.refreshSubagents(current)
+      void this.manager.refreshSubagentsForOpen(current)
     }
   }
 

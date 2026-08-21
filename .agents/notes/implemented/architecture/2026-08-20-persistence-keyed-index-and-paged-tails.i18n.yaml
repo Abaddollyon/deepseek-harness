@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-20-persistence-keyed-index-and-paged-tails.md
+2026-08-20-persistence-keyed-index-and-paged-tails.md: 1294eadadf29e7c3001faf8892b2f72d467a5865
+2026-08-20-persistence-keyed-index-and-paged-tails.zh.md: 036da0048847a0983483f310165db08f967a6237

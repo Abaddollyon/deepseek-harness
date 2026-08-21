@@ -97,6 +97,8 @@ interface NodeIndexRecord {
   ordered: boolean
   results: Map<string, ToolResultNode>
   callStarts: Map<string, number>
+  /** Assistant that emitted each tool call, for constant-time result patching. */
+  callOwners: Map<string, AssistantMessageNode>
   emittedCallIds: Set<string>
   /** Next assistant node at a higher index, per node index. */
   following: (AssistantMessageNode | undefined)[]
@@ -114,9 +116,9 @@ interface TurnRecord {
  * Per-view memo that makes an append extend the previous layout instead of
  * rebuilding it.
  *
- * The fold stays whole — every derivation still walks every entry — but the
- * expensive per-record expansion, the per-turn model, and the result array are
- * reused whenever the inputs they read did not move. A cache is therefore
+ * Finalized append-only input retains its ordered node stream and finalized
+ * turn models, so a later independent turn folds only its suffix. Tool results
+ * still patch their owning assistant record. A cache is therefore
  * never load-bearing for correctness: dropping it changes identities only, and
  * {@link deriveTrajectoryLayout} without one is the reference path the
  * equivalence tests compare against.
@@ -134,6 +136,19 @@ export interface TrajectoryLayoutCache {
   turns: Map<string, TurnRecord>
   /** Previous derivation's result array. */
   result: readonly TrajectoryTurnModel[] | undefined
+  /** Nodes accepted into the last finalized, appendable layout. */
+  acceptedNodes: ConversationSnapshot['nodes'] | undefined
+  /** Accepted request-derived entry prefix, in request array order. */
+  acceptedRequests: readonly RequestView[] | undefined
+  /** Number of ordered node entries accepted into the finalized prefix. */
+  acceptedPrefixLength: number
+  /** Metadata maps accepted with the finalized prefix. */
+  acceptedEventLocations: TrajectoryLayoutInput['eventLocations']
+  acceptedCallSchemas: TrajectoryLayoutInput['callSchemas']
+  /** Largest finalized cell index for suffix index translation. */
+  acceptedLastIndex: number
+  /** Tests count folded entries without relying on elapsed time. */
+  onEntryVisit: (() => void) | undefined
 }
 
 /**
@@ -148,6 +163,13 @@ export function createTrajectoryLayoutCache(): TrajectoryLayoutCache {
     nodeIndexes: undefined,
     turns: new Map(),
     result: undefined,
+    acceptedNodes: undefined,
+    acceptedRequests: undefined,
+    acceptedPrefixLength: 0,
+    acceptedEventLocations: undefined,
+    acceptedCallSchemas: undefined,
+    acceptedLastIndex: 0,
+    onEntryVisit: undefined,
   }
 }
 
@@ -185,7 +207,9 @@ function extendNodeIndexes(record: NodeIndexRecord, nodes: ConversationSnapshot[
     }
     if (node.kind !== 'assistant') continue
     for (const block of node.blocks) {
-      if (block.kind === 'tool-call') record.emittedCallIds.add(block.callId)
+      if (block.kind !== 'tool-call') continue
+      record.emittedCallIds.add(block.callId)
+      record.callOwners.set(block.callId, node)
     }
     if (node.step > 0) record.represented.add(stepKey(node.turn, node.step))
   }
@@ -221,6 +245,7 @@ function nodeIndexesFor(
     ordered: true,
     results: new Map(),
     callStarts: new Map(),
+    callOwners: new Map(),
     emittedCallIds: new Set(),
     following: [],
     represented: new Set(),
@@ -431,9 +456,10 @@ function inputCellDetail(node: InputNode): Pick<
  *   two paths produce equal content and differ only in identity.
  * @returns turns ordered by first appearance.
  */
-export function deriveTrajectoryLayout(
+function deriveTrajectoryLayoutFull(
   input: TrajectoryLayoutInput,
   cache?: TrajectoryLayoutCache,
+  onEntryVisit?: () => void,
 ): readonly TrajectoryTurnModel[] {
   const {
     nodes, eventLocations, partial, runningCalls, requests = [], callSchemas,
@@ -558,6 +584,7 @@ export function deriveTrajectoryLayout(
         .sort((left, right) => layoutEntryOrder(left) - layoutEntryOrder(right))
 
   for (const entry of entries) {
+    onEntryVisit?.()
     if (entry.kind === 'request') {
       const { request } = entry
       const laid = laidFor(cache, request, index + 1, EMPTY_DEPS, callSchemas, () => [{
@@ -860,6 +887,294 @@ export function deriveTrajectoryLayout(
   ) return previous
   cache.result = models
   return models
+}
+
+/**
+ * Fold a snapshot into turn → Message/Step groups with expanded cells.
+ * @param input - nodes plus in-flight partial/runningCalls.
+ * @param cache - Optional per-view memo from {@link createTrajectoryLayoutCache}.
+ * @returns turns ordered by first appearance.
+ */
+export function deriveTrajectoryLayout(
+  input: TrajectoryLayoutInput,
+  cache?: TrajectoryLayoutCache,
+): readonly TrajectoryTurnModel[] {
+  if (cache !== undefined && isFinalizedAppendInput(input)) {
+    const accepted = cache.acceptedNodes
+    const requests = input.requests ?? []
+    const acceptedRequests = cache.acceptedRequests
+    if (
+      accepted !== undefined
+      && acceptedRequests !== undefined
+      && sameNodePrefix(accepted, input.nodes, cache.acceptedPrefixLength)
+      && sameRequestPrefix(acceptedRequests, requests)
+      && sameMetadataMap(cache.acceptedEventLocations, input.eventLocations)
+      && sameMetadataMap(cache.acceptedCallSchemas, input.callSchemas)
+    ) {
+      if (
+        cache.acceptedPrefixLength === input.nodes.length
+        && acceptedRequests.length === requests.length
+        && cache.result !== undefined
+      ) return cache.result
+      const suffix = input.nodes.slice(cache.acceptedPrefixLength)
+      const requestSuffix = requests.slice(acceptedRequests.length)
+      const patched = patchActiveTurnSuffix(cache, input, suffix, requestSuffix)
+      if (patched !== undefined) return patched
+      if (isIndependentTurnSuffix(suffix) && isIndependentRequestSuffix(requestSuffix)) {
+        const appended = deriveTrajectoryLayoutFull(
+          { ...input, nodes: suffix, requests: requestSuffix },
+          undefined,
+          cache.onEntryVisit,
+        )
+        const previous = cache.result ?? []
+        if (appended.every(turn => turn.turn !== null && !previous.some(old => old.turn === turn.turn))) {
+          extendAcceptedNodeIndexes(cache, input.nodes)
+          const models = [...previous, ...offsetTurnModels(appended, cache.acceptedLastIndex)]
+          cache.result = models
+          cache.acceptedNodes = input.nodes
+          cache.acceptedRequests = requests
+          cache.acceptedPrefixLength = input.nodes.length
+          cache.acceptedEventLocations = input.eventLocations
+          cache.acceptedCallSchemas = input.callSchemas
+          cache.acceptedLastIndex = lastCellIndex(models)
+          return models
+        }
+      }
+    }
+  }
+  const models = deriveTrajectoryLayoutFull(input, cache, cache?.onEntryVisit)
+  if (cache !== undefined && isFinalizedAppendInput(input)) {
+    cache.acceptedNodes = input.nodes
+    cache.acceptedRequests = input.requests ?? []
+    cache.acceptedPrefixLength = input.nodes.length
+    cache.acceptedEventLocations = input.eventLocations
+    cache.acceptedCallSchemas = input.callSchemas
+    cache.acceptedLastIndex = lastCellIndex(models)
+  } else if (cache !== undefined) {
+    cache.acceptedNodes = undefined
+    cache.acceptedRequests = undefined
+    cache.acceptedPrefixLength = 0
+    cache.acceptedEventLocations = undefined
+    cache.acceptedCallSchemas = undefined
+    cache.acceptedLastIndex = 0
+  }
+  return models
+}
+
+/** Inputs with no live entries can safely accept independent tails. */
+function isFinalizedAppendInput(input: TrajectoryLayoutInput): boolean {
+  return input.partial === null
+    && input.runningCalls.length === 0
+}
+
+/** Compare the accepted node prefix by member identity, not array identity. */
+function sameNodePrefix(
+  prefix: ConversationSnapshot['nodes'],
+  nodes: ConversationSnapshot['nodes'],
+  length: number,
+): boolean {
+  if (nodes.length < length) return false
+  for (let index = 0; index < length; index++) {
+    if (prefix[index] !== nodes[index]) return false
+  }
+  return true
+}
+
+/** Compare the accepted request prefix by member identity, not array identity. */
+function sameRequestPrefix(
+  prefix: readonly RequestView[],
+  requests: readonly RequestView[],
+): boolean {
+  if (requests.length < prefix.length) return false
+  for (let index = 0; index < prefix.length; index++) {
+    if (prefix[index] !== requests[index]) return false
+  }
+  return true
+}
+
+/** Match metadata map identity, allowing independently created empty maps. */
+function sameMetadataMap(
+  previous: ReadonlyMap<unknown, unknown> | undefined,
+  current: ReadonlyMap<unknown, unknown> | undefined,
+): boolean {
+  return previous === current || (previous?.size === 0 && current?.size === 0)
+}
+
+/** Patch the one finalized entry that extends or resolves the current turn. */
+function patchActiveTurnSuffix(
+  cache: TrajectoryLayoutCache,
+  input: TrajectoryLayoutInput,
+  suffix: ConversationSnapshot['nodes'],
+  requestSuffix: readonly RequestView[],
+): readonly TrajectoryTurnModel[] | undefined {
+  if (suffix.length !== 1 || !isIndependentRequestSuffix(requestSuffix)) return undefined
+  const next = suffix[0]
+  if (next === undefined) return undefined
+  const indexes = extendAcceptedNodeIndexes(cache, input.nodes)
+  if (indexes === undefined) return undefined
+  if (next.kind === 'assistant') {
+    const record = cache.turns.get(`turn:${next.turn}`)
+    if (record === undefined) return undefined
+    cache.onEntryVisit?.()
+    const previous = cache.acceptedNodes?.at(-1)
+    const previousAbsTime = previous === undefined ? null : finiteTime(previous.time)
+    const laid = laidFor(
+      cache,
+      next,
+      cache.acceptedLastIndex + 1,
+      assistantDeps(next, previousAbsTime, indexes.results, indexes.callStarts, indexes.results),
+      input.callSchemas,
+      () => withSubCalls(expandAssistant(
+        next, cache.acceptedLastIndex + 1, previousAbsTime, indexes.results, indexes.callStarts, indexes.results,
+      )),
+    )
+    return publishPatchedTurn(cache, input, next.turn, appendAssistantLaid(record.groups, next.step, laid))
+  }
+  if (next.kind !== 'tool-result') return undefined
+  const owner = indexes.callOwners.get(next.callId)
+  if (owner === undefined) return undefined
+  const cached = cache.laid.get(owner)
+  const record = cache.turns.get(`turn:${owner.turn}`)
+  if (cached === undefined || record === undefined) return undefined
+  cache.onEntryVisit?.()
+  cache.onEntryVisit?.()
+  const previousAbsTime = typeof cached.deps[0] === 'number' ? cached.deps[0] : null
+  const laid = laidFor(
+    cache,
+    owner,
+    cached.startIndex,
+    assistantDeps(owner, previousAbsTime, indexes.results, indexes.callStarts, indexes.results),
+    input.callSchemas,
+    () => withSubCalls(expandAssistant(
+      owner, cached.startIndex, previousAbsTime, indexes.results, indexes.callStarts, indexes.results,
+    )),
+  )
+  return publishPatchedTurn(cache, input, owner.turn, replaceLaid(record.groups, cached.laid, laid))
+}
+
+/** Extend an already-validated node prefix without rescanning it for equality. */
+function extendAcceptedNodeIndexes(
+  cache: TrajectoryLayoutCache,
+  nodes: ConversationSnapshot['nodes'],
+): NodeIndexRecord | undefined {
+  const indexes = cache.nodeIndexes
+  if (indexes === undefined || indexes.nodes.length !== cache.acceptedPrefixLength) return undefined
+  extendNodeIndexes(indexes, nodes, cache.acceptedPrefixLength)
+  return indexes
+}
+
+/** Add a finalized assistant contribution to the matching Message or Step group. */
+function appendAssistantLaid(
+  previous: readonly LaidGroup[],
+  step: number,
+  laid: readonly LaidCell[],
+): LaidGroup[] {
+  const groups = previous.map(group => ({ ...group, laid: [...group.laid] }))
+  const title = step > 0 ? `Step ${step}` : 'Message'
+  const group = step > 0 ? groups.find(entry => entry.title === title) : groups.at(-1)
+  if (group !== undefined && group.title === title) group.laid.push(...laid)
+  else groups.push({ title, laid: [...laid] })
+  return groups
+}
+
+/** Replace a cached assistant expansion without mutating prior published groups. */
+function replaceLaid(
+  previous: readonly LaidGroup[],
+  before: readonly LaidCell[],
+  after: readonly LaidCell[],
+): LaidGroup[] {
+  const first = before[0]
+  const last = before.at(-1)
+  if (first === undefined || last === undefined) return [...previous]
+  let replaced = false
+  const replacementEntries = new Set(after)
+  const groups = previous.map(group => {
+    const laid: LaidCell[] = []
+    for (let index = 0; index < group.laid.length; index++) {
+      const entry = group.laid[index]
+      if (
+        !replaced
+        && entry === first
+        && before.every((expected, offset) => group.laid[index + offset] === expected)
+      ) {
+        laid.push(...after)
+        index += before.length - 1
+        replaced = true
+        continue
+      }
+      if (entry !== undefined) laid.push(entry)
+    }
+    return { ...group, laid }
+  })
+  if (!replaced) return groups
+  const delta = after.length - before.length
+  if (delta === 0) return groups
+  return groups.map(group => ({
+    ...group,
+    laid: group.laid.map(entry =>
+      replacementEntries.has(entry) || entry.cell.index <= last.cell.index
+        ? entry
+        : { ...entry, cell: { ...entry.cell, index: entry.cell.index + delta } }),
+  }))
+}
+
+/** Publish one changed turn while retaining every unaffected turn model identity. */
+function publishPatchedTurn(
+  cache: TrajectoryLayoutCache,
+  input: TrajectoryLayoutInput,
+  turn: number,
+  groups: readonly LaidGroup[],
+): readonly TrajectoryTurnModel[] | undefined {
+  const key = `turn:${turn}`
+  const previous = cache.turns.get(key)
+  const result = cache.result
+  if (previous === undefined || result === undefined) return undefined
+  const model = toTurnModel(turn, { groups: [...groups], stepGroups: new Map() })
+  cache.turns.set(key, { groups, model })
+  const models = result.map(entry => entry.turn === turn ? model : entry)
+  cache.result = models
+  cache.acceptedNodes = input.nodes
+  cache.acceptedRequests = input.requests ?? []
+  cache.acceptedPrefixLength = input.nodes.length
+  cache.acceptedEventLocations = input.eventLocations
+  cache.acceptedCallSchemas = input.callSchemas
+  cache.acceptedLastIndex = lastCellIndex(models)
+  return models
+}
+
+/** Tail requests must be ordinary assistant rows that belong to the node suffix. */
+function isIndependentRequestSuffix(requests: readonly RequestView[]): boolean {
+  return requests.every(request => request.purpose === 'assistant' && request.promptChange === undefined)
+}
+
+/** A suffix starts a later turn, so it cannot revise placement in finalized buckets. */
+function isIndependentTurnSuffix(nodes: ConversationSnapshot['nodes']): boolean {
+  return nodes[0]?.kind === 'user' && nodes.some(node => node.kind === 'assistant')
+}
+
+/** Translate suffix-local cell positions without changing any finalized cell identity. */
+function offsetTurnModels(
+  turns: readonly TrajectoryTurnModel[],
+  offset: number,
+): readonly TrajectoryTurnModel[] {
+  return turns.map(turn => ({
+    ...turn,
+    groups: turn.groups.map(group => ({
+      ...group,
+      cells: group.cells.map(cell => ({ ...cell, index: cell.index + offset })),
+    })),
+  }))
+}
+
+/** Largest cell position in a layout, or zero for an empty layout. */
+function lastCellIndex(turns: readonly TrajectoryTurnModel[]): number {
+  let last = 0
+  for (const turn of turns) {
+    for (const group of turn.groups) {
+      for (const cell of group.cells) last = Math.max(last, cell.index)
+    }
+  }
+  return last
 }
 
 /** Dependencies an assistant expansion reads outside the node itself. */

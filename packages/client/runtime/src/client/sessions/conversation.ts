@@ -449,6 +449,8 @@ export interface ConversationSnapshot {
   /** Authoritative transient inbox snapshot, including queued and steering placements. */
   queue: readonly QueuedMessage[]
   running: boolean
+  /** Optional host activity facet; absent means no special activity. */
+  activity?: 'stopping' | 'maintenance' | undefined
   /**
    * Catalog-discovered continuation address. Its parent availability controls
    * human input; null means ordinary session transport.

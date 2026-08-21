@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-20-one-stop-route-for-every-session-kind.md
+2026-08-20-one-stop-route-for-every-session-kind.md: 36f342c962d6c242481269a28ef13cc632043bfa
+2026-08-20-one-stop-route-for-every-session-kind.zh.md: 3a85b3f654a314d5e5750e7a8f9432947439c890

@@ -31,6 +31,7 @@ function stubAgent(ctx: Context, id: string): Agent {
     session,
     inbox,
     status: 'idle',
+    activity: undefined,
     ctx: new Context(),
     send(_message: UserMessage, _target: InboxTarget, _wakeup: boolean) {},
     runMaintenance: task => task(signal),

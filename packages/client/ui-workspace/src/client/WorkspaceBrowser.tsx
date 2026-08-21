@@ -22,6 +22,7 @@ import type { WorkspaceBrowserProps } from './contract/slots.ts'
 import type { SessionNode, SessionOrderBy } from './tree.ts'
 import { currentGroupKey, deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
+import type { RowDragProps } from './rows/Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
 import { WorkspacePickFlow } from './WorkspacePicker.tsx'
 import css from './WorkspaceBrowser.module.css'
@@ -114,7 +115,7 @@ function nextSessionOrderAccount({
   sessionIds: readonly SessionId[]
   previousOrder: readonly string[] | undefined
   previousUpdatedAt: Readonly<Record<string, number>>
-  list: SessionListState
+  list: Pick<SessionListState, 'byId'>
   orderBy: SessionOrderBy
   sortByRecency: boolean
 }): { order: SessionId[]; updatedAt: Record<string, number>; changed: boolean } {
@@ -259,13 +260,28 @@ function SessionTree({
   groupExpansion, setGroupExpanded,
   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
 }: SessionTreeProps) {
-  const list = useSessions(s => s)
-  const current = list.current
+  const ids = useSessions(s => s.ids)
+  const byId = useSessions(s => s.byId)
+  const current = useSessions(s => s.current)
+  const phase = useSessions(s => s.phase)
+  const list = useMemo(() => ({ ids, byId, current }), [ids, byId, current])
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<string[]>([])
   // Transient drag marker state; the selected mode owns the resulting order.
   const [drag, setDrag] = useState<DragState | null>(null)
+  const dragRef = useRef<DragState | null>(null)
+  const clearHoveredSession = useRef<(() => void) | null>(null)
   const sessionDropCommitted = useRef(false)
   const [workspaceDrag, setWorkspaceDrag] = useState<WorkspaceDragState | null>(null)
+  const workspaceDragRef = useRef<WorkspaceDragState | null>(null)
+  const workspaceMarkerElement = useRef<HTMLElement | null>(null)
+  const workspaceListElement = useRef<HTMLDivElement | null>(null)
+  const workspaceTopMarker = useRef<HTMLSpanElement | null>(null)
+  const clearWorkspaceMarker = (): void => {
+    workspaceMarkerElement.current?.classList.remove(css.workspaceDropBefore as string, css.workspaceDropAfter as string)
+    workspaceMarkerElement.current = null
+    workspaceListElement.current?.classList.remove(css.listTopDropActive as string)
+    if (workspaceTopMarker.current !== null) workspaceTopMarker.current.hidden = true
+  }
   const workspaceDropCommitted = useRef(false)
   const previousOrderBy = useRef(orderBy)
   const nativeDragActive = drag !== null || workspaceDrag !== null
@@ -283,7 +299,7 @@ function SessionTree({
     return list.ids.filter(id => list.byId[id] !== undefined && !accounted.has(id))
   }, [list, workspaces])
   useEffect(() => {
-    if (list.phase !== 'ready') return
+    if (phase !== 'ready') return
     const switchedToUpdated = previousOrderBy.current !== 'updated' && orderBy === 'updated'
     previousOrderBy.current = orderBy
     const accounts = [
@@ -308,7 +324,7 @@ function SessionTree({
         syncSessionOrderAccount(key, next.order.map(id => id as string), next.updatedAt)
       }
     }
-  }, [list, orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, ungroupedSessionIds, workspaces])
+  }, [list, orderBy, phase, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, ungroupedSessionIds, workspaces])
   const orderedWorkspaces = useMemo(() => {
     return workspaces.map((workspace) => {
       const stored = sessionOrderByAccount[workspace.workspaceId as string]
@@ -333,6 +349,7 @@ function SessionTree({
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
     if (sessionDropCommitted.current) return
     sessionDropCommitted.current = true
+    dragRef.current = null
     setDrag(null)
     const group = groups.find(candidate => candidate.key === activeDrag.accountKey)
     if (group === undefined) return
@@ -364,6 +381,8 @@ function SessionTree({
   ): void => {
     if (workspaceDropCommitted.current) return
     workspaceDropCommitted.current = true
+    workspaceDragRef.current = null
+    clearWorkspaceMarker()
     setWorkspaceDrag(null)
     const rowIndex = workspaces.findIndex(workspace => workspace.workspaceId === over.id)
     if (rowIndex === -1) return
@@ -378,15 +397,52 @@ function SessionTree({
       console.warn('workspace reorder rejected:', reason)
     })
   }
-  const workspaceDropAtListStart = groups[0]?.workspaceId !== undefined
-    && workspaceDrag?.over?.id === groups[0].workspaceId
-    && workspaceDrag.over.half === 'before'
-
+  const commitSessionDragRef = useRef(commitSessionDrag)
+  commitSessionDragRef.current = commitSessionDrag
+  const sessionDragProps = useMemo(() => {
+    const props = new Map<SessionId, RowDragProps>()
+    for (const group of groups) {
+      for (const node of group.sessions) {
+        props.set(node.id, {
+          active: drag !== null && drag.accountKey === group.key,
+          start: () => {
+            sessionDropCommitted.current = false
+            const activeDrag = { accountKey: group.key, sessionId: node.id, over: null }
+            dragRef.current = activeDrag
+            setDrag(activeDrag)
+          },
+          hover: (half, clear) => {
+            clearHoveredSession.current?.()
+            clearHoveredSession.current = clear
+            const activeDrag = dragRef.current
+            if (activeDrag !== null) dragRef.current = { ...activeDrag, over: { id: node.id, half } }
+          },
+          drop: (half) => {
+            clearHoveredSession.current?.()
+            clearHoveredSession.current = null
+            const activeDrag = dragRef.current
+            if (activeDrag !== null) commitSessionDragRef.current(activeDrag, { id: node.id, half })
+          },
+          end: () => {
+            clearHoveredSession.current?.()
+            clearHoveredSession.current = null
+            const activeDrag = dragRef.current
+            if (activeDrag?.over !== null && activeDrag?.over !== undefined) {
+              commitSessionDragRef.current(activeDrag, activeDrag.over)
+            } else { dragRef.current = null; setDrag(null) }
+            sessionDropCommitted.current = false
+          },
+        })
+      }
+    }
+    return props
+  }, [groups, drag])
   return (
     <div className={clsx(css.treeBody, css.wide)}>
-      {workspaceDropAtListStart && <span className={css.listTopDropIndicator} aria-hidden="true" />}
+      <span ref={workspaceTopMarker} className={css.listTopDropIndicator} aria-hidden="true" hidden />
       <div
-        className={clsx(css.list, workspaceDropAtListStart && css.listTopDropActive)}
+        ref={workspaceListElement}
+        className={css.list}
         role="tree"
         aria-label={t('section.sessions')}
       >
@@ -395,18 +451,20 @@ function SessionTree({
         )}
         {groups.map((group) => {
           const workspaceId = group.workspaceId
-          const workspaceMarker = workspaceId !== undefined && workspaceDrag?.over?.id === workspaceId
-            ? workspaceDrag.over.half
-            : null
           const workspaceDragProps = workspaceId === undefined ? undefined : {
             start: () => {
               workspaceDropCommitted.current = false
-              setWorkspaceDrag({ workspaceId, over: null })
+              const activeDrag = { workspaceId, over: null }
+              workspaceDragRef.current = activeDrag
+              setWorkspaceDrag(activeDrag)
             },
             end: () => {
-              if (workspaceDrag?.over !== null && workspaceDrag?.over !== undefined) {
-                commitWorkspaceDrag(workspaceDrag, workspaceDrag.over)
+              const activeDrag = workspaceDragRef.current
+              if (activeDrag?.over !== null && activeDrag?.over !== undefined) {
+                commitWorkspaceDrag(activeDrag, activeDrag.over)
               } else {
+                workspaceDragRef.current = null
+                clearWorkspaceMarker()
                 setWorkspaceDrag(null)
               }
               workspaceDropCommitted.current = false
@@ -414,16 +472,24 @@ function SessionTree({
           }
           const hoverWorkspace = workspaceId === undefined
             ? undefined
-            : (half: 'before' | 'after') => {
-              setWorkspaceDrag(active => active === null
-                ? active
-                : { ...active, over: { id: workspaceId, half } })
+            : (element: HTMLElement, half: 'before' | 'after') => {
+              const activeDrag = workspaceDragRef.current
+              if (activeDrag === null) return
+              workspaceDragRef.current = { ...activeDrag, over: { id: workspaceId, half } }
+              clearWorkspaceMarker()
+              workspaceMarkerElement.current = element
+              element.classList.add(half === 'before' ? css.workspaceDropBefore as string : css.workspaceDropAfter as string)
+              if (groups[0]?.workspaceId === workspaceId && half === 'before') {
+                workspaceListElement.current?.classList.add(css.listTopDropActive as string)
+                if (workspaceTopMarker.current !== null) workspaceTopMarker.current.hidden = false
+              }
             }
           const dropWorkspace = workspaceId === undefined
             ? undefined
             : (half: 'before' | 'after') => {
-              if (workspaceDrag === null) return
-              commitWorkspaceDrag(workspaceDrag, { id: workspaceId, half })
+              const activeDrag = workspaceDragRef.current
+              if (activeDrag === null) return
+              commitWorkspaceDrag(activeDrag, { id: workspaceId, half })
             }
           return (
           // Group section: header row + expanded top-level session rows. The
@@ -431,17 +497,13 @@ function SessionTree({
           // (WorkspaceBrowser.module.css).
             <div
               key={group.key}
-              className={clsx(
-                css.groupSection,
-                workspaceMarker === 'before' && css.workspaceDropBefore,
-                workspaceMarker === 'after' && css.workspaceDropAfter,
-              )}
+              className={css.groupSection}
               onDragOver={workspaceDrag === null || hoverWorkspace === undefined
                 ? undefined
                 : (e) => {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
-                  hoverWorkspace(workspaceGroupHalf(e))
+                  hoverWorkspace(e.currentTarget, workspaceGroupHalf(e))
                 }}
               onDrop={workspaceDrag === null || dropWorkspace === undefined
                 ? undefined
@@ -509,47 +571,20 @@ function SessionTree({
               {(expandedSessionGroups.includes(group.key)
                 ? group.sessions
                 : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)
-              ).map((node) => {
-              // Session drag never leaves its group. Ungrouped writes only the
-              // browser-local account; real Workspaces may also write Host order.
-                const sameGroupDrag = drag !== null && drag.accountKey === group.key
-                const dragProps = {
-                  start: () => {
-                    sessionDropCommitted.current = false
-                    setDrag({ accountKey: group.key, sessionId: node.id, over: null })
-                  },
-                  active: sameGroupDrag,
-                  marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
-                  hover: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
-                    setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
-                  },
-                  drop: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
-                    if (drag === null) return
-                    commitSessionDrag(drag, { id: node.id, half })
-                  },
-                  end: () => {
-                    if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
-                    else setDrag(null)
-                    sessionDropCommitted.current = false
-                  },
-                }
-                return (
-                  <SessionNodeItem
-                    key={node.id}
-                    node={node}
-                    currentId={current}
-                    now={now}
-                    onOpen={open}
-                    onRename={onSessionRename}
-                    onFork={forkSession}
-                    onArchive={onSessionArchive}
-                    drag={dragProps}
-                    t={t}
-                  />
-                )
-              })}
+              ).map(node => (
+                <SessionNodeItem
+                  key={node.id}
+                  node={node}
+                  currentId={current}
+                  now={now}
+                  onOpen={open}
+                  onRename={onSessionRename}
+                  onFork={forkSession}
+                  onArchive={onSessionArchive}
+                  drag={sessionDragProps.get(node.id)}
+                  t={t}
+                />
+              ))}
               {group.sessions.length > COLLAPSED_SESSION_LIMIT && (
                 <button
                   type="button"
@@ -590,7 +625,11 @@ function FlatList({
   | 'setSessionOrder'
   | 't'
 >) {
-  const list = useSessions(s => s)
+  const ids = useSessions(s => s.ids)
+  const byId = useSessions(s => s.byId)
+  const current = useSessions(s => s.current)
+  const phase = useSessions(s => s.phase)
+  const list = useMemo(() => ({ ids, byId, current }), [ids, byId, current])
   const baseRows = useMemo(
     () => deriveFlat(list, archivedSessionIds),
     [list, archivedSessionIds],
@@ -598,7 +637,7 @@ function FlatList({
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)
   useEffect(() => {
-    if (list.phase !== 'ready') return
+    if (phase !== 'ready') return
     const previousOrder = sessionOrderByAccount[FLAT_SESSION_ORDER_KEY]
     const previousUpdatedAt = sessionUpdatedAtByAccount[FLAT_SESSION_ORDER_KEY] ?? {}
     const switchedToUpdated = previousOrderBy.current !== 'updated' && orderBy === 'updated'
@@ -614,7 +653,7 @@ function FlatList({
     if (next.changed) {
       syncSessionOrderAccount(FLAT_SESSION_ORDER_KEY, next.order.map(id => id as string), next.updatedAt)
     }
-  }, [list, orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, sessionIds, syncSessionOrderAccount])
+  }, [list, orderBy, phase, sessionOrderByAccount, sessionUpdatedAtByAccount, sessionIds, syncSessionOrderAccount])
   const rows = useMemo(() => {
     const byId = new Map(baseRows.map(row => [row.id, row]))
     return reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
@@ -624,11 +663,14 @@ function FlatList({
       })
   }, [baseRows, sessionOrderByAccount, sessionIds])
   const [drag, setDrag] = useState<DragState | null>(null)
+  const dragRef = useRef<DragState | null>(null)
+  const clearHoveredSession = useRef<(() => void) | null>(null)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
   const commitDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
     if (dropCommitted.current) return
     dropCommitted.current = true
+    dragRef.current = null
     setDrag(null)
     const targetIndex = rows.findIndex(row => row.id === over.id)
     if (targetIndex === -1) return
@@ -642,6 +684,37 @@ function FlatList({
     nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
     setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder.map(id => id as string))
   }
+  const commitDragRef = useRef(commitDrag)
+  commitDragRef.current = commitDrag
+  const dragProps = useMemo(() => new Map(rows.map(node => [node.id, {
+    active: drag !== null,
+    start: () => {
+      dropCommitted.current = false
+      const activeDrag = { accountKey: FLAT_SESSION_ORDER_KEY, sessionId: node.id, over: null }
+      dragRef.current = activeDrag
+      setDrag(activeDrag)
+    },
+    hover: (half: 'before' | 'after', clear: () => void) => {
+      clearHoveredSession.current?.()
+      clearHoveredSession.current = clear
+      const activeDrag = dragRef.current
+      if (activeDrag !== null) dragRef.current = { ...activeDrag, over: { id: node.id, half } }
+    },
+    drop: (half: 'before' | 'after') => {
+      clearHoveredSession.current?.()
+      clearHoveredSession.current = null
+      const activeDrag = dragRef.current
+      if (activeDrag !== null) commitDragRef.current(activeDrag, { id: node.id, half })
+    },
+    end: () => {
+      clearHoveredSession.current?.()
+      clearHoveredSession.current = null
+      const activeDrag = dragRef.current
+      if (activeDrag?.over !== null && activeDrag?.over !== undefined) commitDragRef.current(activeDrag, activeDrag.over)
+      else { dragRef.current = null; setDrag(null) }
+      dropCommitted.current = false
+    },
+  } satisfies RowDragProps])), [rows, drag])
   const now = Date.now()
   return (
     <div className={clsx(css.treeBody, css.wide)}>
@@ -649,42 +722,21 @@ function FlatList({
         {rows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
-        {rows.map((node) => {
-          const active = drag !== null
-          return (
-            <SessionNodeItem
-              key={node.id}
-              node={node}
-              currentId={list.current}
-              now={now}
-              onOpen={open}
-              onRename={onSessionRename}
-              onFork={forkSession}
-              onArchive={onSessionArchive}
-              flat
-              drag={{
-                start: () => {
-                  dropCommitted.current = false
-                  setDrag({ accountKey: FLAT_SESSION_ORDER_KEY, sessionId: node.id, over: null })
-                },
-                active,
-                marker: active && drag.over?.id === node.id ? drag.over.half : null,
-                hover: (half) => {
-                  setDrag(current => current === null ? current : { ...current, over: { id: node.id, half } })
-                },
-                drop: (half) => {
-                  if (drag !== null) commitDrag(drag, { id: node.id, half })
-                },
-                end: () => {
-                  if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
-                  else setDrag(null)
-                  dropCommitted.current = false
-                },
-              }}
-              t={t}
-            />
-          )
-        })}
+        {rows.map(node => (
+          <SessionNodeItem
+            key={node.id}
+            node={node}
+            currentId={list.current}
+            now={now}
+            onOpen={open}
+            onRename={onSessionRename}
+            onFork={forkSession}
+            onArchive={onSessionArchive}
+            flat
+            drag={dragProps.get(node.id)}
+            t={t}
+          />
+        ))}
       </div>
       <span className={css.fade} />
     </div>
@@ -715,7 +767,10 @@ function SearchResults({
   remote: RemoteSearchState
   resultLimit: number
 }) {
-  const list = useSessions(s => s)
+  const ids = useSessions(s => s.ids)
+  const byId = useSessions(s => s.byId)
+  const current = useSessions(s => s.current)
+  const list = useMemo(() => ({ ids, byId, current }), [ids, byId, current])
   const currentRemote = remote.query === query
     ? remote
     : { query, status: 'loading' as const, items: [], hasMore: false }

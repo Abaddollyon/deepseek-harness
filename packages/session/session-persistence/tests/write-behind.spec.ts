@@ -42,6 +42,25 @@ describe('SessionWriteBehind', () => {
     expect(controller.hasWork).toBe(false)
   })
 
+  it('retains a deeply frozen committed event by reference', async () => {
+    const batches: Array<readonly SessionEvent[]> = []
+    const controller = new SessionWriteBehind({
+      maxDelayMs: 200,
+      write: async (events) => { batches.push(events) },
+      reportBackgroundFailure: vi.fn(),
+    })
+    const frozen = Object.freeze({
+      ...event(0),
+      data: Object.freeze({ turn: 1 }),
+    })
+
+    controller.enqueue(frozen)
+    await controller.flush()
+
+    expect(batches).toHaveLength(1)
+    expect(batches[0]?.[0]).toBe(frozen)
+  })
+
   it('coalesces twenty events admitted ten milliseconds apart into one 200 ms batch', async () => {
     vi.useFakeTimers()
     const batches: number[][] = []

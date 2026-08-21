@@ -25,6 +25,7 @@ function nodeSource(node: ChatConversationViewNode): unknown {
 
 class FixtureNodeStore implements ChatNodeStore {
   private byKey = new Map<string, ChatConversationViewNode>()
+  private readonly toolCalls = new Map<string, { readonly block: ToolCallBlock; readonly rootNodeKey: string }>()
   private list: readonly ChatConversationViewNode[] = EMPTY
 
   get(key: string): ChatConversationViewNode | undefined {
@@ -33,6 +34,10 @@ class FixtureNodeStore implements ChatNodeStore {
 
   values(): readonly ChatConversationViewNode[] {
     return this.list
+  }
+
+  getToolCall(callId: string): { readonly block: ToolCallBlock; readonly rootNodeKey: string } | undefined {
+    return this.toolCalls.get(callId)
   }
 
   replace(candidates: readonly ChatConversationViewNode[]): void {
@@ -51,6 +56,19 @@ class FixtureNodeStore implements ChatNodeStore {
     })
     this.byKey = next
     this.list = sameValues(this.list, list) ? this.list : list
+    this.toolCalls.clear()
+    for (const node of this.list) {
+      if (node.kind !== 'tool-call') continue
+      const pending = [(node.data as { readonly root: ToolCallBlock }).root]
+      const seen = new Set<string>()
+      while (pending.length > 0) {
+        const block = pending.pop() as ToolCallBlock
+        if (seen.has(block.callId)) continue
+        seen.add(block.callId)
+        this.toolCalls.set(block.callId, { block, rootNodeKey: node.key })
+        pending.push(...block.subCalls)
+      }
+    }
   }
 }
 

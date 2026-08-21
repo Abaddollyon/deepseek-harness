@@ -11,6 +11,7 @@ import {
   formatTimelineOffset,
   type TrajectoryTimelineMode,
   type TrajectoryTimelineModel,
+  type TrajectoryTimelineSpan,
   type TrajectoryTimeRange,
 } from './timeline.ts'
 import css from './TrajectoryTimeline.module.css'
@@ -45,6 +46,80 @@ interface PanGesture {
   moved: boolean
   pannable: boolean
   pointerId: number
+}
+
+interface TimelineSpanBin {
+  end: number
+  isError: boolean
+  kind: TrajectoryCellKind
+  lane: number
+  spans: readonly TrajectoryTimelineSpan[]
+  start: number
+}
+
+type RenderedTimelineSpan =
+  | { type: 'individual'; span: TrajectoryTimelineSpan }
+  | { type: 'aggregate'; bin: TimelineSpanBin }
+
+function lowerBoundByStart(
+  spans: readonly TrajectoryTimelineSpan[],
+  point: number,
+): number {
+  let low = 0
+  let high = spans.length
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2)
+    if (spans[middle]!.start < point) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function spanDistance(span: TrajectoryTimelineSpan, point: number): number {
+  if (point < span.start) return span.start - point
+  if (point > span.end) return point - span.end
+  return 0
+}
+
+function nearestSpan(
+  spans: readonly TrajectoryTimelineSpan[],
+  point: number,
+): TrajectoryTimelineSpan {
+  const insertion = lowerBoundByStart(spans, point)
+  const before = spans[Math.max(0, insertion - 1)]!
+  const after = spans[Math.min(spans.length - 1, insertion)]!
+  return spanDistance(after, point) < spanDistance(before, point) ? after : before
+}
+
+function cellByIndex(
+  turns: readonly TrajectoryTurnModel[],
+  index: number,
+): TrajectoryCellProps | undefined {
+  for (const turn of turns) {
+    for (const group of turn.groups) {
+      const cells = group.cells
+      if (cells.length === 0 || index < cells[0]!.index || index > cells.at(-1)!.index) continue
+      let low = 0
+      let high = cells.length - 1
+      while (low <= high) {
+        const middle = low + Math.floor((high - low) / 2)
+        const cell = cells[middle]!
+        if (cell.index === index) return cell
+        if (cell.index < index) low = middle + 1
+        else high = middle - 1
+      }
+    }
+  }
+  return undefined
+}
+
+function aggregateTooltipLabel(spans: readonly TrajectoryTimelineSpan[]): string {
+  const counts = new Map<TrajectoryCellKind, number>()
+  for (const span of spans) counts.set(span.kind, (counts.get(span.kind) ?? 0) + 1)
+  const summary = [...counts.entries()]
+    .map(([kind, count]) => `${timelineKindLabel(kind)} ${count}`)
+    .join(' · ')
+  return `${spans.length} operations\n${summary}`
 }
 
 function assistantTimingDetail(
@@ -247,14 +322,6 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   onRecordSelect,
   onRecordFocus,
 }: TrajectoryTimelineProps) {
-  const detailByIndex = useMemo(
-    () => new Map(turns.flatMap(turn =>
-      turn.groups.flatMap(group =>
-        group.cells.map(cell => [cell.index, timelineRecordDetail(cell)] as const),
-      ),
-    )),
-    [turns],
-  )
   const dragRef = useRef<{
     pointerId: number
     anchorTime: number
@@ -264,12 +331,26 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   const panRef = useRef<PanGesture | null>(null)
   const rootRef = useRef<HTMLElement | null>(null)
   const trackRef = useRef<HTMLDivElement | null>(null)
+  const detailCacheRef = useRef(new WeakMap<TrajectoryCellProps, TimelineRecordDetail>())
   const [draft, setDraft] = useState<TrajectoryTimeRange | null>(null)
   const [hover, setHover] = useState<HoverPoint | null>(null)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [panning, setPanning] = useState(false)
   const [viewport, setViewport] = useState<TrajectoryTimeRange | null>(null)
   const [animateViewport, setAnimateViewport] = useState(false)
+  const [trackWidth, setTrackWidth] = useState(() =>
+    Math.max(1, Math.floor(window.innerWidth)))
+  const sortedSpans = useMemo(
+    () => model === null
+      ? []
+      : [...model.spans].sort((left, right) =>
+        left.start - right.start || left.end - right.end || left.index - right.index),
+    [model],
+  )
+  const spanByIndex = useMemo(
+    () => new Map(model?.spans.map(span => [span.index, span] as const) ?? []),
+    [model],
+  )
   useEffect(() => {
     if (
       model !== null
@@ -289,7 +370,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
   }, [model])
   useEffect(() => {
     if (model === null || selectedIndex === null) return
-    const selectedSpan = model.spans.find(span => span.index === selectedIndex)
+    const selectedSpan = spanByIndex.get(selectedIndex)
     if (selectedSpan === undefined) return
     setAnimateViewport(true)
     setViewport((current) => {
@@ -309,7 +390,25 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
       if (nextStart === current.start) return current
       return { start: nextStart, end: nextStart + duration }
     })
-  }, [model, selectedIndex])
+  }, [model, selectedIndex, spanByIndex])
+  useEffect(() => {
+    const track = trackRef.current
+    if (track === null) return
+    const measure = () => {
+      const width = Math.floor(track.getBoundingClientRect().width)
+      if (width > 0) setTrackWidth(width)
+    }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(measure)
+    observer?.observe(track)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [model])
   const fullDuration = Math.max(1, (model?.end ?? 0) - (model?.start ?? 0))
   const viewportDuration = Math.min(
     fullDuration,
@@ -347,6 +446,70 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     : rangeFraction(draft, domainStart, domainDuration, model.start, model.end)
   const visibleRange = draftFraction ?? committed
   const activeRange = draft ?? range
+  const renderedSpans = useMemo<readonly RenderedTimelineSpan[]>(() => {
+    if (model === null) return []
+    const domainEnd = domainStart + domainDuration
+    const visible = model.spans.filter(span =>
+      span.end >= domainStart && span.start <= domainEnd)
+    const selected = selectedIndex === null ? undefined : spanByIndex.get(selectedIndex)
+    const selectedIsVisible = selected !== undefined && visible.includes(selected)
+    const withSelected = selected === undefined || selectedIsVisible ? visible : [...visible, selected]
+    const columnCount = Math.max(1, trackWidth)
+    if (visible.length <= columnCount) {
+      return withSelected.map(span => ({ type: 'individual', span }))
+    }
+    const bins = new Map<string, TrajectoryTimelineSpan[]>()
+    for (const span of visible) {
+      if (span === selected) continue
+      const center = (span.start + span.end) / 2
+      const column = Math.min(
+        columnCount - 1,
+        Math.max(0, Math.floor((center - domainStart) / domainDuration * columnCount)),
+      )
+      const key = `${span.lane}:${column}`
+      const bin = bins.get(key)
+      if (bin === undefined) bins.set(key, [span])
+      else bin.push(span)
+    }
+    const rendered: RenderedTimelineSpan[] = []
+    for (const [key, spans] of bins) {
+      if (spans.length === 1) {
+        rendered.push({ type: 'individual', span: spans[0]! })
+        continue
+      }
+      const column = Number(key.slice(key.indexOf(':') + 1))
+      rendered.push({
+        type: 'aggregate',
+        bin: {
+          start: domainStart + column / columnCount * domainDuration,
+          end: domainStart + (column + 1) / columnCount * domainDuration,
+          lane: spans[0]!.lane,
+          kind: spans[0]!.kind,
+          isError: spans.some(span => span.isError),
+          spans,
+        },
+      })
+    }
+    if (selected !== undefined) rendered.push({ type: 'individual', span: selected })
+    return rendered
+  }, [domainDuration, domainStart, model, selectedIndex, spanByIndex, trackWidth])
+  const detailByIndex = useMemo(() => {
+    if (!renderedSpans.some(item => item.type === 'individual')) return new Map()
+    const details = new Map<number, TimelineRecordDetail>()
+    for (const item of renderedSpans) {
+      if (item.type === 'aggregate') continue
+      const cell = cellByIndex(turns, item.span.index)
+      if (cell === undefined) continue
+      const cached = detailCacheRef.current.get(cell)
+      if (cached !== undefined) details.set(cell.index, cached)
+      else {
+        const detail = timelineRecordDetail(cell)
+        detailCacheRef.current.set(cell, detail)
+        details.set(cell.index, detail)
+      }
+    }
+    return details
+  }, [renderedSpans, turns])
   useEffect(() => {
     const root = rootRef.current
     if (root === null) return
@@ -531,7 +694,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     setDraft(null)
     const click = Math.abs(event.clientX - drag.anchorClientX) < MINIMUM_DRAG_PX
     const clickedSpan = click && drag.recordIndex !== null
-      ? model.spans.find(span => span.index === drag.recordIndex)
+      ? spanByIndex.get(drag.recordIndex)
       : undefined
     if (clickedSpan !== undefined) {
       onRangeChange(null)
@@ -549,16 +712,7 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
     commit(committedRange)
     if (click) {
       const timelinePoint = selected.start
-      const nearest = model.spans.reduce((candidate, span) => {
-        const candidateDistance = timelinePoint < candidate.start
-          ? candidate.start - timelinePoint
-          : timelinePoint > candidate.end ? timelinePoint - candidate.end : 0
-        const spanDistance = timelinePoint < span.start
-          ? span.start - timelinePoint
-          : timelinePoint > span.end ? timelinePoint - span.end : 0
-        return spanDistance < candidateDistance ? span : candidate
-      })
-      onRecordFocus?.(nearest.index)
+      onRecordFocus?.(nearestSpan(sortedSpans, timelinePoint).index)
     }
   }
 
@@ -670,60 +824,70 @@ export const TrajectoryTimeline = memo(function TrajectoryTimeline({
             data-timeline-domain
             style={projectedDomainStyle}
           >
-            {model.spans
-              .filter(span =>
-                span.index === selectedIndex
-                || (span.end >= domainStart && span.start <= domainStart + domainDuration))
-              .map((span) => {
-                const left = (span.start - model.start) / fullDuration
-                const width = (span.end - span.start) / fullDuration
-                const widthPercent = width * 100
-                const detail = detailByIndex.get(span.index)
-                const ttftMs = detail?.ttftMs
-                const decodingMs = detail?.decodingMs
-                const ttftFraction = ttftMs === undefined
-                  || decodingMs === undefined
-                  || ttftMs + decodingMs <= 0
-                  ? null
-                  : ttftMs / (ttftMs + decodingMs)
-                return (
-                  <Tooltip
-                    key={span.index}
-                    label={() => timelineTooltipLabel(span.kind, detail)}
-                    side="bottom"
-                    delayMs={TIMELINE_TOOLTIP_DELAY_MS}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={css.span}
-                      data-timeline-span={span.kind}
-                      data-timeline-record-index={span.index}
-                      data-assistant-timing={ttftFraction === null ? undefined : 'true'}
-                      data-error={span.isError || undefined}
-                      data-equal-duration={mode === 'time' || undefined}
-                      data-current={span.index === selectedIndex || undefined}
-                      data-hovered={hover?.recordIndex === span.index || undefined}
-                      data-search-match={searchMatchIndexes === null
-                        ? undefined
-                        : searchMatchIndexes.has(span.index) ? 'true' : 'false'}
-                      data-selected={activeRange === null
-                        ? undefined
-                        : span.start <= activeRange.end && span.end >= activeRange.start
-                          ? 'true'
-                          : 'false'}
-                      style={{
-                        '--trajectory-span-left': `${left * 100}%`,
-                        '--trajectory-span-width': `${widthPercent}%`,
-                        '--trajectory-span-gap': `min(${widthPercent * 0.08}%, 1px)`,
-                        '--trajectory-span-lane': span.lane,
-                        ...(ttftFraction === null
-                          ? {}
-                          : { '--trajectory-assistant-ttft': `${ttftFraction * 100}%` }),
-                      } as CSSProperties}
-                    />
-                  </Tooltip>
-                )
-              })}
+            {renderedSpans.map((item) => {
+              const span = item.type === 'individual' ? item.span : item.bin
+              const recordIndex = item.type === 'individual' ? item.span.index : undefined
+              const left = (span.start - model.start) / fullDuration
+              const widthPercent = (span.end - span.start) / fullDuration * 100
+              const detail = recordIndex === undefined ? undefined : detailByIndex.get(recordIndex)
+              const ttftMs = detail?.ttftMs
+              const decodingMs = detail?.decodingMs
+              const ttftFraction = ttftMs === undefined
+                || decodingMs === undefined
+                || ttftMs + decodingMs <= 0
+                ? null
+                : ttftMs / (ttftMs + decodingMs)
+              const searchMatch = searchMatchIndexes === null
+                ? undefined
+                : item.type === 'individual'
+                  ? searchMatchIndexes.has(item.span.index)
+                  : item.bin.spans.some(candidate => searchMatchIndexes.has(candidate.index))
+              return (
+                <Tooltip
+                  key={item.type === 'individual'
+                    ? item.span.index
+                    : 'aggregate-' + item.bin.lane + '-' + item.bin.start}
+                  label={() => item.type === 'individual'
+                    ? timelineTooltipLabel(item.span.kind, detail)
+                    : aggregateTooltipLabel(item.bin.spans)}
+                  side="bottom"
+                  delayMs={TIMELINE_TOOLTIP_DELAY_MS}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={css.span}
+                    data-timeline-span={span.kind}
+                    data-timeline-aggregate={item.type === 'aggregate'
+                      ? item.bin.spans.length
+                      : undefined}
+                    data-timeline-record-index={recordIndex}
+                    data-assistant-timing={ttftFraction === null ? undefined : 'true'}
+                    data-error={span.isError || undefined}
+                    data-equal-duration={mode === 'time' || undefined}
+                    data-current={recordIndex === selectedIndex || undefined}
+                    data-hovered={(recordIndex !== undefined
+                      && hover?.recordIndex === recordIndex) || undefined}
+                    data-search-match={searchMatch === undefined
+                      ? undefined
+                      : searchMatch ? 'true' : 'false'}
+                    data-selected={activeRange === null
+                      ? undefined
+                      : span.start <= activeRange.end && span.end >= activeRange.start
+                        ? 'true'
+                        : 'false'}
+                    style={{
+                      '--trajectory-span-left': String(left * 100) + '%',
+                      '--trajectory-span-width': String(widthPercent) + '%',
+                      '--trajectory-span-gap': 'min(' + String(widthPercent * 0.08) + '%, 1px)',
+                      '--trajectory-span-lane': span.lane,
+                      ...(ttftFraction === null
+                        ? {}
+                        : { '--trajectory-assistant-ttft': String(ttftFraction * 100) + '%' }),
+                    } as CSSProperties}
+                  />
+                </Tooltip>
+              )
+            })}
           </div>
         </div>
       </div>

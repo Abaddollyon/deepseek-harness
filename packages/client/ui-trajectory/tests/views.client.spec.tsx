@@ -785,6 +785,179 @@ describe('timeline projection', () => {
       .toBe('min(0.02%, 1px)')
   })
 
+  it('bounds dense subtool mounts and restores exact spans after zoom', () => {
+    const denseSubtools = [{
+      turn: 1,
+      groups: [{
+        title: 'Step 1',
+        cells: [
+          ...Array.from({ length: 3_000 }, (_, index) => ({
+            index,
+            kind: 'subtool' as const,
+            text: 'subtool ' + index,
+            timeSeconds: 1,
+            isError: index === 1_500,
+          })),
+          { index: 3_000, kind: 'user' as const, text: 'tail', timeSeconds: 1 },
+        ],
+      }],
+    }] satisfies readonly TrajectoryTurnModel[]
+    const onRecordSelect = vi.fn()
+    const resizeCallbacks: ResizeObserverCallback[] = []
+    const observe = vi.fn()
+    const disconnect = vi.fn()
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { resizeCallbacks.push(callback) }
+      observe = observe
+      disconnect = disconnect
+    })
+    let measuredWidth = 0
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+      x: 0, y: 0, left: 0, top: 0, right: measuredWidth, bottom: 72,
+      width: measuredWidth, height: 72, toJSON: () => ({}),
+    }))
+    try {
+      const view = render(
+        <TimelineWithModel
+          turns={denseSubtools}
+          mode="sequence"
+          range={null}
+          searchMatchIndexes={new Set([1_500])}
+          onRangeChange={vi.fn()}
+          onRecordSelect={onRecordSelect}
+        />,
+      )
+      const plot = screen.getByLabelText('Timeline overview; drag horizontally to focus events')
+      expect(observe).toHaveBeenCalledWith(plot)
+      const mounted = view.container.querySelectorAll('[data-timeline-span]')
+      expect(mounted.length).toBeLessThanOrEqual(window.innerWidth + 1)
+      measuredWidth = 50
+      act(() => { resizeCallbacks[0]?.([], {} as ResizeObserver) })
+      expect(view.container.querySelectorAll('[data-timeline-span]').length).toBeLessThanOrEqual(100)
+      const aggregate = view.container.querySelector<HTMLElement>('[data-timeline-aggregate]')
+      expect(aggregate).toBeTruthy()
+      fireEvent.focus(aggregate as HTMLElement)
+      expect(screen.getByRole('tooltip').textContent).toMatch(/operations.*SUBTOOL/s)
+
+      view.rerender(
+        <TimelineWithModel
+          turns={denseSubtools}
+          mode="sequence"
+          range={null}
+          selectedIndex={1_500}
+          onRangeChange={vi.fn()}
+          onRecordSelect={onRecordSelect}
+        />,
+      )
+      expect(view.container.querySelector(
+        '[data-timeline-record-index="1500"][data-current="true"]',
+      )).toBeTruthy()
+      expect(view.container.querySelectorAll('[data-timeline-span]').length).toBeLessThanOrEqual(201)
+
+      fireEvent.wheel(plot, { clientX: 50, deltaY: -10_000 })
+      expect(view.container.querySelector('[data-timeline-aggregate]')).toBeNull()
+      const exact = view.container.querySelector<HTMLElement>(
+        '[data-timeline-record-index="1500"]',
+      )
+      expect(exact).toBeTruthy()
+      fireEvent.pointerDown(exact as HTMLElement, { button: 0, clientX: 50, pointerId: 1 })
+      fireEvent.pointerUp(exact as HTMLElement, { clientX: 50, pointerId: 1 })
+      expect(onRecordSelect).toHaveBeenCalledWith(1_500)
+      const disconnectsBeforeUnmount = disconnect.mock.calls.length
+      view.unmount()
+      expect(disconnect).toHaveBeenCalledTimes(disconnectsBeforeUnmount + 1)
+    } finally {
+      rect.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('skips aggregate details and visits only an appended selected tail', () => {
+    let measuredWidth = 0
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+      x: 0, y: 0, left: 0, top: 0, right: measuredWidth, bottom: 72,
+      width: measuredWidth, height: 72, toJSON: () => ({}),
+    }))
+    let settledDetailReads = 0
+    let tailDetailReads = 0
+    const settledCells = Array.from({ length: 3_000 }, (_, index) => {
+      const cell: TrajectoryTurnModel['groups'][number]['cells'][number] = {
+        index,
+        kind: 'subtool',
+        text: 'subtool ' + index,
+        timeSeconds: 1,
+      }
+      Object.defineProperty(cell, 'timeSeconds', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          settledDetailReads++
+          return 1
+        },
+      })
+      return cell
+    })
+    const settledTurns = [{
+      turn: 1,
+      groups: [{ title: 'Step 1', cells: settledCells }],
+    }] satisfies readonly TrajectoryTurnModel[]
+    const settledModel = deriveTrajectoryTimeline(settledTurns, 'sequence')
+    expect(settledModel).not.toBeNull()
+    settledDetailReads = 0
+
+    const view = render(
+      <TrajectoryTimeline
+        turns={settledTurns}
+        model={settledModel}
+        mode="sequence"
+        range={null}
+        onRangeChange={vi.fn()}
+      />,
+    )
+    expect(settledDetailReads).toBe(0)
+
+    const tail: TrajectoryTurnModel['groups'][number]['cells'][number] = {
+      index: 3_000,
+      kind: 'subtool',
+      text: 'appended tail',
+      timeSeconds: 1,
+    }
+    Object.defineProperty(tail, 'timeSeconds', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        tailDetailReads++
+        return 1
+      },
+    })
+    const appendedTurns = [{
+      turn: 1,
+      groups: [{ title: 'Step 1', cells: [...settledCells, tail] }],
+    }] satisfies readonly TrajectoryTurnModel[]
+    const appendedModel = deriveTrajectoryTimeline(appendedTurns, 'sequence')
+    expect(appendedModel).not.toBeNull()
+    settledDetailReads = 0
+    tailDetailReads = 0
+
+    view.rerender(
+      <TrajectoryTimeline
+        turns={appendedTurns}
+        model={appendedModel}
+        mode="sequence"
+        range={null}
+        selectedIndex={3_000}
+        onRangeChange={vi.fn()}
+      />,
+    )
+    expect(settledDetailReads).toBe(0)
+    expect(tailDetailReads).toBe(3)
+    measuredWidth = 500
+    act(() => { window.dispatchEvent(new Event('resize')) })
+    expect(settledDetailReads).toBe(0)
+    expect(tailDetailReads).toBe(3)
+    rect.mockRestore()
+  })
+
   it('clears the selection without changing zoom on a zoomed right click', () => {
     const onRangeChange = vi.fn()
     const view = render(

@@ -291,6 +291,8 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
           .rejects.toBe(reason)
         await expect(persistence.readFrom(SessionId('cancelled-read-from'), 0, controller.signal))
           .rejects.toBe(reason)
+        await expect(persistence.readTail(SessionId('cancelled-read-tail'), undefined, 10, controller.signal))
+          .rejects.toBe(reason)
       } finally {
         await dispose()
       }
@@ -326,6 +328,37 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         await expect(persistence.readFrom(SessionId('absent-read-from'), 0)).rejects.toThrow('not found')
         await expect(persistence.readFrom(m.id, -1)).rejects.toThrow('non-negative safe integer')
         await expect(persistence.readFrom(m.id, 1.5)).rejects.toThrow('non-negative safe integer')
+      } finally {
+        await dispose()
+      }
+    })
+
+    it('readTail returns exact bounded pages and validates both bounds', async () => {
+      const { persistence, dispose } = await make()
+      try {
+        const m = meta('read-tail', '/work')
+        const log = oneTurnLog()
+        await persistence.create(m)
+        await persistence.append(m.id, log)
+
+        await expect(persistence.readTail(m.id, undefined, 2)).resolves.toMatchObject({
+          events: log.slice(-2),
+          hasMore: true,
+        })
+        await expect(persistence.readTail(m.id, 4, 3)).resolves.toMatchObject({
+          events: log.slice(1, 4),
+          hasMore: true,
+        })
+        await expect(persistence.readTail(m.id, 2, 5)).resolves.toMatchObject({
+          events: log.slice(0, 2),
+          hasMore: false,
+        })
+        await expect(persistence.readTail(m.id, 0, 1)).resolves.toMatchObject({ events: [], hasMore: false })
+        await expect(persistence.readTail(SessionId('absent-read-tail'), undefined, 1)).rejects.toThrow('not found')
+        await expect(persistence.readTail(m.id, -1, 1)).rejects.toThrow('non-negative safe integer')
+        await expect(persistence.readTail(m.id, 1.5, 1)).rejects.toThrow('non-negative safe integer')
+        await expect(persistence.readTail(m.id, undefined, 0)).rejects.toThrow('positive safe integer')
+        await expect(persistence.readTail(m.id, undefined, 1.5)).rejects.toThrow('positive safe integer')
       } finally {
         await dispose()
       }

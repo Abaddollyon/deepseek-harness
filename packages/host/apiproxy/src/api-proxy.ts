@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentActivity, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError, admitEncodedImages } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -260,7 +260,7 @@ function paginate(
   events: readonly SessionEvent[],
   beforeSeq: number | undefined,
   maxMessages: number,
-): { events: SessionEvent[]; hasMore: boolean } {
+): { events: SessionEvent[]; hasMore: boolean; cut: number } {
   const upper = beforeSeq === undefined ? events.length : seqLowerBound(events, beforeSeq)
   let count = 0
   let cut = 0
@@ -280,7 +280,7 @@ function paginate(
       break
     }
   }
-  return { events: events.slice(seqLowerBound(events, cut), upper), hasMore: cut > 0 }
+  return { events: events.slice(seqLowerBound(events, cut), upper), hasMore: cut > 0, cut }
 }
 
 /** Composite identity of one assistant step inside a page. */
@@ -452,14 +452,38 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
   return undefined
 }
 
-/** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
+const FRAME_QUEUE_HOLE = Symbol('frame-queue-hole')
+
+interface FrameQueueCoalescer<F> {
+  supersedingKey(item: F): string | undefined
+  supersededKey(item: F): string | undefined
+}
+
+/** Async queue with amortized O(1) pulls and optional queued-frame coalescing. */
 class FrameQueue<F> {
-  private buffer: F[] = []
+  private buffer: Array<F | typeof FRAME_QUEUE_HOLE> = []
+  private head = 0
   private waiter: (() => void) | undefined
   private done = false
+  private readonly queuedSuperseders = new Map<string, number>()
+
+  constructor(private readonly coalescer?: FrameQueueCoalescer<F>) {}
 
   push(item: F): void {
     if (this.done) return
+    const supersededKey = this.coalescer?.supersededKey(item)
+    if (supersededKey !== undefined && this.queuedSuperseders.has(supersededKey)) return
+    const supersedingKey = this.coalescer?.supersedingKey(item)
+    if (supersedingKey !== undefined) {
+      this.queuedSuperseders.set(supersedingKey, (this.queuedSuperseders.get(supersedingKey) ?? 0) + 1)
+      for (let index = this.head; index < this.buffer.length; index += 1) {
+        const queued = this.buffer[index]
+        if (queued !== undefined && queued !== FRAME_QUEUE_HOLE
+          && this.coalescer?.supersededKey(queued) === supersedingKey) {
+          this.buffer[index] = FRAME_QUEUE_HOLE
+        }
+      }
+    }
     this.buffer.push(item)
     this.waiter?.()
   }
@@ -469,12 +493,36 @@ class FrameQueue<F> {
     this.waiter?.()
   }
 
+  private pull(): F | undefined {
+    while (this.head < this.buffer.length) {
+      const item = this.buffer[this.head] as F | typeof FRAME_QUEUE_HOLE
+      this.buffer[this.head] = FRAME_QUEUE_HOLE
+      this.head += 1
+      if (item === FRAME_QUEUE_HOLE) continue
+      const supersedingKey = this.coalescer?.supersedingKey(item)
+      if (supersedingKey !== undefined) {
+        const remaining = (this.queuedSuperseders.get(supersedingKey) ?? 1) - 1
+        if (remaining === 0) this.queuedSuperseders.delete(supersedingKey)
+        else this.queuedSuperseders.set(supersedingKey, remaining)
+      }
+      if (this.head * 2 >= this.buffer.length) {
+        this.buffer = this.buffer.slice(this.head)
+        this.head = 0
+      }
+      return item
+    }
+    this.buffer = []
+    this.head = 0
+    return undefined
+  }
+
   async *iterate(signal: AbortSignal, cleanup: () => void): AsyncGenerator<F> {
     const onAbort = (): void => { this.end() }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       while (true) {
-        while (this.buffer.length > 0) yield this.buffer.shift() as F
+        let item: F | undefined
+        while ((item = this.pull()) !== undefined) yield item
         if (this.done || signal.aborted) return
         await new Promise<void>((resolve) => { this.waiter = resolve })
         this.waiter = undefined
@@ -574,7 +622,11 @@ function sessionListUpdatedAt(header: SessionHeader, metadata: SessionListMetada
 }
 
 /** Shared Session-header projection for list baselines and creation frames. */
-function sessionListFields(header: SessionHeader, events: readonly SessionEvent[] = []): {
+function sessionListFields(
+  header: SessionHeader,
+  events: readonly SessionEvent[] = [],
+  resolvedPreset?: { value: string | undefined },
+): {
   parentSessionId?: SessionId
   origin?: 'subagent'
   cwd?: string
@@ -583,7 +635,9 @@ function sessionListFields(header: SessionHeader, events: readonly SessionEvent[
   // The preset comes from the log, not the header: a session that switched
   // while blank ran its turns under the newer composition, and a picker
   // showing the creation-time value would contradict what the model saw.
-  const agentPreset = resolveSessionPreset({ header, events })
+  const agentPreset = resolvedPreset === undefined
+    ? resolveSessionPreset({ header, events })
+    : resolvedPreset.value
   return {
     ...header.parentSession === undefined ? {} : { parentSessionId: header.parentSession },
     ...header.origin === undefined ? {} : { origin: header.origin },
@@ -593,14 +647,19 @@ function sessionListFields(header: SessionHeader, events: readonly SessionEvent[
 }
 
 /** SessionSummary projection for attached (in-memory) sessions. */
-function summarize(session: Session, running: boolean): SessionSummary {
-  const metadata = sessionListMetadata(session.events)
+function summarize(
+  session: Session,
+  running: boolean,
+  projectedMetadata: SessionListMetadata | undefined,
+  agentPreset: string | undefined,
+): SessionSummary {
+  const metadata = projectedMetadata ?? sessionListMetadata(session.events)
   return {
     sessionId: session.id,
     updatedAt: sessionListUpdatedAt(session.header, metadata),
     running,
     blank: metadata.blank,
-    ...sessionListFields(session.header, session.events),
+    ...sessionListFields(session.header, session.events, { value: agentPreset }),
   }
 }
 
@@ -896,7 +955,12 @@ function historyPage(
  */
 type HistorySource =
   | { readonly kind: 'attached'; readonly session: Session }
-  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] }
+  | {
+    readonly kind: 'detached'
+    readonly header: SessionHeader
+    readonly events: SessionEvent[]
+    readonly projections?: SessionProjectionsBlock
+  }
 
 function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
@@ -1192,7 +1256,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const pendingQuestions = new Map<RpcId, PendingQuestion>()
   const pendingApprovals = new Map<RpcId, PendingApproval>()
   const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
+  const jobs = ctx.get('jobs')
+  // Process-wide result-view pairing, bounded by the largest live turn.
+  const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+  const sessionPresets = new WeakMap<Session, { seq: number; value: string | undefined }>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+
+  /** Resolve the latest selected preset once, then advance the cache from committed events. */
+  function presetForSession(session: Session): string | undefined {
+    const cached = sessionPresets.get(session)
+    if (cached !== undefined) return cached.value
+    for (let index = session.events.length - 1; index >= 0; index -= 1) {
+      const event = session.events[index]
+      if (event?.type !== 'agent-preset/selected') continue
+      sessionPresets.set(session, { seq: event.seq, value: event.data.agentPreset })
+      return event.data.agentPreset
+    }
+    sessionPresets.set(session, { seq: -1, value: session.header.agentPreset })
+    return session.header.agentPreset
+  }
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1416,6 +1498,51 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     broadcast({ type: 'session/queue', sessionId: session.id, items: queueItems(agent, event.data) })
   })
 
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type === 'agent-preset/selected') {
+      sessionPresets.set(session, { seq: event.seq, value: event.data.agentPreset })
+    }
+    if (event.type === 'tool/call') {
+      const data = event.data as ToolCallData
+      try {
+        let table = openCalls.get(session.id)
+        if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
+        table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
+      } catch {
+        // Unparseable model arguments: leave the table unset; the result view soft-falls.
+      }
+    } else if (event.type === 'turn/end') {
+      openCalls.delete(session.id)
+    }
+    if (muxQueues.size === 0) return
+    const view = viewFor(
+      ctx, event,
+      callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
+      ctx.agents.get(session.id),
+    )
+    broadcast({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } })
+  })
+  ctx.on('session/disposed', (session: Session) => {
+    openCalls.delete(session.id)
+  })
+
+  jobs?.onJobsChanged((owner) => {
+    if (muxQueues.size === 0) return
+    if (owner !== undefined) {
+      // Keep the exact owner instance while its Agent scope is tearing down.
+      broadcast({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) })
+      return
+    }
+    // Each unowned change affects every session, but each session view is projected once.
+    for (const session of ctx.sessions.list()) {
+      broadcast({
+        type: 'session/jobs',
+        sessionId: session.id,
+        jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
+      })
+    }
+  })
+
   /** Remove a wait before settling it: synchronous deletion makes the first claimant win. */
   function claimQuestion(pending: PendingQuestion, outcome: 'answered' | 'cancelled'): void {
     pendingQuestions.delete(pending.rpcId)
@@ -1592,11 +1719,102 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * @returns the attached session, or the inspected detached header and events.
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
-  async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+  async function historySourceFor(
+    sessionId: SessionId,
+    beforeSeq: number | undefined,
+    maxMessages: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<HistorySource> {
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
-    const inspected = await inspectServable(sessionId)
-    return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined || typeof persistence.readTail !== 'function') {
+      const inspected = await inspectServable(sessionId)
+      return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    }
+    const inspectDetached = async (): Promise<{ meta: SessionHeader; events: SessionEvent[] }> => {
+      try {
+        const inspected = await persistence.inspect(sessionId, signal)
+        if (inspected.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+        return { meta: inspected.meta, events: [...inspected.events] }
+      } catch (error) {
+        if (error instanceof Error && error.message === `session "${sessionId}" not found`) {
+          throw new SessionNotFound(error.message)
+        }
+        throw error
+      }
+    }
+    const limit = maxMessages ?? DEFAULT_MAX_MESSAGES
+    let cursor = beforeSeq
+    let header: SessionHeader | undefined
+    let events: SessionEvent[] = []
+    let inspectedFallback: { meta: SessionHeader; events: SessionEvent[] } | undefined
+    while (true) {
+      signal?.throwIfAborted()
+      let tail: Awaited<ReturnType<SessionPersistence['readTail']>>
+      try {
+        tail = await persistence.readTail(sessionId, cursor, limit, signal)
+      } catch (error) {
+        if (error instanceof Error && error.message === `session "${sessionId}" not found`) {
+          throw new SessionNotFound(error.message)
+        }
+        throw error
+      }
+      if (tail.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+      header = tail.meta
+      if (beforeSeq === undefined && cursor === undefined && tail.events.length > 0
+        && tail.events.at(-1)?.type !== 'turn/end') {
+        inspectedFallback = await inspectDetached()
+        events = inspectedFallback.events
+        header = inspectedFallback.meta
+        break
+      }
+      if (tail.events.length === 0 && tail.hasMore) {
+        inspectedFallback = await inspectDetached()
+        events = inspectedFallback.events
+        header = inspectedFallback.meta
+        break
+      }
+      events = [...tail.events, ...events]
+      const page = paginate(events, beforeSeq, limit)
+      const earliest = events[0]?.seq ?? 0
+      if (!tail.hasMore || page.cut >= earliest) break
+      cursor = earliest
+    }
+    if (header === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+    return { kind: 'detached', header, events }
+  }
+
+  /** Read a detached projection cut after the presenter's standing scope has mounted its units. */
+  async function withDetachedHistoryProjections(
+    sessionId: SessionId,
+    source: Extract<HistorySource, { kind: 'detached' }>,
+    signal?: AbortSignal,
+  ): Promise<Extract<HistorySource, { kind: 'detached' }>> {
+    let projections: SessionProjectionsBlock | undefined
+    try {
+      const cache = ctx.get('sessionProjectionCache')
+      if (cache === undefined) throw new Error('session projection cache is unavailable')
+      projections = await cache.coldSnapshot(sessionId, signal)
+      const expectedSeq = source.events.at(-1)?.seq ?? -1
+      if (projections.asOfSeq !== expectedSeq) {
+        throw new Error(`projection snapshot ended at seq ${String(projections.asOfSeq)}, expected ${String(expectedSeq)}`)
+      }
+    } catch {
+      const persistence = ctx.get('sessionPersistence')
+      let events: readonly SessionEvent[] = source.events
+      if (persistence !== undefined && typeof persistence.readTail === 'function') {
+        const inspected = await persistence.inspect(sessionId, signal)
+        if (inspected.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+        events = inspected.events
+      }
+      try {
+        projections = detachedProjectionsFor(ctx, events)
+      } catch (error) {
+        ctx.logger.warn(`history: projections for "${sessionId}" failed (serving the page without them): ${String(error)}`)
+      }
+    }
+    return { ...source, ...projections === undefined ? {} : { projections } }
   }
 
   /**
@@ -1627,7 +1845,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     includeProjections: boolean,
   ): { events: readonly SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
-      const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
+      const projections = includeProjections ? source.projections : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
     const projections = includeProjections ? projectionsFor(ctx, source.session) : undefined
@@ -1760,7 +1978,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     // Beside the cwd check for the same reason, and after the await so it
     // covers every path that yields a live agent — freshly created, adopted
     // live, resumed from disk, or recovered by the concurrent-creation catch.
-    assertPresetUnchanged(sessionId, presetId, resolveSessionPreset(agent.session))
+    assertPresetUnchanged(sessionId, presetId, presetForSession(agent.session))
     if (agent.session.header.cwd !== cwd) {
       throw new SessionCwdConflict(sessionId, cwd, agent.session.header.cwd)
     }
@@ -1789,7 +2007,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       const agent = ctx.agents.get(session.id)
       const projections = listProjectionsFor(ctx, session.header, session)
       return {
-        ...summarize(session, agent?.status === 'running'),
+        ...summarize(
+          session,
+          agent?.status === 'running',
+          projections?.values.sessionListMetadata,
+          presetForSession(session),
+        ),
+        ...agent?.activity === undefined ? {} : { activity: agent.activity },
         ...projections === undefined ? {} : { projections },
       }
     }
@@ -2267,14 +2491,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // echoing the header would contradict both the adoption this call just
         // allowed and the row `session.list` serves for the same session.
         const created = ctx.agents.get(sessionId)
-        const createdPreset = created === undefined ? undefined : resolveSessionPreset(created.session)
+        const createdPreset = created === undefined ? undefined : presetForSession(created.session)
         return ok(request, { sessionId, ...createdPreset === undefined ? {} : { agentPreset: createdPreset } })
       },
 
       async history(request) {
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
-          const source = await historySourceFor(sessionId)
+          let source = await historySourceFor(sessionId, beforeSeq, maxMessages)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2282,6 +2506,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // appending, so awaiting between the two reads would pair events cut
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
+          if (source.kind === 'detached' && beforeSeq === undefined) {
+            source = await withDetachedHistoryProjections(sessionId, source)
+          }
           const cut = historyCutOf(source, beforeSeq === undefined)
           const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, historyElideSettledDeltas, scope)
           return ok(request, {
@@ -2657,10 +2884,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { sessionId },
           }))
         }
-        if (hasSubagentOwner(agent.session, agent)) {
-          return Promise.resolve(err(request, subagentOwnershipError(sessionId)))
-        }
-        agent.cancel({ kind: 'user' }, { keepInbox: true })
+        // This endpoint is the human stop authority. Unlike model-facing generic
+        // routes, it must stop an owned child without cancelling its owner.
+        agent.cancel(hasSubagentOwner(agent.session, agent) ? { kind: 'parent' } : { kind: 'user' }, { keepInbox: true })
+        // A human stop covers the whole session tree: descendants own independent
+        // Activations that would otherwise keep running and re-notify the parent.
+        ctx.get('subagents')?.cancelDescendants(sessionId)
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
     },
@@ -2678,9 +2907,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           const entries = catalog.children
           const descendants = catalog.descendants
-          const parentById = new Map(
-            descendants.filter(entry => entry.kind === 'child').map(entry => [entry.id, entry.parentSubagentId ?? entry.parentId]),
-          )
+          const childrenByParent = new Map<SessionId, Set<SessionId>>()
+          for (const entry of descendants) {
+            if (entry.kind !== 'child') continue
+            const parentId = entry.parentSubagentId ?? entry.parentId
+            const children = childrenByParent.get(parentId) ?? new Set<SessionId>()
+            children.add(entry.id)
+            childrenByParent.set(parentId, children)
+          }
           const runningIds = new Set([
             ...entries
               .filter(entry => entry.kind === 'child' && ctx.agents.get(entry.id)?.status === 'running')
@@ -2689,31 +2923,31 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               .filter(entry => entry.kind === 'child' && ctx.agents.get(entry.id)?.status === 'running')
               .map(entry => entry.id),
           ])
+          const runningBranchCounts = new Map<SessionId, number>()
+          const visiting = new Set<SessionId>()
           const branchRunningCount = (rootId: SessionId): number => {
-            let count = 0
-            for (const runningId of runningIds) {
-              const seen = new Set<SessionId>()
-              let current: SessionId | undefined = runningId
-              while (current !== undefined && !seen.has(current)) {
-                if (current === rootId) {
-                  count += 1
-                  break
-                }
-                seen.add(current)
-                current = parentById.get(current)
-              }
-            }
+            const cached = runningBranchCounts.get(rootId)
+            if (cached !== undefined) return cached
+            if (visiting.has(rootId)) return 0
+            visiting.add(rootId)
+            let count = runningIds.has(rootId) ? 1 : 0
+            for (const childId of childrenByParent.get(rootId) ?? []) count += branchRunningCount(childId)
+            visiting.delete(rootId)
+            runningBranchCounts.set(rootId, count)
             return count
+          }
+          for (const entry of entries) {
+            if (entry.kind === 'child') branchRunningCount(entry.id)
           }
           return ok(request, {
             entries: entries.map(entry => entry.kind === 'child'
               ? {
                 ...entry,
-                activity: branchRunningCount(entry.id) > 0 ? 'running' : 'inactive',
-                directActivity: ctx.agents.get(entry.id)?.status === 'running' ? 'running' : 'inactive',
+                activity: (runningBranchCounts.get(entry.id) ?? 0) > 0 ? 'running' : 'inactive',
+                directActivity: runningIds.has(entry.id) ? 'running' : 'inactive',
                 runningDescendantCount: Math.max(
                   0,
-                  branchRunningCount(entry.id) - (ctx.agents.get(entry.id)?.status === 'running' ? 1 : 0),
+                  (runningBranchCounts.get(entry.id) ?? 0) - (runningIds.has(entry.id) ? 1 : 0),
                 ),
               }
               : entry),
@@ -2748,7 +2982,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (verified.error !== undefined) return err(request, verified.error)
         // The generic-history data plane: an attached child serves its
         // in-memory snapshot and the registry's live watermark projections; a
-        // cold child is one persistence inspection plus a detached fold.
+        // cold child reads bounded persistence tails plus the cold projection cache.
         let header: SessionHeader
         let events: SessionEvent[]
         let projections: SessionProjectionsBlock | undefined
@@ -2761,11 +2995,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             : undefined
         } else {
           try {
-            const inspected = await inspectServable(childSessionId)
-            header = inspected.meta
-            events = inspected.events
+            let source = await historySourceFor(childSessionId, beforeSeq, maxMessages, signal)
+            if (source.kind !== 'detached') throw new Error('detached subagent history became attached during lookup')
+            if (beforeSeq === undefined) {
+              source = await withDetachedHistoryProjections(childSessionId, source, signal)
+            }
+            header = source.header
+            events = source.events
             projections = beforeSeq === undefined
-              ? subagentHistoryProjections(ctx, childSessionId, () => detachedProjectionsFor(ctx, inspected.events))
+              ? subagentHistoryProjections(ctx, childSessionId, () => source.projections)
               : undefined
           } catch (error: unknown) {
             if (signal?.aborted) {
@@ -3499,7 +3737,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        const queue = new FrameQueue<RpcRequest<MuxFrame>>({
+          supersedingKey: envelope => envelope.payload.type === 'session/event'
+              && envelope.payload.event.type === 'turn/end'
+            ? envelope.payload.sessionId
+            : undefined,
+          supersededKey: envelope => envelope.payload.type === 'session/event'
+              && envelope.payload.event.type === 'assistant/chunk'
+            ? envelope.payload.sessionId
+            : undefined,
+        })
         muxQueues.add(queue)
         for (const session of ctx.sessions.list()) {
           subscribeSession(queue, session)
@@ -3529,7 +3776,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // a session with no live Agent owns no tasks, so it correctly sees only
         // the unowned ones, and listing never revives a cold session. An empty
         // set sends nothing — absence is how the client reads "no tasks".
-        const jobs = ctx.get('jobs')
         if (jobs !== undefined) {
           for (const session of ctx.sessions.list()) {
             const views = jobViews(jobs.list(ctx.agents.get(session.id)))
@@ -3538,31 +3784,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           }
         }
-        // Per-session open-call table for result-view pairing. Bounded by the
-        // per-turn call count: entries clear on turn/end; a table miss (stream
-        // opened mid-turn) backscans the session's in-memory events instead.
-        const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
         const disposers = [
-          ctx.on('session/event', (session: Session, event: SessionEvent) => {
-            if (event.type === 'tool/call') {
-              const data = event.data as ToolCallData
-              try {
-                let table = openCalls.get(session.id)
-                if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
-                table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
-              } catch {
-                // Unparseable model arguments: leave the table unset; the result view soft-falls.
-              }
-            } else if (event.type === 'turn/end') {
-              openCalls.delete(session.id)
-            }
-            const view = viewFor(
-              ctx, event,
-              callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
-              ctx.agents.get(session.id),
-            )
-            queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
-          }),
           ctx.on('session/created', (session: Session) => {
             subscribeSession(queue, session)
             // The subscribe frame clears the client's task mirror, and a
@@ -3574,27 +3796,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
             }
           }),
-          ctx.on('session/disposed', (session: Session) => {
-            openCalls.delete(session.id)
-          }),
-          ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
-            if (owner !== undefined) {
-              // The exact owner instance the fence compares against, so the
-              // push stays correct even while that Agent's scope is tearing
-              // down and a lookup by id would already miss.
-              queue.push(frame({ type: 'session/jobs', sessionId: owner.id, jobs: jobViews(jobs.list(owner)) }))
-              return
-            }
-            // An unowned task is visible to every caller, so every subscribed
-            // session's set changed with it.
-            for (const session of ctx.sessions.list()) {
-              queue.push(frame({
-                type: 'session/jobs',
-                sessionId: session.id,
-                jobs: jobViews(jobs.list(ctx.agents.get(session.id))),
-              }))
-            }
-          })],
         ]
         return queue.iterate(signal, () => {
           muxQueues.delete(queue)
@@ -3622,7 +3823,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               // has run no turn yet, so this is constantly true in practice.
               blank: sessionBlank(session),
               // Including cwd lets the client group the new session without refreshing the list.
-              ...sessionListFields(session.header, session.events),
+              ...sessionListFields(session.header, session.events, { value: presetForSession(session) }),
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
@@ -3630,6 +3831,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
             queue.push(frame({ type: 'host/session-status', sessionId: agent.id, running: status === 'running' }))
+          }),
+          ctx.on('agent/activity', ({ agent, activity }: {
+            agent: Agent
+            activity: AgentActivity | undefined
+          }) => {
+            queue.push(frame({
+              type: 'host/session-status', sessionId: agent.id, running: agent.status === 'running',
+              ...activity === undefined ? {} : { activity },
+            }))
           }),
           ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
             queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))

@@ -25,6 +25,48 @@ function summary(sessionId: SessionId, over: SummaryOver = {}) {
 }
 
 describe('instances', () => {
+  it('suspends inactive conversation folds while keeping list metadata live', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({ items: [summary(S1), summary(S2)] as never[] }))
+    const manager = new SessionManager(api, fakeRemote())
+    await manager.refreshList()
+    manager.select(S1)
+    const inactive = manager.get(S2)
+    const foldSpy = vi.spyOn(inactive, 'handleMuxEnvelope')
+    for (let index = 0; index < 1_000; index++) {
+      manager.handleMuxEnvelope({
+        rpcId: ('inactive-' + index) as never,
+        payload: { type: 'session/event', sessionId: S2, event: plainTurn(index, index, 'u', 'a')[0] as never },
+      })
+    }
+    expect(foldSpy).toHaveBeenCalledTimes(0)
+    manager.handleHostEnvelope({ rpcId: 'status' as never, payload: { type: 'host/session-status', sessionId: S2, running: true } })
+    expect(manager.getListSnapshot().items.find(item => item.sessionId === S2)?.running).toBe(true)
+  })
+
+  it('prunes closed retention while preserving a selected restored child address', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({ items: [summary(S1)] as never[] }))
+    const selected = 'selected-child' as SessionId
+    const parent = 'selected-parent' as SessionId
+    const address = { childSessionId: selected, parentSessionId: parent, mode: 'active' } as never
+    const manager = new SessionManager(api, fakeRemote(), selected, address)
+    type Retained = { catalogs: Map<SessionId, unknown>; addresses: Map<SessionId, unknown>; projectionStores: Map<SessionId, unknown> }
+    const retained = manager as unknown as Retained
+    retained.addresses.set(selected, address)
+    for (let index = 0; index < 500; index++) {
+      const id = ('closed-parent-' + index) as SessionId
+      retained.catalogs.set(id, {})
+      const child = ('closed-child-' + index) as SessionId
+      retained.addresses.set(child, { parentSessionId: id })
+      retained.projectionStores.set(child, {})
+    }
+    await manager.refreshList()
+    expect(retained.catalogs.size).toBeLessThanOrEqual(128)
+    expect(retained.addresses.has(selected)).toBe(true)
+    expect(retained.projectionStores.size).toBe(0)
+  })
+
   it('lazily builds one resident instance per id and syncs the running bit from the list', async () => {
     const api = new FakeApiClient()
     api.onList = () => Promise.resolve(ok({ items: [summary(S1, { running: true })] as never[] }))
@@ -255,6 +297,7 @@ describe('list lifecycle', () => {
     expect(manager.getListSnapshot().items[0]?.title).toBeUndefined()
 
     frame('title-durable', { type: 'session/projection', sessionId: S1, key: 'title', value: 'Durable', seq: 2 })
+    await Promise.resolve()
     expect(manager.getListSnapshot().items[0]?.title).toBe('Durable')
 
     // A baseline at or past the row's seq keeps it (nothing phantom to drop).

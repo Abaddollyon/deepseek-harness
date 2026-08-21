@@ -206,6 +206,8 @@ describe('session.list projections column', () => {
       blank: false,
       lastPromptAt: session.events.at(-1)?.time,
     })
+    expect(row?.blank).toBe(row?.projections?.values.sessionListMetadata?.blank)
+    expect(row?.updatedAt).toBe(row?.projections?.values.sessionListMetadata?.lastPromptAt)
     expect(row?.projections?.asOfSeq).toBe(session.seq - 1)
   })
 

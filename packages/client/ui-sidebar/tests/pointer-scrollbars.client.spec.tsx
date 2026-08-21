@@ -22,6 +22,7 @@ const neverHook = (() => { throw new Error('shell must not read global hooks') }
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 /**
@@ -43,6 +44,7 @@ function mountColumn(): { column: HTMLElement; quiet: () => boolean } {
   // jsdom lays nothing out, and the leave decision is geometric: pin the box
   // the shell reads so a coordinate can be inside or outside it.
   Object.defineProperty(column, 'getBoundingClientRect', {
+    configurable: true,
     value: () => ({
       left: 0, top: 0, right: COLUMN_WIDTH, bottom: COLUMN_HEIGHT,
       x: 0, y: 0, width: COLUMN_WIDTH, height: COLUMN_HEIGHT, toJSON: () => ({}),
@@ -77,6 +79,38 @@ function movePointerOverDocument(x: number, y: number): void {
 }
 
 describe('SidebarRoot pointer-revealed scrollbars', () => {
+  it('refreshes cached geometry through ResizeObserver and disconnects it', () => {
+    const observe = vi.fn()
+    const disconnect = vi.fn()
+    let resize: ResizeObserverCallback | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { resize = callback }
+      observe = observe
+      disconnect = disconnect
+      unobserve = vi.fn()
+    })
+    const { column } = mountColumn()
+    expect(observe).toHaveBeenCalledWith(column)
+    act(() => { resize?.([], {} as ResizeObserver) })
+    cleanup()
+    expect(disconnect).toHaveBeenCalledOnce()
+  })
+
+  it('reuses cached geometry across moves and refreshes it on layout edges', () => {
+    const { column } = mountColumn()
+    const rect = vi.spyOn(column, 'getBoundingClientRect')
+    movePointer(column, 'in')
+    const afterEnter = rect.mock.calls.length
+
+    movePointerOverDocument(20, 20)
+    movePointerOverDocument(21, 21)
+    expect(rect).toHaveBeenCalledTimes(afterEnter)
+    fireEvent.pointerDown(document)
+    expect(rect).toHaveBeenCalledTimes(afterEnter + 1)
+    fireEvent(window, new Event('resize'))
+    expect(rect).toHaveBeenCalledTimes(afterEnter + 2)
+  })
+
   it('draws them only while the pointer is inside, and lingers on the way out', () => {
     vi.useFakeTimers()
     const { column, quiet } = mountColumn()

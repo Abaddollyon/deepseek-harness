@@ -154,7 +154,7 @@ interface JobRead {
 
 ## Service behavior
 
-The abstract [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition specifies atomic `start`, caller-scoped `get` and `list`, `read`, `kill`, bounded `wait`, failure-isolated `onJobDone` and `onJobsChanged` listeners, and when `attachController` becomes available; [`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) is the process-local Service Provider. Authorization compares owner sessions; owner cleanup and admission use the exact registered `Agent` instance. The local provider's positive-safe-integer `maxConcurrentJobsPerOwner` config defaults to `10` and counts `running` plus `stopping` records per exact owner, with one shared bucket for unowned jobs; terminal producer settlement releases capacity. See [`dsh-jobs`](../../packages/jobs/jobs/README.md) for the Service Definition contract, [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.md) for the registry lifecycle and admission policy, and [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.md) for the model-facing Consumer.
+The abstract [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition specifies atomic `start`, caller-scoped `get` and `list`, `read`, `kill`, bounded `wait`, failure-isolated `onJobDone` and `onJobsChanged` listeners, and when `attachController` becomes available; [`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) is the process-local Service Provider. Authorization compares owner sessions; owner cleanup and admission use the exact registered `Agent` instance. The local provider's positive-safe-integer `maxConcurrentJobsPerOwner` config defaults to `10` and counts `running` plus `stopping` records per exact owner, with one shared bucket for unowned jobs; terminal producer settlement releases capacity. Its positive-safe-integer `maxSettledJobs` config defaults to `256` and bounds retained terminal records process-wide: settlement past the bound evicts the oldest settled record, releasing its buffered output and announcing the removal through `onJobsChanged`; live jobs are never evicted. Its positive-safe-integer `teardownGraceMs` config defaults to `5000` and bounds the teardown join: a cancel that never settles is force-settled `failed` once the grace expires. See [`dsh-jobs`](../../packages/jobs/jobs/README.md) for the Service Definition contract, [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.md) for the registry lifecycle and admission policy, and [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.md) for the model-facing Consumer.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -172,10 +172,11 @@ Abstract background job registry. Subclass, implement the abstract methods, and 
 
 Implementations must honor these semantics:
 
-- Registrations outlive producer and controller fibers. Owner and service disposal cancel live work and await compliant producers; a throwing teardown cancel force-fails only the record. Teardown cancellation also marks the record reported, because a record its owner is being destroyed for has no reader left.
+- Registrations outlive producer and controller fibers. Owner and service disposal cancel live work and await compliant producers; a throwing teardown cancel force-fails only the record. Implementations may bound that teardown join with a validated grace, force-settling a producer whose cancel returned but never settled `done`. Teardown cancellation also marks the record reported, because a record its owner is being destroyed for has no reader left.
 - Owned-job access is fenced by the owner's session id. Ids are predictable, so authorization — not secrecy — is the boundary.
 - Settlement is first-wins: one terminal record, released waiters, and one round of contained listener notification, even against a late producer outcome. Completion is announced last, after the record is committed and every other observer of the settlement has seen it, because a reporter may open a model turn synchronously.
 - start refuses work while no attached job controller serves the spec's owner, so a producer cannot start work that owner cannot collect or stop. One registry serves every composition in the process, so this question — and completion-listener delivery — is owner-relative rather than process-wide: registrations made from an unscoped context serve every owner, and registrations made under an agent composition's scope serve exactly the agents composed under it.
+- Implementations may bound how many terminal records stay retained (a validated bound such as a maximum settled count). An evicted record behaves as an unknown id for get, read, kill, and wait, and its removal is a visible-set change announced through onJobsChanged. Live (`running`/`stopping`) records are never evicted.
 
 ```ts cordis-catalog
 /**
@@ -207,9 +208,9 @@ abstract list(caller?: Agent): JobSnapshot[]
 abstract get(id: JobId, caller?: Agent): JobSnapshot
 
 /**
- * Read the next stream delta, or the idempotent final output after settlement.
- * A terminal read marks the job reported. Throws for an unknown or foreign
- * job.
+ * Read the next stream delta, or the idempotent final output after settlement
+ * while the record stays retained. A terminal read marks the job reported.
+ * Throws for an unknown, evicted, or foreign job.
  * @param id - job to read.
  * @param caller - reading agent checked against the owner.
  * @returns output text and the post-read snapshot.
@@ -255,9 +256,9 @@ abstract onJobDone(listener: JobDoneListener): () => void
  * Register an effect-scoped observer of visible-set changes. It fires after
  * every commit that changes what {@link list} returns for that owner —
  * registration, every stopping transition (including the one teardown
- * performs before it awaits a slow producer), settlement, owner-disposal
- * removal, and the emptying that service disposal commits — so an observer
- * re-reads rather than accumulating deltas.
+ * performs before it awaits a slow producer), settlement, bounded-retention
+ * eviction, owner-disposal removal, and the emptying that service disposal
+ * commits — so an observer re-reads rather than accumulating deltas.
  *
  * Delivery is owner-relative on the same terms as {@link onJobDone}: an
  * observer registered from an unscoped context — a host composition's own
@@ -286,5 +287,5 @@ abstract attachController(name: string): () => void
 
 Types: [Agent](core.md)
 
-Source: [`packages/jobs/jobs/src/index.ts:62`](../../packages/jobs/jobs/src/index.ts)
+Source: [`packages/jobs/jobs/src/index.ts:70`](../../packages/jobs/jobs/src/index.ts)
 <!-- END GENERATED cordis-surface -->

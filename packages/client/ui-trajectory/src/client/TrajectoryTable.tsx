@@ -433,8 +433,12 @@ export interface TrajectoryUsage {
   reasoning?: number
 }
 
-function flattenRecords(turns: readonly TrajectoryTurnModel[]): TableRecord[] {
-  return turns.flatMap((turn, section) => {
+function flattenRecords(
+  turns: readonly TrajectoryTurnModel[],
+  sectionOffset = 0,
+): TableRecord[] {
+  return turns.flatMap((turn, offset) => {
+    const section = sectionOffset + offset
     let firstInSection = true
     const records = turn.groups.flatMap((group) => {
       return group.cells.map((cell, index) => {
@@ -662,6 +666,128 @@ function collapseAssistantRecords(
     i += calls.length
   }
   return out
+}
+
+/** Per-view finalized trajectory projection, including all virtual lookup indexes. */
+interface TrajectoryTableProjection {
+  allRecords: readonly TableRecord[]
+  requestBoundaries: ReadonlyMap<string, number>
+  requestNumbers: ReadonlyMap<string, number>
+  records: readonly TableRecord[]
+  projectedVirtualRows: readonly TrajectoryVirtualRow<TableRecord>[]
+  virtualIndexByRecordId: ReadonlyMap<string, number>
+  requestBoundaryRuns: ReadonlyMap<number, number>
+}
+
+/**
+ * Create a projection cache owned by exactly one trajectory table instance.
+ * @returns A cache that patches appended immutable turns and fully rebuilds every
+ * derived index when history order, search, or fold inputs change.
+ */
+export function createTrajectoryTableProjectionCache() {
+  let previousTurns: readonly TrajectoryTurnModel[] = []
+  let previousSearch: ReadonlySet<number> | null = null
+  let previousCollapsedTurns: ReadonlySet<number> | undefined
+  let previousCollapsedAssistants: ReadonlySet<string> | undefined
+  let previousSessionNumbers: readonly TrajectoryRequestNumber[] | undefined
+  let projection: TrajectoryTableProjection | undefined
+  let operationCount = 0
+  const projectFull = (
+    turns: readonly TrajectoryTurnModel[],
+    sessionNumbers: readonly TrajectoryRequestNumber[] | undefined,
+    search: ReadonlySet<number> | null,
+    collapsedTurns: ReadonlySet<number>,
+    collapsedAssistants: ReadonlySet<string>,
+  ): TrajectoryTableProjection => {
+    const allRecords = flattenRecords(turns)
+    const requestBoundaries = indexRequestBoundaries(allRecords)
+    const requestNumbers = indexRequestNumbers(allRecords, sessionNumbers, requestBoundaries)
+    const turnRecords = search !== null
+      ? filterRecords(allRecords, search)
+      : collapsedTurns.size === 0 ? allRecords : collapseTurnRecords(allRecords, collapsedTurns)
+    const records = search !== null || collapsedAssistants.size === 0
+      ? turnRecords
+      : collapseAssistantRecords(turnRecords, collapsedAssistants)
+    const projectedVirtualRows = groupTrajectoryVirtualRows(records)
+    const virtualIndexByRecordId = new Map<string, number>()
+    for (const [virtualIndex, row] of projectedVirtualRows.entries()) {
+      for (const entry of row.entries) {
+        if (entry.record.collapsedSummary === undefined) {
+          virtualIndexByRecordId.set(trajectoryRecordId(entry.record.cell), virtualIndex)
+        }
+      }
+    }
+    operationCount = allRecords.length + records.length
+    return {
+      allRecords, requestBoundaries, requestNumbers, records, projectedVirtualRows,
+      virtualIndexByRecordId, requestBoundaryRuns: indexRequestBoundaryRuns(records),
+    }
+  }
+  const projectTail = (
+    turns: readonly TrajectoryTurnModel[],
+    sessionNumbers: readonly TrajectoryRequestNumber[] | undefined,
+  ): TrajectoryTableProjection => {
+    const previous = projection!
+    let commonTurns = 0
+    while (commonTurns < previousTurns.length && previousTurns[commonTurns] === turns[commonTurns]) commonTurns++
+    const recordStart = previous.allRecords.findIndex(record => record.section === commonTurns)
+    const suffixStart = recordStart === -1 ? previous.allRecords.length : recordStart
+    const suffix = flattenRecords(turns.slice(commonTurns), commonTurns)
+    const allRecords = [...previous.allRecords.slice(0, suffixStart), ...suffix]
+    const requestBoundaries = indexRequestBoundaries(allRecords)
+    const requestNumbers = indexRequestNumbers(allRecords, sessionNumbers, requestBoundaries)
+    const records = allRecords
+    let rowStart = suffixStart
+    while (rowStart > 0 && records[rowStart - 1]?.cell.requestOnly === true) rowStart--
+    const retainedRows = previous.projectedVirtualRows.filter(row => (row.entries[0]?.logicalIndex ?? rowStart) < rowStart)
+    const suffixRows = groupTrajectoryVirtualRows(records.slice(rowStart), rowStart)
+    const projectedVirtualRows = [...retainedRows, ...suffixRows]
+    const virtualIndexByRecordId = new Map<string, number>()
+    for (const [index, row] of projectedVirtualRows.entries()) for (const entry of row.entries) {
+      if (entry.record.collapsedSummary === undefined) virtualIndexByRecordId.set(trajectoryRecordId(entry.record.cell), index)
+    }
+    const requestBoundaryRuns = indexRequestBoundaryRuns(records)
+    operationCount = commonTurns + previous.allRecords.length + records.length * 3
+    return { allRecords, requestBoundaries, requestNumbers, records, projectedVirtualRows, virtualIndexByRecordId, requestBoundaryRuns }
+  }
+  return {
+    get operationCount() { return operationCount },
+    project(input: {
+      turns: readonly TrajectoryTurnModel[]
+      sessionNumbers: readonly TrajectoryRequestNumber[] | undefined
+      search: ReadonlySet<number> | null
+      collapsedTurns: ReadonlySet<number>
+      collapsedAssistants: ReadonlySet<string>
+    }): TrajectoryTableProjection {
+      const unchanged = projection !== undefined
+        && input.turns === previousTurns
+        && input.sessionNumbers === previousSessionNumbers
+        && input.search === previousSearch
+        && input.collapsedTurns === previousCollapsedTurns
+        && input.collapsedAssistants === previousCollapsedAssistants
+      if (unchanged) { operationCount = 0; return projection! }
+      const prefixLength = previousTurns.length
+      const tailAppend = projection !== undefined
+        && input.turns.length >= prefixLength
+        && previousTurns[0] === input.turns[0]
+        && input.search === null
+        && previousSearch === null
+        && input.collapsedTurns === previousCollapsedTurns
+        && input.collapsedAssistants === previousCollapsedAssistants
+        && input.collapsedTurns.size === 0
+        && input.collapsedAssistants.size === 0
+        && previousTurns.slice(0, -1).every((turn, index) => input.turns[index] === turn)
+      projection = tailAppend
+        ? projectTail(input.turns, input.sessionNumbers)
+        : projectFull(input.turns, input.sessionNumbers, input.search, input.collapsedTurns, input.collapsedAssistants)
+      previousTurns = input.turns
+      previousSessionNumbers = input.sessionNumbers
+      previousSearch = input.search
+      previousCollapsedTurns = input.collapsedTurns
+      previousCollapsedAssistants = input.collapsedAssistants
+      return projection!
+    },
+  }
 }
 
 function stateOf(record: TableRecord): RecordState {
@@ -1732,7 +1858,18 @@ export function TrajectoryTable({
   const loadingOlder = useRef(false)
   const [olderLoading, setOlderLoading] = useState(false)
   const olderLoadAnchor = useRef<OlderLoadAnchor | null>(null)
-  const allRecords = useMemo(() => flattenRecords(turns), [turns])
+  const projectionCache = useRef(createTrajectoryTableProjectionCache())
+  const projection = projectionCache.current.project({
+    turns,
+    sessionNumbers: sessionRequestNumbers,
+    search: searchMatchIndexes,
+    collapsedTurns,
+    collapsedAssistants,
+  })
+  const {
+    allRecords, requestBoundaries, requestNumbers, records, projectedVirtualRows,
+    virtualIndexByRecordId, requestBoundaryRuns,
+  } = projection
   const streamingCellsByIndex = useMemo(
     () => new Map(streamingCells.map(cell => [cell.index, cell])),
     [streamingCells],
@@ -1752,24 +1889,6 @@ export function TrajectoryTable({
   useEffect(() => {
     onSelectedIndexChange?.(selectedIndex)
   }, [onSelectedIndexChange, selectedIndex])
-  const requestBoundaries = useMemo(() => indexRequestBoundaries(allRecords), [allRecords])
-  const requestNumbers = useMemo(
-    () => indexRequestNumbers(allRecords, sessionRequestNumbers, requestBoundaries),
-    [allRecords, requestBoundaries, sessionRequestNumbers],
-  )
-  const records = useMemo(() => {
-    if (searchMatchIndexes !== null) return filterRecords(allRecords, searchMatchIndexes)
-    const turnRecords = collapsedTurns.size === 0
-      ? allRecords
-      : collapseTurnRecords(allRecords, collapsedTurns)
-    return collapsedAssistants.size === 0
-      ? turnRecords
-      : collapseAssistantRecords(turnRecords, collapsedAssistants)
-  }, [allRecords, collapsedAssistants, collapsedTurns, searchMatchIndexes])
-  const projectedVirtualRows = useMemo(
-    () => groupTrajectoryVirtualRows(records),
-    [records],
-  )
   const virtualRowStructure = useStableVirtualRowStructure(projectedVirtualRows)
   const virtualizationEnabled = hasOlderRecords
     || records.length > VIRTUALIZATION_THRESHOLD
@@ -1795,17 +1914,6 @@ export function TrajectoryTable({
     scrollMargin: virtualScrollMargin,
     scrollEndThreshold: BOTTOM_FOLLOW_THRESHOLD_PX,
   })
-  const virtualIndexByRecordId = useMemo(() => {
-    const indexes = new Map<string, number>()
-    for (const [virtualIndex, row] of projectedVirtualRows.entries()) {
-      for (const entry of row.entries) {
-        if (entry.record.collapsedSummary === undefined) {
-          indexes.set(trajectoryRecordId(entry.record.cell), virtualIndex)
-        }
-      }
-    }
-    return indexes
-  }, [projectedVirtualRows])
   const virtualItems = virtualizationEnabled ? rowVirtualizer.getVirtualItems() : []
   const virtualTop = Math.max(0, (virtualItems[0]?.start ?? 0) - virtualScrollMargin)
   const virtualBottom = virtualItems.length === 0
@@ -1835,10 +1943,7 @@ export function TrajectoryTable({
       terminalRequestBoundary:
         record.cell.requestOnly === true && position === records.length - 1,
     }))
-  const requestBoundaryRuns = useMemo(
-    () => indexRequestBoundaryRuns(records),
-    [records],
-  )
+
   const selectedPrompt = selected?.cell.kind === 'system'
     ? selected.cell.promptDetail
     : undefined

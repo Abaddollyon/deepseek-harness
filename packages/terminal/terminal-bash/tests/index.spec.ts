@@ -53,6 +53,7 @@ function agent(ctx: Context, cwd?: string): Agent {
   return {
     id, options: {}, session, inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',
+    activity: undefined,
     ctx,
     send: () => {},
     followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},
@@ -522,6 +523,7 @@ describe('terminal-bash plugin shape', () => {
     const owner: Agent = {
       id: session.id, options: {}, session, inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
       status: 'idle',
+      activity: undefined,
       ctx: ownerFiber.ctx,
       send: () => {},
       followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},
@@ -571,6 +573,7 @@ describe('terminal-bash plugin shape', () => {
     const owner: Agent = {
       id: session.id, options: {}, session, inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
       status: 'idle',
+      activity: undefined,
       ctx: ownerFiber.ctx,
       send: () => {},
       followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},

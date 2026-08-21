@@ -26,6 +26,7 @@ try {
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',
+    activity: undefined,
     send: () => {},
     followup: () => {},
     steer: () => {},

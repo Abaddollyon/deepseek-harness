@@ -5,7 +5,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
-  type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix,
+  type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix, type StoredTail,
 } from '../src/index.ts'
 import { runPersistenceContract, meta, oneTurnLog } from './contract.ts'
 import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-contract.ts'
@@ -188,6 +188,18 @@ class ControlledBackend implements PersistenceBackend<never> {
   beforeLoadStored?: (attempt: number, signal?: AbortSignal) => Promise<void>
   /** When set, the declared seek hook delegates here so readFrom exercises it; unset throws (tests set it first). */
   seekHook?: (id: SessionId, fromSeq: number, signal?: AbortSignal) => Promise<StoredSuffix | undefined>
+  /** When set, the declared tail hook delegates here so tests can control bounded reads. */
+  tailHook?: (id: SessionId, beforeSeq: number | undefined, limit: number, signal?: AbortSignal) => Promise<StoredTail | undefined>
+
+  loadStoredTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
+    if (this.tailHook === undefined) throw new Error('tailHook not configured for this test')
+    return this.tailHook(id, beforeSeq, limit, signal)
+  }
 
   loadStoredFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<StoredSuffix | undefined> {
     if (this.seekHook === undefined) throw new Error('seekHook not configured for this test')
@@ -1347,6 +1359,62 @@ describe('PersistenceCoordinator observation cancellation', () => {
         throw new Error('backend teardown after abort')
       }
       const pending = coordinator.readFrom(id, 0, controller.signal)
+      const observed = pending.catch((error: unknown) => error)
+      await vi.waitFor(() => { expect(hookEntered).toBe(true) })
+      controller.abort(reason)
+      expect(await observed).toBe(reason)
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('readTail via the seek hook validates bounded pages and preserves cancellation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('seek-read-tail')
+    const log = oneTurnLog()
+    backend.store.set(id, { meta: meta(id), events: log })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      backend.tailHook = async (hookId, beforeSeq, limit) => {
+        const entry = backend.store.get(hookId)
+        if (entry === undefined) return undefined
+        const upper = Math.min(beforeSeq ?? entry.events.length, entry.events.length)
+        const start = Math.max(0, upper - limit)
+        return { meta: structuredClone(entry.meta), events: entry.events.slice(start, upper), hasMore: start > 0 }
+      }
+      await expect(coordinator.readTail(id, 5, 2)).resolves.toMatchObject({
+        events: log.slice(3, 5),
+        hasMore: true,
+      })
+      await expect(coordinator.readTail(SessionId('missing-tail'), undefined, 2)).rejects.toThrow('not found')
+      await expect(coordinator.readTail(id, -1, 2)).rejects.toThrow('non-negative safe integer')
+      await expect(coordinator.readTail(id, undefined, 0)).rejects.toThrow('positive safe integer')
+
+      backend.tailHook = async () => ({ meta: meta(id), events: log.slice(0, 3), hasMore: false })
+      await expect(coordinator.readTail(id, undefined, 2)).rejects.toThrow('returned 3 events for limit 2')
+      backend.tailHook = async () => ({ meta: meta(id), events: log.slice(3, 4), hasMore: true })
+      await expect(coordinator.readTail(id, 3, 2)).rejects.toThrow('outside beforeSeq 3')
+
+      const hookFailure = new Error('tail backend exploded')
+      backend.tailHook = () => Promise.reject(hookFailure)
+      await expect(coordinator.readTail(id, undefined, 2)).rejects.toBe(hookFailure)
+
+      const controller = new AbortController()
+      const reason = new Error('read-tail cancelled mid-hook')
+      let hookEntered = false
+      backend.tailHook = async (_hookId, _beforeSeq, _limit, signal) => {
+        hookEntered = true
+        await new Promise<void>((resolve) => { signal?.addEventListener('abort', () => { resolve() }, { once: true }) })
+        throw new Error('backend teardown after abort')
+      }
+      const pending = coordinator.readTail(id, undefined, 2, controller.signal)
       const observed = pending.catch((error: unknown) => error)
       await vi.waitFor(() => { expect(hookEntered).toBe(true) })
       controller.abort(reason)

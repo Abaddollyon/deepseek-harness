@@ -31,11 +31,25 @@ function bench(options: {
   /** Every registered projection unit throws on this child's payloads. */
   projectionsThrow?: true
   historyParent?: SessionId
+  withoutSubagents?: true
+  originSubagent?: true
 } = {}) {
-  const parent = { id: PARENT }
+  const parentCancel = vi.fn()
+  const childCancel = vi.fn()
+  const parentHeader = { version: 0, id: PARENT, createdAt: 1, cwd: '/proj' } satisfies SessionHeader
+  const parentSession = { id: PARENT, header: parentHeader, events: [] as SessionEvent[] }
+  const parent = { id: PARENT, session: parentSession, status: 'running', cancel: parentCancel }
   const child = options.childStatus === undefined
     ? undefined
-    : { id: CHILD, status: options.childStatus }
+    : {
+      id: CHILD, status: options.childStatus, cancel: childCancel,
+      session: {
+        id: CHILD,
+        header: { version: 0, id: CHILD, createdAt: 1, cwd: '/proj', parentSession: PARENT,
+          ...(options.originSubagent === true ? { origin: 'subagent' as const } : {}) },
+        events: [] as SessionEvent[],
+      },
+    }
   const getAgent = vi.fn((id: SessionId) => {
     if (options.parentLive !== false && id === PARENT) return parent
     if (id === CHILD) return child
@@ -88,15 +102,21 @@ function bench(options: {
     if (options.projectionsThrow === true) throw new Error('hostile unit')
     return { snapshot: coldBlock }
   })
+  const cancelDescendants = vi.fn((parentSessionId: SessionId) => {
+    if (parentSessionId === PARENT) child?.cancel({ kind: 'parent' }, { keepInbox: true })
+  })
   const ctx = new Context()
   ctx.provide('agents', { get: getAgent })
-  ctx.provide('subagents', {
-    listChildren,
-    listDescendants,
-    ...(listChildrenAndDescendants === undefined ? {} : { listChildrenAndDescendants }),
-    followup,
-    interrupt,
-  })
+  if (options.withoutSubagents !== true) {
+    ctx.provide('subagents', {
+      listChildren,
+      listDescendants,
+      ...(listChildrenAndDescendants === undefined ? {} : { listChildrenAndDescendants }),
+      followup,
+      interrupt,
+      cancelDescendants,
+    })
+  }
   ctx.provide('sessions', {
     get: (id: SessionId) => options.liveChild === true && id === CHILD
       ? { id: CHILD, header: childHeader, events: childEvents }
@@ -122,10 +142,41 @@ function bench(options: {
   return {
     api, getAgent, listChildren, listDescendants, listChildrenAndDescendants,
     inspect, snapshot, restore, followup, interrupt, parent,
+    parentCancel, childCancel, cancelDescendants,
   }
 }
 
 describe('subagent gateway', () => {
+  it('cascades a human session stop to every live descendant', async () => {
+    const { api, parentCancel, childCancel, cancelDescendants } = bench({ childStatus: 'running' })
+
+    const response = await api.sessions.cancel(request({ sessionId: PARENT }))
+
+    expect(response.result).toEqual({ ok: true, value: { accepted: true } })
+    expect(parentCancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
+    expect(cancelDescendants).toHaveBeenCalledWith(PARENT)
+    expect(childCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+  })
+
+  // Human cancellation supersedes the generic ownership fence: the child is the
+  // target, while its owning parent remains untouched.
+  it('cancels an owned one-shot child without cancelling its owner', async () => {
+    const { api, parentCancel, childCancel } = bench({ childStatus: 'running', originSubagent: true })
+    const response = await api.sessions.cancel(request({ sessionId: CHILD }))
+    expect(response.result).toEqual({ ok: true, value: { accepted: true } })
+    expect(childCancel).toHaveBeenCalledWith({ kind: 'parent' }, { keepInbox: true })
+    expect(parentCancel).not.toHaveBeenCalled()
+  })
+
+  it('accepts a human session stop when the optional subagent service is absent', async () => {
+    const { api, parentCancel } = bench({ withoutSubagents: true })
+
+    const response = await api.sessions.cancel(request({ sessionId: PARENT }))
+
+    expect(response.result).toEqual({ ok: true, value: { accepted: true } })
+    expect(parentCancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
+  })
+
   it('lists the complete catalog and reports exact live-parent availability', async () => {
     const { api, listChildren } = bench({ parentLive: false, entries: [
       {
@@ -208,6 +259,40 @@ describe('subagent gateway', () => {
           id: CHILD, activity: 'running', directActivity: 'inactive', runningDescendantCount: 1,
         }] },
       })
+  })
+
+  it('aggregates running counts across wide and deep branches', async () => {
+    const sibling = sid('sibling')
+    const left = sid('left')
+    const deep = sid('deep')
+    const right = sid('right')
+    const siblingLeaf = sid('sibling-leaf')
+    const { api } = bench({
+      combinedCatalog: {
+        children: [
+          { kind: 'child', id: CHILD, mode: 'continuable', label: 'worker', activity: 'inactive', hasChildren: true },
+          { kind: 'child', id: sibling, mode: 'continuable', label: 'peer', activity: 'inactive', hasChildren: true },
+        ],
+        descendants: [
+          { kind: 'child', id: CHILD, parentId: PARENT, depth: 1 },
+          { kind: 'child', id: left, parentId: CHILD, depth: 2 },
+          { kind: 'child', id: deep, parentId: left, depth: 3 },
+          { kind: 'child', id: right, parentId: CHILD, depth: 2 },
+          { kind: 'child', id: sibling, parentId: PARENT, depth: 1 },
+          { kind: 'child', id: siblingLeaf, parentId: sibling, depth: 2 },
+        ],
+      },
+      runningDescendantIds: [left, deep, right, siblingLeaf],
+    })
+
+    const response = await api.subagents.list(request({ parentSessionId: PARENT }))
+    expect(response.result).toMatchObject({
+      ok: true,
+      value: { entries: [
+        { id: CHILD, activity: 'running', directActivity: 'inactive', runningDescendantCount: 3 },
+        { id: sibling, activity: 'running', directActivity: 'inactive', runningDescendantCount: 1 },
+      ] },
+    })
   })
 
   it('derives catalog activity from the live child Agent rather than Session residency', async () => {

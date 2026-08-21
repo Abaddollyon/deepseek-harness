@@ -35,6 +35,8 @@ export const PAGE_MESSAGES = 50
 export interface SessionOptions {
   /** Catalog-discovered address selecting non-activating subagent transport. */
   address?: SubagentAddress
+  /** Manager-owned proof that this client just created a session with no child catalog. */
+  knownEmpty?: boolean
   /** Whether the exact direct parent Agent was live at the latest catalog read. */
   parentAvailable?: boolean
   /**
@@ -86,6 +88,7 @@ export class Session implements SessionFace {
   /** Session-owned business Context engine over the contiguous raw window. */
   private readonly conversation: ConversationNodeAssembler
   private running = false
+  private activity: 'stopping' | 'maintenance' | undefined
   private address: SubagentAddress | undefined
   private parentAvailable = false
   /**
@@ -103,8 +106,14 @@ export class Session implements SessionFace {
   private lastAgentError: string | null = null
   /** Live events buffered during open/resync and stitched by sequence once history lands. */
   private liveBuffer: { event: SessionEvent; view: ToolEventView | undefined }[] = []
+  /** Prior open window retained for inactive-resume stitching so semantic anchors survive. */
+  private preservedWindow: HistoryEntry[] | undefined
   /** Gap repair in flight; live events detour to the buffer until the tail page lands. */
   private stitching = false
+  /** Inactive open windows retain their last snapshot until selected again. */
+  private conversationStale = false
+  /** A client-created blank has no subagent catalog yet. */
+  private knownEmpty = false
   /** subscribed.lastSeq baseline (gap detection; null when no subscribed frame arrived — degrade to the liveBuffer dedup path). */
   private subscribedLastSeq: number | null = null
 
@@ -139,21 +148,25 @@ export class Session implements SessionFace {
    * @param remote - generated Remote namespaces this session calls.
    * @param options - optional manager-owned state observers.
    */
+  private readonly options: SessionOptions
+
   constructor(
     readonly sessionId: SessionId,
     private readonly api: IApiClient,
     private readonly remote: SessionRemotes,
-    private readonly options: SessionOptions = {},
+    options?: SessionOptions,
   ) {
-    this.projections = options.projections ?? new ProjectionValueStore()
-    this.address = options.address
-    this.parentAvailable = options.parentAvailable ?? false
-    this.conversation = options.conversation === undefined
+    this.options = options ?? {}
+    this.knownEmpty = this.options.knownEmpty ?? false
+    this.projections = this.options.projections ?? new ProjectionValueStore()
+    this.address = this.options.address
+    this.parentAvailable = this.options.parentAvailable ?? false
+    this.conversation = this.options.conversation === undefined
       ? new ConversationNodeAssembler(
         { entries: () => [], fallbackEntry: () => undefined },
         { entries: () => [] },
       )
-      : new ConversationNodeAssembler(options.conversation.events, options.conversation.views)
+      : new ConversationNodeAssembler(this.options.conversation.events, this.options.conversation.views)
     this.notifier = new Notifier(() => {
       this.conversation.flush()
       this.snapshotCache = this.buildSnapshot()
@@ -299,28 +312,14 @@ export class Session implements SessionFace {
    * land in promptError (same error-strip display slot). A continuable
    * subagent address routes through `subagent.interrupt`, whose durable
    * parent-address authority works without a live parent Agent; a one-shot
-   * address stays uncancellable (the UI offers no stop action, so this arm is
-   * defensive).
+   * address uses the human session cancellation route.
    * @returns the cancel result.
    */
   async cancel(): Promise<RpcResult<{ accepted: true }>> {
     const address = this.address
-    if (address !== undefined && address.mode === 'one-shot') {
-      const result: RpcResult<{ accepted: true }> = {
-        ok: false,
-        error: {
-          code: 'subagent-delivery-unavailable',
-          message: 'subagent activation cancellation is unavailable',
-          details: { childSessionId: address.childSessionId },
-        },
-      }
-      this.promptError = { op: 'stop', error: result.error }
-      this.notifier.markDirty()
-      return result
-    }
     let result: RpcResult<{ accepted: true }>
     try {
-      result = address !== undefined
+      result = address !== undefined && address.mode === 'continuable'
         ? (await this.api.subagents.interrupt(address)).result
         : (await this.api.sessions.cancel({ sessionId: this.sessionId })).result
     } catch (error) {
@@ -425,12 +424,16 @@ export class Session implements SessionFace {
     // that follows it, so ordering is guaranteed).
     if (this.openState === 'cold') return // never opened: no window to rebuild (doOpen flips to 'loading' synchronously, so cold implies no in-flight open)
     this.openGeneration++
+    const restoringInactive = this.preservedWindow !== undefined
     this.openPromise = null
-    this.openState = 'cold'
-    this.openError = null
-    this.events = []
-    this.views = []
-    this.baseSeq = 0
+    if (!restoringInactive) {
+      this.openState = 'cold'
+      this.openError = null
+      this.events = []
+      this.views = []
+      this.baseSeq = 0
+      this.conversationStale = false
+    }
     // Superseded, not settled: the baseline replay re-sends still-pending requested frames verbatim
     // (same rpcId), re-minting fresh waits; a stale reference's respond() still reaches the host.
     this.pending.clear()
@@ -438,7 +441,8 @@ export class Session implements SessionFace {
     this.subscribedLastSeq = null
     this.liveBuffer = []
     this.notifier.markDirty()
-    await this.open()
+    if (restoringInactive) await this.doOpen(this.openGeneration)
+    else await this.open()
   }
 
   // ---- Subscription API (useSyncExternalStore direct wiring) ----
@@ -462,6 +466,41 @@ export class Session implements SessionFace {
   }
 
   // ---- Manager-only entry points (@internal; never called by the UI) ----
+
+  /** Mark a just-created blank as an empty local window. */
+  markKnownEmpty(): void { this.knownEmpty = true }
+
+  /**
+   * Report whether this client-created blank can skip an initial child-catalog pull.
+   * @returns true only while the manager-owned fresh-empty shortcut remains valid.
+   */
+  isKnownEmpty(): boolean { return this.knownEmpty }
+
+  /** Invalidate the local-empty assumption on the first raced live event. */
+  invalidateKnownEmpty(): void {
+    if (!this.knownEmpty) return
+    this.knownEmpty = false
+    if (this.openState === 'open') void this.resync()
+  }
+
+  /** Forget the optimization when a connection generation ends without fetching. */
+  clearKnownEmpty(): void { this.knownEmpty = false }
+
+  /** Mark an open conversation window stale without folding subsequent events. */
+  suspendConversation(): void {
+    if (this.openState === 'open') this.conversationStale = true
+  }
+
+  /** Resume a stale window through the existing generation-guarded history path. */
+  resumeConversation(): Promise<void> {
+    if (!this.conversationStale) return Promise.resolve()
+    this.conversationStale = false
+    this.preservedWindow = this.events.map((event, index) => ({
+      event,
+      view: this.views[index],
+    } as unknown as HistoryEntry))
+    return this.resync()
+  }
 
   /**
    * Mux frame arrival (the dispatch switch).
@@ -519,7 +558,17 @@ export class Session implements SessionFace {
   }
 
   /**
-   * Running-bit relay from the host stream (list entry and snapshot stay consistent).
+   * Update the optional host activity facet in the Session snapshot.
+   * @param activity - special activity state, or undefined to clear it.
+   */
+  handleActivity(activity: 'stopping' | 'maintenance' | undefined): void {
+    if (this.activity === activity) return
+    this.activity = activity
+    this.notifier.markDirty()
+  }
+
+  /**
+   * Relay the running bit from the host stream to the Session snapshot.
    * @param running - the new running state.
    */
   handleRunning(running: boolean): void {
@@ -616,9 +665,12 @@ export class Session implements SessionFace {
   /** @param generation - openGeneration at launch; every await re-checks it and a stale pass
    *  drops all writes (resync superseded this open — its outcome belongs to a dead connection). */
   private async doOpen(generation: number): Promise<void> {
-    this.openState = 'loading'
-    this.openError = null
-    this.notifier.markDirty()
+    const restoringInactive = this.preservedWindow !== undefined
+    if (!restoringInactive) {
+      this.openState = 'loading'
+      this.openError = null
+      this.notifier.markDirty()
+    }
     try {
       let { result } = await this.history({ maxMessages: PAGE_MESSAGES })
       if (generation !== this.openGeneration) return
@@ -627,7 +679,23 @@ export class Session implements SessionFace {
         this.openError = result.error
         return
       }
-      this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+      const preserved = this.preservedWindow
+      this.preservedWindow = undefined
+      const oldTail = preserved?.at(-1)?.event.seq
+      const missed = oldTail === undefined
+        ? []
+        : result.value.events.filter(entry => entry.event.seq > oldTail)
+      if (preserved !== undefined && oldTail !== undefined && missed.length > 0 && missed[0]?.event.seq === oldTail + 1) {
+        for (const entry of missed) this.appendLive(entry.event, entry.view)
+        this.hasMore = result.value.hasMore
+        this.notifier.markDirty()
+      } else {
+        const entries = preserved === undefined
+          ? result.value.events
+          : [...new Map([...preserved, ...result.value.events].map(entry => [entry.event.seq, entry])).values()]
+            .sort((a, b) => a.event.seq - b.event.seq)
+        this.installWindow(entries, result.value.hasMore, result.value.projections)
+      }
       // Gap detection: baseline past the window tail and liveBuffer did not cover it -> pull the tail page once more.
       const tailSeq = this.windowTailSeq()
       if (this.subscribedLastSeq !== null && tailSeq !== null && this.subscribedLastSeq > tailSeq) {
@@ -686,6 +754,7 @@ export class Session implements SessionFace {
    *  raw range, which lets Conversation Definitions correlate every recorded event between its
    *  ends and lets a compaction checkpoint resolve its cited summary event. */
   private acceptLiveEvent(event: SessionEvent, view?: ToolEventView): void {
+    if (this.conversationStale) return
     if (this.openState === 'loading' || this.stitching) {
       this.liveBuffer.push({ event, view })
       return
@@ -750,6 +819,7 @@ export class Session implements SessionFace {
       pending: this.pendingCache.value,
       queue: this.queueMirror.snapshot(),
       running: this.running,
+      activity: this.activity,
       subagent: this.address === undefined
         ? null
         : { address: this.address, parentAvailable: this.parentAvailable },

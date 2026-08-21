@@ -40,7 +40,7 @@ declare module '@deepseek-ai/cordis' {
  * disposal) are policy, not tunables, and always fire.
  */
 export interface Config {
-  /** Committed events per session that force a durable checkpoint write between mandatory points. */
+  /** Projection-moving events per session that force a checkpoint write between mandatory points. */
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
@@ -53,9 +53,11 @@ export const Config: z<Config> = z.object({
 
 /** Per-session write-behind bookkeeping (live sessions only; dropped at retire). */
 interface DirtyState {
-  /** Committed events since the last durable write. */
+  /** Projection-moving events since the last durable write. */
   pending: number
-  /** Interval trigger armed at the first dirty event after a clean write. */
+  /** Last projection change sequence counted for this session (one event can change several units). */
+  lastChangedSeq: number
+  /** Interval trigger armed at the first dirty projection movement after a clean write. */
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
@@ -130,25 +132,14 @@ export class SessionProjectionCache extends Service {
   }
 
   /**
-   * Durably checkpoint one live session NOW (both mandatory points call
-   * this; tests and carriers may too). The registry cut is snapshotted at
-   * this boundary (states are live references), then the whole record is
-   * replaced. NOT fail-soft — callers on the fail-soft paths contain it.
+   * Checkpoint one live session without forcing its log write-behind drain.
+   * The cache can briefly lead the stored log on this mid-stream path;
+   * {@link coldSnapshot} detects an overreaching row and replays from seq 0.
    * @param session - the live session to checkpoint.
-   * @returns resolution after durability and event emission.
+   * @returns resolution after the cache row is durable.
    */
   async write(session: Session): Promise<void> {
-    const rows = this.ctx.sessionProjections.checkpoint(session)
-    this.markClean(session)
-    // Durability barrier: the checkpoint cut was taken above, so flushing
-    // AFTER it guarantees every event inside the cut is durably logged
-    // before the cache row lands — a crash can leave the cache behind the
-    // log (longer tail replay) but never ahead of it (phantom values folded
-    // from events no stored log contains). At detach the store entry is
-    // already gone; persistence's own retirement drain covers that path and
-    // any residual overreach is caught by the cold read's anchored floor.
-    if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
-    await this.put(session.id, identityOf(session.header), rows)
+    await this.writeCheckpoint(session, false)
   }
 
   /**
@@ -199,24 +190,26 @@ export class SessionProjectionCache extends Service {
   // --- write-behind (throttle + mandatory points) ---
 
   private installWritePath(): void {
-    // Every committed event advances the dirty counter; turn/end is a
-    // mandatory point (the durable value most reads want is the turn-final
-    // one), count/interval throttle the in-turn stream.
-    this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
-      if (event.type === 'turn/end') {
-        void this.flushSoft(session, 'turn/end')
-        return
-      }
-      const state = this.dirty.get(session) ?? { pending: 0, timer: undefined }
+    // Only a projection state-reference change makes a checkpoint fresher. The
+    // registry emits once per changed unit, so sequence de-duplication counts
+    // each projection-moving event at most once.
+    this.ctx.sessionProjections.onChanged((session, _key, _value, seq) => {
+      const state = this.dirty.get(session) ?? { pending: 0, lastChangedSeq: -1, timer: undefined }
       this.dirty.set(session, state)
+      if (state.lastChangedSeq === seq) return
+      state.lastChangedSeq = seq
       state.pending += 1
       if (state.pending >= this.config.writeEveryEvents) {
-        void this.flushSoft(session, 'count threshold')
+        queueMicrotask(() => { void this.flushSoft(session, 'count threshold', false) })
         return
       }
       state.timer ??= setTimeout(() => {
-        void this.flushSoft(session, 'interval')
+        void this.flushSoft(session, 'interval', false)
       }, this.config.writeIntervalMs)
+    })
+
+    this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
+      if (event.type === 'turn/end') void this.flushSoft(session, 'turn/end', true)
     })
 
     // Detach (the live-to-cold moment): the second mandatory point. After
@@ -224,7 +217,7 @@ export class SessionProjectionCache extends Service {
     // flushSoft's synchronous prefix reads and resets the dirty state, so
     // dropping it (timer already cleared by markClean) right after is safe.
     this.ctx.on('session/disposed', (session: Session) => {
-      void this.flushSoft(session, 'detach')
+      void this.flushSoft(session, 'detach', true)
       this.markClean(session)
       this.dirty.delete(session)
     })
@@ -238,14 +231,22 @@ export class SessionProjectionCache extends Service {
     }, 'sessionProjectionCache.timers')
   }
 
+  /** Write one cut, draining the live log first only at a mandatory checkpoint. */
+  private async writeCheckpoint(session: Session, flushLog: boolean): Promise<void> {
+    const rows = this.ctx.sessionProjections.checkpoint(session)
+    this.markClean(session)
+    if (flushLog && this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
+    await this.put(session.id, identityOf(session.header), rows)
+  }
+
   /**
    * One fail-soft durable checkpoint. Every caller has work by construction:
    * the throttle triggers only fire dirty (markClean clears the timer with
    * the counter) and the two mandatory points write unconditionally.
    */
-  private async flushSoft(session: Session, trigger: string): Promise<void> {
+  private async flushSoft(session: Session, trigger: string, flushLog: boolean): Promise<void> {
     try {
-      await this.write(session)
+      await this.writeCheckpoint(session, flushLog)
     } catch (error) {
       this.ctx.logger.warn(`session projection cache: ${trigger} write for "${session.id}" failed (cache stays stale): ${String(error)}`)
     }

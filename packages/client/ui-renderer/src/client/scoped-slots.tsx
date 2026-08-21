@@ -266,6 +266,40 @@ function localeSubscription(face: LocaleFace): { subscribe: (fn: () => void) => 
   return cached
 }
 
+/** Stable subscribe/getVersion closure pair for one (host, slot key). */
+interface KeySubscription {
+  readonly subscribe: (fn: () => void) => () => void
+  readonly getVersion: () => number
+}
+
+/**
+ * Per (host x slot key) subscribe/getVersion closure pairs for the outlet
+ * registration tick. Same rationale as the locale pair above: uSES
+ * resubscribes whenever the subscribe reference changes, so fresh closures
+ * per render would churn one unsubscribe/resubscribe per outlet per render —
+ * nested outlets in deep trees amplify that. The outer WeakMap rides host
+ * identity (the cache dies with the host); slot keys are a bounded
+ * declaration namespace, so the inner Map cannot grow unbounded.
+ */
+const keySubscriptionCache = new WeakMap<SlotRendererHost, Map<string, KeySubscription>>()
+
+function keySubscription(host: SlotRendererHost, key: string): KeySubscription {
+  let perKey = keySubscriptionCache.get(host)
+  if (!perKey) {
+    perKey = new Map()
+    keySubscriptionCache.set(host, perKey)
+  }
+  let cached = perKey.get(key)
+  if (!cached) {
+    cached = {
+      subscribe: fn => host.subscribe(key, fn),
+      getVersion: () => host.getVersion(key),
+    }
+    perKey.set(key, cached)
+  }
+  return cached
+}
+
 /**
  * Subscribe an outlet to the installed locale face's revision (0 while none
  * is installed — exactly one uSES call either way, keeping hook order
@@ -658,10 +692,10 @@ function SlotOutlet({ slotKey, ownerProps, opts }: {
 }) {
   const host = useHost()
   // Version tick drives entries() re-read; the host batches per microtask.
-  useSyncExternalStore(
-    fn => host.subscribe(slotKey, fn),
-    () => host.getVersion(slotKey),
-  )
+  // The pair is cached per (host x key): stable references keep uSES from
+  // resubscribing on every outlet re-render.
+  const subscription = keySubscription(host, slotKey)
+  useSyncExternalStore(subscription.subscribe, subscription.getVersion)
   // Locale revision tick: a locale switch re-renders every outlet, and entry
   // bodies re-derive their `t` seat at the new revision (fresh identity).
   useLocaleRevision(host.locale)
@@ -853,10 +887,8 @@ function renderOutletContent(
 /** Root outlet: the shell's single ctx-level render entry — an unregistered 'root' is a boot-order failure, never a silent blank. */
 function RootOutlet({ ownerProps }: { ownerProps: object }) {
   const host = useHost()
-  useSyncExternalStore(
-    fn => host.subscribe('root', fn),
-    () => host.getVersion('root'),
-  )
+  const subscription = keySubscription(host, 'root')
+  useSyncExternalStore(subscription.subscribe, subscription.getVersion)
   useLocaleRevision(host.locale)
   const entry = host.entriesOfSlot('root')[0]
   if (!entry) {

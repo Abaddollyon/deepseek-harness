@@ -11,7 +11,7 @@ import type { LlmCallConfig, LlmFailure, ResolvedRetryPolicy } from '@deepseek-a
 import type { AgentCancelCause, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
-import type { InboxTarget } from './types.ts'
+import type { AgentActivity, InboxTarget } from './types.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 declare module '@deepseek-ai/dsh-system-prompt' {
   interface AssembleContext {
@@ -49,6 +49,34 @@ export interface CancelOptions {
  */
 export type AgentStatus = 'idle' | 'running'
 
+/**
+ * A live qualifier on an agent that {@link AgentStatus} cannot express, or
+ * `undefined` when the status alone describes the agent.
+ *
+ * This is a second, independent facet rather than a third status value, because
+ * `idle`/`running` is a load-bearing two-state fact for its existing readers —
+ * the goal round driver, the schedule runtime, and compaction all branch on
+ * `status === 'idle'`, and the SDK server forwards the value verbatim on its
+ * wire. A qualifier neither hides an `idle` from them nor changes what they
+ * receive.
+ *
+ * `stopping` means a cancellation has been requested and the active work has
+ * not yet converged: the abort signal is set, but a started tool call is still
+ * draining, an LLM stream is still tearing down, or the turn ending has not
+ * been appended. It is the only account of the interval between asking an agent
+ * to stop and its status reaching `idle`, which is otherwise indistinguishable
+ * from ordinary work.
+ *
+ * `maintenance` means a between-turn task owns the agent
+ * ({@link Agent.runMaintenance}): a manual compaction or a scheduled job may run
+ * a whole model request there. The status stays `idle` because no turn is open,
+ * so this facet is what tells a consumer the agent is busy and cancellable.
+ *
+ * Declared in the pure-type outlet so wire contracts can name it without
+ * pulling this module's cordis Context merge into client aggregates.
+ */
+export type { AgentActivity } from './types.ts'
+
 /** Whether and with which messages the loop enters a proposed step. */
 export type PreStepDecision =
   | { kind: 'reject' }
@@ -72,6 +100,13 @@ export interface Agent {
   readonly inbox: Inbox
   /** The current lifecycle state, mirrored on every `agent/status` transition. */
   readonly status: AgentStatus
+  /**
+   * The current live qualifier, mirrored on every `agent/activity` transition,
+   * or `undefined` when {@link status} alone describes the agent. Readable so a
+   * consumer subscribing mid-flight has a baseline instead of waiting for the
+   * next transition.
+   */
+  readonly activity: AgentActivity | undefined
   /** Agent-scoped context; its contributions are agent-local, unwind on disposal, and reject registration afterward. */
   readonly ctx: Context
 
@@ -176,6 +211,19 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'agent/status'(this: Scoped<Agent>, payload: { agent: Agent; status: AgentStatus }): void
+    /**
+     * The agent's live qualifier changed, independently of `agent/status`:
+     * `stopping` while a requested cancellation converges, `maintenance` while a
+     * between-turn task owns the agent, `undefined` when neither applies. Both
+     * transitions of one status change may carry an activity change with them;
+     * the activity is emitted first, so no listener ever observes an `idle`
+     * agent still claiming to be `stopping`.
+     * @param payload.agent - the agent whose qualifier changed.
+     * @param payload.activity - the qualifier just entered, or `undefined` when it was cleared.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode emit
+     */
+    'agent/activity'(this: Scoped<Agent>, payload: { agent: Agent; activity: AgentActivity | undefined }): void
     /**
      * One message entered the live inbox.
      * @param payload.agent - the agent whose inbox changed.

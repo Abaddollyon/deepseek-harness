@@ -36,6 +36,7 @@ function stubAgent(ctx: Context, rawId: string, presetScope?: ScopeKey): Agent {
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle' as const,
+    activity: undefined,
     ctx: agentCtx,
     send: () => {},
     followup: () => {},
@@ -1133,5 +1134,260 @@ describe('LocalJobRegistry teardown change notifications', () => {
     await fiber.dispose()
     // stopping (teardown cancel), settlement, then the final empty set.
     expect(seen).toEqual([undefined, undefined, undefined])
+  })
+})
+
+describe('LocalJobRegistry teardown grace', () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid teardownGraceMs config: %s',
+    async (teardownGraceMs) => {
+      const ctx = new Context()
+      await expect(ctx.plugin(LocalJobRegistry, { teardownGraceMs }))
+        .rejects.toThrow()
+    },
+  )
+
+  it('force-fails a clean cancel that never settles once the owner teardown grace expires', async () => {
+    const ctx = await harness({ teardownGraceMs: 25 })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const owner = stubAgent(ctx, 'owner')
+    ctx.agents.register(owner)
+    const seen: JobSnapshot[] = []
+    ctx.jobs.onJobDone(snapshot => void seen.push(snapshot))
+
+    // The producer acknowledges the cancel (returns cleanly) but never settles
+    // `done` — indistinguishable from a slow stop until the grace expires.
+    let settle!: (outcome: JobOutcome) => void
+    const cancels: (string | undefined)[] = []
+    ctx.jobs.start({
+      kind: 'subagent',
+      label: 'stuck stop',
+      owner,
+      run: () => ({
+        cancel(reason) { cancels.push(reason) },
+        done: new Promise<JobOutcome>((res) => { settle = res }),
+      }),
+    })
+
+    // Drains without the producer ever settling; the kill signal was sent once.
+    await disposeAgentScope(owner)
+    expect(cancels).toEqual(['owner disposed'])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not settle within the owner teardown grace (25ms)'))
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ status: 'failed', reported: true })
+    expect(seen[0]?.detail).toContain('work may be orphaned')
+    expect(ctx.jobs.list(owner)).toEqual([])
+
+    // A late producer outcome is first-wins-ignored; no second notification.
+    settle({ status: 'completed' })
+    await tick()
+    expect(seen).toHaveLength(1)
+  })
+
+  it('force-fails only the straggler when a sibling settles during service teardown', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const fiber = await ctx.plugin(LocalJobRegistry, { teardownGraceMs: 25 })
+    ctx.jobs.attachController('test-controller')
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    let settleCompliant!: (outcome: JobOutcome) => void
+    ctx.jobs.start({
+      kind: 'bash',
+      label: 'compliant stop',
+      run: () => ({
+        cancel() { settleCompliant({ status: 'killed' }) },
+        done: new Promise<JobOutcome>((res) => { settleCompliant = res }),
+      }),
+    })
+    ctx.jobs.start({
+      kind: 'bash',
+      label: 'stuck stop',
+      run: () => ({
+        cancel() {},
+        done: new Promise<JobOutcome>(() => {}),
+      }),
+    })
+
+    await fiber.dispose()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('jobs: job bash-2 did not settle within the service teardown grace (25ms)'))
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('bash-1 did not settle'))
+  })
+
+  it('never arms the grace when teardown has nothing to await', async () => {
+    const ctx = await harness({ maxSettledJobs: 1, teardownGraceMs: 25 })
+    const owner = stubAgent(ctx, 'owner')
+    ctx.agents.register(owner)
+    // The owner's only record was already evicted, so disposal joins zero jobs.
+    const evicted = producer({ owner })
+    ctx.jobs.start(evicted.spec)
+    evicted.settle({ status: 'completed' })
+    const survivor = producer()
+    ctx.jobs.start(survivor.spec)
+    survivor.settle({ status: 'completed' })
+    await tick()
+
+    const started = Date.now()
+    await disposeAgentScope(owner)
+    expect(Date.now() - started).toBeLessThan(25)
+  })
+})
+
+describe('LocalJobRegistry scaling and retention', () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid maxSettledJobs config: %s',
+    async (maxSettledJobs) => {
+      const ctx = new Context()
+      await expect(ctx.plugin(LocalJobRegistry, { maxSettledJobs }))
+        .rejects.toThrow()
+    },
+  )
+
+  it('keeps another owner\'s list untouched at 500 settled jobs, in registration order across buckets', async () => {
+    const ctx = await harness({ maxConcurrentJobsPerOwner: 1000, maxSettledJobs: 1000 })
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+
+    // Interleave so the list merge must interleave back: owned, unowned, owned.
+    const first = ctx.jobs.start(producer({ owner: alice }).spec)
+    const open = ctx.jobs.start(producer().spec)
+    const second = ctx.jobs.start(producer({ owner: alice }).spec)
+    const bobs = Array.from({ length: 500 }, () => producer({ owner: bob }))
+    for (const job of bobs) ctx.jobs.start(job.spec)
+    for (const job of bobs) job.settle({ status: 'completed' })
+    // A late unowned registration must still sort after alice's owned records.
+    const openLate = ctx.jobs.start(producer().spec)
+    await tick()
+
+    // Bob's 500 terminal records never enter alice's (or the no-caller's) read.
+    expect(ctx.jobs.list(alice).map(job => job.id)).toEqual([first, open, second, openLate])
+    expect(ctx.jobs.list().map(job => job.id)).toEqual([open, openLate])
+    expect(ctx.jobs.list(bob)).toHaveLength(502)
+  })
+
+  it('answers list() and admission without scanning the record store', async () => {
+    const ctx = await harness({ maxConcurrentJobsPerOwner: 100, maxSettledJobs: 1000 })
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+    const bobs = Array.from({ length: 50 }, () => producer({ owner: bob }))
+    for (const job of bobs) ctx.jobs.start(job.spec)
+    for (const job of bobs) job.settle({ status: 'completed' })
+    await tick()
+
+    // The owner buckets and live counts, not a store scan, back both reads.
+    const service = ctx.jobs as unknown as { store: Map<JobId, unknown> }
+    const valuesSpy = vi.spyOn(service.store, 'values')
+    expect(ctx.jobs.list(alice)).toEqual([])
+    const started = producer({ owner: alice })
+    ctx.jobs.start(started.spec)
+    started.settle({ status: 'completed' })
+    await tick()
+    expect(valuesSpy).not.toHaveBeenCalled()
+    expect(ctx.jobs.list(alice).map(job => job.id)).toEqual(['bash-51'])
+  })
+
+  it('evicts the oldest settled jobs beyond maxSettledJobs and reads them as unknown', async () => {
+    const ctx = await harness({ maxSettledJobs: 3 })
+    const jobs = Array.from({ length: 5 }, () => producer())
+    for (const job of jobs) ctx.jobs.start(job.spec)
+    for (const job of jobs) job.settle({ status: 'completed', output: 'buffered' })
+    await tick()
+
+    expect(ctx.jobs.list().map(job => job.id)).toEqual(['bash-3', 'bash-4', 'bash-5'])
+    expect(() => ctx.jobs.get(JobId('bash-1'))).toThrow('unknown job bash-1')
+    expect(() => ctx.jobs.read(JobId('bash-2'))).toThrow('unknown job bash-2')
+    expect(() => ctx.jobs.kill(JobId('bash-1'))).toThrow('unknown job bash-1')
+    await expect(ctx.jobs.wait(JobId('bash-1'), 5)).rejects.toThrow('unknown job bash-1')
+    // Retained terminal output stays idempotently readable.
+    expect(ctx.jobs.read(JobId('bash-3')).text).toBe('buffered')
+  })
+
+  it('never evicts running or stopping jobs, however many jobs settle past the bound', async () => {
+    const ctx = await harness({ maxSettledJobs: 2 })
+    const live = producer()
+    ctx.jobs.start(live.spec)
+    const stopping = producer()
+    const stoppingId = ctx.jobs.start(stopping.spec)
+    expect(ctx.jobs.kill(stoppingId)).toBe('requested')
+
+    const settled = Array.from({ length: 3 }, () => producer())
+    for (const job of settled) ctx.jobs.start(job.spec)
+    for (const job of settled) job.settle({ status: 'completed' })
+    await tick()
+
+    // bash-3 was evicted; both live records survive at the head of the set.
+    expect(ctx.jobs.list().map(job => [job.id, job.status] as const)).toEqual([
+      ['bash-1', 'running'],
+      ['bash-2', 'stopping'],
+      ['bash-4', 'completed'],
+      ['bash-5', 'completed'],
+    ])
+
+    // Once they settle they join retention themselves and are retained last.
+    live.settle({ status: 'completed' })
+    stopping.settle({ status: 'killed' })
+    await tick()
+    expect(ctx.jobs.list().map(job => job.id)).toEqual(['bash-1', 'bash-2'])
+  })
+
+  it('announces eviction to the evicted record\'s owner and leaves other owners intact', async () => {
+    const ctx = await harness({ maxConcurrentJobsPerOwner: 10, maxSettledJobs: 2 })
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+    const seen: (string | undefined)[] = []
+    ctx.jobs.onJobsChanged(changed => void seen.push(changed?.id))
+
+    const alices = Array.from({ length: 3 }, () => producer({ owner: alice }))
+    for (const job of alices) ctx.jobs.start(job.spec)
+    for (const job of alices) job.settle({ status: 'completed' })
+    await tick()
+    const bobsJob = producer({ owner: bob })
+    const bobId = ctx.jobs.start(bobsJob.spec)
+    bobsJob.settle({ status: 'completed' })
+    await tick()
+
+    // The bound is process-wide: bob's settlement evicted alice's oldest
+    // survivor, announced to alice, while bob's own visible set is untouched.
+    expect(seen).toEqual([
+      'alice', 'alice', 'alice', // three registrations
+      'alice', 'alice', // two bounded settlements
+      'alice', 'alice', // third settlement, then the eviction it caused
+      'bob', 'bob', // bob's registration and settlement
+      'alice', // the eviction bob's settlement caused
+    ])
+    expect(ctx.jobs.list(alice).map(job => job.id)).toEqual(['bash-3'])
+    expect(ctx.jobs.list(bob).map(job => job.id)).toEqual([bobId])
+
+    await disposeAgentScope(alice)
+    await disposeAgentScope(bob)
+  })
+
+  it('drains an owner cleanly when eviction already emptied its bucket', async () => {
+    const ctx = await harness({ maxSettledJobs: 1 })
+    const owner = stubAgent(ctx, 'owner')
+    ctx.agents.register(owner)
+    const evicted = producer({ owner })
+    ctx.jobs.start(evicted.spec)
+    evicted.settle({ status: 'completed' })
+    const survivor = producer()
+    ctx.jobs.start(survivor.spec)
+    survivor.settle({ status: 'completed' })
+    await tick()
+
+    // The owner's only record was evicted by the unowned settlement.
+    expect(ctx.jobs.list(owner).map(job => job.id)).toEqual(['bash-2'])
+
+    const seen: (string | undefined)[] = []
+    ctx.jobs.onJobsChanged(changed => void seen.push(changed?.id))
+    await disposeAgentScope(owner)
+    // Nothing of the owner's remained, so disposal changes no visible set.
+    expect(seen).toEqual([])
+    expect(ctx.jobs.list().map(job => job.id)).toEqual(['bash-2'])
   })
 })

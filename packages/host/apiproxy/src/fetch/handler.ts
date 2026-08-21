@@ -196,6 +196,17 @@ function fullFrame(narrow: RpcRequest<MuxFrame | HostFrame>): ServerRequest {
   return { type: 'server-request', rpcId: narrow.rpcId, method: narrow.payload.type, payload: narrow.payload }
 }
 
+const encodedFrames = new WeakMap<RpcRequest<MuxFrame | HostFrame>, Uint8Array>()
+
+/** Encode one immutable carrier envelope once across every connected SSE sink. */
+function encodedFrame(encoder: TextEncoder, narrow: RpcRequest<MuxFrame | HostFrame>): Uint8Array {
+  const cached = encodedFrames.get(narrow)
+  if (cached !== undefined) return cached
+  const encoded = encoder.encode(`data: ${JSON.stringify(fullFrame(narrow))}\n\n`)
+  encodedFrames.set(narrow, encoded)
+  return encoded
+}
+
 /**
  * Wrap a frame stream as an SSE Response; stops when req.signal aborts. An
  * impl throw mid-stream emits one stream/error frame and then closes.
@@ -210,7 +221,7 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
         // a comment line is not a frame, so client frame parsing skips it naturally).
         controller.enqueue(encoder.encode(': connected\n\n'))
         for await (const narrow of frames) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame(narrow))}\n\n`))
+          controller.enqueue(encodedFrame(encoder, narrow))
         }
       } catch (error: unknown) {
         // Mid-stream impl failure → one stream/error frame, then close: the client must see

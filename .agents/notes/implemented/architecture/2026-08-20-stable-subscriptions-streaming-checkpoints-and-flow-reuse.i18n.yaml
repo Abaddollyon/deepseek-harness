@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-20-stable-subscriptions-streaming-checkpoints-and-flow-reuse.md
+2026-08-20-stable-subscriptions-streaming-checkpoints-and-flow-reuse.md: 1d9d7a0b7b7061afa6e647b2fc0f67a68b72c45e
+2026-08-20-stable-subscriptions-streaming-checkpoints-and-flow-reuse.zh.md: 5acbe869cddb8913ddd8502cd18c201859d35b86

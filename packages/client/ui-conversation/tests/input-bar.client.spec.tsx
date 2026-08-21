@@ -70,6 +70,7 @@ interface BenchOptions {
   }
   draft?: string
   running?: boolean
+  activity?: ConversationSnapshot['activity']
   subagent?: Exclude<ConversationSnapshot['subagent'], null>
   disabled?: boolean
   inert?: boolean
@@ -114,6 +115,7 @@ function bench(over?: BenchOptions) {
   const lex = over?.lexicon
   const session = createSnapshotStore<ConversationSnapshot>(snapshotOf({
     running: over?.running ?? false,
+    activity: over?.activity,
     subagent: over?.subagent ?? null,
     removed: over?.disabled ?? false,
     promptError: over?.promptError ?? null,
@@ -202,11 +204,15 @@ function bench(over?: BenchOptions) {
   }
   const view = render(<InputBar {...props} />)
   const textarea = view.container.querySelector('textarea')!
-  const primaryStops = over?.running === true && over.subagent === undefined
+  const stoppable = over?.running === true || over?.activity !== undefined
+  const primaryStops = stoppable && over?.subagent === undefined
+  const stopLabel = over?.activity === 'stopping' ? '停止中…' : '停止生成'
   const button = view.container.querySelector<HTMLButtonElement>(
-    `button[aria-label="${primaryStops ? '停止生成' : '发送消息'}"]`,
+    `button[aria-label="${primaryStops ? stopLabel : '发送消息'}"]`,
   )!
-  const interruptButton = view.container.querySelector<HTMLButtonElement>('button[aria-label="停止生成"]')
+  const interruptButton = over?.subagent !== undefined && stoppable
+    ? view.container.querySelector<HTMLButtonElement>(`button[aria-label="${stopLabel}"]`)
+    : null
   return {
     view, textarea, button, interruptButton, props, sink, shell, wiring: shell, session, stop, removeImage, slotCalls,
     menuLauncher,
@@ -612,6 +618,22 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('stopping keeps the primary Stop visible, relabelled, and disabled', () => {
+    const { button, stop } = bench({ activity: 'stopping' })
+    expect(button.getAttribute('aria-label')).toBe('停止中…')
+    expect(button.disabled).toBe(true)
+    fireEvent.click(button)
+    expect(stop).not.toHaveBeenCalled()
+  })
+
+  it('maintenance exposes the primary Stop while running is false', () => {
+    const { button, stop } = bench({ activity: 'maintenance' })
+    expect(button.getAttribute('aria-label')).toBe('停止生成')
+    expect(button.disabled).toBe(false)
+    fireEvent.click(button)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
   it('running plain Enter follows the busy-state Steer preference', () => {
     const { textarea, sink } = bench({ running: true, busyEnter: 'steer', draft: '直接插话' })
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -650,6 +672,36 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('stopping keeps a continuable subagent Stop visible, relabelled, and disabled', () => {
+    const { button, interruptButton, stop } = bench({
+      activity: 'stopping',
+      subagent: {
+        address: { parentSessionId: 'parent' as SessionId, childSessionId: SID, mode: 'continuable' },
+        parentAvailable: true,
+      },
+    })
+    expect(button.getAttribute('aria-label')).toBe('发送消息')
+    expect(interruptButton?.getAttribute('aria-label')).toBe('停止中…')
+    expect(interruptButton?.disabled).toBe(true)
+    fireEvent.click(interruptButton!)
+    expect(stop).not.toHaveBeenCalled()
+  })
+
+  it('maintenance exposes a continuable subagent Stop while running is false', () => {
+    const { button, interruptButton, stop } = bench({
+      activity: 'maintenance',
+      subagent: {
+        address: { parentSessionId: 'parent' as SessionId, childSessionId: SID, mode: 'continuable' },
+        parentAvailable: true,
+      },
+    })
+    expect(button.getAttribute('aria-label')).toBe('发送消息')
+    expect(interruptButton?.getAttribute('aria-label')).toBe('停止生成')
+    expect(interruptButton?.disabled).toBe(false)
+    fireEvent.click(interruptButton!)
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
   it('parent-offline running continuable locks Send but keeps independent Stop usable', () => {
     const { button, interruptButton, textarea, stop, view } = bench({
       running: true,
@@ -673,7 +725,9 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
-  it('running one-shot subagent never exposes Stop', () => {
+  // Human session cancellation reaches one-shot children, so the GUI exposes
+  // the same independent Stop as continuable children.
+  it('running one-shot subagent exposes an independent Stop', () => {
     const { button, interruptButton, stop } = bench({
       running: true,
       draft: '不可停止',
@@ -687,8 +741,10 @@ describe('running and lock semantics', () => {
       },
     })
     expect(button.getAttribute('aria-label')).toBe('发送消息')
-    expect(interruptButton).toBeNull()
-    expect(stop).not.toHaveBeenCalled()
+    expect(interruptButton).not.toBeNull()
+    expect(interruptButton?.disabled).toBe(false)
+    fireEvent.click(interruptButton!)
+    expect(stop).toHaveBeenCalledTimes(1)
   })
 
   it('keeps both running subagent Enter gestures on Queue transport', () => {

@@ -340,6 +340,36 @@ describe('SessionPersistenceSqlite physical packing', () => {
     await store.close()
   })
 
+  it('pages logical tails exactly across packed physical rows', async () => {
+    const store = new SqliteStore({
+      path: await freshDbPath('dsh-sqlite-tail-pages-'),
+      journalMode: 'wal',
+      busyTimeoutMs: DEFAULT_BUSY_TIMEOUT_MS,
+    })
+    const header = meta('tail-pages')
+    const events = chunkLog(8)
+    await store.appendBatch(header, events.slice(0, 6), false)
+    await store.appendBatch(header, events.slice(6), true)
+
+    await expect(store.loadStoredTail(header.id, undefined, 2)).resolves.toMatchObject({
+      meta: header, events: events.slice(10), hasMore: true,
+    })
+    await expect(store.loadStoredTail(header.id, 9, 5)).resolves.toMatchObject({
+      meta: header, events: events.slice(4, 9), hasMore: true,
+    })
+    await expect(store.loadStoredTail(header.id, 6, 5)).resolves.toMatchObject({
+      meta: header, events: events.slice(1, 6), hasMore: true,
+    })
+    await expect(store.loadStoredTail(header.id, 4, 5)).resolves.toMatchObject({
+      meta: header, events: events.slice(0, 4), hasMore: false,
+    })
+    await expect(store.loadStoredTail(header.id, undefined, Number.MAX_SAFE_INTEGER)).resolves.toMatchObject({
+      meta: header, events, hasMore: false,
+    })
+    await expect(store.loadStoredTail(SessionId('missing'), undefined, 1)).resolves.toBeUndefined()
+    await store.close()
+  })
+
   it('waits for a competing process within the configured busy timeout', async () => {
     const path = await freshDbPath('dsh-sqlite-busy-')
     const store = new SqliteStore({ path, journalMode: 'wal', busyTimeoutMs: 1_000 })
@@ -372,11 +402,11 @@ describe('SessionPersistenceSqlite physical packing', () => {
   it('rejects an older SQLite physical schema', async () => {
     const path = await freshDbPath('dsh-sqlite-old-schema-')
     const seed = await openDatabase(DatabaseSync, path, 'wal', DEFAULT_BUSY_TIMEOUT_MS)
-    seed.exec(testSql('set-user-version-16'))
+    seed.exec(testSql('set-user-version-17'))
     seed.close()
     await chmod(path, 0o600)
     await expect(openDatabase(DatabaseSync, path, 'wal', DEFAULT_BUSY_TIMEOUT_MS))
-      .rejects.toThrow(/schema version 16.*incompatible/)
+      .rejects.toThrow(/schema version 17.*incompatible/)
   })
 
   it('rejects a stale physical append without replacing the winning tail', async () => {
@@ -528,7 +558,7 @@ describe('SessionPersistenceSqlite schema ownership', () => {
 
     const foreignPath = await freshDbPath('dsh-sqlite-foreign-')
     const foreign = new DatabaseSync(foreignPath)
-    foreign.exec(testSql('set-user-version-17'))
+    foreign.exec(testSql('set-user-version-18'))
     foreign.exec(testSql('set-application-id-12345'))
     foreign.close()
     await expect(openDatabase(DatabaseSync, foreignPath, 'wal', DEFAULT_BUSY_TIMEOUT_MS)).rejects.toThrow(/has application id 12345/)

@@ -27,6 +27,12 @@ export const TASK_WAIT_TIMEOUT = 'TASK_WAIT_TIMEOUT'
 /** Default maximum number of active jobs in one exact-owner bucket. */
 const DEFAULT_MAX_CONCURRENT_TASKS_PER_OWNER = 10
 
+/** Default maximum number of retained terminal jobs process-wide. */
+const DEFAULT_MAX_SETTLED_JOBS = 256
+
+/** Default teardown grace in milliseconds before a non-settling stop is force-failed. */
+const DEFAULT_TEARDOWN_GRACE_MS = 5_000
+
 /** Configuration for the process-local job registry. */
 export interface Config {
   /**
@@ -34,6 +40,21 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Maximum terminal jobs retained process-wide for `job_output`-style reads;
+   * omission defaults to 256. Settlement beyond the bound evicts the oldest
+   * settled records, releasing their buffered output; an evicted id reads as an
+   * unknown job. Live (`running`/`stopping`) jobs are never evicted.
+   */
+  maxSettledJobs?: number
+  /**
+   * Grace in milliseconds that owner or service teardown awaits producer
+   * settlement after cancellation; omission defaults to 5000. A cancel that
+   * returned without settling `done` is indistinguishable from a slow stop
+   * until the grace expires; the record is then force-settled `failed` and
+   * teardown proceeds without awaiting that producer again.
+   */
+  teardownGraceMs?: number
 }
 
 /** The registry's mutable per-job record (never handed out — see {@link LocalJobRegistry.snapshot}). */
@@ -49,6 +70,8 @@ interface TrackedTask {
   status: JobStatus
   detail: string | undefined
   output: string | undefined
+  /** Process-wide registration order; merges owner buckets in `list()`. */
+  seq: number
   startedAt: number
   finishedAt: number | undefined
   reported: boolean
@@ -95,12 +118,48 @@ export class LocalJobRegistry extends JobRegistry {
       .min(1)
       .max(Number.MAX_SAFE_INTEGER)
       .default(DEFAULT_MAX_CONCURRENT_TASKS_PER_OWNER),
+    maxSettledJobs: z.number()
+      .step(1)
+      .min(1)
+      .max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_MAX_SETTLED_JOBS),
+    teardownGraceMs: z.number()
+      .step(1)
+      .min(1)
+      .max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_TEARDOWN_GRACE_MS),
   })
 
   /** Schemastery-defaulted active-job limit. */
   private readonly maxConcurrentJobsPerOwner: number
+  /** Schemastery-defaulted terminal-retention bound. */
+  private readonly maxSettledJobs: number
+  /** Schemastery-defaulted teardown grace in milliseconds. */
+  private readonly teardownGraceMs: number
   private store = new Map<JobId, TrackedTask>()
   private counters = new Map<string, number>()
+  /** Next registration sequence value; never reused, even across eviction. */
+  private registrationSeq = 0
+  /**
+   * Live and settled owned records per owner session id, in registration
+   * order. The session id — not the exact `Agent` object — keys the bucket so
+   * a same-id caller sees the current owner's jobs; exact-owner questions
+   * (admission counts, owner-disposal draining) filter the bucket by identity.
+   */
+  private ownedJobs = new Map<string, Set<TrackedTask>>()
+  /** Live and settled unowned records in registration order; every caller sees them. */
+  private unownedJobs = new Set<TrackedTask>()
+  /**
+   * Live (`running`/`stopping`) counts per exact owner; the `undefined` key
+   * is the shared unowned bucket. Incremented at registration and decremented
+   * by the first effective settlement, so admission never scans the store.
+   */
+  private activeCounts = new Map<Agent | undefined, number>()
+  /**
+   * Settled records in settlement order; retention evicts from the front.
+   * Holds terminal records only, so eviction can never reach live work.
+   */
+  private settledJobs = new Set<TrackedTask>()
   /**
    * Surfaces and listeners layered by the scope that registered them, in the
    * tools-registry shape: a contribution files into its registering context's
@@ -124,6 +183,8 @@ export class LocalJobRegistry extends JobRegistry {
     super(ctx)
     // Schemastery validates and fills the default before constructing the service.
     this.maxConcurrentJobsPerOwner = (config as Required<Config>).maxConcurrentJobsPerOwner
+    this.maxSettledJobs = (config as Required<Config>).maxSettledJobs
+    this.teardownGraceMs = (config as Required<Config>).teardownGraceMs
     this.selfCtx = ctx
     ctx.effect(() => () => this.disposeAll(), 'jobs teardown')
   }
@@ -151,6 +212,8 @@ export class LocalJobRegistry extends JobRegistry {
     const count = (this.counters.get(spec.kind) ?? 0) + 1
     this.counters.set(spec.kind, count)
     const id = JobId(`${spec.kind}-${count}`)
+    const seq = this.registrationSeq
+    this.registrationSeq += 1
 
     let markSettled!: () => void
     const settled = new Promise<void>((resolve) => { markSettled = resolve })
@@ -165,6 +228,7 @@ export class LocalJobRegistry extends JobRegistry {
       status: 'running',
       detail: undefined,
       output: undefined,
+      seq,
       startedAt: Date.now(),
       finishedAt: undefined,
       reported: false,
@@ -174,6 +238,8 @@ export class LocalJobRegistry extends JobRegistry {
       waitResolvers: new Set(),
     }
     this.store.set(id, job)
+    this.indexOnStart(job)
+    this.adjustActive(job.owner, 1)
 
     void hooks.done.then(
       (outcome) => { this.settle(job, outcome) },
@@ -190,10 +256,31 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   list(caller?: Agent): JobSnapshot[] {
-    const session = caller?.id
-    return [...this.store.values()]
-      .filter(job => job.owner === undefined || job.owner.id === session)
-      .map(job => this.snapshot(job))
+    const owned = caller === undefined ? undefined : this.ownedJobs.get(caller.id)
+    if (owned === undefined) {
+      return [...this.unownedJobs].map(job => this.snapshot(job))
+    }
+    // Both buckets are insertion-ordered under one process-wide registration
+    // sequence, so merging them reproduces registration order while touching
+    // only the caller's own jobs plus the shared unowned bucket — never other
+    // owners' records.
+    const merged: TrackedTask[] = []
+    const open = this.unownedJobs.values()
+    const mine = owned.values()
+    let nextOpen = open.next()
+    let nextMine = mine.next()
+    while (!nextOpen.done && !nextMine.done) {
+      if (nextOpen.value.seq < nextMine.value.seq) {
+        merged.push(nextOpen.value)
+        nextOpen = open.next()
+      } else {
+        merged.push(nextMine.value)
+        nextMine = mine.next()
+      }
+    }
+    for (; !nextOpen.done; nextOpen = open.next()) merged.push(nextOpen.value)
+    for (; !nextMine.done; nextMine = mine.next()) merged.push(nextMine.value)
+    return merged.map(job => this.snapshot(job))
   }
 
   get(id: JobId, caller?: Agent): JobSnapshot {
@@ -318,13 +405,69 @@ export class LocalJobRegistry extends JobRegistry {
       .some(layer => !layer.controllers.isEmpty())
   }
 
-  /** Count authoritative active records for one exact owner or the shared unowned bucket. */
-  private activeTaskCount(owner: Agent | undefined): number {
-    let count = 0
-    for (const job of this.store.values()) {
-      if (job.owner === owner && (job.status === 'running' || job.status === 'stopping')) count += 1
+  /** File a newly registered record into its owner bucket. */
+  private indexOnStart(job: TrackedTask): void {
+    if (job.owner === undefined) {
+      this.unownedJobs.add(job)
+      return
     }
-    return count
+    const bucket = this.ownedJobs.get(job.owner.id)
+    if (bucket === undefined) {
+      this.ownedJobs.set(job.owner.id, new Set([job]))
+    } else {
+      bucket.add(job)
+    }
+  }
+
+  /**
+   * Remove a record from its owner bucket and the settled-retention index.
+   * Used by retention eviction and owner-disposal draining; service disposal
+   * clears the indexes wholesale instead.
+   */
+  private deindex(job: TrackedTask): void {
+    this.settledJobs.delete(job)
+    if (job.owner === undefined) {
+      this.unownedJobs.delete(job)
+      return
+    }
+    const bucket = this.ownedJobs.get(job.owner.id)
+    /* v8 ignore next -- an indexed owned record always has its owner bucket */
+    if (bucket === undefined) return
+    bucket.delete(job)
+    if (bucket.size === 0) this.ownedJobs.delete(job.owner.id)
+  }
+
+  /** Adjust one exact owner's live active count; the `undefined` owner is the shared unowned bucket. */
+  private adjustActive(owner: Agent | undefined, delta: 1 | -1): void {
+    const next = (this.activeCounts.get(owner) ?? 0) + delta
+    if (next === 0) this.activeCounts.delete(owner)
+    else this.activeCounts.set(owner, next)
+  }
+
+  /** Live active count for one exact owner or the shared unowned bucket, without scanning the store. */
+  private activeTaskCount(owner: Agent | undefined): number {
+    return this.activeCounts.get(owner) ?? 0
+  }
+
+  /**
+   * Retain one settled record under the configured bound. The oldest settled
+   * records beyond `maxSettledJobs` are evicted — dropped from every index,
+   * buffered output released — and each affected owner's observers notified,
+   * because eviction changes what {@link list} returns. Only settlement
+   * enqueues, one record at a time, so at most the front record overflows.
+   */
+  private retainSettled(job: TrackedTask): void {
+    this.settledJobs.add(job)
+    if (this.settledJobs.size <= this.maxSettledJobs) return
+    for (const evicted of this.settledJobs) {
+      this.settledJobs.delete(evicted)
+      this.deindex(evicted)
+      this.store.delete(evicted.id)
+      evicted.output = undefined
+      evicted.readOutput = undefined
+      this.notifyChanged(evicted.owner)
+      break
+    }
   }
 
   /**
@@ -419,6 +562,7 @@ export class LocalJobRegistry extends JobRegistry {
     job.detail = outcome.detail
     job.output = outcome.output
     job.finishedAt = Date.now()
+    this.adjustActive(job.owner, -1)
     if (job.waiters > 0) job.reported = true
     const snapshot = this.snapshot(job)
     const waitResolvers = [...job.waitResolvers]
@@ -426,17 +570,21 @@ export class LocalJobRegistry extends JobRegistry {
     for (const resolveWait of waitResolvers) resolveWait()
     job.markSettled()
     this.notifyChanged(job.owner)
-    if (this.listenersClosed) return
-    for (const listener of this.listenersFor(job.owner)) {
-      try {
-        const returned = listener(snapshot, job.owner)
-        void Promise.resolve(returned).catch((error: unknown) => {
-          this.selfCtx.logger.warn(`jobs: onJobDone listener rejected for ${job.id}: ${String(error)}`)
-        })
-      } catch (error: unknown) {
-        this.selfCtx.logger.warn(`jobs: onJobDone listener threw for ${job.id}: ${String(error)}`)
+    if (!this.listenersClosed) {
+      for (const listener of this.listenersFor(job.owner)) {
+        try {
+          const returned = listener(snapshot, job.owner)
+          void Promise.resolve(returned).catch((error: unknown) => {
+            this.selfCtx.logger.warn(`jobs: onJobDone listener rejected for ${job.id}: ${String(error)}`)
+          })
+        } catch (error: unknown) {
+          this.selfCtx.logger.warn(`jobs: onJobDone listener threw for ${job.id}: ${String(error)}`)
+        }
       }
     }
+    // Retention runs after the settlement's own announcement: eviction is a
+    // separate visible-set commit for the evicted record's owner.
+    this.retainSettled(job)
   }
 
   /**
@@ -465,10 +613,17 @@ export class LocalJobRegistry extends JobRegistry {
 
   /** Cancel, await terminal records, and drop every job owned by one exact agent lifecycle. */
   private async disposeOwned(owner: Agent): Promise<void> {
-    const owned = [...this.store.values()].filter(job => job.owner === owner)
+    // The session-id bucket narrows the scan to one owner's namespace; exact
+    // identity then separates a stale lifecycle from its same-id replacement.
+    // Retention eviction may already have emptied the bucket.
+    const bucket = this.ownedJobs.get(owner.id)
+    const owned = bucket === undefined ? [] : [...bucket].filter(job => job.owner === owner)
     this.cancelForTeardown(owned, 'owner disposed')
-    await Promise.all(owned.map(job => job.settled))
-    for (const job of owned) this.store.delete(job.id)
+    await this.awaitTeardown(owned, 'owner')
+    for (const job of owned) {
+      this.deindex(job)
+      this.store.delete(job.id)
+    }
     // Removal is the one visible-set change no per-job record carries, so it
     // must be announced here or an observer keeps the dropped rows forever.
     if (owned.length > 0) this.notifyChanged(owner)
@@ -484,7 +639,7 @@ export class LocalJobRegistry extends JobRegistry {
     this.listenersClosed = true
     const all = [...this.store.values()]
     this.cancelForTeardown(all, 'jobs service disposed')
-    await Promise.all(all.map(job => job.settled))
+    await this.awaitTeardown(all, 'service')
     // Distinct owners whose records just disappeared. A change observer files
     // into the layer of the context that registered it, so a consumer mounted
     // outside this service — the api-proxy carrier registers from the mux
@@ -492,6 +647,11 @@ export class LocalJobRegistry extends JobRegistry {
     // received after a registry reload.
     const emptied = new Set(all.map(job => job.owner))
     this.store.clear()
+    this.ownedJobs.clear()
+    this.unownedJobs.clear()
+    this.settledJobs.clear()
+    // Every record settled before this point, so all counts already read zero.
+    this.activeCounts.clear()
     for (const owner of emptied) this.notifyChanged(owner)
     // Detach cross-fiber owner effects after the shared store is quiescent.
     const ownerCleanups = [...this.ownerCleanups.values()]
@@ -500,9 +660,43 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   /**
+   * Await terminal records during teardown, bounded by the configured grace.
+   * A cancel that returned without settling `done` is indistinguishable from
+   * a slow stop until the grace expires; stragglers are then force-settled
+   * `failed` — first-wins, so a late producer outcome cannot replace the
+   * record — and the join completes. The kill signal already sent is neither
+   * repeated nor withdrawn.
+   * @param jobs - records whose settlement teardown awaits.
+   * @param teardown - which teardown (`owner` or `service`), for diagnostics.
+   */
+  private async awaitTeardown(jobs: TrackedTask[], teardown: 'owner' | 'service'): Promise<void> {
+    if (jobs.length === 0) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<'expired'>((resolve) => {
+      timer = setTimeout(() => resolve('expired'), this.teardownGraceMs)
+    })
+    try {
+      if (await Promise.race([Promise.all(jobs.map(job => job.settled)), expired]) !== 'expired') return
+    } finally {
+      clearTimeout(timer)
+    }
+    for (const job of jobs) {
+      if (isTerminal(job.status)) continue
+      this.selfCtx.logger.warn(`jobs: job ${job.id} did not settle within the ${teardown} teardown grace (${this.teardownGraceMs}ms); record forced failed and work may be orphaned`)
+      this.settle(job, {
+        status: 'failed',
+        detail: `producer did not settle within the ${teardown} teardown grace (${this.teardownGraceMs}ms); work may be orphaned`,
+      })
+    }
+    // Every record is terminal now, so this closing join cannot stall.
+    await Promise.all(jobs.map(job => job.settled))
+  }
+
+  /**
    * Cancel jobs during teardown with per-job containment. A throwing cancel
    * force-fails the record and reports a possible orphan; a cancel that returns
-   * without settling remains indistinguishable from a slow stop and may stall.
+   * without settling is force-settled by {@link awaitTeardown} once the grace
+   * expires.
    */
   private cancelForTeardown(jobs: TrackedTask[], reason: string): void {
     for (const job of jobs) {

@@ -11,11 +11,29 @@ import { trajectoryNode } from './trajectory-definition-common.ts'
  * architecture/2026-08-09-client-conversation-node-assembly.md. */
 const MAX_DEPTH = 256
 
+interface ProjectedCall {
+  readonly source: ToolCallBlock
+  readonly interruptedKey: string
+  readonly value: ToolCallBlock
+}
+
 interface ToolState {
   readonly rootId: string
-  readonly calls: ReadonlyMap<string, ToolCallBlock>
-  readonly children: ReadonlyMap<string, readonly string[]>
-  readonly parents: ReadonlyMap<string, string>
+  readonly calls: Map<string, ToolCallBlock>
+  readonly children: Map<string, readonly string[]>
+  readonly parents: Map<string, string>
+  readonly projected: Map<string, ProjectedCall>
+}
+
+let projectionOperationHook: (() => void) | undefined
+
+/**
+ * Install a projection operation counter for focused performance tests.
+ *
+ * @param hook - Callback invoked when one uncached call is projected, or undefined to remove it.
+ */
+export function setTrajectoryToolProjectionOperationHook(hook: (() => void) | undefined): void {
+  projectionOperationHook = hook
 }
 
 interface DispatchData {
@@ -134,6 +152,14 @@ function acceptsEdge(state: ToolState, parent: string, child: string): boolean {
   return parentDepth + subtreeDepth <= MAX_DEPTH
 }
 
+function invalidate(state: ToolState, callId: string): void {
+  let cursor: string | undefined = callId
+  while (cursor !== undefined) {
+    state.projected.delete(cursor)
+    cursor = state.parents.get(cursor)
+  }
+}
+
 function updateDispatch(state: ToolState, match: ConversationMatch): ToolState {
   const event = match.event
   if (event.type !== 'tool/code-dispatch-start' && event.type !== 'tool/code-dispatch') return state
@@ -145,16 +171,16 @@ function updateDispatch(state: ToolState, match: ConversationMatch): ToolState {
   if (index < 0 && !acceptsEdge(state, parentId, childId)) return state
   if (event.type === 'tool/code-dispatch-start' && index >= 0) return state
 
-  const calls = new Map(state.calls)
-  calls.set(childId, event.type === 'tool/code-dispatch-start'
+  const previous = state.calls.get(childId)
+  state.calls.set(childId, event.type === 'tool/code-dispatch-start'
     ? childCall(match, data)
-    : childResult(match, data, calls.get(childId)))
-  if (index >= 0) return { ...state, calls }
-  const children = new Map(state.children)
-  children.set(parentId, [...siblings, childId])
-  const parents = new Map(state.parents)
-  parents.set(childId, parentId)
-  return { ...state, calls, children, parents }
+    : childResult(match, data, previous))
+  if (index < 0) {
+    state.children.set(parentId, [...siblings, childId])
+    state.parents.set(childId, parentId)
+  }
+  invalidate(state, childId)
+  return state
 }
 
 function interruption(
@@ -177,6 +203,10 @@ function projectCall(
   const block = state.calls.get(callId)
   if (block === undefined) return undefined
   if (visited.has(callId) || depth > MAX_DEPTH) return { ...block, subCalls: [] }
+  const interruptedKey = interruptedAt === undefined ? '' : String(interruptedAt.seq) + ':' + String(interruptedAt.time)
+  const cached = state.projected.get(callId)
+  if (cached?.source === block && cached.interruptedKey === interruptedKey) return cached.value
+  projectionOperationHook?.()
   const nextVisited = new Set(visited)
   nextVisited.add(callId)
   const subCalls = (state.children.get(callId) ?? [])
@@ -184,21 +214,24 @@ function projectCall(
       const child = projectCall(state, childId, interruptedAt, nextVisited, depth + 1)
       return child === undefined ? [] : [child]
     })
-  if ('kind' in block || interruptedAt === undefined) return { ...block, subCalls }
-  return {
-    kind: 'tool-result',
-    seq: interruptedAt.seq - 0.8,
-    time: interruptedAt.time,
-    callId: block.callId,
-    call: { name: block.name, argsRaw: block.argsRaw },
-    callTime: block.time,
-    content: [],
-    isError: true,
-    error: { name: 'Interrupted', code: 'interrupted' },
-    callView: block.callView,
-    resultView: null,
-    subCalls,
-  }
+  const value: ToolCallBlock = 'kind' in block || interruptedAt === undefined
+    ? { ...block, subCalls }
+    : {
+        kind: 'tool-result',
+        seq: interruptedAt.seq - 0.8,
+        time: interruptedAt.time,
+        callId: block.callId,
+        call: { name: block.name, argsRaw: block.argsRaw },
+        callTime: block.time,
+        content: [],
+        isError: true,
+        error: { name: 'Interrupted', code: 'interrupted' },
+        callView: block.callView,
+        resultView: null,
+        subCalls,
+      }
+  state.projected.set(callId, { source: block, interruptedKey, value })
+  return value
 }
 
 function fallbackState(context: ConversationNodeContext<ToolState>): ToolState | undefined {
@@ -210,6 +243,7 @@ function fallbackState(context: ConversationNodeContext<ToolState>): ToolState |
     calls: new Map([[root.callId, root]]),
     children: new Map(),
     parents: new Map(),
+    projected: new Map(),
   }
   for (const match of context.matches) state = updateDispatch(state, match)
   return state
@@ -239,6 +273,7 @@ const trajectoryToolDefinition: ConversationNodeDefinition<ToolState> = {
       calls: new Map([[root.callId, root]]),
       children: new Map(),
       parents: new Map(),
+      projected: new Map(),
     }
   },
   update: (context, match) => {
@@ -247,9 +282,9 @@ const trajectoryToolDefinition: ConversationNodeDefinition<ToolState> = {
     const running = previous !== undefined && !('kind' in previous) ? previous : undefined
     const result = rootResult(match, running)
     if (result === undefined) return context.state
-    const calls = new Map(context.state.calls)
-    calls.set(context.state.rootId, result)
-    return { ...context.state, calls }
+    context.state.calls.set(context.state.rootId, result)
+    invalidate(context.state, context.state.rootId)
+    return context.state
   },
   buildViewNode: (context) => {
     const state = context.state ?? fallbackState(context)

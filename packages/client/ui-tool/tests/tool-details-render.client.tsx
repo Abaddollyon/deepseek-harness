@@ -1,7 +1,7 @@
 /** Test adapter for the production conversation.details.tool registration. */
 import type { HostDescription } from '@deepseek-ai/dsh-client-connection/client'
 import type {
-  ChatConversationViewNode, ChatSnapshot, ConversationNode, RunningToolCall, SessionId,
+  ChatConversationViewNode, ChatSnapshot, ConversationNode, RunningToolCall, SessionId, ToolCallBlock,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionProviderComponent, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { DetailsSlotProps, DetailsToolOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/src/client/contract/slots.ts'
@@ -27,13 +27,26 @@ export function toolChatSnapshot(
     data: { root },
   }))
   const byKey = new Map(nodes.map(node => [node.key, node]))
+  const toolCalls = new Map<string, { readonly block: ToolCallBlock; readonly rootNodeKey: string }>()
+  for (const node of nodes) {
+    const pending = [(node.data as { root: ToolCallBlock }).root]
+    while (pending.length > 0) {
+      const block = pending.pop() as ToolCallBlock
+      toolCalls.set(block.callId, { block, rootNodeKey: node.key })
+      pending.push(...block.subCalls)
+    }
+  }
+  const nodeStore = {
+    get: (key: string) => byKey.get(key),
+    values: () => nodes,
+    getToolCall: (callId: string) => toolCalls.get(callId),
+  } as ChatSnapshot['nodes'] & {
+    getToolCall(callId: string): { readonly block: ToolCallBlock; readonly rootNodeKey: string } | undefined
+  }
   const empty: readonly string[] = []
   return {
     order: nodes.map(node => node.key),
-    nodes: {
-      get: key => byKey.get(key),
-      values: () => nodes,
-    },
+    nodes: nodeStore,
     locations: {
       getTurn: () => empty,
       getStep: () => empty,

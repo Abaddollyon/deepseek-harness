@@ -7,6 +7,7 @@ import AgentRegistry, { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
@@ -35,6 +36,8 @@ interface FakeDelivery {
   followup?: (...args: unknown[]) => void
   /** Defaults to `running`, the lane that never wakes, so notice-content tests pin one lane. */
   status?: 'idle' | 'running'
+  /** Durable event log; defaults to empty, a session that was never user-stopped. */
+  events?: readonly SessionEvent[]
 }
 
 /**
@@ -50,7 +53,7 @@ function fakeAgent(ctx: Context, sessionId: string, delivery: FakeDelivery = {})
     inject: delivery.inject ?? (() => {}),
     followup: delivery.followup ?? (() => {}),
     status: delivery.status ?? 'running',
-    session: { id, header: { version: 0, id, createdAt: 0 } },
+    session: { id, header: { version: 0, id, createdAt: 0 }, events: delivery.events ?? [] },
   } as unknown as Agent
   agentRegistryDisposers.set(agent, ctx.agents.register(agent))
   agentScopeFibers.set(agent, scopeFiber)
@@ -100,6 +103,11 @@ function text(result: { content: { type: string; text?: string }[] }): string {
 }
 
 const tick = () => new Promise<void>(r => setTimeout(r, 0))
+
+/** A durable `turn/end` record for a fake owner's session log. */
+function turnEnd(turn: number, reason: TurnEndReason): SessionEvent<'turn/end'> {
+  return { type: 'turn/end', seq: turn, time: turn, data: { turn, reason } }
+}
 
 /** Start and settle `count` owned jobs one at a time, letting each notice land. */
 async function settleTasks(ctx: Context, owner: Agent, count: number): Promise<void> {
@@ -563,6 +571,68 @@ describe('completion notice delivery', () => {
     ctx.jobs.start(p.spec)
 
     p.settle({ status: 'completed', detail: 'exit code: 0' })
+    await tick()
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
+  it('delivers non-waking when the idle owner\'s newest turn ended on a user cancellation', async () => {
+    const { ctx } = await setup()
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'sess-1', {
+      inject,
+      followup,
+      status: 'idle',
+      events: [turnEnd(1, { kind: 'aborted', reason: { kind: 'user' } })],
+    })
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+
+    p.settle({ status: 'completed' })
+    await tick()
+    // Waking would re-open a session the user stopped; the notice queues for
+    // the next step instead of spending a turn.
+    expect(followup).not.toHaveBeenCalled()
+    expect(inject).toHaveBeenCalledTimes(1)
+  })
+
+  it('wakes again once a turn the user started after the stop ends normally', async () => {
+    const { ctx } = await setup()
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'sess-1', {
+      inject,
+      followup,
+      status: 'idle',
+      events: [
+        turnEnd(1, { kind: 'aborted', reason: { kind: 'user' } }),
+        turnEnd(2, { kind: 'completed' }),
+      ],
+    })
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+
+    p.settle({ status: 'completed' })
+    await tick()
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
+  it('still wakes when the newest turn was aborted for a non-user cause', async () => {
+    const { ctx } = await setup()
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'sess-1', {
+      inject,
+      followup,
+      status: 'idle',
+      events: [turnEnd(1, { kind: 'aborted', reason: { kind: 'parent' } })],
+    })
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+
+    p.settle({ status: 'completed' })
     await tick()
     expect(followup).toHaveBeenCalledTimes(1)
     expect(inject).not.toHaveBeenCalled()

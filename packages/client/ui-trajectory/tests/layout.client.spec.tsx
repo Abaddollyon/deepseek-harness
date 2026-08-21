@@ -629,6 +629,105 @@ describe('deriveTrajectoryLayout incremental cache', () => {
     expect(after[0]).toBe(before[0])
   })
 
+  it('visits only an independent appended turn suffix', () => {
+    const cache = createTrajectoryLayoutCache()
+    let visits = 0
+    cache.onEntryVisit = () => { visits++ }
+    const beforeInput = {
+      nodes: [...turnNodes(1), ...turnNodes(2)],
+      partial: null,
+      runningCalls: [],
+    }
+    const before = deriveTrajectoryLayout(beforeInput, cache)
+    expect(visits).toBe(8)
+
+    visits = 0
+    const input = { ...beforeInput, nodes: [...beforeInput.nodes, ...turnNodes(3)] }
+    const after = deriveTrajectoryLayout(input, cache)
+
+    expect(visits).toBe(4)
+    expect(after.slice(0, 2)).toEqual(before)
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(after).toEqual(deriveTrajectoryLayout(input))
+  })
+
+  it('visits only appended request and node entries for a later turn', () => {
+    const cache = createTrajectoryLayoutCache()
+    let visits = 0
+    cache.onEntryVisit = () => { visits++ }
+    const before = deriveTrajectoryLayout(inputAt(8), cache)
+    expect(visits).toBe(8)
+
+    visits = 0
+    const input = inputAt(12)
+    const after = deriveTrajectoryLayout(input, cache)
+
+    expect(visits).toBe(4)
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    expect(after).toEqual(deriveTrajectoryLayout(input))
+  })
+
+  it('visits only a same-turn assistant suffix', () => {
+    const cache = createTrajectoryLayoutCache()
+    let visits = 0
+    cache.onEntryVisit = () => { visits++ }
+    const eventLocations = new Map()
+    const callSchemas = new Map()
+    const before = deriveTrajectoryLayout({ ...inputAt(1), eventLocations, callSchemas }, cache)
+
+    visits = 0
+    const input = { ...inputAt(2), eventLocations: new Map(), callSchemas: new Map() }
+    const after = deriveTrajectoryLayout(input, cache)
+
+    expect(visits).toBe(1)
+    expect(after).toEqual(deriveTrajectoryLayout(input))
+    expect(cellsOf(after)[0]).toBe(cellsOf(before)[0])
+  })
+
+  it('patches a late tool result by visiting its owner and tail only', () => {
+    const cache = createTrajectoryLayoutCache()
+    let visits = 0
+    cache.onEntryVisit = () => { visits++ }
+    const before = deriveTrajectoryLayout(inputAt(2), cache)
+    const beforeCells = cellsOf(before)
+
+    visits = 0
+    const input = inputAt(3)
+    const after = deriveTrajectoryLayout(input, cache)
+    const afterCells = cellsOf(after)
+
+    expect(visits).toBe(2)
+    expect(after).toEqual(deriveTrajectoryLayout(input))
+    expect(afterCells[0]).toBe(beforeCells[0])
+    expect(afterCells.find(cell => cell.kind === 'tool')?.outputDetail).toBe('out 1')
+  })
+
+  it('inserts nested late-result cells without losing the expanded tail', () => {
+    const cache = createTrajectoryLayoutCache()
+    const before = deriveTrajectoryLayout(inputAt(2), cache)
+    // session[2] is the union-typed fixture row; the spread widens to a bare
+    // object, so pin the tool-result member type the layout input requires.
+    const result: Extract<(typeof session)[number], { kind: 'tool-result' }> = {
+      ...(session[2] as Extract<(typeof session)[number], { kind: 'tool-result' }>),
+      subCalls: [{
+        kind: 'tool-result' as const,
+        seq: 104, time: 103_400, callId: 'c1:code:1',
+        call: { name: 'read', argsRaw: '{"path":"a"}' }, callTime: 102_500,
+        content: [{ type: 'text' as const, text: 'nested output' }],
+        isError: false, callView: null, resultView: null, subCalls: [],
+      }],
+    }
+    const input = { ...inputAt(2), nodes: [...inputAt(2).nodes, result] }
+    const after = deriveTrajectoryLayout(input, cache)
+
+    expect(after).toEqual(deriveTrajectoryLayout(input))
+    expect(cellsOf(after).map(cell => cell.kind)).toEqual(['user', 'message', 'tool', 'subtool'])
+    expect(cellsOf(after).map(cell => cell.index)).toEqual([1, 2, 3, 4])
+    expect(cellsOf(after)[0]).toBe(cellsOf(before)[0])
+  })
+
   it('re-expands only the record whose tool result arrived', () => {
     const cache = createTrajectoryLayoutCache()
     const before = deriveTrajectoryLayout(inputAt(2), cache)

@@ -55,6 +55,7 @@ export type {
   PersistenceCoordinatorOptions,
   StoredPrefix,
   StoredSuffix,
+  StoredTail,
 } from './coordinator.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -219,6 +220,34 @@ export abstract class SessionPersistence extends Service {
    */
   abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal):
   Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+
+  /**
+   * Read a bounded seq-ascending event page immediately before an exclusive seq.
+   * `beforeSeq` omitted selects the current durable tail. The result contains at
+   * most `limit` events and reports whether an older valid event remains.
+   * @param id - persisted session to read.
+   * @param beforeSeq - exclusive seq bound, or `undefined` for the latest tail.
+   * @param limit - positive safe-integer event limit.
+   * @param signal - optional cancellation for queued and backend read work.
+   * @returns the header, bounded event page, and older-event indicator.
+   */
+  async readTail(
+    id: SessionId,
+    beforeSeq: number | undefined,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }> {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0)) {
+      throw new TypeError(`readTail beforeSeq must be a non-negative safe integer or undefined, got ${String(beforeSeq)}`)
+    }
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new TypeError(`readTail limit must be a positive safe integer, got ${String(limit)}`)
+    }
+    const whole = await this.readFrom(id, 0, signal)
+    const upper = Math.min(beforeSeq ?? whole.events.length, whole.events.length)
+    const start = Math.max(0, upper - limit)
+    return { meta: whole.meta, events: whole.events.slice(start, upper), hasMore: start > 0 }
+  }
 
   /**
    * Lightweight listing from metadata, without a full-log parse.

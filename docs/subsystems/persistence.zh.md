@@ -360,6 +360,18 @@ abstract inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection
 abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }>
 
 /**
+ * Read a bounded seq-ascending event page immediately before an exclusive seq.
+ * `beforeSeq` omitted selects the current durable tail. The result contains at
+ * most `limit` events and reports whether an older valid event remains.
+ * @param id - persisted session to read.
+ * @param beforeSeq - exclusive seq bound, or `undefined` for the latest tail.
+ * @param limit - positive safe-integer event limit.
+ * @param signal - optional cancellation for queued and backend read work.
+ * @returns the header, bounded event page, and older-event indicator.
+ */
+async readTail( id: SessionId, beforeSeq: number | undefined, limit: number, signal?: AbortSignal, ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }>
+
+/**
  * Lightweight listing from metadata, without a full-log parse.
  * @param signal - optional cancellation for backend listing work.
  * @returns one header per materialized session.
@@ -381,5 +393,5 @@ abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot
 
 Types: [SessionEvent](session.md) · [SessionId](core.md)
 
-Source: [`packages/session/session-persistence/src/index.ts:84`](../../packages/session/session-persistence/src/index.ts)
+Source: [`packages/session/session-persistence/src/index.ts:85`](../../packages/session/session-persistence/src/index.ts)
 <!-- END GENERATED cordis-surface -->

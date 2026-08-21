@@ -253,6 +253,34 @@ describe('connection client apply', () => {
     fetch.mockRestore()
   })
 
+  it('drains a large queued burst in order without front-removal shifting', async () => {
+    ;(globalThis as Win).location = {
+      hostname: 'localhost', search: '', origin: 'http://localhost:3080',
+    }
+    ;(globalThis as WebSocketGlobal).WebSocket = FakeWebSocket as unknown as typeof WebSocket
+    const client = (await mount()).api
+    const abort = new AbortController()
+    const iterator = client.events.mux({}, abort.signal)[Symbol.asyncIterator]()
+    const first = iterator.next()
+    await vi.waitFor(() => { expect(sockets[0]?.readyState).toBe(FakeWebSocket.OPEN) })
+
+    const count = 10_000
+    const encoded = (index: number): string => JSON.stringify({
+      type: 'server-request',
+      rpcId: `burst-${index}`,
+      method: 'session/subscribed',
+      payload: { type: 'session/subscribed', sessionId: 'burst-session', lastSeq: index },
+    })
+    sockets[0]!.receive(encoded(0))
+    const values: number[] = [(await first).value!.payload.lastSeq]
+    for (let index = 1; index < count; index++) sockets[0]!.receive(encoded(index))
+    for (let index = 1; index < count; index++) values.push((await iterator.next()).value!.payload.lastSeq)
+
+    expect(values).toEqual(Array.from({ length: count }, (_, index) => index))
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+  })
+
   it('maps an HTTPS page origin to a secure WebSocket URL', async () => {
     ;(globalThis as Win).location = {
       hostname: 'harness.example', search: '', origin: 'https://harness.example',

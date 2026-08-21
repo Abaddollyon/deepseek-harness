@@ -81,6 +81,21 @@ async function collect(
   return frames.filter((frame): frame is JobFrame => frame.type === 'session/jobs')
 }
 
+/** Drain raw job envelopes so fanout identity remains observable. */
+async function collectEnvelopes(
+  iterable: AsyncIterable<RpcRequest<MuxFrame>>,
+  count: number,
+  abort: AbortController,
+): Promise<Array<RpcRequest<JobFrame>>> {
+  const frames: Array<RpcRequest<JobFrame>> = []
+  for await (const envelope of iterable) {
+    if (envelope.payload.type !== 'session/jobs') continue
+    frames.push(envelope as RpcRequest<JobFrame>)
+    if (frames.length >= count) abort.abort()
+  }
+  return frames
+}
+
 describe('session/jobs subscription baseline', () => {
   it('is omitted for a session with no tasks — absence is the empty set', async () => {
     const { ctx, session } = await harness(true)
@@ -151,6 +166,33 @@ describe('session/jobs change pushes', () => {
     const [frame] = await collected
     const fields: readonly string[] = Object.keys(frame?.jobs[0] ?? {})
     expect([...fields].sort()).toEqual(['id', 'kind', 'label', 'startedAt', 'status'])
+  })
+
+  it('projects each unowned session once and shares its envelope across mux streams', async () => {
+    const { ctx } = await harness(true)
+    ctx.sessions.create()
+    const proxy = api(ctx)
+    const firstAbort = new AbortController()
+    const secondAbort = new AbortController()
+    const first = collectEnvelopes(
+      proxy.events.mux({ rpcId: RpcId('t-tasks-shared-1'), payload: {} }, firstAbort.signal),
+      2,
+      firstAbort,
+    )
+    const second = collectEnvelopes(
+      proxy.events.mux({ rpcId: RpcId('t-tasks-shared-2'), payload: {} }, secondAbort.signal),
+      2,
+      secondAbort,
+    )
+
+    ctx.jobs.start(producer('shared fanout').spec)
+
+    const [firstEnvelopes, secondEnvelopes] = await Promise.all([first, second])
+    const secondBySession = new Map(secondEnvelopes.map(envelope => [envelope.payload.sessionId, envelope]))
+    expect(firstEnvelopes).toHaveLength(2)
+    for (const envelope of firstEnvelopes) {
+      expect(envelope).toBe(secondBySession.get(envelope.payload.sessionId))
+    }
   })
 
   it('fans an unowned change out to every subscribed session', async () => {

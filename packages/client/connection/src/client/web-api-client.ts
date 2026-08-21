@@ -41,6 +41,7 @@ export class WebApiClient extends AbstractApiClient {
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(url)
     const inbox: SocketItem<F>[] = []
+    let inboxHead = 0
     let wake: (() => void) | undefined
     const enqueue = (item: SocketItem<F>): void => {
       inbox.push(item)
@@ -73,10 +74,18 @@ export class WebApiClient extends AbstractApiClient {
     if (signal.aborted) handleAbort()
     try {
       while (true) {
-        while (inbox.length > 0) {
-          const item = inbox.shift() as SocketItem<F>
+        while (inboxHead < inbox.length) {
+          const item = inbox[inboxHead++] as SocketItem<F>
           if (item.kind === 'end') return
           yield item.envelope
+          if (inboxHead >= 1024 && inboxHead * 2 >= inbox.length) {
+            inbox.splice(0, inboxHead)
+            inboxHead = 0
+          }
+        }
+        if (inboxHead !== 0) {
+          inbox.splice(0, inboxHead)
+          inboxHead = 0
         }
         await new Promise<void>((resolve) => { wake = resolve })
       }

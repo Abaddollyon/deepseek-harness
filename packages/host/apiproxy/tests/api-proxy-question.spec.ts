@@ -94,6 +94,41 @@ describe('question response validation', () => {
     abort.abort()
   })
 
+  it('keeps a queued answerable frame when turn/end coalesces transcript chunks', async () => {
+    const { ctx, api } = await harness()
+    const abort = new AbortController()
+    const iterator = api.events.mux({ rpcId: RpcId('question-coalescing'), payload: {} }, abort.signal)[Symbol.asyncIterator]()
+    const owner = agent(ctx)
+    expect((await iterator.next()).value?.payload.type).toBe('session/subscribed')
+    owner.session.append('assistant/chunk', {
+      turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'superseded' },
+    })
+    const asked = ctx.userQuestions.ask({
+      agent: owner,
+      questions: [{ id: 'keep', question: 'Keep this request?', options: [{ label: 'Yes' }] }],
+    })
+    owner.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    let requested: RpcRequest<Extract<MuxFrame, { type: 'question/requested' }>> | undefined
+    const eventTypes: string[] = []
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) break
+      if (next.value.payload.type === 'question/requested') {
+        requested = next.value as RpcRequest<Extract<MuxFrame, { type: 'question/requested' }>>
+      }
+      if (next.value.payload.type === 'session/event') eventTypes.push(next.value.payload.event.type)
+      if (next.value.payload.type === 'session/event' && next.value.payload.event.type === 'turn/end') break
+    }
+    expect(requested).toBeDefined()
+    expect(eventTypes).toEqual(['turn/end'])
+    if (requested === undefined) throw new Error('unreachable')
+    expect(await api.respond(answer(requested, ['Yes']))).toEqual({ accepted: true })
+    await expect(asked).resolves.toEqual({ answers: [{ id: 'keep', selected: ['Yes'] }] })
+    abort.abort()
+    await iterator.next()
+  })
+
   it('keeps selected options and custom text mutually exclusive for single-select questions', async () => {
     const { ctx, api } = await harness()
     const abort = new AbortController()

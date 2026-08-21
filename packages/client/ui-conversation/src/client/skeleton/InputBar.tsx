@@ -4,7 +4,7 @@
  * through this entry's own inject, whose hooks compartment binds
  * useNotices/useLexicon; layout-phase inputs (variant, placeholder,
  * region-slot content) ride the owner props. Session facts
- * (running/removed/promptError) are self-selected via useSession. */
+ * (running/activity/removed/promptError) are self-selected via useSession. */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
@@ -50,6 +50,7 @@ export function InputBar({
   const commandMenuOpen = useMenuLauncher(source => source === 'command')
   const promptError = useSession(s => s.promptError) ?? null
   const running = useSession(s => s.running) ?? false
+  const activity = useSession(s => (s as typeof s & { activity?: 'stopping' | 'maintenance' }).activity)
   const subagent = useSession(s => s.subagent) ?? null
   const removed = useSession(s => s.removed) ?? false
   // Plan mode swaps the textarea placeholder (the projection is the folded
@@ -487,15 +488,17 @@ export function InputBar({
     if (el !== null) toggleCommandMenu?.(selectionOf(el))
   }
 
-  // Ordinary sessions retain their primary Send/Stop toggle. A continuable
-  // child keeps Send as the primary action and exposes Stop independently so
-  // pointer users can queue follow-ups while its current turn is running.
-  const primaryStops = running && subagent === null
-  const interruptible = running && continuable
-  const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
+  // Ordinary sessions retain their primary Send/Stop toggle. A child keeps Send
+  // as the primary action and exposes Stop independently while its turn runs.
+  const stopInProgress = activity === 'stopping'
+  const stoppable = running || stopInProgress || activity === 'maintenance'
+  const primaryStops = stoppable && subagent === null
+  const interruptible = stoppable && subagent !== null
+  const stopLabel = stopInProgress ? t('input.stopping') : t('input.stop')
+  const primaryLabel = primaryStops ? stopLabel : t('input.send')
   const onPrimary = (): void => {
     if (primaryStops) {
-      stop?.()
+      if (!stopInProgress) stop?.()
       return
     }
     if (inputActions === undefined) return // absent machine: the button is disabled
@@ -719,12 +722,12 @@ export function InputBar({
             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             <ContextMeter useProjection={useProjection} t={t} />
             {interruptible && (
-              <Tooltip label={t('input.stop')} side="top" delayMs={500}>
+              <Tooltip label={stopLabel} side="top" delayMs={500}>
                 <button
                   type="button"
                   className={css.primary}
-                  aria-label={t('input.stop')}
-                  disabled={stop === undefined}
+                  aria-label={stopLabel}
+                  disabled={stop === undefined || stopInProgress}
                   onMouseDown={keepFocus}
                   onClick={stop}
                 >
@@ -739,7 +742,7 @@ export function InputBar({
                 type="button"
                 className={css.primary}
                 aria-label={primaryLabel}
-                disabled={primaryStops ? stop === undefined : empty || disabled || machineBusy}
+                disabled={primaryStops ? stop === undefined || stopInProgress : empty || disabled || machineBusy}
                 onMouseDown={keepFocus}
                 onClick={onPrimary}
               >

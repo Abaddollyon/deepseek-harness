@@ -38,6 +38,7 @@ function agent(ctx: Context): Agent {
     inbox,
     ctx: scope.ctx,
     get status() { return status },
+    activity: undefined,
     send: () => {},
     followup: () => {},
     steer: () => {},
