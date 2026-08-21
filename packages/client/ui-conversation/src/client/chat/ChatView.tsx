@@ -364,13 +364,13 @@ export function ChatView({
   const virtualItems = !virtualizationEnabled || measuredVirtualItems.length > 0 || fallbackVirtualIndex < 0
     ? measuredVirtualItems
     : [{
-        index: fallbackVirtualIndex,
-        key: getVirtualRowKey(fallbackVirtualIndex),
-        lane: 0,
-        size: VIRTUAL_ESTIMATED_ROW_HEIGHT,
-        start: fallbackVirtualStart,
-        end: fallbackVirtualStart + VIRTUAL_ESTIMATED_ROW_HEIGHT,
-      }]
+      index: fallbackVirtualIndex,
+      key: getVirtualRowKey(fallbackVirtualIndex),
+      lane: 0,
+      size: VIRTUAL_ESTIMATED_ROW_HEIGHT,
+      start: fallbackVirtualStart,
+      end: fallbackVirtualStart + VIRTUAL_ESTIMATED_ROW_HEIGHT,
+    }]
 
   useLayoutEffect(() => {
     if (!virtualizationEnabled) return

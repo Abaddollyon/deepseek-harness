@@ -1088,7 +1088,7 @@ function replaceLaid(
   if (first === undefined || last === undefined) return [...previous]
   let replaced = false
   const replacementEntries = new Set(after)
-  const groups = previous.map(group => {
+  const groups = previous.map((group) => {
     const laid: LaidCell[] = []
     for (let index = 0; index < group.laid.length; index++) {
       const entry = group.laid[index]

@@ -217,19 +217,19 @@ function projectCall(
   const value: ToolCallBlock = 'kind' in block || interruptedAt === undefined
     ? { ...block, subCalls }
     : {
-        kind: 'tool-result',
-        seq: interruptedAt.seq - 0.8,
-        time: interruptedAt.time,
-        callId: block.callId,
-        call: { name: block.name, argsRaw: block.argsRaw },
-        callTime: block.time,
-        content: [],
-        isError: true,
-        error: { name: 'Interrupted', code: 'interrupted' },
-        callView: block.callView,
-        resultView: null,
-        subCalls,
-      }
+      kind: 'tool-result',
+      seq: interruptedAt.seq - 0.8,
+      time: interruptedAt.time,
+      callId: block.callId,
+      call: { name: block.name, argsRaw: block.argsRaw },
+      callTime: block.time,
+      content: [],
+      isError: true,
+      error: { name: 'Interrupted', code: 'interrupted' },
+      callView: block.callView,
+      resultView: null,
+      subCalls,
+    }
   state.projected.set(callId, { source: block, interruptedKey, value })
   return value
 }
