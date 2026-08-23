@@ -101,5 +101,5 @@ estimateMessage(message: Message): number
 
 Types: [EpochHeader](session.zh.md) · [Message](llm-streaming.zh.md) · [Session](session.zh.md)
 
-Source: [`packages/llm/token-meter/src/index.ts`](../../packages/llm/token-meter/src/index.ts)
+Source: [`packages/llm/token-meter/src/index.ts:75`](../../packages/llm/token-meter/src/index.ts)
 <!-- END GENERATED cordis-surface -->
