@@ -1234,6 +1234,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the header and the stored events with `seq >= fromSeq`.',
       },
       {
+        signature: 'async readTail( id: SessionId, beforeSeq: number | undefined, limit: number, signal?: AbortSignal, ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }>',
+        description: 'Read a bounded event page immediately before one sequence position. Sequential backends may scan their complete artifact through readFrom; the bound still limits returned events and lets callers widen repeated scans.',
+        parameters: [{ name: 'id', description: 'persisted session to read.' }, { name: 'beforeSeq', description: 'exclusive seq bound, or undefined for the latest tail.' }, { name: 'limit', description: 'positive safe-integer event limit.' }, { name: 'signal', description: 'optional cancellation for backend read work.' }],
+        returns: 'the header, bounded event page, and older-event indicator.',
+      },
+      {
         signature: 'abstract list(signal?: AbortSignal): Promise<SessionHeader[]>',
         description: 'Lightweight listing from metadata, without a full-log parse.',
         parameters: [{ name: 'signal', description: 'optional cancellation for backend listing work.' }],
@@ -5023,7 +5029,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowPhase',
-    declaration: 'export interface WorkflowPhase {\n    title: string;\n    detail?: string;\n    provider?: string;\n    model?: string;\n}',
+    declaration: 'export interface WorkflowPhase {\n    title: string;\n    detail?: string;\n    provider?: string;\n    model?: string;\n    reasoningEffort?: string;\n}',
   },
   {
     name: 'WorkflowResult',

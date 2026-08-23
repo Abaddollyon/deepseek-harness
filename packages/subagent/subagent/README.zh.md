@@ -41,7 +41,9 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 - `toolFilter`：应用请求的子 agent 工具限制；
 - `persona`：应用每个子 agent 独立的 persona。
 
-每个进程内子 agent 都通过一次 `applyChildComposition(childCtx, parent, composition)` 调用完成组装：先加入父级的 agent-preset 组合，再应用子 agent 自己的 persona 和工具限制。加入父级组合正是子 agent 获得能力的途径：所有面向模型的行都位于 agent 平面，完全没有加入任何组合的子 agent 抵达模型时会看到空的工具注册表（见 [`dsh-agent-presets`](../../preset/agent-presets/README.zh.md)）。将父级作为参数是刻意设计：这让“组装子 agent 却不做该加入”在各调用点无法表达，而这正是这一次调用所要杜绝的缺陷。未组装 preset roster 的部署不加入任何组合、也不需要加入；其面向模型的行位于宿主组合中，子 agent 已能通过工具注册表的全局层解析到它们。
+每个进程内子 agent 都通过一次 `applyChildComposition(childCtx, parent, composition, options)` 调用完成组装：先加入父级的 agent-preset 组合，再应用子 agent 自己的 persona、工具限制和推理等级。加入父级组合正是子 agent 获得能力的途径：所有面向模型的行都位于 agent 平面，完全没有加入任何组合的子 agent 抵达模型时会看到空的工具注册表（见 [`dsh-agent-presets`](../../preset/agent-presets/README.zh.md)）。将父级作为参数是刻意设计：这让“组装子 agent 却不做该加入”在各调用点无法表达，而这正是这一次调用所要杜绝的缺陷。未组装 preset roster 的部署不加入任何组合、也不需要加入；其面向模型的行位于宿主组合中，子 agent 已能通过工具注册表的全局层解析到它们。
+
+`resolveChildAgentOptions()` 会独立解析 `provider`、`model`、`maxTokens` 和 `reasoningEffort`：请求覆盖其中之一时，其余仍沿用父级取值。路由二元组会随 `AgentOptions` 直达 loop，但本 seam 声明的可合并扩展字段 `AgentOptions.reasoningEffort` 若不作处理就会被接受却永远到不了请求，因为 loop 只从 `provider`／`model`／`maxTokens` 播种请求配置。因此 `applyChildComposition` 会把它作为 Agent 作用域的模型选择安装到子 agent 自己已解析的路由之上；若推理等级没有完整路由可应用，则直接拒绝，而不是悄悄丢弃。把已解析的 options 作为参数传入，使这一遗漏在各调用点无法表达，正如传入父级对 preset 加入所起的作用。
 
 `childSessionMeta()` 把所加入的 preset id 记在子 agent 的持久化 header 上，理由与顶层会话记录自己的那一个相同：preset 决定了模型所见的工具 schema 与提示段，因此冷读子 agent 的历史时必须重建那份组装，而不是部署默认值。该值从父方**活着的** scope 链读取，而不是从父方 header 读取，因为在空白期切换过 preset 的父方运行在更新的那份组装上，而它的 header 仍写着旧的那个。
 

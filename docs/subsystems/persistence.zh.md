@@ -360,6 +360,18 @@ abstract inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection
 abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }>
 
 /**
+ * Read a bounded event page immediately before one sequence position.
+ * Sequential backends may scan their complete artifact through {@link readFrom};
+ * the bound still limits returned events and lets callers widen repeated scans.
+ * @param id - persisted session to read.
+ * @param beforeSeq - exclusive seq bound, or undefined for the latest tail.
+ * @param limit - positive safe-integer event limit.
+ * @param signal - optional cancellation for backend read work.
+ * @returns the header, bounded event page, and older-event indicator.
+ */
+async readTail( id: SessionId, beforeSeq: number | undefined, limit: number, signal?: AbortSignal, ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }>
+
+/**
  * Lightweight listing from metadata, without a full-log parse.
  * @param signal - optional cancellation for backend listing work.
  * @returns one header per materialized session.

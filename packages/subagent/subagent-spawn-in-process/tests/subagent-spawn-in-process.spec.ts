@@ -1,4 +1,4 @@
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { Context, symbols, type EffectMeta } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -279,6 +279,57 @@ describe('dsh-subagent-spawn-in-process', () => {
     expect(result.stopReason).toBe('completed')
     expect(text(result.output)).toBe('explicit model child')
     await run.dispose()
+    await parentHandle.dispose()
+  })
+
+  it('applies request.agentOptions.reasoningEffort to the CHILD model request, leaving the parent untouched', async () => {
+    // The parent route declares two efforts; the child asks for one of them.
+    const ctx = new Context()
+    const adapter = new MockAdapter(
+      [textResponse('parent turn'), textResponse('child answer')],
+      { efforts: [{ id: ReasoningEffortId('low'), name: 'low' }, { id: ReasoningEffortId('high'), name: 'high' }] },
+    )
+    await mountAgentLoopTestDependencies(ctx)
+    await mountInvariants(ctx)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const parent = ctx.agentLoop.create(SessionId('effort-parent'), { provider: 'mock', model: 'mock' })
+
+    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }))
+    await parent.whenIdle()
+    expect(adapter.requests[0]?.reasoningEffort).toBeUndefined()
+
+    const run = await start(ctx, 'spawn', {
+      prompt: [{ type: 'text', text: 'think harder' }],
+      parent,
+      agentOptions: { reasoningEffort: ReasoningEffortId('high') },
+    })
+    const result = await run.result
+    expect(result.stopReason).toBe('completed')
+    // The child inherited the parent's provider/model and carried ONLY the effort.
+    expect(adapter.requests[1]).toMatchObject({ provider: 'mock', model: 'mock', reasoningEffort: 'high' })
+    await run.dispose()
+  })
+
+  it('refuses a delegated reasoning effort that has no complete route to apply to', async () => {
+    const { ctx } = await setup([])
+    const parentHandle = await ctx.agents.create({
+      sessionId: SessionId('routeless-effort-parent'),
+      agentOptions: {},
+    })
+    await expect(start(ctx, 'spawn', {
+      prompt: [{ type: 'text', text: 'p' }],
+      parent: parentHandle.agent,
+      agentOptions: { reasoningEffort: ReasoningEffortId('high') },
+    })).rejects.toThrow('subagent reasoningEffort "high" needs a complete route: the child resolved no provider')
+    // A half-resolved route names the half that is missing.
+    await expect(start(ctx, 'spawn', {
+      prompt: [{ type: 'text', text: 'p' }],
+      parent: parentHandle.agent,
+      agentOptions: { provider: 'mock', reasoningEffort: ReasoningEffortId('high') },
+    })).rejects.toThrow('subagent reasoningEffort "high" needs a complete route: the child resolved no model')
     await parentHandle.dispose()
   })
 

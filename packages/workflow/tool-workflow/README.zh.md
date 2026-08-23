@@ -6,7 +6,7 @@
 
 ## 模型看到的内容
 
-工具有三个参数：`meta`（必需的身份数据：`name`、`description` 和可选的进度注解）、`script`（必需的纯 JavaScript 脚本体，不含 `export const meta` 语句；工具描述包含完整的编写约定）以及 `args`（可选 JSON 对象，作为全局变量 `args` 向脚本公开；裸列表应包装到字段中，使协议 schema 如实表达形态）。插件还会贡献一个 `tool:<toolName>` 系统提示词段，其中包含使用策略：只有用户明确要求工作流／大型编排时才使用该工具；一两项委派优先使用普通 subagent 调用。这遵循工具指导随工具插件交付、绝不放入部署 persona 的约定。
+工具有三个参数：`meta`（必需的身份数据：`name`、`description` 和可选的进度注解，包括每个阶段声明预期使用的 `provider`／`model`／`reasoningEffort`）、`script`（必需的纯 JavaScript 脚本体，不含 `export const meta` 语句；工具描述包含完整的编写约定）以及 `args`（可选 JSON 对象，作为全局变量 `args` 向脚本公开；裸列表应包装到字段中，使协议 schema 如实表达形态）。插件还会贡献一个 `tool:<toolName>` 系统提示词段，其中包含使用策略：只有用户明确要求工作流／大型编排时才使用该工具；一两项委派优先使用普通 subagent 调用。这遵循工具指导随工具插件交付、绝不放入部署 persona 的约定。
 
 ## 生命周期
 
@@ -81,5 +81,6 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 - **父级轮次会阻塞到整个工作流结算**：没有后台启动／轮询接口，取消会丢弃局部输出并返回错误。
 - **`args` 必须是对象，Native 结果文本有界**：调用方把顶层数组／标量包装到字段中；规范工作流结果保持完整，超过 `maxResultChars` 的 JSON 会在面向模型的投影中截断，而不是存储在检索句柄背后。
-- **每次工具注册的工作流策略固定**：提供方选择、上限和工具名称属于部署配置，不是模型调用参数。
+- **每次工具注册的全局工作流策略固定**：subagent 后端、上限和工具名称属于部署配置，不是模型调用参数。每次 `agent()` 调用仍可独立选择自己的 LLM 目标（`provider`、`model`、`reasoningEffort`）。
+- **按 agent 的 LLM 目标只在进程内子 agent 上生效**：随包发布的 `spawn` 后端会把所选提供方、模型和推理等级应用到子 agent；忽略 `agentOptions` 的远程 subagent 后端会同样忽略这三者。
 - **持久记录只覆盖顶层且只供观察**：嵌套 Code Mode dispatch 不记录；记录故障会刻意退化为不完整前缀，而不改变执行。
