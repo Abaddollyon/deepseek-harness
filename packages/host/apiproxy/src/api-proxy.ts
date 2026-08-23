@@ -113,6 +113,10 @@ import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
+/** Smallest storage-event window used to satisfy one message-bounded history page. */
+const MIN_HISTORY_READ_EVENTS = 256
+/** Largest adaptive storage-event window; bounds over-read while avoiding tiny repeated scans. */
+const MAX_HISTORY_READ_EVENTS = 16_384
 
 /** Provider work budget: at most 100 calls and 2,000 inspected hits. */
 const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
@@ -229,7 +233,7 @@ function paginate(
   events: readonly SessionEvent[],
   beforeSeq: number | undefined,
   maxMessages: number,
-): { events: SessionEvent[]; hasMore: boolean } {
+): { events: SessionEvent[]; hasMore: boolean; cut: number } {
   const window = beforeSeq === undefined ? [...events] : events.filter(event => event.seq < beforeSeq)
   let count = 0
   let cut = 0
@@ -250,7 +254,7 @@ function paginate(
     }
   }
   const page = window.filter(event => event.seq >= cut)
-  return { events: page, hasMore: cut > 0 }
+  return { events: page, hasMore: cut > 0, cut }
 }
 
 /** Wrap an ok result echoing the request's rpcId. */
@@ -777,7 +781,12 @@ function historyPage(
  */
 type HistorySource =
   | { readonly kind: 'attached'; readonly session: Session }
-  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] }
+  | {
+    readonly kind: 'detached'
+    readonly header: SessionHeader
+    readonly events: SessionEvent[]
+    readonly projections?: SessionProjectionsBlock
+  }
 
 function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
@@ -1471,11 +1480,99 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * @returns the attached session, or the inspected detached header and events.
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
-  async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+  async function historySourceFor(
+    sessionId: SessionId,
+    beforeSeq: number | undefined,
+    maxMessages: number | undefined,
+  ): Promise<HistorySource> {
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
-    const inspected = await inspectServable(sessionId)
-    return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined || typeof persistence.readTail !== 'function') {
+      const inspected = await inspectServable(sessionId)
+      return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    }
+    const inspectDetached = async (): Promise<{ meta: SessionHeader; events: SessionEvent[] }> => {
+      try {
+        const inspected = await persistence.inspect(sessionId)
+        if (inspected.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+        return { meta: inspected.meta, events: [...inspected.events] }
+      } catch (error) {
+        if (error instanceof Error && error.message === `session "${sessionId}" not found`) {
+          throw new SessionNotFound(error.message)
+        }
+        throw error
+      }
+    }
+    const limit = maxMessages ?? DEFAULT_MAX_MESSAGES
+    let readLimit = Math.max(limit, MIN_HISTORY_READ_EVENTS)
+    let cursor = beforeSeq
+    let header: SessionHeader | undefined
+    let events: SessionEvent[] = []
+    while (true) {
+      let tail: Awaited<ReturnType<SessionPersistence['readTail']>>
+      try {
+        tail = await persistence.readTail(sessionId, cursor, readLimit)
+      } catch (error) {
+        if (error instanceof Error && error.message === `session "${sessionId}" not found`) {
+          throw new SessionNotFound(error.message)
+        }
+        throw error
+      }
+      if (tail.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+      header = tail.meta
+      if (beforeSeq === undefined && cursor === undefined && tail.events.length > 0
+        && tail.events.at(-1)?.type !== 'turn/end') {
+        const inspected = await inspectDetached()
+        events = inspected.events
+        header = inspected.meta
+        break
+      }
+      if (tail.events.length === 0 && tail.hasMore) {
+        const inspected = await inspectDetached()
+        events = inspected.events
+        header = inspected.meta
+        break
+      }
+      events = [...tail.events, ...events]
+      const page = paginate(events, beforeSeq, limit)
+      const earliest = events[0]?.seq ?? 0
+      if (!tail.hasMore || page.cut >= earliest) break
+      cursor = earliest
+      readLimit = Math.min(readLimit * 2, MAX_HISTORY_READ_EVENTS)
+    }
+    return { kind: 'detached', header, events }
+  }
+
+  /** Read a detached projection cut after the presenter's standing scope has mounted its units. */
+  async function withDetachedHistoryProjections(
+    sessionId: SessionId,
+    source: Extract<HistorySource, { kind: 'detached' }>,
+  ): Promise<Extract<HistorySource, { kind: 'detached' }>> {
+    let projections: SessionProjectionsBlock | undefined
+    try {
+      const cache = ctx.get('sessionProjectionCache')
+      if (cache === undefined) throw new Error('session projection cache is unavailable')
+      projections = await cache.coldSnapshot(sessionId)
+      const expectedSeq = source.events.at(-1)?.seq ?? -1
+      if (projections.asOfSeq !== expectedSeq) {
+        throw new Error(`projection snapshot ended at seq ${String(projections.asOfSeq)}, expected ${String(expectedSeq)}`)
+      }
+    } catch {
+      const persistence = ctx.get('sessionPersistence')
+      let events: readonly SessionEvent[] = source.events
+      if (persistence !== undefined && typeof persistence.readTail === 'function') {
+        const inspected = await persistence.inspect(sessionId)
+        if (inspected.meta.cwd === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
+        events = inspected.events
+      }
+      try {
+        projections = detachedProjectionsFor(ctx, events)
+      } catch (error) {
+        ctx.logger.warn(`history: projections for "${sessionId}" failed (serving the page without them): ${String(error)}`)
+      }
+    }
+    return { ...source, ...projections === undefined ? {} : { projections } }
   }
 
   /**
@@ -1506,7 +1603,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     includeProjections: boolean,
   ): { events: SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
-      const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
+      const projections = includeProjections ? source.projections : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
     const events = [...source.session.events]
@@ -2154,7 +2251,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async history(request) {
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
-          const source = await historySourceFor(sessionId)
+          let source = await historySourceFor(sessionId, beforeSeq, maxMessages)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2162,6 +2259,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // appending, so awaiting between the two reads would pair events cut
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
+          if (source.kind === 'detached' && beforeSeq === undefined) {
+            source = await withDetachedHistoryProjections(sessionId, source)
+          }
           const cut = historyCutOf(source, beforeSeq === undefined)
           const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
           return ok(request, {

@@ -271,6 +271,26 @@ describe('the inherited readRaw default', () => {
   })
 })
 
+describe('the inherited readTail default', () => {
+  it('returns exact bounded suffixes and rejects invalid bounds', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(MemoryPersistence)
+    const id = SessionId('tail-page')
+    await ctx.sessionPersistence.create(meta(id))
+    await ctx.sessionPersistence.append(id, oneTurnLog())
+
+    const latest = await ctx.sessionPersistence.readTail(id, undefined, 2)
+    expect(latest.events.map(event => event.seq)).toEqual([4, 5])
+    expect(latest.hasMore).toBe(true)
+    const earlier = await ctx.sessionPersistence.readTail(id, 3, 3)
+    expect(earlier.events.map(event => event.seq)).toEqual([0, 1, 2])
+    expect(earlier.hasMore).toBe(false)
+    await expect(ctx.sessionPersistence.readTail(id, -1, 1)).rejects.toThrow('beforeSeq')
+    await expect(ctx.sessionPersistence.readTail(id, undefined, 0)).rejects.toThrow('limit')
+  })
+})
+
 // Each fixture shares one map across mounts. No `corruptTail` is supplied because map writes are
 // atomic; the suite asserts that skip while JSONL and SQLite cover the repair branch.
 runCoordinatorContract('memory', async (): Promise<CoordinatorFixture> => {
