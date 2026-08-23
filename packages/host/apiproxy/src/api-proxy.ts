@@ -115,6 +115,10 @@ import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
+/** Smallest storage-event window used to satisfy one message-bounded history page. */
+const MIN_HISTORY_READ_EVENTS = 256
+/** Largest adaptive storage-event window; bounds over-read while avoiding tiny repeated scans. */
+const MAX_HISTORY_READ_EVENTS = 16_384
 
 /** Provider work budget: at most 100 calls and 2,000 inspected hits. */
 const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
@@ -1745,6 +1749,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       }
     }
     const limit = maxMessages ?? DEFAULT_MAX_MESSAGES
+    // Storage pages count raw events while the API quota counts only visible
+    // messages. Streaming-heavy logs can contain thousands of chunks per
+    // message, so fixed message-sized reads repeatedly rescan sequential media.
+    let readLimit = Math.max(limit, MIN_HISTORY_READ_EVENTS)
     let cursor = beforeSeq
     let header: SessionHeader | undefined
     let events: SessionEvent[] = []
@@ -1753,7 +1761,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       signal?.throwIfAborted()
       let tail: Awaited<ReturnType<SessionPersistence['readTail']>>
       try {
-        tail = await persistence.readTail(sessionId, cursor, limit, signal)
+        tail = await persistence.readTail(sessionId, cursor, readLimit, signal)
       } catch (error) {
         if (error instanceof Error && error.message === `session "${sessionId}" not found`) {
           throw new SessionNotFound(error.message)
@@ -1780,6 +1788,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       const earliest = events[0]?.seq ?? 0
       if (!tail.hasMore || page.cut >= earliest) break
       cursor = earliest
+      readLimit = Math.min(readLimit * 2, MAX_HISTORY_READ_EVENTS)
     }
     if (header === undefined) throw new SessionNotFound(`session "${sessionId}" not found`)
     return { kind: 'detached', header, events }

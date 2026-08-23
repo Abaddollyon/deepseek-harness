@@ -867,9 +867,29 @@ describe('detached history tail paging', () => {
     if (!response.result.ok) throw new Error(response.result.error.message)
     expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([295, 296, 297, 298, 299])
     expect(response.result.value.hasMore).toBe(true)
-    expect(readTail.mock.calls.every(([, , limit]) => limit === 2)).toBe(true)
-    expect(readTail.mock.calls.length * 2).toBeLessThan(events.length)
+    expect(readTail.mock.calls.map(([, , limit]) => limit)).toEqual([256])
+    expect(256).toBeLessThan(events.length)
     expect(list).not.toHaveBeenCalled()
+    expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('widens raw-event reads when streaming deltas separate visible messages', async () => {
+    const events: SessionEvent[] = [userEvent(0, 'older')]
+    for (let seq = 1; seq <= 600; seq += 1) {
+      events.push({
+        type: 'assistant/chunk', seq, time: seq,
+        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'x' } },
+      })
+    }
+    events.push(userEvent(601, 'newer'))
+    events.push({ type: 'turn/end', seq: 602, time: 602, data: { turn: 1, reason: { kind: 'completed' } } })
+    const { api, readTail, inspect } = await pagedApi(events)
+
+    const response = await api.sessions.history(request({ sessionId: sid('paged-history'), maxMessages: 2 }))
+    if (!response.result.ok) throw new Error(response.result.error.message)
+    expect(response.result.value.events.at(0)?.event.seq).toBe(0)
+    expect(response.result.value.events.at(-1)?.event.seq).toBe(602)
+    expect(readTail.mock.calls.map(([, , limit]) => limit)).toEqual([256, 512])
     expect(inspect).not.toHaveBeenCalled()
   })
 
@@ -887,7 +907,7 @@ describe('detached history tail paging', () => {
     expect(list).not.toHaveBeenCalled()
   })
 
-  it('pages beforeSeq exactly across storage chunks and source-event groups', async () => {
+  it('pages beforeSeq exactly across source-event groups', async () => {
     const events: SessionEvent[] = [
       { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } },
       userEvent(1, 'prompt'),
@@ -907,7 +927,8 @@ describe('detached history tail paging', () => {
     if (!response.result.ok) throw new Error(response.result.error.message)
     expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([2, 3, 4, 5])
     expect(response.result.value.hasMore).toBe(true)
-    expect(readTail.mock.calls.map(([, beforeSeq]) => beforeSeq)).toEqual([6, 5, 4, 3])
+    expect(readTail.mock.calls.map(([, beforeSeq]) => beforeSeq)).toEqual([6])
+    expect(readTail.mock.calls.map(([, , limit]) => limit)).toEqual([256])
     expect(list).not.toHaveBeenCalled()
   })
 })
