@@ -152,6 +152,27 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     host.close()
   })
 
+  it('agent({reasoningEffort}) forwards an effort alone, without inventing a provider or model', async () => {
+    const host = fakeHost({ reply: () => text('ok') })
+    void runWorkerSession(host.port, init("return await agent('think hard', { reasoningEffort: 'max' })"))
+    const result = await host.result()
+    expect(result.value).toBe('ok')
+    const start = host.ofType(WorkerToHostType.ChildStart)[0]!
+    expect(start.request.reasoningEffort).toBe('max')
+    expect(start.request.provider).toBeUndefined()
+    expect(start.request.model).toBeUndefined()
+    host.close()
+  })
+
+  it('agent({provider, model, reasoningEffort}) forwards all three independently settable target fields', async () => {
+    const host = fakeHost({ reply: () => text('ok') })
+    void runWorkerSession(host.port, init("return await agent('p', { provider: 'openai', model: 'gpt-x', reasoningEffort: 'low' })"))
+    await host.result()
+    const start = host.ofType(WorkerToHostType.ChildStart)[0]!
+    expect(start.request).toMatchObject({ provider: 'openai', model: 'gpt-x', reasoningEffort: 'low' })
+    host.close()
+  })
+
   it('a schema child completing WITHOUT a structured value resolves null with a failed outcome', async () => {
     const host = fakeHost({ reply: () => text('prose, no structure') })
     void runWorkerSession(host.port, init("return await agent('p', { schema: { type: 'object' } })"))
@@ -338,7 +359,12 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
       ["return await agent('p', { label: 3 })", '"label" must be a string'],
       ["return await agent('p', { get label() { throw new Error('read failed') } })", 'options must be plain JSON data'],
       ["return await agent('p', { bogus: true })", '"bogus" is not recognized'],
-      ["return await agent('p', { effort: 'high' })", '"effort" is deferred and not supported by this engine (supported: label, phase, schema, provider, model)'],
+      ["return await agent('p', { isolation: 'strict' })", '"isolation" is deferred and not supported by this engine (supported: label, phase, schema, provider, model, reasoningEffort)'],
+      ["return await agent('p', { agentType: 'explore' })", '"agentType" is deferred and not supported by this engine'],
+      // The bare Claude Code spelling is no longer deferred: it is simply not a
+      // name this engine has, and the rejection points at the one it does.
+      ["return await agent('p', { effort: 'high' })", '"effort" is not recognized (supported: label, phase, schema, provider, model, reasoningEffort)'],
+      ["return await agent('p', { reasoningEffort: 3 })", '"reasoningEffort" must be a string'],
       ["return await agent('p', { schema: { type: 'object', oneOf: [] } })", 'outside the supported subset'],
       ['return await parallel([() => 1, () => 2, () => 3])', 'over the per-call cap (2)'],
       ['return await pipeline([1, 2, 3], (x) => x)', 'maxItemsPerCall'],

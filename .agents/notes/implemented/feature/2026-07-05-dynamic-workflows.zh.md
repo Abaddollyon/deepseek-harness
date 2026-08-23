@@ -16,7 +16,7 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 一次工作流调用包含 JSON `meta`（`name`、`description`，以及可选的 `whenToUse`/`phases`）和一段支持顶层 `await` 并返回 JSON 值的 JavaScript `script` 正文。元数据作为数据校验，从不被执行。正文接收 `agent(prompt, options)`、`parallel(thunks)`、`pipeline(items, ...stages)`、`phase(title)`、`log(message)` 和 `args`。流水线各阶段接收 `(prev, item, index)`，阶段之间无屏障；失败的子 agent 和普通阶段错误将受影响的 item 结算为 `null` 并跳过其剩余阶段。Claude Code 的确定性限制随日志机制一并延后实现，因此兼容的脚本正文在将 meta 头移入参数后可以使用时钟和随机数。
 
-与 CC 有一处刻意的严格性差异：钩子误用——未知或延迟的选项（`effort`/`isolation`/`agentType`）、格式错误的参数、超出支持子集的 schema、触发上限、seam 启动失败——会抛出带 `fatal: true` 的 `WorkflowError`，组合器会重新抛出 fatal 错误而非将 item 置为 null。如果不这样做，一个拼错的选项会悄然变成一个与子 agent 失败无法区分的 `null`——这正是本仓库禁止的「被接受后被忽略」的失败模式。另有一处新增：工具的 `args` 参数是一个 JSON 对象（裸列表被包装为一个字段），使协议格式（wire format）保持诚实。
+与 CC 有一处刻意的严格性差异：钩子误用——未知或延迟的选项（`isolation`/`agentType`）、格式错误的参数、超出支持子集的 schema、触发上限、seam 启动失败——会抛出带 `fatal: true` 的 `WorkflowError`，组合器会重新抛出 fatal 错误而非将 item 置为 null。如果不这样做，一个拼错的选项会悄然变成一个与子 agent 失败无法区分的 `null`——这正是本仓库禁止的「被接受后被忽略」的失败模式。另有一处新增：工具的 `args` 参数是一个 JSON 对象（裸列表被包装为一个字段），使协议格式（wire format）保持诚实。
 
 ### seam（dsh-workflow）
 
@@ -59,7 +59,7 @@ worker 侧逻辑通过进程内 `MessageChannel` 运行，使 V8 覆盖率能够
 - **后台收集**（启动工具 → run id → 完成通知 → 收集），与 shell/subagent 后台统一一起设计。
 - **日志化 + 恢复**（`resumeFromRunId`、缓存的 agent() 前缀）：实现它会以脚本约定收紧的形式重新引入 CC 的确定性禁令（脚本可以读取时钟）。
 - **保存／打包的工作流**（`.deepseek/workflows/` 注册表、斜杠命令 API）和**脚本持久化到运行目录**（工具调用事件已经持久记录了脚本）。
-- **嵌套 `workflow()`**、**token `budget`**，以及 `effort`/`isolation`/`agentType` agent 选项（每个都会明确拒绝，并在消息中注明其已延迟实现）。
+- **嵌套 `workflow()`**、**token `budget`**，以及 `isolation`/`agentType` agent 选项（每个都会明确拒绝，并在消息中注明其已延迟实现）。按调用的推理等级已在后续以 `reasoningEffort` 落地，并刻意不沿用 Claude Code 的裸名 `effort`：见[按 agent 的推理等级](2026-08-19-workflow-per-agent-reasoning-effort.zh.md)。
 - **整体运行的挂钟超时**：取消总能释放调用方（result 在宽限期内 settle），因此总运行时间上限是后台重设计的策略旋钮，不是此处的正确性需求。
 - **超越 worker 线程的引擎加固**：在同一 seam 背后使用 isolated-vm 或独立进程引擎（真正的沙箱化；内存限制）。
 - **ACP（Agent Client Protocol）后端结构化输出**和 **`toolFilter`**（两者仍以能力标志 `false` 门控）。
