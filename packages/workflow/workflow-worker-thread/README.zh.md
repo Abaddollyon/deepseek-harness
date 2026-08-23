@@ -27,10 +27,14 @@ worker 仍提供实用的隔离：
 
 在 worker 内，脚本会收到 `args` 以及以下钩子：
 
-- `agent(prompt, { label, phase, schema, model })` 启动一个宿主侧 subagent。提供 schema 时返回结构化值，否则返回最终文本。普通子 agent 失败会产生 `null`；
+- `agent(prompt, { label, phase, schema, provider, model, reasoningEffort })` 启动一个宿主侧 subagent。提供 schema 时返回结构化值，否则返回最终文本。普通子 agent 失败会产生 `null`；
 - `parallel(thunks)` 在已配置的并发限制下运行 thunk；
 - `pipeline(items, ...stages)` 在没有跨阶段屏障的情况下传递 `(previous, item, index)`；
 - `phase(title)` 和 `log(message)` 发出观察器叙述。
+
+`provider`、`model` 和 `reasoningEffort` 用于选择子 agent 的 LLM 目标，三者可独立设置：调用未给出的字段沿用父 agent 的取值。脚本侧拼写为 `reasoningEffort`，与 `LlmCallConfig.reasoningEffort` 一致，而不是工具 JSON 风格的 `reasoning_effort`；Claude Code 的裸名 `effort` 不是本引擎存在的名称，`isolation`／`agentType` 仍被推迟并按名称拒绝。
+
+在任何子 agent 启动之前，宿主会通过 `ctx.llm.resolveCallConfig`，针对该子 agent 实际运行的路由（给出时用每次调用的覆盖值，否则用继承的父路由）校验所请求的推理等级。该查询采用 LLM seam 自身的策略：显式请求但该确切模型未提供的推理等级会被**拒绝**，绝不做钳制或别名替换（它唯一的替换是为未请求推理等级的调用方物化适配器默认值）。拒绝、路由不完整，或部署未组合 LLM 能力，都会成为终止脚本的致命 `AGENT_START` 错误，因为被悄悄降级的推理等级会让本次运行的成本与质量不可预测。随后该推理等级经 `agentOptions` 传给子 agent，由进程内委派组合将其作为 Agent 作用域的模型选择应用。
 
 未知选项、格式错误的参数、不支持的 schema、超出上限、提供方启动失败和基础设施结果失败都属于致命工作流错误。有意不注入 timer、文件系统 API 或 Node 全局变量，但上述信任注意事项仍然适用。
 
