@@ -20,7 +20,7 @@ import type {
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceBrowserProps } from './contract/slots.ts'
 import type { SessionNode, SessionOrderBy } from './tree.ts'
-import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
+import { currentGroupKey, deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
 import { WorkspacePickFlow } from './WorkspacePicker.tsx'
@@ -766,6 +766,43 @@ function SearchResults({
   )
 }
 
+/** One navigation a reveal answers: the selected Session together with the group that renders it. */
+interface CurrentGroupReveal {
+  /** Identity of that pair; each distinct value is answered exactly once. */
+  navigation: string
+  /** Group key to open, or null when the group is already open. */
+  foldedKey: string | null
+}
+
+/**
+ * Open the group holding the current Session once per navigation.
+ *
+ * Auto-expansion answers a navigation event — the selection moving to another
+ * Session, or a freshly connected Workspace claiming the Session it just
+ * created — and is never re-asserted as a standing invariant. The reveal
+ * records the selection/group pair it answered, and folding that group by hand
+ * changes neither term, so a deliberate fold stands until the selection moves
+ * again. Pinning does not cover this case: it holds live rows only, so an idle
+ * current Session in a folded group would stay unreachable. The reveal expands
+ * through the persisted view store the header's `aria-expanded` renders from,
+ * so the stored fold bit and the rendered state remain one fact.
+ * @param reveal - the current navigation and the group to open, or null while nothing is
+ * selected or the Workspace baseline cannot yet say which group renders it.
+ * @param expand - persists one group's expansion.
+ */
+function useCurrentGroupReveal(reveal: CurrentGroupReveal | null, expand: (key: string, expanded: boolean) => void): void {
+  const answered = useRef<string | null>(null)
+  useEffect(() => {
+    if (reveal === null) {
+      answered.current = null
+      return
+    }
+    if (reveal.navigation === answered.current) return
+    answered.current = reveal.navigation
+    if (reveal.foldedKey !== null) expand(reveal.foldedKey, true)
+  }, [reveal, expand])
+}
+
 /**
  * Render the browsing region.
  * @param props - composed slot props (shell owner share + store + injected actions).
@@ -840,6 +877,20 @@ export function WorkspaceBrowser({
       ...workspaces.map(workspace => workspace.workspaceId as string),
     ])
   }, [actions.retainAccountKeys, workspacePhase, workspaces])
+  // Navigation reveal (see useCurrentGroupReveal). It lives here rather than in
+  // SessionTree because the tree unmounts with search, the flat mode, and the
+  // rail: an answered navigation must survive those remounts, or returning to
+  // the tree would undo a fold the user made in it.
+  const currentSessionId = useSessions(state => state.current)
+  const reveal = useMemo<CurrentGroupReveal | null>(() => {
+    // Workspace membership decides which group renders the Session; before the
+    // baseline lands every Session reads as Ungrouped, so the reveal waits
+    // instead of opening a group the membership will contradict.
+    if (currentSessionId === undefined || workspacePhase !== 'ready') return null
+    const key = currentGroupKey(currentSessionId, workspaces)
+    return { navigation: `${currentSessionId}\u0000${key}`, foldedKey: groupExpansion[key] === true ? null : key }
+  }, [currentSessionId, groupExpansion, workspacePhase, workspaces])
+  useCurrentGroupReveal(reveal, actions.setGroupExpanded)
   // The query outlives the tree and the input (both wide-only) so collapsing
   // does not silently drop an in-progress filter.
   const [query, setQuery] = useState('')
