@@ -193,26 +193,36 @@ describe('WorkspaceBrowser', () => {
     const b = mount({
       useSessions: hook(sessionState([
         untitled('one', new Date(2026, 0, 2, 3, 4).getTime()),
-        untitled('two', new Date(2026, 0, 5, 6, 7).getTime()),
+        // Same minute as 'one': the dated labels collide, so the derivation
+        // numbers both rows rather than letting them read identically.
+        untitled('two', new Date(2026, 0, 2, 3, 4, 30).getTime()),
+        untitled('three', new Date(2026, 0, 5, 6, 7).getTime()),
       ])),
-      useWorkspaces: hook(workspaceState([workspace('alpha', ['one', 'two'])])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['one', 'two', 'three'])])),
     })
     fireEvent.click(screen.getByText('alpha'))
 
-    // Each row takes its own dated label; the workspace name appears once, as
-    // the group header.
-    expect(screen.getByText('新会话 · 2026年1月2日 03:04')).toBeTruthy()
+    // Every row label is non-empty, distinct from every sibling's, and
+    // distinct from the group label, which appears exactly once — as the
+    // group header.
+    expect(screen.getByText('新会话 · 2026年1月2日 03:04（1）')).toBeTruthy()
+    expect(screen.getByText('新会话 · 2026年1月2日 03:04（2）')).toBeTruthy()
     expect(screen.getByText('新会话 · 2026年1月5日 06:07')).toBeTruthy()
     expect(screen.getAllByText('alpha')).toHaveLength(1)
-    // A durable title arriving on the same rows restores their real titles.
+    // A durable title arriving on the same rows restores their real titles —
+    // including one that legitimately IS the directory's own name.
     rerender(b, {
       useSessions: hook(sessionState([
-        summary('one', 2, { title: 'Real one', displayTitle: 'Real one' }),
-        summary('two', 1, { title: 'Real two', displayTitle: 'Real two' }),
+        summary('one', 3, { title: 'Real one', displayTitle: 'Real one' }),
+        summary('two', 2, { title: 'Real two', displayTitle: 'Real two' }),
+        summary('three', 1, { title: 'alpha', displayTitle: 'alpha' }),
       ])),
     })
     expect(screen.getByText('Real one')).toBeTruthy()
     expect(screen.getByText('Real two')).toBeTruthy()
+    // Header plus the genuinely directory-named row, nothing dated remains.
+    expect(screen.getAllByText('alpha')).toHaveLength(2)
+    expect(screen.queryByText(/新会话 · /)).toBeNull()
   })
 
   it('persists flat-list drag order locally and applies Last updated within that account', async () => {

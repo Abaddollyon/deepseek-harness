@@ -10,7 +10,7 @@ A session row's stored display title comes from the client runtime's projection:
 
 ## Decision
 
-The workspace tree marks a non-blank session row whose summary carries no durable title as `untitled` (`SessionNode.untitled`, derived from `SessionSummary.title === undefined`). The row renderer mirrors the existing blank-row substitution: instead of the stored title — which in this state is only the directory-basename fallback — it renders a dated New Session label (`session.untitled`, "New Session · 2026-08-24 09:32" in en), stamped with the session's last-activity time through the dictionary's date template. The label is meaningful (an unnamed session), distinct per session (its own timestamp), and honest about not being a title. The moment the host projects a durable title, the same rows render that title verbatim; search and the copy affordance keep reading the stored title, so nothing else changes.
+The workspace tree marks a non-blank session row whose summary carries no durable title as `untitled` (`SessionNode.untitled`, derived from `SessionSummary.title === undefined`). The row renderer mirrors the existing blank-row substitution: instead of the stored title — which in this state is only the directory-basename fallback — it renders a dated New Session label (`session.untitled`, "New Session · 2026-08-24 09:32" in en), stamped with the session's last-activity time through the dictionary's date template. The label is meaningful (an unnamed session) and honest about not being a title. Because the stamp has minute precision, the derivation numbers every member of a same-minute collision set (`SessionNode.untitledNumber`, assigned per rendered list in row order; `session.untitledNumbered`, "New Session · 2026-08-24 09:32 (2)" in en), so two untitled sessions in one list never render identical text. The moment the host projects a durable title, the same rows render that title verbatim — including a durable title that legitimately equals the directory name, which never enters the untitled path; search and the copy affordance keep reading the stored title, so nothing else changes.
 
 The runtime projection itself is untouched: `displayTitleOf` is the repo-wide single derivation also consumed by the conversation header and subagent lineage, where the basename remains a reasonable last resort.
 
@@ -24,10 +24,9 @@ The runtime projection itself is untouched: `displayTitleOf` is the repo-wide si
 
 ## Consequences
 
-- Untitled rows under one group are visually distinct from each other and from the group header, and no row can masquerade as the workspace.
-- Two untitled sessions with identical last-activity minute stamps still share one label; the durable title resolves the collision as soon as it lands.
-- `SessionNode` gains an optional `untitled` flag (absent = false), so existing construction sites are unaffected.
+- Untitled rows under one group are visually distinct from each other and from the group header, and no row can masquerade as the workspace; same-minute collisions carry an ordinal, so the distinctness guarantee has no gap.
+- `SessionNode` gains optional `untitled` and `untitledNumber` fields (absent = false/unnumbered), so existing construction sites are unaffected, and lists without collisions keep their row identities (the derivation returns its input array unchanged).
 
 ## Testing
 
-`tree.client.spec.ts` covers the flag's derivation (untitled, titled, and blank rows). `rows.client.spec.tsx` covers two untitled rows rendering distinct dated labels while a titled row renders its stored title. `workspace-browser.client.spec.tsx` covers the assembled regression: a group whose sessions lack durable titles renders one dated label per row and the workspace name exactly once, and a durable title arriving on the same rows restores their real titles.
+`tree.client.spec.ts` covers the flag's derivation (untitled, titled, and blank rows) and the collision numbering across grouped, flat, and pinned row sets. `rows.client.spec.tsx` covers untitled rows rendering dated labels — numbered on collision — while a titled row renders its stored title. `workspace-browser.client.spec.tsx` covers the assembled regression: a group whose sessions lack durable titles renders non-empty, pairwise-distinct labels and the workspace name exactly once, and durable titles arriving on the same rows restore their real titles, including one that legitimately equals the directory name.
