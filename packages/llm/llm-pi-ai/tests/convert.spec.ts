@@ -883,6 +883,24 @@ describe('mapStopReason / mapUsage', () => {
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5 })
   })
+
+  it('maps the provider-reported reasoning split without adding it to output', () => {
+    // pi-ai keeps reasoning inside output; reasoningTokens is a sub-breakdown,
+    // so outputTokens must not grow by the split.
+    expect(mapUsage({ ...usage(10, 12), reasoning: 7 })).toEqual({
+      inputTokens: 10,
+      outputTokens: 12,
+      reasoningTokens: 7,
+    })
+    // Providers that expose the breakdown report zero as a number; only
+    // providers without one leave the field absent.
+    expect(mapUsage({ ...usage(10, 5), reasoning: 0 })).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      reasoningTokens: 0,
+    })
+    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5 })
+  })
 })
 
 describe('toStreamChunks edge branches', () => {
