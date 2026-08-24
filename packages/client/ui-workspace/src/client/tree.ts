@@ -12,8 +12,13 @@ import {
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
 
-/** Display label for the ungrouped bucket row. */
-export const UNGROUPED_LABEL = 'Ungrouped'
+/**
+ * Display label for the ungrouped bucket row: loose chats attached to no
+ * workspace. Keep verbatim-equal to the dictionary's `group.ungrouped`
+ * entry; the row renderer reads the dictionary, this constant backs the
+ * non-localized derivations (search labels, cwd-less fallbacks).
+ */
+export const UNGROUPED_LABEL = 'Ungrouped chats'
 
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {

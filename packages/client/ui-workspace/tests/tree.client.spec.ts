@@ -7,6 +7,7 @@ import {
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
+import { en } from '../src/client/locales.ts'
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -486,6 +487,12 @@ describe('createWorkspaceViewStore', () => {
 })
 
 describe('workspaceLabel', () => {
+  it('keeps UNGROUPED_LABEL verbatim-equal to the en dictionary entry', () => {
+    // The bucket row reads the dictionary while non-localized derivations read
+    // the constant; the two must never drift apart.
+    expect(UNGROUPED_LABEL).toBe(en['group.ungrouped'])
+  })
+
   it('uses the Ungrouped fallback and extracts POSIX and Windows basenames', () => {
     expect(workspaceLabel(undefined)).toBe(UNGROUPED_LABEL)
     expect(workspaceLabel('')).toBe(UNGROUPED_LABEL)
