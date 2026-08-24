@@ -569,6 +569,25 @@ describe('WorkspaceBrowser', () => {
     expect(groupHeader('fresh').getAttribute('aria-expanded')).toBe('true')
   })
 
+  it('defers the reveal until the Workspace baseline says which group renders the session', async () => {
+    const sessions = sessionState([summary('a', 2)], { current: sid('a') })
+    const b = mount({
+      useSessions: hook(sessions),
+      useWorkspaces: hook({
+        ...workspaceState([]), phase: 'pending' as const, state: 'loading' as const, baselinesReady: false,
+      }),
+    })
+    // Without the baseline every session reads as Ungrouped, so opening a group
+    // would be a guess: nothing is written and nothing claims to be open.
+    expect(b.store.getSnapshot().groupExpansion).toEqual({})
+    expect(groupHeader('未分组会话').getAttribute('aria-expanded')).toBe('false')
+
+    rerender(b, { useWorkspaces: hook(workspaceState([workspace('alpha', ['a'])])) })
+    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
+    expect(screen.getByText('a')).toBeTruthy()
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+  })
+
   it('opens only the current session\'s group, leaving other folded groups pinning their live rows', async () => {
     const b = mount({
       useSessions: hook(sessionState([
