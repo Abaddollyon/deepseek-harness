@@ -13,11 +13,18 @@
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
 
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+
 - id: goal-round-driver
   name: '@deepseek-ai/dsh-goal-round-driver'
+  config:
+    wake:
+      mode: event-driven
+      timeoutMs: 300000
 ```
 
-该插件没有可调配置。`maxGoalRounds` 属于目标定义，面向模型的阻塞阈值则属于 [`dsh-tool-goal`](../tool-goal/README.zh.md)；在驱动器中重复任一数值都可能产生分歧策略。
+`wake.mode` 默认为 `always`，在每个 idle 检查点立即续行。`event-driven` 会在直属子 agent 或调用者拥有的后台 job 仍在运行时延迟 Round，并在用户消息、完成 notice、relay 或 `wake.timeoutMs` 安全超时后续行；超时默认 300000 ms，最小 1000 ms。事件驱动模式需要进程级 Cordis timer 服务。若可选后台 job 检查失败，驱动器会记录该失败并继续，而不会让 goal 无限期停驻。`maxGoalRounds` 仍属于 goal 定义，面向模型的阻塞阈值仍属于 [`dsh-tool-goal`](../tool-goal/README.zh.md)。
 
 ## Round 约定
 
@@ -29,13 +36,13 @@
 
 ## Idle 检查点
 
-整个 agent 进入 idle 时，持久 goal phase 和 revision 具有权威性。phase 为 active、已启用续行且仍有容量的 goal 会预留下一 Round；完成、暂停、阻塞和编辑都会阻止续行。驱动器不会通过关联 goal 消息与 `turn/end` 来对前一段活动分类，因此提供方错误和 token 上限不属于提示词级 goal 结果。
+整个 agent 进入 idle 时，持久 goal phase 和 revision 具有权威性。`always` 模式会为 phase 为 active、已启用续行且仍有容量的 goal 预留下一 Round。事件驱动模式在没有直属子 agent 或调用者拥有的后台 job 运行时保持相同吞吐；存在待完成工作时，则等待用户消息、完成 notice、relay 或安全超时。goal 自身消息与 `tool-goal` 上下文不会唤醒自己的续行。完成、暂停、阻塞和编辑都会阻止续行。驱动器不会通过关联 goal 消息与 `turn/end` 来对前一段活动分类，因此提供方错误和 token 上限不属于提示词级 goal 结果。
 
 ## 生命周期与持久性
 
 `goal/changed` 会产生持久性义务。排队工作前，驱动器会等待 `ctx.sessions.flush()`，并在等待后重新检查 goal revision 与竞争输入。通过 `agent/error` 到达的 flush 失败会停用续行，避免另一 Round 启动。
 
-此插件加载到现有 agent 上时绝不会继承续行启用状态。`GoalService.disarm()` 会移除进程本地权限，而不改变持久 phase、revision 或历史；之后由用户明确授权的 resume 会记录重新启用续行。会话 resume 和 fork 后，goal 领域通过 `agent/session-start` 处理应用相同规则。
+唤醒序号计数器与超时句柄只存在于当前进程，并在会话启动时重置。计时器由插件 fiber 管理，并在 goal 变更、停用续行、agent 销毁和 teardown 时清除。此插件加载到现有 agent 上时绝不会继承续行启用状态。`GoalService.disarm()` 会移除进程本地权限，而不改变持久 phase、revision 或历史；之后由用户明确授权的 resume 会记录重新启用续行。会话 resume 和 fork 后，goal 领域通过 `agent/session-start` 处理应用相同规则。
 
 取消会移除 inbox 中待处理的工作，或留下 agent 范围的 aborted 状态。在下一次 idle 检查点，驱动器会暂停存在已预留或已准入尝试的 goal，避免取消后自动重启；与 goal 尝试无关的取消只会撤销进程本地续行权限。如果 pause 变更失败，驱动器会回退到停用续行。插件 teardown 会关闭准入，停用所有活跃 goal 的续行，以 `parent` cause 取消正在进行的工作，并在事件防护仍生效的情况下等待驱动器和 agent 完全停稳。
 
@@ -49,7 +56,7 @@
 
 #### Token 影响
 
-每个已准入 Round 会增加一个固定指令块和目标。后续请求会重新发送保留的 Round，直到压缩（compaction）将其遮蔽；不会创建新 agent，也不会复制对话前缀。
+每个已准入 Round 会增加一个固定指令块和目标。事件驱动模式会在已有工作预计将发布唤醒消息时抑制 Round；如果消息丢失，回退超时仍可准入一轮。后续请求会重新发送保留的 Round，直到压缩（compaction）将其遮蔽；不会创建新 agent，也不会复制对话前缀。
 
 #### KV Cache 影响
 
@@ -62,3 +69,4 @@
 - **已接受队列的卸载竞态**：Cordis 插件卸载是异步的。已经被 agent inbox 接受的 goal 提示词可以在卸载开始前启动并消耗其 Round；teardown 随后会取消请求、停用 goal 的续行并等待完全停稳。不会再启动后续 Round。
 - **只有 Round 上限，不是资源预算**：token、货币、时间与提供方配额策略保持独立。对应的会话事件不会归属于 goal 消息，也不会映射为 goal 阻塞代码。
 - **异常情况不自动重试**：暂时性的提供方与持久化失败需要之后由用户授权 resume，而不会采用隐式重试策略。
+- **进程本地唤醒状态**：事件驱动计数器与计时器不持久化。重启会通过普通会话生命周期停用续行；明确 resume 会建立新的权限和唤醒状态。

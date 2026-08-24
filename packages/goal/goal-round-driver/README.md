@@ -13,11 +13,18 @@ Same-session continuation driver for [`ctx.goals`](../goal/README.md). It turns 
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
 
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+
 - id: goal-round-driver
   name: '@deepseek-ai/dsh-goal-round-driver'
+  config:
+    wake:
+      mode: event-driven
+      timeoutMs: 300000
 ```
 
-The plugin has no tunable configuration. `maxGoalRounds` belongs to the goal definition, while the model-facing blocked threshold belongs to [`dsh-tool-goal`](../tool-goal/README.md); duplicating either value in the driver could produce divergent policy.
+`wake.mode` defaults to `always`, which preserves immediate continuation at every idle checkpoint. `event-driven` delays a round while a direct child agent or caller-owned background job remains live, then continues after a user message, completion notice, relay, or `wake.timeoutMs` safety net (default 300000 ms, minimum 1000 ms). Event-driven mode requires the process-wide Cordis timer service. If optional background-job inspection fails, the driver logs the failure and continues rather than parking the goal indefinitely. `maxGoalRounds` remains part of the goal definition, while the model-facing blocked threshold remains in [`dsh-tool-goal`](../tool-goal/README.md).
 
 ## Round contract
 
@@ -29,13 +36,13 @@ The retained prompt names the JSON-quoted objective and `round/maxGoalRounds`, t
 
 ## Idle checkpoint
 
-At whole-agent idle, durable goal phase and revision are authoritative. An active, armed goal with capacity reserves its next round; completion, pause, blocking, and edits suppress continuation. The driver does not classify the preceding activity by correlating the goal message with `turn/end`, so provider errors and token limits are not prompt-level goal outcomes.
+At whole-agent idle, durable goal phase and revision are authoritative. An active, armed goal with capacity reserves its next round under `always` mode. Event-driven mode preserves that throughput when no direct child or caller-owned background job is live; while work is pending, it waits for a user-authored message, completion notice, relay, or safety-net timeout. Goal-origin messages and `tool-goal` context do not wake their own continuation. Completion, pause, blocking, and edits suppress continuation. The driver does not classify the preceding activity by correlating the goal message with `turn/end`, so provider errors and token limits are not prompt-level goal outcomes.
 
 ## Lifecycle and durability
 
 `goal/changed` creates a durability obligation. Before queuing work, the driver awaits `ctx.sessions.flush()` and rechecks both the goal revision and competing input after the await. A flush failure arriving through `agent/error` disarms continuation before another round can start.
 
-Activation is never inherited when this plugin loads over an existing agent. `GoalService.disarm()` removes process-local authority without changing durable phase, revision, or history; explicit human-authorized resume records the later reactivation. The same rule applies after session resume and fork through the goal domain's `agent/session-start` handling.
+Wake sequence counters and timeout handles are process-local and reset on session start. Timers are owned by the plugin fiber and cleared on goal changes, disarm, agent disposal, and teardown. Activation is never inherited when this plugin loads over an existing agent. `GoalService.disarm()` removes process-local authority without changing durable phase, revision, or history; explicit human-authorized resume records the later reactivation. The same rule applies after session resume and fork through the goal domain's `agent/session-start` handling.
 
 Cancellation removes pending inbox work or leaves an agent-wide aborted state. At the next idle checkpoint the driver pauses a goal with a reserved or admitted attempt so cancellation cannot auto-restart it; cancellation unrelated to a goal attempt only disarms process-local continuation. If the pause mutation fails, the driver falls back to disarming. Plugin teardown closes admission, disarms every live goal, cancels active work with the `parent` cause, and awaits the driver plus agent quiescence while its event fence remains installed.
 
@@ -49,7 +56,7 @@ Each admitted round is one retained user-role `<goal_round>` block naming the fu
 
 #### Token effect
 
-One fixed instruction block plus the objective is added per admitted round. Later requests resend retained rounds until compaction shadows them; no fresh agent or copied conversation prefix is created.
+One fixed instruction block plus the objective is added per admitted round. Event-driven mode suppresses rounds while owned work is expected to publish a wake message; the fallback timeout can still admit a round when that message is lost. Later requests resend retained rounds until compaction shadows them; no fresh agent or copied conversation prefix is created.
 
 #### KV Cache effect
 
@@ -62,3 +69,4 @@ Append-only within an epoch: each admitted round extends the existing conversati
 - **Accepted-queue unload race** — Cordis plugin unload is asynchronous. A goal prompt already accepted by the agent inbox can begin and consume its round before unload starts; teardown then cancels the request, disarms the goal, and awaits quiescence. No later round starts.
 - **Round cap, not resource budget** — token, currency, time, and provider quota policies remain independent. Their session events are not attributed to the goal message or mapped into goal blocker codes.
 - **No abnormal auto-retry** — transient provider and persistence failures require a later human-authorized resume rather than an implicit retry policy.
+- **Process-local wake state** — event-driven counters and timers are not durable. A restart disarms continuation through the ordinary session lifecycle; explicit resume establishes new authority and wake state.
