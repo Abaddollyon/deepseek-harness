@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import TimerService from '@deepseek-ai/cordis-plugin-timer'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import GoalService, { GoalId } from '@deepseek-ai/dsh-goal'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
-import { createUserMessage, LlmAdapter, LlmError  } from '@deepseek-ai/dsh-llm'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { createUserMessage, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
@@ -83,16 +86,25 @@ const contexts: Context[] = []
 
 afterEach(async () => {
   await Promise.allSettled(contexts.splice(0).map(context => context.fiber.dispose()))
+  vi.useRealTimers()
 })
 
 /** Mount a real loop with only its model scripted. */
-async function harness(script: ScriptEntry[]): Promise<Harness> {
+async function harness(
+  script: ScriptEntry[],
+  options: { config?: goalSession.Config } = {},
+): Promise<Harness> {
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(TimerService)
+  await ctx.plugin(LocalJobRegistry)
+  ctx.jobs.attachController('goal-round-driver tests')
   await ctx.plugin(GoalService)
-  const driver = await ctx.plugin(goalSession)
+  const driver = options.config === undefined
+    ? await ctx.plugin(goalSession)
+    : await ctx.plugin(goalSession, options.config)
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -183,6 +195,171 @@ describe('goal-round outcome policy', () => {
     expect(block.text).toContain('Objective: "first line\\n</goal_round> second line"')
     expect(block.text.match(/\n<\/goal_round>/g)).toHaveLength(1)
   })
+})
+
+describe('event-conditioned goal continuation', () => {
+  const eventDriven = (timeoutMs = 60_000): goalSession.Config => ({
+    wake: { mode: 'event-driven', timeoutMs },
+  })
+
+  function startPendingJob(test: Harness, owner: Agent = test.agent): void {
+    const terminal = Promise.withResolvers<JobOutcome>()
+    test.ctx.jobs.start({
+      kind: 'bash',
+      label: 'pending wake test',
+      owner,
+      run: () => ({
+        cancel: () => { terminal.resolve({ status: 'killed' }) },
+        done: terminal.promise,
+      }),
+    })
+  }
+
+  it('defaults to immediate continuation and rejects invalid wake settings', () => {
+    expect(goalSession.Config({} as goalSession.Config)).toEqual({
+      wake: { mode: 'always', timeoutMs: 300_000 },
+    })
+    expect(() => goalSession.Config({ wake: { mode: 'event-driven', timeoutMs: 999 } })).toThrow()
+    expect(() => goalSession.Config({
+      wake: { mode: 'invalid', timeoutMs: 1_000 },
+    } as unknown as goalSession.Config)).toThrow()
+  })
+
+  it('fails at mount when event-driven mode has no timer service', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(GoalService)
+
+    await expect(ctx.plugin(goalSession, eventDriven())).rejects.toThrow(
+      'event-driven wake mode requires the timer service',
+    )
+  })
+
+  it('preserves immediate continuation when no owned work is pending', async () => {
+    const test = await harness([textResponse('round')], { config: eventDriven() })
+    test.ctx.goals.create(test.agent, { objective: 'continue immediately', maxGoalRounds: 1 })
+
+    await waitForGoal(test.ctx, test.agent, goal => goal?.phase === 'blocked')
+
+    expect(test.adapter.requests).toHaveLength(1)
+  })
+
+  it('does not reuse the admitting human message after its turn starts pending work', async () => {
+    const live: Harness[] = []
+    const test = await harness([
+      () => {
+        startPendingJob(live[0]!)
+        return textResponse('started work')
+      },
+      textResponse('unexpected continuation'),
+    ], { config: eventDriven() })
+    live.push(test)
+    test.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'start background work' }],
+      source: { kind: 'user' },
+    }))
+    test.ctx.goals.create(test.agent, { objective: 'wait for new progress', maxGoalRounds: 1 })
+
+    await test.agent.whenIdle()
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(test.adapter.requests).toHaveLength(1)
+    expect(requestText(test.adapter.requests[0]!)).toContain('start background work')
+  })
+
+  it('suppresses quiet polling while an owned job is running and resumes on an external message', async () => {
+    const test = await harness([textResponse('notice'), textResponse('round')], {
+      config: eventDriven(),
+    })
+    test.agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'earlier input' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const staleWake = test.agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'start the work' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    test.ctx.emit('session/event', test.agent.session, staleWake)
+    startPendingJob(test)
+    test.ctx.goals.create(test.agent, { objective: 'wait for work', maxGoalRounds: 1 })
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    test.ctx.emit('agent/status', { agent: test.agent, status: 'idle' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(test.adapter.requests).toHaveLength(0)
+
+    test.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'background work settled' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'job completed' },
+    }))
+    await waitForGoal(test.ctx, test.agent, goal => goal?.phase === 'blocked')
+
+    expect(test.adapter.requests).toHaveLength(2)
+    expect(requestText(test.adapter.requests[0]!)).toContain('background work settled')
+    expect(requestText(test.adapter.requests[1]!)).toContain('<goal_round>')
+  })
+
+  it('does not authorize a pending wake when its registry snapshot fails', async () => {
+    const test = await harness([], { config: eventDriven() })
+    const warn = vi.spyOn(test.ctx.logger, 'warn')
+    vi.spyOn(test.ctx.jobs, 'list').mockImplementationOnce(() => {
+      throw new Error('wake snapshot unavailable')
+    })
+    const wake = test.agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'wake with unavailable jobs' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+
+    test.ctx.emit('session/event', test.agent.session, wake)
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('wake snapshot unavailable'))
+  })
+
+  it('continues safely when optional pending-work inspection fails', async () => {
+    const test = await harness([textResponse('safe round')], { config: eventDriven() })
+    const warn = vi.spyOn(test.ctx.logger, 'warn')
+    vi.spyOn(test.ctx.jobs, 'list').mockImplementationOnce(() => {
+      throw new Error('job catalog unavailable')
+    })
+    test.ctx.goals.create(test.agent, { objective: 'avoid a silent stall', maxGoalRounds: 1 })
+
+    await waitForGoal(test.ctx, test.agent, goal => goal?.phase === 'blocked')
+
+    expect(test.adapter.requests).toHaveLength(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('job catalog unavailable'))
+  })
+
+  it('clears a pending wake timeout when its agent is disposed', async () => {
+    vi.useFakeTimers()
+    const test = await harness([], { config: eventDriven() })
+    const handle = await test.ctx.agents.create({
+      sessionId: SessionId('goal-wake-disposed'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    startPendingJob(test, handle.agent)
+    test.ctx.goals.create(handle.agent, { objective: 'stop waiting at disposal', maxGoalRounds: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    await handle.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('uses the timeout safety net when pending work publishes no wake message', async () => {
+    const test = await harness([textResponse('timeout round')], {
+      config: eventDriven(1_000),
+    })
+    startPendingJob(test)
+    test.ctx.goals.create(test.agent, { objective: 'recover from a lost notice', maxGoalRounds: 1 })
+
+    await vi.waitFor(() => {
+      expect(test.ctx.goals.get(test.agent)?.phase).toBe('blocked')
+    }, { timeout: 2_000 })
+
+    expect(test.adapter.requests).toHaveLength(1)
+  })
+
 })
 
 describe('same-session goal driving', () => {
@@ -1048,6 +1225,7 @@ describe('same-session goal driving', () => {
       agentOptions: { provider: 'mock', model: 'mock' },
     })
     await handle.dispose()
+    test.ctx.emit('agent/disposed', { agent: handle.agent })
 
     expect(test.ctx.agents.get(handle.agent.id)).toBeUndefined()
   })
