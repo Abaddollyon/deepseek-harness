@@ -710,6 +710,27 @@ export interface Config {
 
 Source: [`packages/goal/goal/src/index.ts:116`](../packages/goal/goal/src/index.ts)
 
+<a id="deepseek-aidsh-goal-round-driver"></a>
+
+## `@deepseek-ai/dsh-goal-round-driver`
+
+Requires: `agents` · `goals` · `sessions`
+
+```ts config-catalog
+/** Deployment-level policy for automatic goal continuation. */
+export interface Config {
+  /** Conditions that may reserve the next goal round. */
+  wake: {
+    /** `always` preserves immediate continuation; `event-driven` waits while owned work remains live. */
+    mode: 'always' | 'event-driven'
+    /** Maximum quiet wait before a safety-net continuation. */
+    timeoutMs: number
+  }
+}
+```
+
+Source: [`packages/goal/goal-round-driver/src/index.ts:26`](../packages/goal/goal-round-driver/src/index.ts)
+
 <a id="deepseek-aidsh-headless"></a>
 
 ## `@deepseek-ai/dsh-headless`
@@ -1095,6 +1116,15 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Recovery from a provider auth rejection (HTTP 401/403) that arrives before
+   * any content: the adapter refreshes the route's stored OAuth credential
+   * once, then retries after {@link PiAiAuthRecovery.delayMs}. Only a failure
+   * with nothing emitted is eligible — once content has streamed, the turn
+   * owns recovery. Omission enables one recovery attempt; `retries: 0`
+   * disables it.
+   */
+  authRecovery?: PiAiAuthRecovery
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1225,6 +1255,14 @@ export interface PiAiCompatProfile {
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
 
+/** Adapter-level recovery from a pre-content provider auth rejection. */
+export interface PiAiAuthRecovery {
+  /** Additional attempts after an auth-classified failure (default 1). */
+  retries?: number
+  /** Delay before each additional attempt in milliseconds (default 1000). */
+  delayMs?: number
+}
+
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling dispatch
@@ -1241,7 +1279,7 @@ export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFo
 
 Depends on: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`)
 
-Source: [`packages/llm/llm-pi-ai/src/config.ts:213`](../packages/llm/llm-pi-ai/src/config.ts)
+Source: [`packages/llm/llm-pi-ai/src/config.ts:246`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 
@@ -2503,7 +2541,7 @@ Source: [`packages/context/tmux-context/src/index.ts:34`](../packages/context/tm
 export type TokenMeterConfig = Record<string, never>
 ```
 
-Source: [`packages/llm/token-meter/src/types.ts:12`](../packages/llm/token-meter/src/types.ts)
+Source: [`packages/llm/token-meter/src/types.ts:17`](../packages/llm/token-meter/src/types.ts)
 
 <a id="deepseek-aidsh-tool-bash"></a>
 
@@ -3269,7 +3307,6 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-cordis-client-runner` ([`packages/extensions/cordis-client-runner/src/index.ts`](../packages/extensions/cordis-client-runner/src/index.ts))
 - `@deepseek-ai/dsh-fs-e2b` — requires `e2b` ([`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts))
 - `@deepseek-ai/dsh-fs-observation-policy` ([`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts))
-- `@deepseek-ai/dsh-goal-round-driver` — requires `agents` · `goals` · `sessions` ([`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-auto` — requires `webServer` · `loader` ([`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))

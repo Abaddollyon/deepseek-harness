@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertServiceable, Config } from '../src/config.ts'
+import { assertServiceable, Config, resolveProfiles } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -85,5 +85,52 @@ describe('request image policy bounds', () => {
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
+  })
+})
+
+describe('auth recovery policy', () => {
+  it('resolves the enabled default and an explicit disable', () => {
+    const resolved = resolveProfiles({
+      'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }] },
+    })
+    expect(resolved.get('acme-gateway')?.authRecovery).toEqual({ retries: 1, delayMs: 1000 })
+    const off = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'm' }],
+        authRecovery: { retries: 0 },
+      },
+    })
+    expect(off.get('acme-gateway')?.authRecovery).toEqual({ retries: 0, delayMs: 1000 })
+  })
+
+  it('rejects an invalid budget at the schema, and at resolution when bypassed', () => {
+    expect(routeWith({ authRecovery: { retries: -1 } })).toThrow()
+    expect(routeWith({ authRecovery: { delayMs: -1 } })).toThrow()
+    expect(() => {
+      assertServiceable({
+        providers: {
+          'acme-gateway': {
+            api: 'openai-completions',
+            baseURL: 'https://acme.test',
+            models: [{ id: 'm' }],
+            authRecovery: { retries: 1.5 },
+          },
+        },
+      } as unknown as Config)
+    }).toThrow(/authRecovery.retries must be a non-negative integer/)
+    expect(() => {
+      assertServiceable({
+        providers: {
+          'acme-gateway': {
+            api: 'openai-completions',
+            baseURL: 'https://acme.test',
+            models: [{ id: 'm' }],
+            authRecovery: { delayMs: -1 },
+          },
+        },
+      } as unknown as Config)
+    }).toThrow(/authRecovery.delayMs must be a non-negative finite number/)
   })
 })

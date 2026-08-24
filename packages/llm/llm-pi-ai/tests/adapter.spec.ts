@@ -215,7 +215,9 @@ describe('PiAiAdapter provider routing', () => {
   })
 
   it('uses the catalog API implementation, including OpenAI Responses', async () => {
-    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const failure = { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }
+    // The 401 earns one auth-recovery retry, so the scripted behavior repeats.
+    const server = await mockServer([failure, failure])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
@@ -223,7 +225,7 @@ describe('PiAiAdapter provider routing', () => {
     })
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
     expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/v1/responses'])
+    expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
   })
 
   it('resolves an attachment service mounted after the adapter when dispatching an image', async () => {
@@ -309,7 +311,8 @@ describe('PiAiAdapter provider routing', () => {
       maxPixels: 2048 * 2048,
       maxBytes: 1024 * 1024,
     }, expect.any(AbortSignal))
-    expect(server.paths).toEqual(['/v1/responses'])
+    // One auth-recovery retry re-dispatches the image-bearing request.
+    expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
   })
 
   it('forces one wire request for an SDK-retryable provider failure', async () => {
@@ -335,7 +338,8 @@ describe('PiAiAdapter provider routing', () => {
   })
 
   it('uses OpenAI Responses against an Azure project v1 path with its API key header', async () => {
-    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const failure = { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }
+    const server = await mockServer([failure, failure])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
@@ -349,7 +353,7 @@ describe('PiAiAdapter provider routing', () => {
     })
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-5.5', messages: [] })
     expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/api/projects/openai/openai/v1/responses'])
+    expect(server.paths).toEqual(['/api/projects/openai/openai/v1/responses', '/api/projects/openai/openai/v1/responses'])
     expect(server.headers[0]?.['api-key']).toBe('test-key')
     expect(server.headers[0]?.authorization).toBe('')
   })
@@ -360,11 +364,15 @@ describe('PiAiAdapter provider routing', () => {
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
-    const server = await mockServer([{ status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }])
+    // A 401 earns one auth-recovery retry; scripting the behavior twice keeps
+    // the second attempt on the same failure instead of the script-exhaustion
+    // 500.
+    const behavior = { status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }
+    const server = await mockServer([behavior, behavior])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
-    expect(server.paths).toEqual(['/chat/completions'])
+    expect(server.paths).toEqual(Array(code === 'AUTH' ? 2 : 1).fill('/chat/completions'))
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
