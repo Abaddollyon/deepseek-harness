@@ -1081,6 +1081,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const pendingApprovals = new Map<RpcId, PendingApproval>()
   const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /**
+   * Titles discovered from cold logs after a cache miss. The list response
+   * never waits for these reads; the next poll can include the settled value.
+   */
+  const coldTitles = new Map<SessionId, {
+    createdAt: number
+    cwd?: string
+    settled: boolean
+    title?: string
+    eventSeq?: number
+  }>()
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1762,6 +1773,36 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    */
   async function listVisibleSessionSummaries(signal?: AbortSignal): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
+    const sessionQuery = ctx.get('sessionQuery')
+    const canReadTitles = sessionQuery !== undefined
+      && typeof sessionQuery.readTitleSnapshots === 'function'
+    const coldTitleCandidates = new Map<SessionId, SessionHeader>()
+    const titleProjectionFor = (
+      meta: SessionHeader,
+      projections: SessionProjectionsBlock | undefined,
+    ): SessionProjectionsBlock | undefined => {
+      if (projections?.values.title !== undefined) return projections
+      if (!canReadTitles) return projections
+      const cached = coldTitles.get(meta.id)
+      if (cached !== undefined && (cached.createdAt !== meta.createdAt || cached.cwd !== meta.cwd)) {
+        coldTitles.delete(meta.id)
+      }
+      const current = coldTitles.get(meta.id)
+      if (current === undefined) {
+        coldTitles.set(meta.id, {
+          createdAt: meta.createdAt,
+          ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }),
+          settled: false,
+        })
+        coldTitleCandidates.set(meta.id, meta)
+        return projections
+      }
+      if (!current.settled || current.title === undefined) return projections
+      return {
+        asOfSeq: Math.max(projections?.asOfSeq ?? 0, current.eventSeq ?? 0),
+        values: { ...projections?.values, title: current.title },
+      }
+    }
     const summarizeAttached = (session: Session): SessionSummary => {
       const agent = ctx.agents.get(session.id)
       const projections = listProjectionsFor(ctx, session.header, session)
@@ -1785,7 +1826,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           batch.map(async (meta) => {
             // Projection hints remain optional. Blank verification may read
             // this Session's artifact only when it passes the configured size check.
-            const projections = listProjectionsFor(ctx, meta, undefined)
+            const projections = titleProjectionFor(meta, listProjectionsFor(ctx, meta, undefined))
             const summary = await summarizeCold(
               ctx,
               persistence,
@@ -1817,6 +1858,28 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         signal?.throwIfAborted()
         items.push(...summaries)
       }
+    }
+    if (canReadTitles && coldTitleCandidates.size > 0) {
+      void sessionQuery.readTitleSnapshots([...coldTitleCandidates.keys()]).then((results) => {
+        for (const result of results) {
+          const meta = coldTitleCandidates.get(result.sessionId)
+          const cached = coldTitles.get(result.sessionId)
+          if (meta === undefined || cached === undefined
+            || cached.createdAt !== meta.createdAt || cached.cwd !== meta.cwd) continue
+          cached.settled = true
+          if (result.status === 'fulfilled' && result.value.title !== undefined) {
+            cached.title = result.value.title.title
+            cached.eventSeq = result.value.title.eventSeq
+          }
+        }
+      }, () => {
+        for (const meta of coldTitleCandidates.values()) {
+          const cached = coldTitles.get(meta.id)
+          if (cached !== undefined && cached.createdAt === meta.createdAt && cached.cwd === meta.cwd) {
+            cached.settled = true
+          }
+        }
+      })
     }
     items.sort((a, b) => b.updatedAt - a.updatedAt)
     return items

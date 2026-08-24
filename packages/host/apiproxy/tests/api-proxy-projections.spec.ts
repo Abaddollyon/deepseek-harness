@@ -286,6 +286,39 @@ describe('session.list projections column', () => {
     expect(row?.projections).toEqual({ asOfSeq: 7, values: { 'test/last-user': { text: 'cached' } } })
   })
 
+  it('warms a durable cold title without blocking the first list response', async () => {
+    const { ctx } = await harness(true)
+    const coldId = SessionId('session-cold-title')
+    const meta = { version: 0, id: coldId, createdAt: 5, cwd: '/tmp' }
+    let release!: (value: unknown) => void
+    const pending = new Promise<unknown>((resolve) => { release = resolve })
+    ctx.provide('sessionPersistence', {
+      list: async () => [meta],
+      locate: () => undefined,
+    } as never)
+    const readTitleSnapshots = vi.fn(() => pending)
+    ctx.provide('sessionQuery', { readTitleSnapshots } as never)
+
+    const gateway = api(ctx)
+    const first = await gateway.sessions.list(request({}))
+    if (!first.result.ok) throw new Error('unreachable')
+    const firstRow = first.result.value.items.find(item => item.sessionId === coldId)
+    expect(firstRow !== undefined && 'projections' in firstRow).toBe(false)
+    expect(readTitleSnapshots).toHaveBeenCalledWith([coldId])
+
+    release([{
+      sessionId: coldId,
+      status: 'fulfilled',
+      value: { session: meta, title: { title: 'Durable title', eventSeq: 2 } },
+    }])
+    await vi.waitFor(async () => {
+      const second = await gateway.sessions.list(request({}))
+      if (!second.result.ok) throw new Error('unreachable')
+      const row = second.result.value.items.find(item => item.sessionId === coldId)
+      expect(row?.projections?.values.title).toBe('Durable title')
+    })
+  })
+
   it('cold rows without a cache plugin (or without a stored row) just lack the column', async () => {
     const { ctx } = await harness(true)
     const coldId = SessionId('session-cold-uncached')
