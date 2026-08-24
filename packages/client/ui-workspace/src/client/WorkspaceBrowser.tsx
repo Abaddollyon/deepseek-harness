@@ -35,7 +35,11 @@ const EXPAND_SLIDE_MS = 300
 const SEARCH_DEBOUNCE_MS = 250
 /** `session.search` wire bound, measured in JavaScript UTF-16 code units. */
 const SEARCH_QUERY_MAX_CODE_UNITS = 500
-/** Session rows visible per Workspace before the local overflow control. */
+/**
+ * Session rows visible per Workspace before the local overflow control. It
+ * bounds the expanded list only: `GroupNode.sessions` is empty while a group is
+ * folded, so both the slice and the overflow count exclude pinned live rows.
+ */
 const COLLAPSED_SESSION_LIMIT = 5
 
 /** Keep controlled input and RPC payload inside the session.search wire contract. */
@@ -480,6 +484,32 @@ function SessionTree({
                     },
                   }}
               />
+              {/* Folded group: its live rows stay reachable. They carry no drag
+                  wiring, so reorder never targets a row the fold is holding up. */}
+              {group.pinned.map(node => (
+                <SessionNodeItem
+                  key={node.id}
+                  node={node}
+                  currentId={current}
+                  now={now}
+                  onOpen={open}
+                  onRename={onSessionRename}
+                  onFork={forkSession}
+                  onArchive={onSessionArchive}
+                  pinned
+                  t={t}
+                />
+              ))}
+              {group.pinned.length > 0 && group.sessionCount > group.pinned.length && (
+                <div className={css.foldedRemainder}>
+                  {t(
+                    group.sessionCount - group.pinned.length === 1
+                      ? 'sessions.hiddenIdle.one'
+                      : 'sessions.hiddenIdle.other',
+                    { n: group.sessionCount - group.pinned.length },
+                  )}
+                </div>
+              )}
               {(expandedSessionGroups.includes(group.key)
                 ? group.sessions
                 : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)

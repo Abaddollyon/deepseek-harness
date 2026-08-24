@@ -160,6 +160,45 @@ describe('deriveGroups', () => {
     ).items[0]).toMatchObject({ id: parent.id, runningSubagentCount: 2 })
   })
 
+  it('keeps a folded group\'s live rows pinned and every settled row folded away', () => {
+    const running = { ...summary('running', 5), running: true }
+    const idle = summary('idle', 4)
+    const done = { ...summary('done', 3), completed: true }
+    const host = summary('host', 2)
+    const child = { ...summary('child', 1), parentId: host.id, origin: 'subagent' as const, running: true }
+    const sessions = list(running, idle, done, host, child)
+    const members = ['running', 'idle', 'done', 'host', 'child']
+
+    const folded = deriveGroups(sessions, [workspace('first', members)], noArchive, view())[0]!
+    // Own activity and descendant activity both pin; the finished-but-unopened
+    // reminder is settled state and folds away with the idle rows.
+    expect(folded.expanded).toBe(false)
+    expect(folded.sessions).toEqual([])
+    expect(folded.pinned.map(node => node.id)).toEqual([running.id, host.id])
+    expect(folded.pinned.map(node => node.runningSubagentCount)).toEqual([0, 1])
+    expect(folded.sessionCount).toBe(4)
+
+    // Expanded is the mirror image: every row in `sessions`, nothing pinned, so
+    // no session can ever render twice.
+    const expanded = deriveGroups(sessions, [workspace('first', members)], noArchive, view(['first']))[0]!
+    expect(expanded.pinned).toEqual([])
+    expect(expanded.sessions.map(node => node.id)).toEqual([running.id, idle.id, done.id, host.id])
+  })
+
+  it('re-derives pinned rows as sessions start and stop running', () => {
+    const started = { ...summary('one', 2), running: true }
+    const stopped = { ...summary('one', 2), running: false, completed: true }
+    const other = summary('two', 1)
+    const pinnedOf = (first: SessionSummary) =>
+      deriveGroups(list(first, other), [workspace('first', ['one', 'two'])], noArchive, view())[0]!
+        .pinned.map(node => node.id)
+
+    // idle -> running pins the row; running -> idle drops it in the same pure pass.
+    expect(pinnedOf(stopped)).toEqual([])
+    expect(pinnedOf(started)).toEqual([sid('one')])
+    expect(pinnedOf(stopped)).toEqual([])
+  })
+
   it('ignores fork lineage and sorts every ungrouped session as a top-level row', () => {
     const parent = summary('parent', 1)
     const oldChild = { ...summary('old-child', 10), parentId: parent.id }

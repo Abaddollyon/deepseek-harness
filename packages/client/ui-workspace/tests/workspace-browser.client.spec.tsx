@@ -308,6 +308,52 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
   })
 
+  it('keeps running sessions reachable through a collapse without inflating the overflow count', () => {
+    // 8 members: 2 running. Folded shows the 2 live rows; expanded shows 5 plus
+    // the overflow control for the remaining 3.
+    const items = Array.from({ length: 8 }, (_, index) => summary(
+      `session-${index + 1}`, 8 - index, index === 1 || index === 6 ? { running: true } : {},
+    ))
+    const b = mount({
+      useSessions: hook(sessionState(items)),
+      useWorkspaces: hook(workspaceState([workspace('alpha', items.map(item => item.id))])),
+    })
+
+    // Folded: only the live rows survive, and the remainder is counted honestly.
+    expect(screen.getByText('session-2')).toBeTruthy()
+    expect(screen.getByText('session-7')).toBeTruthy()
+    expect(screen.queryByText('session-1')).toBeNull()
+    expect(screen.getByText('另有 6 个会话已折叠')).toBeTruthy()
+    // The overflow control belongs to the expanded list; pinned rows never feed it.
+    expect(screen.queryByRole('button', { name: /展开其余|收起/ })).toBeNull()
+
+    fireEvent.click(screen.getByText('alpha'))
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
+    // Expanded: 8 rows minus the 5 shown = 3, unchanged by the pinning behavior,
+    // and no live row is duplicated by its earlier pinned rendering.
+    expect(screen.getByRole('button', { name: '展开其余 3 个会话' })).toBeTruthy()
+    expect(screen.queryByText('另有 6 个会话已折叠')).toBeNull()
+    expect(screen.getAllByText('session-2')).toHaveLength(1)
+    expect(screen.queryByText('session-7')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '展开其余 3 个会话' }))
+    expect(screen.getAllByText('session-7')).toHaveLength(1)
+  })
+
+  it('folds a group away entirely once its last live row stops running', () => {
+    const running = sessionState([summary('busy', 2, { running: true }), summary('quiet', 1)])
+    const b = mount({
+      useSessions: hook(running),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['busy', 'quiet'])])),
+    })
+    expect(screen.getByText('busy')).toBeTruthy()
+    expect(screen.getByText('另有 1 个会话已折叠')).toBeTruthy()
+
+    // The pinned row is derived from the live snapshot, so it leaves with the run.
+    rerender(b, { useSessions: hook(sessionState([summary('busy', 2, { completed: true }), summary('quiet', 1)])) })
+    expect(screen.queryByText('busy')).toBeNull()
+    expect(screen.queryByText('另有 1 个会话已折叠')).toBeNull()
+  })
+
   it('shares one editable order across modes and promotes only while Last updated is active', async () => {
     const initial = sessionState([summary('one', 3), summary('two', 2)])
     const b = mount({
