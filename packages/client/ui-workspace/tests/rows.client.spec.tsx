@@ -57,6 +57,40 @@ function fireDrag(row: HTMLElement, kind: 'dragOver' | 'drop', clientY: number):
 }
 
 describe('workspace browser rows', () => {
+  it('renders an untitled row as a dated New Session, never the directory-basename fallback', () => {
+    // Sessions without a durable title carry the workspace's own name as their
+    // stored display title; rendering it made every row under a group read as
+    // the group itself.
+    const older: SessionNode = {
+      id: sid('older'), title: 'project', untitled: true, blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: new Date(2026, 0, 2, 3, 4).getTime(),
+    }
+    const newer: SessionNode = {
+      id: sid('newer'), title: 'project', untitled: true, blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: new Date(2026, 0, 5, 6, 7).getTime(),
+    }
+    const titled: SessionNode = {
+      id: sid('titled'), title: 'project', untitled: false, blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: newer.updatedAt,
+    }
+    render(
+      <>
+        <SessionNodeItem node={older} currentId={undefined} now={0} onOpen={vi.fn()}
+          onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />
+        <SessionNodeItem node={newer} currentId={undefined} now={0} onOpen={vi.fn()}
+          onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />
+        <SessionNodeItem node={titled} currentId={undefined} now={0} onOpen={vi.fn()}
+          onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />
+      </>,
+    )
+
+    // Each untitled row takes its own dated label; only the titled row renders
+    // its stored title verbatim.
+    expect(screen.getByText('新会话 · 2026年1月2日 03:04')).toBeTruthy()
+    expect(screen.getByText('新会话 · 2026年1月5日 06:07')).toBeTruthy()
+    expect(screen.getAllByText('project')).toHaveLength(1)
+  })
+
   it('omits only an empty leading status slot in the hierarchy-free flat list', () => {
     const idle: SessionNode = {
       id: sid('flat'), title: 'Flat Session', blank: false, running: false,
@@ -116,7 +150,7 @@ describe('workspace browser rows', () => {
     const onCreate = vi.fn()
     const group: GroupNode = {
       key: 'project', workspaceId: wid('project'), cwd: '/projects/project', createdAt: 0, label: 'Project',
-      sessionCount: 1, expanded: true, containsCurrent: true, sessions: [],
+      sessionCount: 1, expanded: true, containsCurrent: true, sessions: [], pinned: [],
     }
     render(<ProjectRowItem group={group} onToggle={onToggle} onCreate={onCreate} t={t} />)
 
@@ -126,6 +160,34 @@ describe('workspace browser rows', () => {
     expect(onToggle).not.toHaveBeenCalled()
     fireEvent.click(screen.getByText('Project'))
     expect(onToggle).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a folded header reported as collapsed while its pinned rows render', () => {
+    const live: SessionNode = {
+      id: sid('live'), title: 'Live Session', blank: false, running: true,
+      runningSubagentCount: 0, completed: false, updatedAt: 0,
+    }
+    const group: GroupNode = {
+      key: 'project', workspaceId: wid('project'), cwd: '/projects/project', createdAt: 0, label: 'Project',
+      sessionCount: 3, expanded: false, containsCurrent: true, sessions: [], pinned: [live],
+    }
+    const { container } = render(
+      <>
+        <ProjectRowItem group={group} onToggle={vi.fn()} onCreate={vi.fn()} t={t} />
+        <SessionNodeItem node={live} currentId={undefined} now={0} onOpen={vi.fn()}
+          onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} pinned t={t} />
+      </>,
+    )
+
+    // Live rows below a folded header must not report the group as expanded.
+    const [header, pinnedRow] = screen.getAllByRole('treeitem')
+    expect(header!.getAttribute('aria-expanded')).toBe('false')
+    // Closed folder + unrotated chevron: the fold stays legible next to its live row.
+    expect(container.querySelector('[class*="arrowOpen"]')).toBeNull()
+    // The pinned row is a real row of the tree, indented and never a drag source.
+    expect(pinnedRow!.className).toMatch(/pinnedSessionRow/)
+    expect(pinnedRow!.getAttribute('draggable')).toBe('false')
+    expect(screen.getByText('Live Session')).toBeTruthy()
   })
 
   it('renders and opens a selected running Session row', () => {
@@ -255,7 +317,7 @@ describe('workspace browser rows', () => {
     const onToggle = vi.fn()
     const group: GroupNode = {
       key: 'project', workspaceId: wid('project'), cwd: '/projects/project', createdAt: 0, label: 'Project',
-      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
     }
     render(<ProjectRowItem
       group={group} onToggle={onToggle} onCreate={vi.fn()}
@@ -286,7 +348,7 @@ describe('workspace browser rows', () => {
     try {
       const group: GroupNode = {
         key: 'project', workspaceId: wid('project'), cwd: '/projects/project', createdAt: 0, label: 'Project',
-        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
       }
       render(<ProjectRowItem group={group} onToggle={vi.fn()} onCreate={vi.fn()} t={t} />)
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
@@ -311,7 +373,7 @@ describe('workspace browser rows', () => {
     try {
       const group: GroupNode = {
         key: 'project', workspaceId: wid('project'), cwd: '/home/u/Documents/project', createdAt: 0, label: 'Project',
-        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
       }
       render(<ProjectRowItem group={group} home="/home/u" onToggle={vi.fn()} onCreate={vi.fn()} t={t} />)
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
@@ -331,7 +393,7 @@ describe('workspace browser rows', () => {
     try {
       const group: GroupNode = {
         key: 'project', workspaceId: wid('project'), cwd: undefined, createdAt: 0, label: 'Project',
-        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
       }
       render(<ProjectRowItem group={group} home="/home/u" onToggle={vi.fn()} onCreate={vi.fn()} t={t} />)
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
@@ -349,7 +411,7 @@ describe('workspace browser rows', () => {
     try {
       const group: GroupNode = {
         key: 'project', workspaceId: wid('project'), cwd: 'C:\\Users\\u\\project', createdAt: 0, label: 'Project',
-        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
       }
       render(<ProjectRowItem group={group} home="C:\\Users\\u" onToggle={vi.fn()} onCreate={vi.fn()} t={t} />)
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
@@ -360,12 +422,16 @@ describe('workspace browser rows', () => {
     }
   })
 
-  it('ungrouped bucket renders no workspace menu', () => {
+  it('ungrouped bucket renders the loose-chats dictionary label and no workspace menu', () => {
     const group: GroupNode = {
-      key: '', workspaceId: undefined, cwd: undefined, createdAt: undefined, label: 'Ungrouped',
-      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+      key: '', workspaceId: undefined, cwd: undefined, createdAt: undefined, label: 'Ungrouped chats',
+      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [], pinned: [],
     }
     render(<ProjectRowItem group={group} onToggle={vi.fn()} onCreate={vi.fn()} t={t} />)
+    // The bucket names loose chats, not a bare "ungrouped" — and its label
+    // comes from the dictionary, never the derivation's stored label.
+    expect(screen.getByText('未分组会话')).toBeTruthy()
+    expect(screen.queryByText('Ungrouped chats')).toBeNull()
     expect(screen.queryByRole('button', { name: /工作区/ })).toBeNull()
   })
 

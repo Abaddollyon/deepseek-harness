@@ -12,14 +12,28 @@ import {
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
 
-/** Display label for the ungrouped bucket row. */
-export const UNGROUPED_LABEL = 'Ungrouped'
+/**
+ * Display label for the ungrouped bucket row: loose chats attached to no
+ * workspace. Keep verbatim-equal to the dictionary's `group.ungrouped`
+ * entry; the row renderer reads the dictionary, this constant backs the
+ * non-localized derivations (search labels, cwd-less fallbacks).
+ */
+export const UNGROUPED_LABEL = 'Ungrouped chats'
 
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
   id: SessionId
   /** Stored display title; the renderer substitutes the localized New Session label for blank rows. */
   title: string
+  /**
+   * No durable title backs this row (logs predating the title service, or a
+   * title projection that has not landed): the stored display title is only
+   * the runtime's directory-basename fallback, identical for every session
+   * sharing the workspace cwd. The renderer substitutes a dated New Session
+   * label so untitled rows stay distinct from each other and from the group.
+   * Absent = false.
+   */
+  untitled?: boolean
   /** The provisional blank session (renderer shows the localized New Session title). */
   blank: boolean
   /** The runtime Session list reports an interaction awaiting this user. */
@@ -52,6 +66,13 @@ export interface GroupNode {
   containsCurrent: boolean
   /** Visible session rows (empty while the group is folded). */
   sessions: readonly SessionNode[]
+  /**
+   * Live rows kept reachable while the group is folded, in the same order they
+   * hold in {@link sessions}. Empty while the group is expanded, so a session
+   * never appears in both arrays; reorder and overflow paths read
+   * {@link sessions} only and therefore never target a pinned row.
+   */
+  pinned: readonly SessionNode[]
 }
 
 /** One flat search row combining list metadata with an optional content match. */
@@ -218,6 +239,7 @@ function sessionNode(
   return {
     id: s.id,
     title: sessionTitle(s),
+    untitled: !s.blank && s.title === undefined,
     blank: s.blank,
     running: s.running,
     runningSubagentCount: descendants.get(s.id)?.runningCount ?? 0,
@@ -228,11 +250,22 @@ function sessionNode(
 }
 
 /**
+ * A row whose work is still in flight: its own run, or a run in a descendant
+ * reached through uninterrupted subagent-origin lineage. The finished-but-unopened
+ * reminder is a settled state and is deliberately excluded.
+ */
+function isLive(node: SessionNode): boolean {
+  return node.running || node.runningSubagentCount > 0
+}
+
+/**
  * Derive the workspace browser groups with every session as a top-level row.
  *
  * Every group shows; sessions populate under expanded groups in the selected
- * local order. Blank sessions are excluded except for the selected
- * provisional New Session row; archived sessions are excluded everywhere.
+ * local order. A folded group keeps no `sessions`, but still exposes its live
+ * rows as `pinned` so running work never disappears behind a collapse. Blank
+ * sessions are excluded except for the selected provisional New Session row;
+ * archived sessions are excluded everywhere.
  * Content search lives outside this derivation
  * (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot (`current` feeds containsCurrent).
@@ -257,6 +290,7 @@ export function deriveGroups(
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
     const expanded = expandedGroups.has(g.key)
+    const rows = g.sessions.map(session => sessionNode(session, descendants))
     groups.push({
       key: g.key,
       workspaceId: g.workspaceId,
@@ -266,7 +300,8 @@ export function deriveGroups(
       sessionCount: g.sessions.length,
       expanded,
       containsCurrent: g.key === currentGroup,
-      sessions: expanded ? g.sessions.map(session => sessionNode(session, descendants)) : [],
+      sessions: expanded ? rows : [],
+      pinned: expanded ? [] : rows.filter(isLive),
     })
   }
   return groups

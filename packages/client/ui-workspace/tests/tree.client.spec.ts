@@ -7,6 +7,7 @@ import {
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
+import { en } from '../src/client/locales.ts'
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -92,6 +93,25 @@ describe('deriveGroups', () => {
     expect(strayGroups.map(group => group.key)).toEqual(['first'])
   })
 
+  it('flags rows without a durable title so the renderer can date them distinctly', () => {
+    // The runtime's display title falls back to the cwd basename, which is the
+    // workspace's own name for every session sharing its directory; the tree
+    // must mark that case so rows never render as copies of the group label.
+    const untitled = { ...summary('untitled', 5, '/projects/first'), displayTitle: 'first' }
+    const titled = { ...summary('titled', 4, '/projects/first'), title: 'Real title', displayTitle: 'Real title' }
+    const blank = { ...summary('blank', 3), blank: true }
+    const sessions = { ...list(untitled, titled, blank), current: blank.id }
+    const groups = deriveGroups(
+      sessions, [workspace('first', ['untitled', 'titled', 'blank'])], noArchive, view(['first']),
+    )
+    const nodes = groups[0]!.sessions
+    expect(nodes.find(node => node.id === untitled.id)).toMatchObject({ untitled: true, title: 'first' })
+    expect(nodes.find(node => node.id === titled.id)).toMatchObject({ untitled: false, title: 'Real title' })
+    // Blank rows own the plain New Session label, never the dated untitled one.
+    expect(nodes.find(node => node.id === blank.id)).toMatchObject({ untitled: false, blank: true })
+    expect(deriveFlat(sessions, noArchive).find(node => node.id === untitled.id)).toMatchObject({ untitled: true })
+  })
+
   it('projects the completion reminder into session and search rows (absent = false)', () => {
     const done = { ...summary('done', 3), completed: true }
     const plain = summary('plain', 2)
@@ -139,6 +159,45 @@ describe('deriveGroups', () => {
       sessions, [workspace('first', ['parent', 'fork'])], 'parent', noArchive,
       { items: [], hasMore: false }, 10,
     ).items[0]).toMatchObject({ id: parent.id, runningSubagentCount: 2 })
+  })
+
+  it('keeps a folded group\'s live rows pinned and every settled row folded away', () => {
+    const running = { ...summary('running', 5), running: true }
+    const idle = summary('idle', 4)
+    const done = { ...summary('done', 3), completed: true }
+    const host = summary('host', 2)
+    const child = { ...summary('child', 1), parentId: host.id, origin: 'subagent' as const, running: true }
+    const sessions = list(running, idle, done, host, child)
+    const members = ['running', 'idle', 'done', 'host', 'child']
+
+    const folded = deriveGroups(sessions, [workspace('first', members)], noArchive, view())[0]!
+    // Own activity and descendant activity both pin; the finished-but-unopened
+    // reminder is settled state and folds away with the idle rows.
+    expect(folded.expanded).toBe(false)
+    expect(folded.sessions).toEqual([])
+    expect(folded.pinned.map(node => node.id)).toEqual([running.id, host.id])
+    expect(folded.pinned.map(node => node.runningSubagentCount)).toEqual([0, 1])
+    expect(folded.sessionCount).toBe(4)
+
+    // Expanded is the mirror image: every row in `sessions`, nothing pinned, so
+    // no session can ever render twice.
+    const expanded = deriveGroups(sessions, [workspace('first', members)], noArchive, view(['first']))[0]!
+    expect(expanded.pinned).toEqual([])
+    expect(expanded.sessions.map(node => node.id)).toEqual([running.id, idle.id, done.id, host.id])
+  })
+
+  it('re-derives pinned rows as sessions start and stop running', () => {
+    const started = { ...summary('one', 2), running: true }
+    const stopped = { ...summary('one', 2), running: false, completed: true }
+    const other = summary('two', 1)
+    const pinnedOf = (first: SessionSummary) =>
+      deriveGroups(list(first, other), [workspace('first', ['one', 'two'])], noArchive, view())[0]!
+        .pinned.map(node => node.id)
+
+    // idle -> running pins the row; running -> idle drops it in the same pure pass.
+    expect(pinnedOf(stopped)).toEqual([])
+    expect(pinnedOf(started)).toEqual([sid('one')])
+    expect(pinnedOf(stopped)).toEqual([])
   })
 
   it('ignores fork lineage and sorts every ungrouped session as a top-level row', () => {
@@ -428,6 +487,12 @@ describe('createWorkspaceViewStore', () => {
 })
 
 describe('workspaceLabel', () => {
+  it('keeps UNGROUPED_LABEL verbatim-equal to the en dictionary entry', () => {
+    // The bucket row reads the dictionary while non-localized derivations read
+    // the constant; the two must never drift apart.
+    expect(UNGROUPED_LABEL).toBe(en['group.ungrouped'])
+  })
+
   it('uses the Ungrouped fallback and extracts POSIX and Windows basenames', () => {
     expect(workspaceLabel(undefined)).toBe(UNGROUPED_LABEL)
     expect(workspaceLabel('')).toBe(UNGROUPED_LABEL)

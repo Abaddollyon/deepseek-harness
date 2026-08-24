@@ -22,9 +22,17 @@ import css from './Rows.module.css'
 /** The standard locale seat, prop-passed from the browser root. */
 type RowTranslate = WorkspaceBrowserProps['t']
 
-/** Row display title: blank rows show the localized New Session label. */
+/**
+ * Row display title: blank rows show the localized New Session label. An
+ * untitled row's stored title is only the runtime's directory-basename
+ * fallback — identical for every session sharing the workspace cwd — so it
+ * shows a dated New Session label, distinct per session, until the host
+ * projects a durable title.
+ */
 function displayTitle(node: SessionNode, t: RowTranslate): string {
-  return node.blank ? t('session.new') : node.title
+  if (node.blank) return t('session.new')
+  if (node.untitled) return t('session.untitled', { time: dateTimeLabel(node.updatedAt, t) })
+  return node.title
 }
 
 /** Localized compact relative time ("刚刚"/"5分钟" in zh, "now"/"5min" in en). */
@@ -40,15 +48,21 @@ function hoverTimeLabel(updatedAt: number, now: number, t: RowTranslate): string
 }
 
 /**
- * Absolute creation time through the dictionary's date template (the message
- * clock pattern): `toLocaleString` would follow the browser language, not the
- * app locale, and produce mixed-language text after a switch.
+ * Absolute date-plus-minute stamp through the dictionary's date template
+ * (the message clock pattern): `toLocaleString` would follow the browser
+ * language, not the app locale, and produce mixed-language text after a
+ * switch.
  */
-function createdLabel(createdAt: number, t: RowTranslate): string {
-  const d = new Date(createdAt)
+function dateTimeLabel(epochMs: number, t: RowTranslate): string {
+  const d = new Date(epochMs)
   const pad2 = (v: number): string => String(v).padStart(2, '0')
   const date = t('date.ymd', { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() })
-  return t('hover.created', { time: `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` })
+  return `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+/** Hover-card creation line: the absolute stamp inside the created template. */
+function createdLabel(createdAt: number, t: RowTranslate): string {
+  return t('hover.created', { time: dateTimeLabel(createdAt, t) })
 }
 
 /** Hover-card body: workspace title, display directory path, absolute creation time. */
@@ -356,10 +370,11 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.onArchive - archive a session by id.
  * @param props.drag - optional draggable-row wiring.
  * @param props.flat - omit the empty status slot in the hierarchy-free flat list.
+ * @param props.pinned - the row survives its group's collapse; indent it under the folded header.
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }: {
+export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, pinned = false, t }: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -374,6 +389,11 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   drag?: RowDragProps | undefined
   /** The row is rendered without a parent Workspace header. */
   flat?: boolean | undefined
+  /**
+   * The row is a live session held visible under its own folded Workspace
+   * header. The indent keeps a folded group from reading as an expanded one.
+   */
+  pinned?: boolean | undefined
   t: RowTranslate
 }) {
   const row = node
@@ -397,6 +417,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
     <div
       className={clsx(
         css.sessionRow, selected && css.selected, menuOpen && css.menuOpen,
+        pinned && css.pinnedSessionRow,
         flat && !showStatus && css.flatSessionRowWithoutStatus,
         drag?.marker === 'before' && css.dropBefore, drag?.marker === 'after' && css.dropAfter,
       )}

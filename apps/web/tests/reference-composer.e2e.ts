@@ -230,10 +230,13 @@ describe.skipIf(MODE === 'record')('web e2e: file and session references through
 
   it('renders the durable direct-message then recall order', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-reference-order'))
-    const group = page.getByRole('treeitem', { name: /Ungrouped/ })
+    const group = page.getByRole('treeitem', { name: /Ungrouped chats/ })
     await group.waitFor({ timeout: 15_000 })
     if (await group.getAttribute('aria-expanded') !== 'true') await group.click()
-    const target = page.getByRole('treeitem').filter({ hasText: /^dsh-web-e2e-ws-/ }).first()
+    // Both seeded sessions are cold, so the host serves no title projection
+    // for them and the sidebar renders each as a dated New Session row; the
+    // target leads the bucket's recency order (its id also wins the tiebreak).
+    const target = page.getByRole('treeitem').filter({ hasText: /^New Session · / }).first()
     await target.waitFor({ timeout: 15_000 })
     await target.click()
     await page.getByRole('button', { name: /^Session recall\s*Research notes$/ }).waitFor({ timeout: 15_000 })
