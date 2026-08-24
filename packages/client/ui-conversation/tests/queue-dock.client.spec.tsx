@@ -242,6 +242,15 @@ describe('QueueDock', () => {
     })
   })
 
+  it('keeps queued editing available when ordinary snapshots omit subagent metadata', () => {
+    const snap = { ...snapshotWith([row('i-edit', 'before')]), subagent: undefined } as unknown as ConversationSnapshot
+    const source = liveSession(snap)
+    const view = render(<QueueDock {...kitFor(snap)} useSession={source.useSession} />)
+
+    fireEvent.click(view.getByLabelText('编辑排队消息'))
+    expect(view.getByRole('textbox', { name: '编辑排队消息' })).toHaveProperty('value', 'before')
+  })
+
   it('cancels an edit by button or Escape without mutating the queue', () => {
     const snap = snapshotWith([row('i-edit', 'before')])
     const source = liveSession(snap)
