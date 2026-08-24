@@ -15,10 +15,16 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../../vendor/timer"
+    },
+    {
       "path": "../../core/agent"
     },
     {
       "path": "../goal"
+    },
+    {
+      "path": "../../jobs/jobs"
     },
     {
       "path": "../../llm/llm"

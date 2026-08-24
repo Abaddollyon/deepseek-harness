@@ -116,15 +116,13 @@ export async function startInProcessRun(
   // parent's future.
   const inherited = captureDelegatedPolicyOverrides(parent)
 
-  const childAgentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
-
   let structured: StructuredAttachment | undefined
   const setup = (childCtx: Context): void => {
     appendDelegatedPolicyOverrides((childCtx.agent as Agent).session, inherited)
     applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
-    }, childAgentOptions)
+    })
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
     }
@@ -135,7 +133,7 @@ export async function startInProcessRun(
     sessionId: childId,
     meta: childSessionMeta(parent, childDepth, activationBoundary),
     ...seed !== undefined ? { seed } : {},
-    agentOptions: childAgentOptions,
+    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
     signal: request.signal,
     setup,
   })

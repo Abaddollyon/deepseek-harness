@@ -5,7 +5,7 @@ import { cleanup } from '@testing-library/react'
 import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SidebarSectionOwnerProps } from '../src/client/contract/slots.ts'
 
 afterEach(() => { cleanup() })
@@ -21,9 +21,10 @@ function applyRemoteSection(ctx: ClientContext): void {
 describe('external sidebar workspace sections', () => {
   it('composes a declaration-aware remote section and removes it on HMR disposal', async () => {
     const runtime = await SlotTestRuntime.create()
-    runtime.provide('layout', { toggleSidebar: vi.fn() })
+    runtime.ctx.provide('layout', { toggleSidebar: vi.fn() })
+    runtime.ctx.provide('uiWorkspace', { startSession: vi.fn() })
     const locale = new LocaleRuntime(runtime.ctx)
-    runtime.provide('locale', locale)
+    runtime.ctx.provide('locale', locale)
     runtime.slots.installLocale(locale)
     await runtime.declare({ 'sidebar': { kind: 'single', scope: 'root' } })
 

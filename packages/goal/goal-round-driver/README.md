@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-goal-round-driver` automatically continues an active goal in the same session: whenever the agent is idle with an active, armed goal and remaining round capacity, the driver starts the next goal round. Each round is one model turn toward the objective, driven by a retained goal-round prompt; only goal-sourced rounds count against the goal's round cap, and the goal records a blocker when the cap is exhausted. The driver has no configuration of its own — the round cap belongs to the goal definition and the model-facing blocked threshold belongs to `dsh-tool-goal`, so policy stays in one place. Mount it together with `dsh-goal` and `dsh-tool-goal` when a task should work itself toward completion across rounds; leave it out when every step needs human steering.
+`dsh-goal-round-driver` automatically continues an active goal in the same session: whenever the agent is idle with an active, armed goal and remaining round capacity, the driver starts the next goal round. Each round is one model turn toward the objective, driven by a retained goal-round prompt; only goal-sourced rounds count against the goal's round cap, and the goal records a blocker when the cap is exhausted. The driver accepts an optional `wake` policy: `always` preserves immediate continuation, while `event-driven` waits for external progress when a child agent or caller-owned background job is live, then wakes on a user message, notice, relay, or timer safety net. Event-driven mode requires the Cordis timer service; job inspection is optional. The round cap belongs to the goal definition and the model-facing blocked threshold belongs to `dsh-tool-goal`, so policy stays in one place. Mount it together with `dsh-goal` and `dsh-tool-goal` when a task should work itself toward completion across rounds; leave it out when every step needs human steering.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Mount `dsh-goal-round-driver` when an active goal should keep making progress wi
 
 ### Compose it
 
-Mount the driver beside the goal service and the goal tools; the driver itself takes no configuration.
+Mount the driver beside the goal service and the goal tools. Its optional `wake` configuration defaults to immediate continuation; select `event-driven` with a bounded `timeoutMs` when live child agents or caller-owned jobs should suppress quiet polling.
 
 ```yaml
 - id: goal

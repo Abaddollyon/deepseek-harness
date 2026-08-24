@@ -23,7 +23,7 @@ const routeOf = (ctx: Context, session: Session): ModelRouteProjection | null =>
 
 /** Fold the same log from scratch the way a cold read does: seq order, empty checkpoint. */
 const coldRoute = (ctx: Context, session: Session): ModelRouteProjection | null => {
-  const restored = ctx.sessionProjections.restore({}, session.events, 0).snapshot.values
+  const restored = ctx.sessionProjections.restore({}, session.events, 0, session.header).snapshot.values
   if (!('modelRoute' in restored)) throw new Error('modelRoute projection is not registered')
   return restored.modelRoute ?? null
 }
