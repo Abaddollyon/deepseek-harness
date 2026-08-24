@@ -117,6 +117,13 @@
   margin-left: 0;
 }
 
+/* A live session held visible under its own folded Workspace header takes the
+   22px indent step, so a folded group with running work never draws the same
+   as an expanded one. */
+.pinnedSessionRow {
+  padding-left: 30px;
+}
+
 @keyframes row-in {
   from { opacity: 0; }
 }
