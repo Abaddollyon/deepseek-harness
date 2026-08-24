@@ -26,12 +26,18 @@ type RowTranslate = WorkspaceBrowserProps['t']
  * Row display title: blank rows show the localized New Session label. An
  * untitled row's stored title is only the runtime's directory-basename
  * fallback — identical for every session sharing the workspace cwd — so it
- * shows a dated New Session label, distinct per session, until the host
- * projects a durable title.
+ * shows a dated New Session label until the host projects a durable title;
+ * same-minute collisions carry the derivation's ordinal, keeping every
+ * label in one list distinct.
  */
 function displayTitle(node: SessionNode, t: RowTranslate): string {
   if (node.blank) return t('session.new')
-  if (node.untitled) return t('session.untitled', { time: dateTimeLabel(node.updatedAt, t) })
+  if (node.untitled) {
+    const time = dateTimeLabel(node.updatedAt, t)
+    return node.untitledNumber === undefined
+      ? t('session.untitled', { time })
+      : t('session.untitledNumbered', { time, n: node.untitledNumber })
+  }
   return node.title
 }
 

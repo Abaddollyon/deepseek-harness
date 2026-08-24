@@ -91,6 +91,16 @@ describe('workspace browser rows', () => {
     expect(screen.getAllByText('project')).toHaveLength(1)
   })
 
+  it('renders the collision ordinal inside the dated label of a same-minute untitled row', () => {
+    const node: SessionNode = {
+      id: sid('dupe'), title: 'project', untitled: true, untitledNumber: 2, blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: new Date(2026, 0, 2, 3, 4).getTime(),
+    }
+    render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
+      onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />)
+    expect(screen.getByText('新会话 · 2026年1月2日 03:04（2）')).toBeTruthy()
+  })
+
   it('omits only an empty leading status slot in the hierarchy-free flat list', () => {
     const idle: SessionNode = {
       id: sid('flat'), title: 'Flat Session', blank: false, running: false,

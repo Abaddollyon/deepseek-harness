@@ -34,6 +34,12 @@ export interface SessionNode {
    * Absent = false.
    */
   untitled?: boolean
+  /**
+   * 1-based ordinal inside the set of untitled rows whose dated labels share
+   * one minute stamp; present only when such a collision exists, so no two
+   * rows of one list ever render identical text.
+   */
+  untitledNumber?: number
   /** The provisional blank session (renderer shows the localized New Session title). */
   blank: boolean
   /** The runtime Session list reports an interaction awaiting this user. */
@@ -259,6 +265,35 @@ function isLive(node: SessionNode): boolean {
 }
 
 /**
+ * Number the untitled rows whose dated labels share one minute stamp. The
+ * renderer's untitled label distinguishes rows by last-activity time alone,
+ * so same-minute untitled siblings would render identical text; every member
+ * of a collision set takes a 1-based ordinal in row order. The input array
+ * returns unchanged (identity included) when no collision exists, and the
+ * collision rule scopes to the rendered list — one group, or the flat view.
+ * @param rows - one rendered row set in render order.
+ * @returns the rows, with `untitledNumber` set on colliding untitled rows.
+ */
+function numberUntitledCollisions(rows: SessionNode[]): SessionNode[] {
+  const minuteOf = (row: SessionNode): number => Math.floor(row.updatedAt / 60_000)
+  const minutes = new Map<number, number>()
+  for (const row of rows) {
+    if (row.untitled !== true) continue
+    const minute = minuteOf(row)
+    minutes.set(minute, (minutes.get(minute) ?? 0) + 1)
+  }
+  if (![...minutes.values()].some(count => count > 1)) return rows
+  const seen = new Map<number, number>()
+  return rows.map((row) => {
+    if (row.untitled !== true || minutes.get(minuteOf(row)) === 1) return row
+    const minute = minuteOf(row)
+    const n = (seen.get(minute) ?? 0) + 1
+    seen.set(minute, n)
+    return { ...row, untitledNumber: n }
+  })
+}
+
+/**
  * Derive the workspace browser groups with every session as a top-level row.
  *
  * Every group shows; sessions populate under expanded groups in the selected
@@ -300,8 +335,8 @@ export function deriveGroups(
       sessionCount: g.sessions.length,
       expanded,
       containsCurrent: g.key === currentGroup,
-      sessions: expanded ? rows : [],
-      pinned: expanded ? [] : rows.filter(isLive),
+      sessions: expanded ? numberUntitledCollisions(rows) : [],
+      pinned: expanded ? [] : numberUntitledCollisions(rows.filter(isLive)),
     })
   }
   return groups
@@ -329,7 +364,7 @@ export function deriveFlat(
     rows.push(s)
   }
   rows.sort(byRecency)
-  return rows.map(session => sessionNode(session, descendants))
+  return numberUntitledCollisions(rows.map(session => sessionNode(session, descendants)))
 }
 
 /** Relative-time bucket of a session row's trailing label. */

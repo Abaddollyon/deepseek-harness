@@ -112,6 +112,42 @@ describe('deriveGroups', () => {
     expect(deriveFlat(sessions, noArchive).find(node => node.id === untitled.id)).toMatchObject({ untitled: true })
   })
 
+  it('numbers untitled rows whose dated labels share a minute, per rendered list', () => {
+    // The dated label distinguishes untitled rows by minute; same-minute
+    // siblings would render identical text, so every member of a collision
+    // set takes an ordinal while unique-minute rows stay unnumbered.
+    const MINUTE = 60_000
+    const untitled = (id: string, updatedAt: number) => ({
+      ...summary(id, updatedAt, '/projects/first'), displayTitle: 'first',
+    })
+    const a = untitled('a', 10 * MINUTE)
+    const b = untitled('b', 10 * MINUTE + 5_000) // same minute as a
+    const c = untitled('c', 11 * MINUTE)
+    const titled = { ...summary('titled', 10 * MINUTE), title: 'first', displayTitle: 'first' }
+    const sessions = list(a, b, c, titled)
+    const groups = deriveGroups(
+      sessions, [workspace('first', ['a', 'b', 'c', 'titled'])], noArchive, view(['first']),
+    )
+    const nodes = groups[0]!.sessions
+    // A durable title that happens to equal the directory name renders as-is
+    // and never enters the untitled numbering.
+    expect(nodes.find(node => node.id === a.id)).toMatchObject({ untitled: true, untitledNumber: 1 })
+    expect(nodes.find(node => node.id === b.id)).toMatchObject({ untitled: true, untitledNumber: 2 })
+    expect(nodes.find(node => node.id === c.id)?.untitledNumber).toBeUndefined()
+    expect(nodes.find(node => node.id === titled.id)).toMatchObject({ untitled: false, title: 'first' })
+    expect(nodes.find(node => node.id === titled.id)?.untitledNumber).toBeUndefined()
+    // The flat list numbers its own rendered set (recency order puts b ahead
+    // of a); a folded group numbers its pinned rows.
+    const flat = deriveFlat(sessions, noArchive)
+    expect(flat.find(node => node.id === a.id)).toMatchObject({ untitledNumber: 2 })
+    expect(flat.find(node => node.id === b.id)).toMatchObject({ untitledNumber: 1 })
+    const folded = deriveGroups(
+      { ...list({ ...a, running: true }, { ...b, running: true }) },
+      [workspace('first', ['a', 'b'])], noArchive, view(),
+    )
+    expect(folded[0]!.pinned.map(node => node.untitledNumber)).toEqual([1, 2])
+  })
+
   it('projects the completion reminder into session and search rows (absent = false)', () => {
     const done = { ...summary('done', 3), completed: true }
     const plain = summary('plain', 2)
