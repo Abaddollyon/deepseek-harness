@@ -241,7 +241,7 @@ describe('SubagentHeaderLineage', () => {
 
     fireEvent.click(trigger)
     expect(screen.getByRole('tree')).toBeTruthy()
-    fireEvent.mouseLeave(trigger.parentElement!)
+fireEvent.mouseLeave(trigger.parentElement!)
     await advance(120)
     expect(screen.getByRole('tree')).toBeTruthy()
     fireEvent.click(trigger)
