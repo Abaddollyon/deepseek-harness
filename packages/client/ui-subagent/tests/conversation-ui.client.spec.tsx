@@ -227,7 +227,7 @@ describe('SubagentHeaderLineage', () => {
     expect(screen.queryByRole('tree')).toBeNull()
   })
 
-  it('opens only on hover and preserves the portaled-menu crossing grace', async () => {
+  it('opens on hover or click and preserves the portaled-menu crossing grace', async () => {
     vi.useFakeTimers()
     const advance = async (duration: number): Promise<void> => {
       await act(async () => { await vi.advanceTimersByTimeAsync(duration) })
@@ -237,6 +237,8 @@ describe('SubagentHeaderLineage', () => {
     const triggerRect = vi.spyOn(trigger, 'getBoundingClientRect')
       .mockReturnValue({ bottom: 40, left: 50 } as DOMRect)
 
+    fireEvent.click(trigger)
+    expect(screen.getByRole('tree')).toBeTruthy()
     fireEvent.click(trigger)
     expect(screen.queryByRole('tree')).toBeNull()
 
@@ -288,6 +290,19 @@ describe('SubagentHeaderLineage', () => {
     expect(tree.style.top).toBe('95px')
     expect(tree.style.left).toBe('100px')
     view.unmount()
+  })
+
+  it('cancels a pending hover when click opens the catalog', async () => {
+    vi.useFakeTimers()
+    render(<SubagentHeaderLineage {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /2 个子代理/ })
+    fireEvent.mouseEnter(trigger.parentElement!)
+    fireEvent.click(trigger)
+    expect(screen.getByRole('tree')).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(150)
+    expect(screen.getByRole('tree')).toBeTruthy()
+    fireEvent.click(trigger)
+    expect(screen.queryByRole('tree')).toBeNull()
   })
 
   it('cancels a pending hover when the trigger becomes hidden', async () => {

@@ -2,7 +2,9 @@
 import { fireEvent, render, cleanup } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
-import type { SessionId, SessionListState, SessionSummary, SubagentAddress } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { SubagentHeaderLineage, type SubagentHeaderLineageProps } from '../src/client/SubagentHeaderLineage.tsx'
 
 afterEach(cleanup)
