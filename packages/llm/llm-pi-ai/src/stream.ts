@@ -39,8 +39,11 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
+/** Harness failure code for a provider credential rejection (HTTP 401/403). */
+export const AUTH_FAILURE_CODE = 'AUTH'
+
 function classifyPiAiError(message: string): string {
-  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
+  if (/\b(?:401|403)\b/.test(message)) return AUTH_FAILURE_CODE
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   // A rejected request body (gateway or provider size cap): resending the

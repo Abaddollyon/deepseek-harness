@@ -60,6 +60,15 @@ export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
 
+/** Default extra attempts after a provider's pre-content auth rejection. */
+export const DEFAULT_AUTH_RECOVERY_RETRIES = 1
+
+/** Maximum extra attempts permitted by one auth-recovery policy. */
+export const MAX_AUTH_RECOVERY_RETRIES = 8
+
+/** Default delay before an auth-recovery attempt, in milliseconds. */
+export const DEFAULT_AUTH_RECOVERY_DELAY_MS = 1_000
+
 /** Output capability assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_MAX_TOKENS = 32_768
 
@@ -176,11 +185,36 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Recovery from a provider auth rejection (HTTP 401/403) that arrives before
+   * any content: the adapter refreshes the route's stored OAuth credential
+   * once, then retries after {@link PiAiAuthRecovery.delayMs}. Only a failure
+   * with nothing emitted is eligible — once content has streamed, the turn
+   * owns recovery. Omission enables one recovery attempt; `retries: 0`
+   * disables it.
+   */
+  authRecovery?: PiAiAuthRecovery
+}
+
+/** Adapter-level recovery from a pre-content provider auth rejection. */
+export interface PiAiAuthRecovery {
+  /** Additional attempts after an auth-classified failure (default 1). */
+  retries?: number
+  /** Delay before each additional attempt in milliseconds (default 1000). */
+  delayMs?: number
+}
+
+/** {@link PiAiAuthRecovery} with every default resolved. */
+export interface ResolvedPiAiAuthRecovery {
+  /** Non-negative extra-attempt budget after defaulting. */
+  retries: number
+  /** Non-negative pre-attempt delay after defaulting. */
+  delayMs: number
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'authRecovery'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
@@ -197,6 +231,8 @@ export interface ResolvedPiAiProviderProfile
   requestImageMaxBytes: number
   /** Immutable retry policy captured with this provider route. */
   retryPolicy: ResolvedRetryPolicy
+  /** Immutable pre-content auth-recovery policy captured with this provider route. */
+  authRecovery: ResolvedPiAiAuthRecovery
   /**
    * The pi-ai provider this route registers, built from the resolved models.
    * Construction happens here so an unserviceable protocol or an underspecified
@@ -287,6 +323,11 @@ const reasoningEfforts = z.dict(
   z.union(THINKING_LEVELS),
 ) as unknown as z<PiAiReasoningEfforts>
 
+const authRecovery: z<PiAiAuthRecovery> = z.object({
+  retries: z.number().step(1).min(0).max(MAX_AUTH_RECOVERY_RETRIES).default(DEFAULT_AUTH_RECOVERY_RETRIES),
+  delayMs: z.number().min(0).max(MAX_TIMER_DELAY_MS).default(DEFAULT_AUTH_RECOVERY_DELAY_MS),
+})
+
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
   name: z.string(),
@@ -334,6 +375,7 @@ const profile = z.object({
   requestImagePixelBudget: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_MAX_BYTES),
   retryPolicy: RetryPolicySchema,
+  authRecovery,
 })
 
 /** Runtime schema for {@link Config}. */
@@ -435,6 +477,18 @@ export function resolveProfiles(
     if (!Number.isSafeInteger(requestImageMaxBytes) || requestImageMaxBytes <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" requestImageMaxBytes must be a positive safe integer`)
     }
+    const authRecovery: ResolvedPiAiAuthRecovery = {
+      retries: source.authRecovery?.retries ?? DEFAULT_AUTH_RECOVERY_RETRIES,
+      delayMs: source.authRecovery?.delayMs ?? DEFAULT_AUTH_RECOVERY_DELAY_MS,
+    }
+    if (!Number.isSafeInteger(authRecovery.retries) || authRecovery.retries < 0 || authRecovery.retries > MAX_AUTH_RECOVERY_RETRIES) {
+      throw new Error(`llm-pi-ai: provider "${provider}" authRecovery.retries must be a non-negative integer`)
+    }
+    if (!Number.isFinite(authRecovery.delayMs) || authRecovery.delayMs < 0 || authRecovery.delayMs > MAX_TIMER_DELAY_MS) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" authRecovery.delayMs must be a non-negative finite number no greater than ${MAX_TIMER_DELAY_MS}`,
+      )
+    }
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty
     // list here is always one someone typed — and unlike an entry's, nothing
@@ -459,7 +513,7 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
+    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, authRecovery: _authRecovery, ...rest } = source
     resolved.set(provider, {
       ...rest,
       provider,
@@ -470,6 +524,7 @@ export function resolveProfiles(
       requestImagePixelBudget,
       requestImageMaxBytes,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
+      authRecovery,
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog.configuredMaxTokens,
