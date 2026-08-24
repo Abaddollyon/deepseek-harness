@@ -92,6 +92,25 @@ describe('deriveGroups', () => {
     expect(strayGroups.map(group => group.key)).toEqual(['first'])
   })
 
+  it('flags rows without a durable title so the renderer can date them distinctly', () => {
+    // The runtime's display title falls back to the cwd basename, which is the
+    // workspace's own name for every session sharing its directory; the tree
+    // must mark that case so rows never render as copies of the group label.
+    const untitled = { ...summary('untitled', 5, '/projects/first'), displayTitle: 'first' }
+    const titled = { ...summary('titled', 4, '/projects/first'), title: 'Real title', displayTitle: 'Real title' }
+    const blank = { ...summary('blank', 3), blank: true }
+    const sessions = { ...list(untitled, titled, blank), current: blank.id }
+    const groups = deriveGroups(
+      sessions, [workspace('first', ['untitled', 'titled', 'blank'])], noArchive, view(['first']),
+    )
+    const nodes = groups[0]!.sessions
+    expect(nodes.find(node => node.id === untitled.id)).toMatchObject({ untitled: true, title: 'first' })
+    expect(nodes.find(node => node.id === titled.id)).toMatchObject({ untitled: false, title: 'Real title' })
+    // Blank rows own the plain New Session label, never the dated untitled one.
+    expect(nodes.find(node => node.id === blank.id)).toMatchObject({ untitled: false, blank: true })
+    expect(deriveFlat(sessions, noArchive).find(node => node.id === untitled.id)).toMatchObject({ untitled: true })
+  })
+
   it('projects the completion reminder into session and search rows (absent = false)', () => {
     const done = { ...summary('done', 3), completed: true }
     const plain = summary('plain', 2)

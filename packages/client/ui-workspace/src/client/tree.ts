@@ -20,6 +20,15 @@ export interface SessionNode {
   id: SessionId
   /** Stored display title; the renderer substitutes the localized New Session label for blank rows. */
   title: string
+  /**
+   * No durable title backs this row (logs predating the title service, or a
+   * title projection that has not landed): the stored display title is only
+   * the runtime's directory-basename fallback, identical for every session
+   * sharing the workspace cwd. The renderer substitutes a dated New Session
+   * label so untitled rows stay distinct from each other and from the group.
+   * Absent = false.
+   */
+  untitled?: boolean
   /** The provisional blank session (renderer shows the localized New Session title). */
   blank: boolean
   /** The runtime Session list reports an interaction awaiting this user. */
@@ -218,6 +227,7 @@ function sessionNode(
   return {
     id: s.id,
     title: sessionTitle(s),
+    untitled: !s.blank && s.title === undefined,
     blank: s.blank,
     running: s.running,
     runningSubagentCount: descendants.get(s.id)?.runningCount ?? 0,

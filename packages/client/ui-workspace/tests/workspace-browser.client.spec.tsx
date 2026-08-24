@@ -22,8 +22,10 @@ const t: WorkspaceBrowserProps['t'] = makeTranslate(zh, commonZh)
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
+// A durable title rides every summary by default: the title service is active,
+// so the untitled directory-basename fallback is the exception, not the norm.
 const summary = (id: string, updatedAt: number, overrides: Partial<SessionSummary> = {}): SessionSummary => ({
-  id: sid(id), displayTitle: id, running: false, blank: false, updatedAt, ...overrides,
+  id: sid(id), title: id, displayTitle: id, running: false, blank: false, updatedAt, ...overrides,
 })
 const sessionState = (items: readonly SessionSummary[], overrides: Partial<SessionListState> = {}): SessionListState => ({
   ids: items.map(item => item.id),
@@ -178,6 +180,39 @@ describe('WorkspaceBrowser', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu')).toBeNull()
     expect(b.store.getSnapshot().groupBy).toBe('workspace')
+  })
+
+  it('renders sessions without durable titles as dated New Session rows, never as copies of the group label', () => {
+    // The reported regression: every child row of a group read as the group's
+    // own name. Those sessions carry no durable title, so their stored display
+    // title is only the runtime's cwd-basename fallback — the workspace name.
+    const untitled = (id: string, updatedAt: number): SessionSummary => ({
+      id: sid(id), displayTitle: 'alpha', running: false, blank: false, updatedAt,
+      cwd: '/projects/alpha',
+    })
+    const b = mount({
+      useSessions: hook(sessionState([
+        untitled('one', new Date(2026, 0, 2, 3, 4).getTime()),
+        untitled('two', new Date(2026, 0, 5, 6, 7).getTime()),
+      ])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['one', 'two'])])),
+    })
+    fireEvent.click(screen.getByText('alpha'))
+
+    // Each row takes its own dated label; the workspace name appears once, as
+    // the group header.
+    expect(screen.getByText('新会话 · 2026年1月2日 03:04')).toBeTruthy()
+    expect(screen.getByText('新会话 · 2026年1月5日 06:07')).toBeTruthy()
+    expect(screen.getAllByText('alpha')).toHaveLength(1)
+    // A durable title arriving on the same rows restores their real titles.
+    rerender(b, {
+      useSessions: hook(sessionState([
+        summary('one', 2, { title: 'Real one', displayTitle: 'Real one' }),
+        summary('two', 1, { title: 'Real two', displayTitle: 'Real two' }),
+      ])),
+    })
+    expect(screen.getByText('Real one')).toBeTruthy()
+    expect(screen.getByText('Real two')).toBeTruthy()
   })
 
   it('persists flat-list drag order locally and applies Last updated within that account', async () => {
