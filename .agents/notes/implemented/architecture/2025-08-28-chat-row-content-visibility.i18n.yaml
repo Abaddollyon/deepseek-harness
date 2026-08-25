@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2025-08-28-chat-row-content-visibility.md
+2025-08-28-chat-row-content-visibility.md: cab71190612e03b78635c6044b277efcc96f4302
+2025-08-28-chat-row-content-visibility.zh.md: 54804f5ba9535ee88a6852e5d59f0496dd0725eb
