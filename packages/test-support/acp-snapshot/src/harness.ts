@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, delimiter } from 'node:path'
 import { vi } from 'vitest'
+import { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -246,6 +247,10 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
       await cp(opts.workspaceDir, cwd, { recursive: true })
     }
     await opts.prepareWorkspace?.(cwd)
+    // A cwd under a marked ancestor (a git-tracked developer home, or a TMPDIR
+    // rooted in one) would otherwise adopt the ancestor's AGENTS.md and
+    // .agents/skills into the replay, shifting every later sourceEventSeq.
+    await isolateWorkspaceProjectRoot(cwd)
     const env: NodeJS.ProcessEnv = {
       ...opts.env,
       DSH_SNAPSHOT: opts.mode,

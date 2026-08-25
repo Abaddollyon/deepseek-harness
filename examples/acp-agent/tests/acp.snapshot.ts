@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { copyFile, mkdir, utimes, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { expect, it } from 'vitest'
 import {
   defineAcpSnapshotSuite,
@@ -700,6 +700,48 @@ defineAcpSnapshotSuite({
   scenarios: SCENARIOS,
   mode: snapshotModeFromEnv(process.env.DSH_SNAPSHOT),
   hasPwsh,
+})
+
+// Ambient-host hermeticity regression: the session-sandbox-root scenario proved a
+// replay cwd under a git-tracked developer home adopted that home's AGENTS.md and
+// .agents/skills, shifting every later sourceEventSeq. The harness now anchors
+// project discovery at the generated cwd; this replays a turn whose cwd sits
+// under an ancestor that IS a marked project root and asserts none of its state
+// enters the log.
+it('keeps ambient ancestor instructions and skills out of replayed sessions', async () => {
+  const ambient = await mkdtemp(join(tmpdir(), 'acp-snap-ambient-'))
+  await Promise.all([
+    mkdir(join(ambient, '.git')),
+    mkdir(join(ambient, '.agents', 'skills', 'ambient-host-skill'), { recursive: true }),
+  ])
+  await Promise.all([
+    writeFile(join(ambient, 'AGENTS.md'), 'AMBIENT-HOST-INSTRUCTION sentinel\n'),
+    writeFile(join(ambient, '.agents', 'skills', 'ambient-host-skill', 'SKILL.md'), [
+      '---',
+      'name: ambient-host-skill',
+      'description: Must not enter ACP replays',
+      '---',
+      '',
+      'Ambient host state.',
+      '',
+    ].join('\n')),
+  ])
+  try {
+    const dir = join(SNAPSHOTS_DIR, 'text-turn')
+    const input = JSON.parse(await readFile(join(dir, 'input.json'), 'utf8')) as InputScript
+    const result = await runScenario(input, {
+      agent: AGENT,
+      mode: 'replay',
+      fixtureFile: join(dir, 'session.jsonl'),
+      workspaceParent: ambient,
+    })
+    expect(result.sessionLogs.length).toBeGreaterThan(0)
+    const replayed = result.sessionLogs.map(log => log.content).join('\n')
+    expect(replayed).not.toContain('AMBIENT-HOST-INSTRUCTION')
+    expect(replayed).not.toContain('ambient-host-skill')
+  } finally {
+    await rm(ambient, { recursive: true, force: true })
+  }
 })
 
 it('pins native DeepSeek Files offload and inline fallback in assembled requests', async () => {

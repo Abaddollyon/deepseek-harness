@@ -34,6 +34,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include, { type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import Group from '@deepseek-ai/cordis-plugin-group'
 import {
+  isolateWorkspaceProjectRoot,
   scrubRequestHeaders,
   scrubSessionSnapshot,
   stabilizeFixtureMessageIds,
@@ -377,6 +378,11 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   Object.assign(process.env, skillRootEnvironment)
   let persistenceRoot: string
   try {
+    // Project skill roots are discovered by walking up from the session cwd;
+    // anchor the walk at the owned workspace so a marked TMPDIR ancestor cannot
+    // leak host skills into replay goldens (the DSH_* skill roots are pinned
+    // above for the same reason).
+    await isolateWorkspaceProjectRoot(workspaceCwd)
     persistenceRoot = await mkdtemp(join(tmpdir(), 'dsh-web-e2e-sessions-'))
   } catch (error) {
     const failures: unknown[] = [error]

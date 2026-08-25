@@ -483,7 +483,8 @@ describe('runScenario', () => {
       { steps: [...boot, { op: 'prompt', text: 'ls' }] },
       { agent: AGENT, mode: 'replay', fixtureFile, workspaceDir },
     )
-    expect(result.rawStdout).toContain('workspace:seeded.txt')
+    // The harness-owned project-root marker sorts first in the workspace echo.
+    expect(result.rawStdout).toContain('workspace:.git,seeded.txt')
   })
 
   it('prepares the generated workspace after copying committed fixtures', { timeout: 20_000 }, async () => {
@@ -507,7 +508,7 @@ describe('runScenario', () => {
       },
     )
 
-    expect(result.rawStdout).toContain('workspace:committed.txt,runtime.txt')
+    expect(result.rawStdout).toContain('workspace:.git,committed.txt,runtime.txt')
   })
 
   it('creates the generated workspace under an explicit parent', { timeout: 20_000 }, async () => {
