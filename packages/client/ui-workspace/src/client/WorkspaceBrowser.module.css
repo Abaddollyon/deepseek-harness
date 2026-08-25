@@ -464,6 +464,18 @@
   font-size: 13px;
 }
 
+/* Pinned threads section label: quiet heading over the user-pinned rows,
+   quieter than a Workspace header because it groups across Workspaces. */
+.pinnedHeader {
+  height: 28px;
+  padding: 0 12px;
+  line-height: 28px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-secondary);
+}
+
 /* Rename dialog form (same figma dialog family as the create modals). */
 .renameInput {
   box-sizing: border-box;

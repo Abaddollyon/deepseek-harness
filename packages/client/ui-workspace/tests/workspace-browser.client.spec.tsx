@@ -455,6 +455,199 @@ describe('WorkspaceBrowser', () => {
     expect(screen.queryByText('gone-s')).toBeNull()
   })
 
+  it('pins a session from the row menu into a top Pinned section that renders it exactly once', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('alpha-s', 2), summary('alpha-t', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['alpha-s', 'alpha-t'])])),
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('button', { name: '会话“alpha-s”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '置顶会话' }))
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['alpha-s'])
+
+    // The row left its group for the Pinned section: exactly one rendering,
+    // and the section sits above every Workspace group.
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('alpha-s')).toHaveLength(1)
+    expect(screen.getByText('alpha-t')).toBeTruthy()
+    const heading = screen.getByText('已置顶')
+    const position = heading.compareDocumentPosition(screen.getByText('alpha'))
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('returns an unpinned session to its accounted group position', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('alpha-s', 3), summary('alpha-t', 2), summary('alpha-u', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['alpha-s', 'alpha-t', 'alpha-u'])])),
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    act(() => { b.store.actions.togglePinnedSession('alpha-t') })
+    expect(screen.getAllByText('alpha-t')).toHaveLength(1)
+    expect(screen.getByText('已置顶')).toBeTruthy()
+
+    // Unpin from the Pinned section's own row menu; the row rejoins its group
+    // at the accounted slot between its former neighbors.
+    fireEvent.click(screen.getByRole('button', { name: '会话“alpha-t”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '取消置顶' }))
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual([])
+    expect(screen.queryByText('已置顶')).toBeNull()
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('alpha'),
+      expect.stringContaining('alpha-s'),
+      expect.stringContaining('alpha-t'),
+      expect.stringContaining('alpha-u'),
+    ])
+  })
+
+  it('omits a pinned loose session from the Ungrouped bucket', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('loose-a', 2), summary('loose-b', 1)])),
+      useWorkspaces: hook(workspaceState([])),
+    })
+    fireEvent.click(screen.getByText('未分组会话'))
+    act(() => { b.store.actions.togglePinnedSession('loose-a') })
+    expect(screen.getAllByText('loose-a')).toHaveLength(1)
+    expect(screen.getByText('loose-b')).toBeTruthy()
+    // The pinned row renders above the bucket header, inside the section.
+    const position = screen.getByText('loose-a')
+      .compareDocumentPosition(screen.getByText('未分组会话'))
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('omits pinned rows from the flat list and restores their manual position on unpin', async () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('one', 3), summary('two', 2), summary('three', 1)])),
+    })
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    await waitFor(() => {
+      expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+        .toEqual(['one', 'two', 'three'])
+    })
+    act(() => { b.store.actions.togglePinnedSession('two') })
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('two')).toHaveLength(1)
+    // The rendered flat list skips the pinned row; the order account keeps it.
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('two'),
+      expect.stringContaining('one'),
+      expect.stringContaining('three'),
+    ])
+    expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+      .toEqual(['one', 'two', 'three'])
+
+    act(() => { b.store.actions.togglePinnedSession('two') })
+    expect(screen.queryByText('已置顶')).toBeNull()
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('one'),
+      expect.stringContaining('two'),
+      expect.stringContaining('three'),
+    ])
+  })
+
+  it('keeps a pinned session\'s flat position when another row is dragged', async () => {
+    // The flat-order repair trap: drag edits must rewrite the full order
+    // account, not the rendered rows — the rendered list omits pinned ids, so
+    // a rows-derived write would silently drop the pinned thread's position.
+    const b = mount({
+      useSessions: hook(sessionState([summary('one', 3), summary('two', 2), summary('three', 1)])),
+    })
+    fireEvent.click(screen.getByRole('button', { name: '视图选项' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
+    await waitFor(() => {
+      expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+        .toEqual(['one', 'two', 'three'])
+    })
+    act(() => { b.store.actions.togglePinnedSession('two') })
+
+    const one = screen.getByText('one').closest('[role="treeitem"]') as HTMLElement
+    const three = screen.getByText('three').closest('[role="treeitem"]') as HTMLElement
+    three.getBoundingClientRect = () => ({
+      top: 150, bottom: 184, left: 0, right: 200, width: 200, height: 34,
+      x: 0, y: 150, toJSON: () => ({}),
+    })
+    fireEvent.dragStart(one, { dataTransfer: dragData() })
+    fireDrag(three, 'drop', 180)
+    expect(b.store.getSnapshot().sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+      .toEqual(['two', 'three', 'one'])
+
+    act(() => { b.store.actions.togglePinnedSession('two') })
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent)).toEqual([
+      expect.stringContaining('two'),
+      expect.stringContaining('three'),
+      expect.stringContaining('one'),
+    ])
+  })
+
+  it('renders a pinned running session once — in the Pinned section, not under its folded group', () => {
+    const b = mount({
+      useSessions: hook(sessionState([
+        summary('pinned-live', 3, { running: true }),
+        summary('free-live', 2, { running: true }),
+        summary('idle', 1),
+      ])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['pinned-live', 'free-live', 'idle'])])),
+    })
+    act(() => { b.store.actions.togglePinnedSession('pinned-live') })
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('pinned-live')).toHaveLength(1)
+    // The folded group keeps its other live row as the automatic holdout and
+    // counts only the sessions the fold still hides.
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByText('free-live')).toBeTruthy()
+    expect(screen.getByText('另有 1 个会话已折叠')).toBeTruthy()
+  })
+
+  it('reveals a pinned current session\'s group without duplicating the pinned row', async () => {
+    // Pins are seeded into the persisted view store before the browser mounts
+    // (see the remount test below): the reveal then navigates into a session
+    // that is already pinned.
+    const seed = createWorkspaceViewStore().create()
+    seed.actions.togglePinnedSession('cur-s')
+    const b = mount({
+      useSessions: hook(sessionState(
+        [summary('cur-s', 2), summary('other-s', 1)],
+        { current: sid('cur-s') },
+      )),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['cur-s', 'other-s'])])),
+    })
+    expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['cur-s'])
+    // The reveal still opens the current session's group, but the pinned
+    // current row renders exactly once — in the Pinned section.
+    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
+    expect(screen.getByText('other-s')).toBeTruthy()
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('cur-s')).toHaveLength(1)
+  })
+
+  it('restores pinned threads from the persisted view store across a remount', () => {
+    const seed = createWorkspaceViewStore().create()
+    seed.actions.togglePinnedSession('one')
+    const first = mount({
+      useSessions: hook(sessionState([summary('one', 2), summary('two', 1)])),
+    })
+    expect(first.store.getSnapshot().pinnedSessionIds).toEqual(['one'])
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    first.view.unmount()
+
+    mount({ useSessions: hook(sessionState([summary('one', 2), summary('two', 1)])) })
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('one')).toHaveLength(1)
+    // The unpinned session is back in its (folded) bucket, not in the section.
+    fireEvent.click(screen.getByText('未分组会话'))
+    expect(screen.getByText('two')).toBeTruthy()
+  })
+
+  it('shows no empty-list placeholder while every session is pinned', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('only', 1)])),
+    })
+    act(() => { b.store.actions.togglePinnedSession('only') })
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getByText('only')).toBeTruthy()
+    expect(screen.queryByText('暂无会话')).toBeNull()
+  })
+
   it('logs and keeps the tree when the archive call rejects', async () => {
     const rejection = new Error('archive exploded')
     const archiveSession = vi.fn(async () => { throw rejection })
