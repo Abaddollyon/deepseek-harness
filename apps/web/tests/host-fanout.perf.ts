@@ -17,6 +17,7 @@ import { CallId, createMessage, createToolResultMessage, createUserMessage } fro
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -73,16 +74,6 @@ async function harness(): Promise<Context> {
   return ctx
 }
 
-/**
- * Create one session through the store. Typed here because this lane's compiler
- * face does not pick up the `ctx.sessions` service augmentation.
- * @param ctx - the composed host context.
- * @returns the new session.
- */
-function createSession(ctx: Context): Session {
-  return (ctx.sessions as { create: () => Session }).create()
-}
-
 /** Register a live Agent so the gateway's per-event agent lookups hit. */
 function attachAgent(ctx: Context, session: Session): void {
   ctx.agents.register({
@@ -137,7 +128,7 @@ function growSession(session: Session, target: number): void {
       for (let index = 0; index < 4; index += 1) appendToolPair(session, turn, 2, index)
       appendAssistant(session, turn, 3)
     }
-    session.append('turn/end', { turn })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
   }
 }
 
@@ -148,7 +139,7 @@ function emitTurn(session: Session, turn: number): void {
   if (turn % TOOL_TURN_INTERVAL === 0) {
     for (let index = 0; index < 4; index += 1) appendToolPair(session, turn, 4, index)
   }
-  session.append('turn/end', { turn })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
 /**
@@ -212,14 +203,14 @@ describe('manual host performance: mux fan-out', () => {
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
     const catalogStart = performance.now()
-    for (let index = 0; index < CATALOG_SESSIONS; index += 1) createSession(ctx)
-    const long = createSession(ctx)
+    for (let index = 0; index < CATALOG_SESSIONS; index += 1) ctx.sessions.create()
+    const long = ctx.sessions.create()
     attachAgent(ctx, long)
     growSession(long, LONG_SESSION_EVENTS)
     const seedMs = performance.now() - catalogStart
     const longEvents = long.events.length
 
-    expect((ctx.sessions as { list: () => readonly Session[] }).list()).toHaveLength(CATALOG_SESSIONS + 1)
+    expect(ctx.sessions.list()).toHaveLength(CATALOG_SESSIONS + 1)
     expect(longEvents).toBeGreaterThanOrEqual(LONG_SESSION_EVENTS)
 
     const report: Record<string, unknown>[] = []
@@ -292,6 +283,49 @@ describe('manual host performance: mux fan-out', () => {
 
     console.log(`[host-fanout] seed ${rounded(seedMs)}ms for ${String(CATALOG_SESSIONS + 1)} sessions, long session ${String(longEvents)} events`)
     console.table(report)
+  })
+
+  /**
+   * Standing evidence for a change deliberately NOT made: memoizing
+   * `resolveSessionPreset` per session. It is absent from the mux hot path, and
+   * this prices what a cache could possibly return on the one path that calls it
+   * per session. A memo would also have to invalidate on the very event the
+   * function exists to observe, so the numbers have to justify that risk.
+   */
+  it('reports what memoizing preset resolution could save on the list path', async () => {
+    const ctx = await harness()
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    for (let index = 0; index < CATALOG_SESSIONS; index += 1) ctx.sessions.create()
+    const long = ctx.sessions.create()
+    growSession(long, LONG_SESSION_EVENTS)
+    const empty = ctx.sessions.create()
+
+    const reps = 200
+    let started = performance.now()
+    for (let index = 0; index < reps; index += 1) resolveSessionPreset(long)
+    const longUs = (performance.now() - started) * 1000 / reps
+
+    started = performance.now()
+    for (let index = 0; index < reps; index += 1) resolveSessionPreset(empty)
+    const emptyUs = (performance.now() - started) * 1000 / reps
+
+    let listMs = 0
+    for (let index = 0; index < 5; index += 1) {
+      const at = performance.now()
+      await api.sessions.list({ rpcId: RpcId(`preset-list-${String(index)}`), payload: {} })
+      listMs += performance.now() - at
+    }
+    listMs /= 5
+
+    // The whole catalog resolves once per list call: one worst-case log plus
+    // every ordinary one.
+    const perListMs = (longUs + emptyUs * CATALOG_SESSIONS) / 1000
+    expect(listMs).toBeGreaterThan(0)
+    console.log(`[host-preset] resolveSessionPreset, ${String(long.events.length)}-event log: ${String(rounded(longUs))}us`)
+    console.log(`[host-preset] resolveSessionPreset, empty log: ${String(rounded(emptyUs))}us`)
+    console.log(`[host-preset] session.list over ${String(CATALOG_SESSIONS + 2)} sessions: ${String(rounded(listMs))}ms`)
+    console.log(`[host-preset] resolution share of one list: ${String(rounded(perListMs))}ms `
+      + `(${String(rounded(perListMs / listMs * 100))}%)`)
   })
 })
 
