@@ -11,7 +11,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailureCode } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
@@ -213,18 +213,15 @@ export interface SubagentStopReasonMap {
 /** The union over {@link SubagentStopReasonMap} — widens automatically as backends merge in variants. */
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
-/** Provider-neutral cause of a failed child run that callers can branch on. */
-export type SubagentFailureCause = 'quota' | 'rate-limit' | 'transient' | 'permanent' | 'unknown'
-
 /**
- * Machine-readable provider failure facts retained on a failed child result.
+ * Machine-readable provider failure facts retained alongside diagnostic text.
  *
- * The cause is deliberately smaller than provider error taxonomies so a parent
- * can stop dispatching, wait, or reroute without parsing diagnostic text.
+ * `code` is the LLM seam's merge-extensible failure code; consumers must use a
+ * documented default for unrecognised codes and treat them as non-retryable.
  */
 export interface SubagentFailure {
-  /** Closed provider-neutral cause used for retry and routing decisions. */
-  readonly cause: SubagentFailureCause
+  /** Typed provider failure code used for routing and retry decisions. */
+  readonly code: LlmFailureCode
   /** Provider-requested delay before another attempt, in milliseconds. */
   readonly retryAfterMs?: number
 }
@@ -253,10 +250,11 @@ export interface SubagentResult {
    * Provider-authored, non-assistant failure detail for a non-`completed`
    * result. Providers keep this text free of tool inputs, file contents,
    * environment values, credentials, and raw protocol payloads, and limit it
-   * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
+   * to 4096 UTF-8 bytes. This is human/model-readable context, not a branch key;
+   * use the optional {@link failure} companion for routing decisions.
    */
   readonly diagnostic?: string
-  /** Structured retry/routing facts when the provider identified a failure cause. */
+  /** Typed branchable cause accompanying `diagnostic`; absent means the cause is unknown. */
   readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
