@@ -695,12 +695,16 @@ function viewFor(
   // is a scope whose chain passes through its preset; a cold read passes the
   // preset's standing key directly — no agent, no resume. An undefined scope
   // sees only the global layer, which is the pre-preset deployment shape.
-  scope?: ScopeKey,
+  //
+  // Resolved lazily, like `argsFor`: most events carry no view at all, and on
+  // the live path resolving the scope means an agent-registry lookup through
+  // the Context proxy — measurably the most expensive step in this function.
+  scopeFor?: () => ScopeKey | undefined,
 ): ToolEventView | undefined {
   try {
     if (event.type === 'tool/call') {
       const { name, arguments: raw } = event.data as ToolCallData
-      const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+      const view = ctx.tools.get(name, scopeFor?.())?.presentCall?.(JSON.parse(raw))
       return view === undefined ? undefined : { for: 'call', view }
     }
     if (event.type === 'tool/result') {
@@ -709,7 +713,7 @@ function viewFor(
       const callId = message.source.callId
       const call = argsFor(callId) as { name: string; args: unknown } | undefined
       if (call === undefined) return undefined
-      const view = ctx.tools.get(call.name, scope)?.presentResult?.(call.args, {
+      const view = ctx.tools.get(call.name, scopeFor?.())?.presentResult?.(call.args, {
         content: result.content,
         isError: result.isError === true,
         ...meta === undefined ? {} : { meta },
@@ -755,9 +759,10 @@ function historyPage(
   scope?: ScopeKey,
 ): { events: HistoryEntry[]; hasMore: boolean } {
   const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+  const scopeFor = (): ScopeKey | undefined => scope
   return {
     events: page.events.map((event) => {
-      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
+      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scopeFor)
       return { event, ...view === undefined ? {} : { view } }
     }),
     hasMore: page.hasMore,
@@ -1313,6 +1318,50 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     const agent = ctx.agents.get(session.id)
     if (agent?.session !== session) return
     broadcast({ type: 'session/queue', sessionId: session.id, items: queueItems(agent, event.data) })
+  })
+
+  /**
+   * Per-session open-call table for result-view pairing. Bounded by the
+   * per-turn call count: entries clear on turn/end; a table miss (an event
+   * observed before this gateway existed) backscans the session's in-memory
+   * events instead.
+   */
+  const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+
+  // One listener for every connected consumer, not one per stream. The view,
+  // the call-table update, and the frame envelope are the same value for all of
+  // them, so computing them per stream repeated the presenter call and the
+  // agent lookup once per open tab. Sharing the envelope matches every other
+  // push here (see `broadcast`); a mux consumer reads rpcId only on answerable
+  // frames, which mint their own.
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type === 'tool/call') {
+      const data = event.data as ToolCallData
+      try {
+        let table = openCalls.get(session.id)
+        if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
+        table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
+      } catch {
+        // Unparseable model arguments: leave the table unset; the result view soft-falls.
+      }
+    } else if (event.type === 'turn/end') {
+      openCalls.delete(session.id)
+    }
+    if (muxQueues.size === 0) return
+    const view = viewFor(
+      ctx, event,
+      callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
+      () => ctx.agents.get(session.id),
+    )
+    const envelope = frame<MuxFrame>({
+      type: 'session/event', sessionId: session.id, event,
+      ...view === undefined ? {} : { view },
+    })
+    for (const queue of muxQueues) queue.push(envelope)
+  })
+
+  ctx.on('session/disposed', (session: Session) => {
+    openCalls.delete(session.id)
   })
 
   /** Remove a wait before settling it: synchronous deletion makes the first claimant win. */
@@ -3528,31 +3577,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           }
         }
-        // Per-session open-call table for result-view pairing. Bounded by the
-        // per-turn call count: entries clear on turn/end; a table miss (stream
-        // opened mid-turn) backscans the session's in-memory events instead.
-        const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+        // session/event fan-out is process-wide (one listener, one view, one
+        // envelope for every queue); this stream owns only its own baselines.
         const disposers = [
-          ctx.on('session/event', (session: Session, event: SessionEvent) => {
-            if (event.type === 'tool/call') {
-              const data = event.data as ToolCallData
-              try {
-                let table = openCalls.get(session.id)
-                if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
-                table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
-              } catch {
-                // Unparseable model arguments: leave the table unset; the result view soft-falls.
-              }
-            } else if (event.type === 'turn/end') {
-              openCalls.delete(session.id)
-            }
-            const view = viewFor(
-              ctx, event,
-              callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
-              ctx.agents.get(session.id),
-            )
-            queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
-          }),
           ctx.on('session/created', (session: Session) => {
             subscribeSession(queue, session)
             // The subscribe frame clears the client's task mirror, and a
@@ -3563,9 +3590,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             if (views.length > 0) {
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
             }
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            openCalls.delete(session.id)
           }),
           ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
             if (owner !== undefined) {
