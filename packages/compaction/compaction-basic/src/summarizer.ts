@@ -7,7 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { contentHasImage, createUserMessage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema,
+  ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema, UserMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
@@ -64,6 +64,19 @@ const COMPACTION_INSTRUCTION = [
   '- Output only the checkpoint text: do not call any tool or take any other action.',
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
 ].join('\n')
+
+/**
+ * Build the trailing compaction directive delivered as the final user message
+ * after the replayed conversation prefix. Exported so replay admission can
+ * price the exact instruction the summarization call appends.
+ * @returns the identified plugin-sourced instruction message.
+ */
+export function compactionInstructionMessage(): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
+    source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
+  })
+}
 
 /** Framing that makes the replacement user message established context. */
 const CHECKPOINT_PREAMBLE =
@@ -145,10 +158,7 @@ export async function summarizeWithLlm(
   const assembler = new BlockAssembler()
   const messages: Message[] = [
     ...input.messages,
-    createUserMessage({
-      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
-      source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
-    }),
+    compactionInstructionMessage(),
   ]
   const options: GenerateOptions = {
     provider: target.provider,

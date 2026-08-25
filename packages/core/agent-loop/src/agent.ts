@@ -14,9 +14,10 @@ import type {
   InboxTarget,
   PreStepDecision,
   RequestErrorAction,
+  RequestPreflightAction,
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
   BlockAssembler,
   LlmError,
@@ -369,7 +370,7 @@ export class ReactLoopAgent implements Agent {
 
     while (true) {
       const { request, preparedCall } = await this.buildRequest(
-        turn, step, assembly.tools, system, this.session.deriveMessages(), signal,
+        turn, step, assembly.tools, system, signal,
       )
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
@@ -459,7 +460,6 @@ export class ReactLoopAgent implements Agent {
     step: number,
     tools: GenerateOptions['tools'] & object,
     system: string,
-    boundaryMessages: Message[],
     signal: AbortSignal,
   ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
     const { session } = this
@@ -533,6 +533,30 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
+    // The preflight waterfall admits the exact canonical request before its
+    // messages are derived. A retry decision must follow durable log growth
+    // (compaction appends), so the anchor assertion turns a non-productive
+    // retry into a loud listener defect instead of a silent hot loop.
+    let preflightAnchor = session.events.length
+    while (true) {
+      const action = await this.dispatch.waterfall(
+        'agent/request-preflight',
+        { turn, step, header, contextWindow, signal },
+        () => Promise.resolve<RequestPreflightAction>(undefined),
+      )
+      signal.throwIfAborted()
+      if (action?.kind !== 'retry') break
+      if (session.events.length === preflightAnchor) {
+        throw new Error(
+          `agent "${this.id}": agent/request-preflight returned retry without a durable session change`,
+        )
+      }
+      preflightAnchor = session.events.length
+    }
+
+    // Admission passed: derive the boundary messages only now, so a retrying
+    // listener's durable changes are part of the derived history.
+    const boundaryMessages = session.deriveMessages()
     const request = markAgentLoopRequest(deepFreeze({
       ...header.config,
       messages: boundaryMessages,

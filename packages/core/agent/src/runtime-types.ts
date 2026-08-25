@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { LlmCallConfig, LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AgentCancelCause, EpochHeader, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
 import type { InboxTarget } from './types.ts'
@@ -56,6 +56,9 @@ export type PreStepDecision =
 
 /** Action returned by a listener that owns model-request recovery. */
 export type RequestErrorAction = { kind: 'retry' } | undefined
+
+/** Action returned by a listener that durably reduced request pressure and needs admission re-run. */
+export type RequestPreflightAction = { kind: 'retry' } | undefined
 
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
@@ -244,6 +247,32 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
     */
     'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+    /**
+     * Admit one exact model request before its messages are derived. The
+     * payload carries the canonical header just logged for this request and
+     * the resolved adapter capacity, so listeners price admission against the
+     * exact target request rather than a stale one. Calling `next()` admits
+     * the request. A listener that durably reduced request pressure (for
+     * example through compaction) returns `{ kind: 'retry' }` without
+     * calling `next()`; the loop then re-dispatches the preflight so every
+     * listener re-admits against the rebuilt surface, and only after that
+     * admission passes are request messages derived. A retry decision must
+     * follow a durable session-log change — the loop asserts the log advanced
+     * and throws otherwise — and the listener must bound its own retry
+     * budget. The default `undefined` admits the request unchanged; a
+     * request that still exceeds capacity is admitted and left to the
+     * provider's overflow failure and `agent/request-error` recovery, never
+     * silently truncated.
+     * @param payload.agent - the agent making the model call.
+     * @param payload.turn - the open turn number.
+     * @param payload.step - the step whose request this is.
+     * @param payload.header - the exact canonical request header logged for this request.
+     * @param payload.contextWindow - the resolved adapter context capacity, when advertised.
+     * @param payload.signal - the current turn's explicit abort signal.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/request-preflight'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>
     /**
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`

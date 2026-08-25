@@ -12,7 +12,7 @@ import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
-import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { Agent, RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -24,15 +24,17 @@ import {
 } from './config.ts'
 import {
   assertNoActiveCompaction,
+  capRangeForReplayBudget,
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
-import { summarizeWithLlm } from './summarizer.ts'
+import { compactionInstructionMessage, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
   ModelCompactPolicyConfig,
   ResolvedConfig,
+  ResolvedTargetPolicy,
 } from './types.ts'
 
 export type {
