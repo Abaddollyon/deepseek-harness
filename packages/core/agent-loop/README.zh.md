@@ -1,11 +1,27 @@
+---
+description: "具体的 agent 循环驱动器与生命周期所有者。"
+kind: "package-reference"
+---
+
 # dsh-agent-loop
 
 [English](README.md) | 中文
+
+## 概述
+
+具体的 agent 插件和循环驱动器拥有 session、turn 与 step 生命周期。
+
+## 目录
+
+- [服务：AgentLoop](#service-agentloop-ctx-key-agentloop)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
 agent（智能体）的唯一具体实现插件和循环驱动器。其包内部实现满足 `Agent` 接口，并驱动会话、轮次和步骤的生命周期。
 
 这是 harness 中唯一包含具体循环逻辑的包。其他所有内容要么是抽象服务，要么是针对扩展点的插件：新行为应放入插件，而不是这里。
 
+<a id="service-agentloop-ctx-key-agentloop"></a>
 ## 服务：`AgentLoop`（ctx 键：`agentLoop`）
 
 ### 公开 API
@@ -40,8 +56,10 @@ interface Config {
   maxParallelToolCalls?: number // default 10; 1 is serial
   agents: Array<{
     id: string                 // required
+    sessionId?: string          // exact create-or-resume identity; exclusive with resumeSessionId
     provider?: string
     model?: string
+    reasoningEffort?: string    // registered effort id for the configured model route
     maxTokens?: number         // positive per-request output-token cap
     resumeSessionId?: string   // load this persisted session instead of creating one
     cwd?: string               // optional workspace cwd for the fresh session
@@ -49,7 +67,7 @@ interface Config {
 }
 ```
 
-通过配置创建的 agent 会自动启动。模型调用同时需要 `provider` 和 `model`；`agent/request` 可以在分发前补齐缺失的这一对值。可选的正数 `maxTokens` 会为每次对话请求提供初始输出上限，并记录在请求 header 中。`maxParallelToolCalls` 限制每个 agent 针对并行安全调用使用的滚动池，默认值为 `10`；它同时也是 `agent-loop` Settings 段的全部内容，因此叠加在该条目之上的用户层无需重启即可限制下一组工具调用，而非正整数的值会在写入时被拒绝，而不是到那一组时才失败。`agents` 刻意不在该段中——它在服务启动时被消费一次，所以存储的改动只会看起来生效。`cwd` 仅应用于全新会话，而 `resumeSessionId` 保留持久化元数据。通过配置创建的 agent 使用部署 persona；编程式 setup 可以按 agent 遮蔽它。该插件为每个 agent 提供 `provider`、`model` 和 `cwd` 提示词变量；harness 身份与部署 persona 属于 `dsh-system-prompt`。
+通过配置创建的 agent 会自动启动。模型调用同时需要 `provider` 和 `model`；`agent/request` 可以在分发前补齐缺失的这一对值。`reasoningEffort` 为该路由选择已注册的推理强度。`sessionId` 在首次使用时创建确切身份，并在重新挂载时恢复已物化的历史记录；它与要求已有历史记录的 `resumeSessionId` 互斥。可选的正数 `maxTokens` 会为每次对话请求提供初始输出上限，并记录在请求 header 中。`maxParallelToolCalls` 限制每个 agent 针对并行安全调用使用的滚动池，默认值为 `10`；它同时也是 `agent-loop` Settings 段的全部内容，因此叠加在该条目之上的用户层无需重启即可限制下一组工具调用，而非正整数的值会在写入时被拒绝，而不是到那一组时才失败。`agents` 刻意不在该段中——它在服务启动时被消费一次，所以存储的改动只会看起来生效。`cwd` 仅应用于全新会话，而 `resumeSessionId` 保留持久化元数据。通过配置创建的 agent 使用部署 persona；编程式 setup 可以按 agent 遮蔽它。该插件为每个 agent 提供 `provider`、`model` 和 `cwd` 提示词变量；harness 身份与部署 persona 属于 `dsh-system-prompt`。
 
 ### 包内部具体驱动器
 
@@ -61,7 +79,7 @@ interface Config {
 
 ### 循环生命周期（`agent.ts`）
 
-驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。包私有的编排入口点会恢复确切的 Agent，一次性派生 `agent.session`，并让操作局部的辅助函数捕获它，而不是通过浅层接口继续传递具体驱动器或每次操作的 `Session`。如果显式 `Session` 正是辅助函数的实际接口，该辅助函数会保留它；创建、持久化加载、未发布 setup、服务、worker、进程、持久化和 wire 协议则继续保留各自的显式身份。[agent 服务](../../../.agents/notes/implemented/architecture/2026-07-15-agent-initiator-scope.zh.md)规定传播、teardown 和分离工作规则。
+驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。包私有的编排入口点会恢复确切的 Agent，一次性派生 `agent.session`，并让操作局部的辅助函数捕获它，而不是通过浅层接口继续传递具体驱动器或每次操作的 `Session`。如果显式 `Session` 正是辅助函数的实际接口，该辅助函数会保留它；创建、持久化加载、未发布 setup、服务、worker、进程、持久化和 wire 协议则继续保留各自的显式身份。[agent 服务](../agent/README.zh.md#initiator-scope)规定传播、teardown 和分离工作规则。
 
 每次提供方调用成功结束时，都会恰好追加一个 `assistant/message` 完成锚点，包括无内容调用和以 `max-tokens` 结束的调用。该锚点原样记录组装后的内容，在 `sourceEventSeqs` 中列出确切的分片 seq（流没有分片时为 `[]`），并在用量可用时包含用量；空内容不会进入派生消息历史。轮次取消打断流式输出时，如果非空文本或推理内容已送达用户，循环也会追加一个带 `interrupted: true` 的锚点。该锚点引用对应的分片 seq，并把已渲染的前缀放入派生消息历史，使下一次请求包含用户看到的内容。未分派的工具调用会被省略，空流或只包含工具调用的流不会生成锚点；提供方故障也不提交 assistant 内容（[决策](../../../.agents/notes/implemented/architecture/2026-08-10-cancelled-stream-prefix-finalize.zh.md)）。
 
@@ -82,6 +100,7 @@ interface Config {
 - 持久化：`session/event` 发生后立即安排延后写入；`session/flush` 是显式观测屏障
 - UI：`session/event`（assistant token 流、边界、工具活动）+ `agent/*` 控制事件（`agent/status`、`agent/created`/`agent/disposed`）
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 完整对话请求
@@ -128,7 +147,14 @@ interface Config {
 
 ## 已知限制与暂缓事项
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - **分类是一元的**：安全性取决于比较同级调用或资源的调用必须保持独占（参见[设计原理](../../../.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.zh.md)）。
 - **配置 label 默认对应新会话**：省略 `sessionId` 时，每次启动都会创建新的 `${id}-session-<uuid>`；如需确切的恢复或创建行为，必须显式提供稳定的 `sessionId`，而 `resumeSessionId` 要求已有持久化历史。
 - **配置 agent 没有逐 agent persona 字段或 setup 钩子**：它们使用部署 persona；只有编程式 `ctx.agents.create()` / `resume()` 工厂选项支持带作用域的 persona／工具组合。
 - **没有内置轮次预算**：工具调用或 steering 会让当前轮次继续；限制失控轮次的策略必须从既有生命周期扩展点（如 `agent/turn-stopping`）执行取消。
+
+<a id="dev-note"></a>
+### 开发备注
+
+生命周期变更需要覆盖取消、teardown 和持久化的专项测试。

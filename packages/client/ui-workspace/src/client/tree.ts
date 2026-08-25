@@ -9,6 +9,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { indexSubagentDescendants, type SubagentDescendantSummary } from './subagent-lineage.ts'
 
 type PendingInteractionStatus = 'approval' | 'plan-review' | 'question'
+/** Pending interaction kind indexed by owning Session id. */
 export type PendingInteractionSnapshot = ReadonlyMap<SessionId, { readonly kind: string }>
 
 function pendingStatus(snapshot: PendingInteractionSnapshot, id: SessionId): PendingInteractionStatus | undefined {
@@ -346,6 +347,7 @@ function numberUntitledCollisions(rows: SessionNode[]): SessionNode[] {
  * @param workspaces - real workspaces in stable Host order.
  * @param archivedSessionIds - registry-global archive set.
  * @param view - local expansion arrays.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns group sections in render order.
  */
 export function deriveGroups(
@@ -392,6 +394,7 @@ export function deriveGroups(
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @param pinnedSessionIds - user-pinned Session ids in pin order.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns pinned rows in render order.
  */
 export function derivePinnedSessions(
@@ -423,6 +426,7 @@ export function derivePinnedSessions(
  * outside this derivation (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns flat rows in render order.
  */
 export function deriveFlat(
@@ -461,6 +465,7 @@ export interface RelativeTime {
  * @param archivedSessionIds - registry-global archive set (members never match).
  * @param content - ranked Host content-search page.
  * @param limit - protocol-owned maximum merged row count.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns bounded deduplicated flat rows and a refine-query hint bit.
  */
 export function deriveSearchResults(
