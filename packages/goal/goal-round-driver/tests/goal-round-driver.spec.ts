@@ -1001,6 +1001,43 @@ describe('same-session goal driving', () => {
     expect(test.adapter.requests).toHaveLength(0)
   })
 
+  it('preserves queued human work across driver teardown', async () => {
+    const test = await harness(['hang'])
+    test.ctx.goals.create(test.agent, { objective: 'teardown keeps foreign inbox' })
+    await waitForRequests(test.adapter, 1)
+
+    test.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'human queued' }],
+      source: { kind: 'user' },
+    }))
+    await test.driver.dispose()
+
+    // The driver owns only its round: queued input it never claimed survives
+    // the interruption for the next lifecycle.
+    expect(test.agent.inbox.nextTurn.map(message => message.content[0]))
+      .toEqual([{ type: 'text', text: 'human queued' }])
+    expect(test.agent.session.events.some(event =>
+      event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
+    expect(test.agent.status).toBe('idle')
+  })
+
+  it('cancels the reservation when its queued round message is discarded', async () => {
+    const test = await harness([])
+    onInboxMessage(test.ctx, test.agent, (message) => {
+      if (message.source.kind !== 'goal') return
+      // A discard landing before the driver claims the queued round retires
+      // its reservation: the round must never reach a model request.
+      test.agent.inbox.remove(message.id)
+    })
+    test.ctx.goals.create(test.agent, { objective: 'discarded before claim' })
+    await test.agent.whenIdle()
+
+    expect(test.agent.session.events.some(event =>
+      event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(true)
+    expect(test.adapter.requests).toHaveLength(0)
+    expect(test.ctx.goals.get(test.agent)).toMatchObject({ roundsStarted: 0 })
+  })
+
   it('resets process-local scheduling state at a session-start edge', async () => {
     const test = await harness([textResponse('after explicit resume')])
     const created = test.ctx.goals.create(test.agent, { objective: 'restart safely', maxGoalRounds: 1 })

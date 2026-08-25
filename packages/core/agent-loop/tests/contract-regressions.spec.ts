@@ -247,8 +247,10 @@ describe('abort during tool execution ends the turn', () => {
         ? [event.data.content]
         : []))
       .toEqual([])
+    // Disposal keeps the pending inbox: context injected during execution
+    // and the accepted result context both survive for a later lifecycle.
     expect(agent.inbox.nextStep.map(inboxText))
-      .toEqual(['accepted result context during disposal'])
+      .toEqual(['accepted before disposal', 'accepted result context during disposal'])
     expect(agent.session.events.filter(event => event.type === 'turn/start'))
       .toHaveLength(1)
     expect(agent.session.events.find(event => event.type === 'turn/end')?.data.reason)
