@@ -47,7 +47,7 @@ class StepwiseToolAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: 400 },
+      context: { contextWindow: 1_000 },
     })
   }
 
@@ -169,9 +169,9 @@ async function harness(toolSteps: number): Promise<{ ctx: Context; compact: Repr
   // fires within the runaway turn after enough history can shrink.
   const compact = new ReproCompactionEngine(ctx, {
     auto: true,
-    thresholdRatio: 0.5,
+    thresholdRatio: 0.2,
     retainTokens: 50,
-    maxTokens: 8192,
+    maxTokens: 64,
     compactionRetries: 1,
   })
   return { ctx, compact }
@@ -243,7 +243,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
     }
   })
 
-  it('runs automatic pressure between the completed tool step and the next step', async () => {
+  it('runs automatic pressure after the next step starts but before its request', async () => {
     const { ctx } = await harness(8)
     try {
       const agent = ctx.agentLoop.create(SessionId('post-step-order'), { provider: 'mock', model: 'mock' })
@@ -265,11 +265,11 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       const nextStepStart = events.find(event =>
         event.type === 'step/start'
         && event.data.step === precedingResult.data.step + 1
-        && event.seq > compactStart!.seq,
+        && event.seq < compactStart!.seq,
       )
       expect(precedingResult.seq).toBeLessThan(compactStart!.seq)
       expect(precedingStepEnd!.seq).toBeLessThan(compactStart!.seq)
-      expect(compactStart!.seq).toBeLessThan(nextStepStart!.seq)
+      expect(nextStepStart!.seq).toBeLessThan(compactStart!.seq)
     } finally {
       await ctx.fiber.dispose()
     }

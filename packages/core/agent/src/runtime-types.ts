@@ -7,12 +7,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
-import type { LlmCallConfig, LlmFailure, ReasoningEffortId, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { LlmCallConfig, LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
+import type { AgentCancelCause, EpochHeader, Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
-import type { Agent } from './types.ts'
-export type { Agent } from './types.ts'
+import type { InboxTarget } from './types.ts'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 declare module '@deepseek-ai/dsh-system-prompt' {
   interface AssembleContext {
@@ -27,8 +26,6 @@ export interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
-  reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
 }
@@ -55,50 +52,50 @@ export type AgentStatus = 'idle' | 'running'
 /** Whether and with which messages the loop enters a proposed step. */
 export type PreStepDecision =
   | { kind: 'reject' }
-  | {
-    kind: 'enter'
-    messages: UserMessage[]
-    /** Start a distinct model-message series before this step's admitted messages. */
-    startsRequestSeries?: true
-  }
+  | { kind: 'enter'; messages: UserMessage[] }
 
 /** Action returned by a listener that owns model-request recovery. */
 export type RequestErrorAction = { kind: 'retry' } | undefined
 
+/** Action returned by a listener after committing a newer replacement surface. */
+export type RequestPreflightAction = { kind: 'retry'; surfaceGeneration: number } | undefined
+
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
 
-declare module './types.ts' {
-  interface Agent {
-    /** The provider route and model this agent's requests use. */
-    readonly options: AgentOptions
-    /** The live session this agent drives; its log is the durable source of truth. */
-    readonly session: Session
-    /** The agent-owned projection of durable pending work. */
-    readonly inbox: Inbox
-    /** The current lifecycle state, mirrored on every `agent/status` transition. */
-    readonly status: AgentStatus
-    /** Agent-scoped context; its contributions are agent-local, unwind on disposal, and reject registration afterward. */
-    readonly ctx: Context
+/** Public live-agent handle. */
+export interface Agent {
+  /** The single identity shared with {@link session}. */
+  readonly id: SessionId
+  /** The provider route and model this agent's requests use. */
+  readonly options: AgentOptions
+  /** The live session this agent drives; its log is the durable source of truth. */
+  readonly session: Session
+  /** The agent-owned projection of durable pending work. */
+  readonly inbox: Inbox
+  /** The current lifecycle state, mirrored on every `agent/status` transition. */
+  readonly status: AgentStatus
+  /** Agent-scoped context; its contributions are agent-local, unwind on disposal, and reject registration afterward. */
+  readonly ctx: Context
 
-    /**
+  /**
    * Clear queued and steering work — unless `keepInbox` — and abort the active
    * turn or between-turn task. The first cause wins for that activity. With no
    * active activity, cancellation is a no-op and does not arm later work.
    * @param cause - the stable caller intent carried by the active operation signal.
    * @param options - cancellation options; `keepInbox` preserves pending work.
    */
-    cancel(cause: AgentCancelCause, options?: CancelOptions): void
+  cancel(cause: AgentCancelCause, options?: CancelOptions): void
 
-    /**
+  /**
    * Resolve after the current whole-agent activity reaches quiescence. This
    * follows replacement work started before the observed driver retires,
    * but does not identify the settlement of any particular message.
    * @returns fulfillment after no active driver or maintenance task remains.
    */
-    whenIdle(): Promise<void>
+  whenIdle(): Promise<void>
 
-    /**
+  /**
    * Run one non-turn maintenance task from the true idle phase. The task starts
    * synchronously after claiming that phase; later waking input remains in the
    * inbox until the task settles, while public status stays `idle`.
@@ -107,9 +104,9 @@ declare module './types.ts' {
    * @throws synchronously when turn-driving or another maintenance task already owns the agent.
    * @returns the task promise.
    */
-    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>
+  runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>
 
-    /**
+  /**
    * Route identified input to an inbox boundary and optionally wake the driver.
    * Waking input submitted after active cancellation is queued for the next
    * turn and runs when the aborted activity converges to idle; a `disposed`
@@ -120,16 +117,16 @@ declare module './types.ts' {
    * @param target - the preferred next-turn or next-step inbox boundary.
    * @param wakeup - whether delivery may wake the driver.
    */
-    send(message: UserMessage, target: InboxTarget, wakeup: boolean): void
+  send(message: UserMessage, target: InboxTarget, wakeup: boolean): void
 
-    /**
+  /**
    * Queue an ordinary follow-up turn and wake the driver. The item becomes the
    * sole ordinary message of its own turn.
    * @param message - identified prompt content and the source that supplied it.
    */
-    followup(message: UserMessage): void
+  followup(message: UserMessage): void
 
-    /**
+  /**
    * Submit steering for the nearest step. An idle driver starts a turn;
    * a running driver consumes it at its next step boundary.
    * A rejected step leaves steering parked in the inbox until the next
@@ -137,9 +134,9 @@ declare module './types.ts' {
    * lifecycle teardown keeps it parked for a later lifecycle.
    * @param message - identified steering content and the source that supplied it.
    */
-    steer(message: UserMessage): void
+  steer(message: UserMessage): void
 
-    /**
+  /**
    * Queue model-facing context for the next pre-step without waking the
    * driver. A running driver claims it at the nearest later step boundary;
    * idle drivers leave it pending until follow-up or steering
@@ -148,8 +145,7 @@ declare module './types.ts' {
    * lifecycle teardown keeps it parked for a later lifecycle.
    * @param message - identified injected context and the source that supplied it.
    */
-    inject(message: UserMessage): void
-  }
+  inject(message: UserMessage): void
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -251,6 +247,36 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
     */
     'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+    /**
+     * Admit one exact model request before its messages are derived. The
+     * payload carries the canonical header just logged for this request and
+     * the resolved adapter capacity, so listeners price admission against the
+     * exact target request rather than a stale one. Calling `next()` admits
+     * the request. A listener that durably reduced request pressure (for
+     * example through compaction) returns `{ kind: 'retry' }` without
+     * calling `next()`; the loop then re-dispatches the preflight so every
+     * listener re-admits against the rebuilt surface, and only after that
+     * admission passes are request messages derived. The action identifies
+     * the committed replacement generation; the loop rejects stale or
+     * log-only progress. Listeners own their policy budgets, while the loop's
+     * fixed safety ceiling admits the full request after repeated productive
+     * retries so provider overflow recovery remains available. The default
+     * `undefined` admits the request unchanged; a
+     * request that still exceeds capacity is admitted and left to the
+     * provider's overflow failure and `agent/request-error` recovery, never
+     * silently truncated.
+     * @param payload.agent - the agent making the model call.
+     * @param payload.turn - the open turn number.
+     * @param payload.step - the step whose request this is.
+     * @param payload.header - the exact canonical request header logged for this request.
+     * @param payload.contextWindow - the resolved adapter context capacity, when advertised.
+     * @param payload.attempt - one-based dispatch count for this canonical request.
+     * @param payload.maxAttempts - fixed loop safety ceiling for this canonical request.
+     * @param payload.signal - the current turn's explicit abort signal.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/request-preflight'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; attempt: number; maxAttempts: number; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>
     /**
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
