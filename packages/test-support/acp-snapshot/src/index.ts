@@ -25,6 +25,9 @@ export {
   type RunOptions,
   type RunResult,
 } from './harness.ts'
+// Re-exported so in-process replay scaffolds (apps/web) anchor workspace
+// discovery the same way the subprocess harnesses do.
+export { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 export {
   launchAcpTestAgent,
   type AcpTestLaunchOptions,

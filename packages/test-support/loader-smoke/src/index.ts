@@ -11,7 +11,7 @@
  * @module @deepseek-ai/dsh-loader-smoke
  */
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -121,6 +121,31 @@ export function resolveExampleLaunch(options: ExampleLaunchOptions): ExampleLaun
   return { command: process.execPath, args: [options.libBin ?? toLibBin(options.srcBin), ...configArgs], env }
 }
 
+/**
+ * The default project-root marker seeded by {@link isolateWorkspaceProjectRoot}.
+ * Matches the agent-instructions and skill-filesystem default project-root markers.
+ */
+export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
+
+/**
+ * Anchor workspace discovery at a harness-owned isolated cwd. Workspace
+ * instruction files and project skill roots are discovered by walking UP from
+ * the session cwd to the first directory holding a project-root marker, so a
+ * temp cwd whose ancestor chain contains a real checkout — a developer home
+ * kept under git, or a TMPDIR rooted inside one — would otherwise adopt that
+ * checkout's AGENTS.md and .agents/skills into replays and fail keyless
+ * snapshot comparisons for purely environmental reasons. Seeding an empty
+ * marker directory makes the isolated cwd its own project root: discovery
+ * still runs against exactly the files the scenario seeded, while nothing
+ * above the cwd is reachable. Every harness that creates an isolated example
+ * cwd calls this before spawning the process, mirroring how the same
+ * harnesses pin DSH_HOME inside the cwd.
+ * @param cwd - the harness-owned isolated working directory.
+ */
+export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
+  await mkdir(join(cwd, ISOLATED_PROJECT_ROOT_MARKER), { recursive: true })
+}
+
 /** Inputs that vary between real-Loader example smokes. */
 export interface LoaderSmokeOptions {
   /** Human-readable example name used in failure diagnostics. */
@@ -176,6 +201,8 @@ export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<Loade
   const processTimeoutMs = options.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS
   try {
     await options.prepare?.(cwd)
+    // Anchor workspace discovery at the isolated cwd; see isolateWorkspaceProjectRoot.
+    await isolateWorkspaceProjectRoot(cwd)
     const launch = resolveExampleLaunch({
       srcBin: options.binScript,
       libBin: options.libBinScript,

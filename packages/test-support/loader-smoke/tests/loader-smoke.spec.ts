@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -65,6 +65,26 @@ describe('runLoaderSmoke', () => {
     expect(canonicalTempPath(inspected)).toBe(canonicalTempPath(output.cwd))
     expect(marker).toBe('prepared')
     expect(existsSync(inspected)).toBe(false)
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('anchors workspace discovery at the isolated cwd with a project-root marker', async () => {
+    // Instruction and project-skill discovery walk up from the session cwd; the
+    // seeded marker terminates that walk so a marked ancestor (a git-tracked
+    // home, a TMPDIR inside one) cannot leak host instructions or skills into
+    // a replayed session.
+    let markerSeen = false
+    await runLoaderSmoke({
+      label: 'marker fixture',
+      tempDirPrefix: 'loader-smoke-marker-',
+      binScript: fixture('success'),
+      configPath,
+      tsconfigPath,
+      mode: 'src',
+      inspect: async (cwd) => {
+        markerSeen = (await stat(join(cwd, '.git'))).isDirectory()
+      },
+    })
+    expect(markerSeen).toBe(true)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('rejects a non-zero exit with captured diagnostics', async () => {
