@@ -121,6 +121,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   /** Resolved and validated compaction configuration. */
   readonly config: ResolvedConfig
 
+  private readonly warnedPressureConfigTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
 
@@ -161,13 +162,32 @@ export class BasicCompactionEngine extends CompactionEngine {
       { agent, header, contextWindow, attempt, signal },
       next,
     ): Promise<RequestPreflightAction> => {
-      if (contextWindow === undefined || signal.aborted) return next()
+      if (signal.aborted) return next()
       const policy = resolveTargetPolicy(this.config, header.config)
       if (attempt > policy.maxOverflowRetries) return next()
+      const targetKey = `${header.config.provider}/${header.config.model}`
+      if (contextWindow === undefined) {
+        if (!this.warnedPressureConfigTargets.has(targetKey)) {
+          this.warnedPressureConfigTargets.add(targetKey)
+          ctx.logger.warn(`request preflight compaction skipped: no context capacity for ${targetKey}`)
+        }
+        return next()
+      }
 
       const meter = this.ctx.tokenMeter
       const measurement = meter.measure(agent.session)
-      const spec = resolveCompactSpec(policy, contextWindow)
+      let spec: ReturnType<typeof resolveCompactSpec>
+      try {
+        spec = resolveCompactSpec(policy, contextWindow)
+      } catch (error: unknown) {
+        if (error instanceof TargetPressureConfigError) {
+          if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
+          this.warnedPressureConfigTargets.add(error.targetKey)
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`request preflight compaction skipped: ${message}`)
+        return next()
+      }
       if (measurement.totalTokens < spec.thresholdTokens
         && measurement.totalTokens + (header.config.maxTokens ?? 0) <= contextWindow) {
         return next()
@@ -184,8 +204,9 @@ export class BasicCompactionEngine extends CompactionEngine {
           signal,
         )
       } catch (error: unknown) {
+        signal.throwIfAborted()
         const message = error instanceof Error ? error.message : String(error)
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `request preflight compaction failed after durable surface progress: ${message}; `
             + 'retrying admission from the replacement surface',
@@ -200,7 +221,8 @@ export class BasicCompactionEngine extends CompactionEngine {
         )
         return next()
       }
-      if (signal.aborted || agent.session.surface.replaceGeneration <= generation) return next()
+      signal.throwIfAborted()
+      if (agent.session.surface.replaceGeneration <= generation) return next()
       if (result !== null) logResult(result, 'request preflight')
       return {
         kind: 'retry',
@@ -322,12 +344,12 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Compact for replayed step-boundary pressure or one provider-confirmed context
+   * Compact for an explicit pressure check or one provider-confirmed context
    * overflow. Both triggers price the latest durable routed request envelope;
    * overflow bypasses the normal threshold and retained-tail policy so it can
    * force one useful balanced reduction.
    * @param agent - agent whose latest durable routed request is measured.
-   * @param trigger - normal step-boundary pressure or context-overflow recovery.
+   * @param trigger - explicit pressure checking or context-overflow recovery.
    * @param signal - live turn cancellation signal forwarded to summarization.
    * @returns the latest summary compaction result, or `null` when no summary ran.
    */
