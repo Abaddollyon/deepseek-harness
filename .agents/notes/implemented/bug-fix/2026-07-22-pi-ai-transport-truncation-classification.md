@@ -18,7 +18,7 @@ The detail loss is upstream and unrecoverable in the adapter: pi-ai reduces a ca
 - The classifier carries an `XXX(pi-ai upstream)` note naming the flattening site and stating the intended fix: classify on `code`/`cause` if pi-ai ever forwards the original `Error` or a hook that lets us capture the `cause`. Classification stays best-effort text matching until then.
 - `llm-pi-ai/README.md` gains a Known-Limitations bullet recording that pi-ai flattens the cause chain and that harness codes are therefore classified from message text.
 
-Classification stays on message text because that is the only signal pi-ai delivers; the `XXX` marks it as a workaround, not the desired end state.
+Classification stays on message text because that is the only signal pi-ai delivers; the `XXX` marks it as a workaround, not the desired end state. [HTTP/2 stream-reset classification](2026-08-25-pi-ai-http2-stream-reset-classification.md) later extended the same wording set with reset signatures.
 
 ## Alternatives considered
 
