@@ -175,6 +175,21 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     host.close()
   })
 
+  it('agent({label}) forwards the explicit label; an unlabelled call sends none', async () => {
+    const host = fakeHost({ reply: (_request, index) => text(`answer-${index}`) })
+    void runWorkerSession(host.port, init(`
+      await agent('named child', { label: 'scout' })
+      return await agent('anonymous child')
+    `))
+    const result = await host.result()
+    expect(result.stopReason).toBe('completed')
+    const starts = host.ofType(WorkerToHostType.ChildStart)
+    expect(starts).toHaveLength(2)
+    expect(starts[0]!.request.label).toBe('scout')
+    expect(starts[1]!.request.label).toBeUndefined()
+    host.close()
+  })
+
   it('a schema child completing WITHOUT a structured value resolves null with a failed outcome', async () => {
     const host = fakeHost({ reply: () => text('prose, no structure') })
     void runWorkerSession(host.port, init("return await agent('p', { schema: { type: 'object' } })"))
