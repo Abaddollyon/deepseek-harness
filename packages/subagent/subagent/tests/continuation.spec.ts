@@ -1738,6 +1738,56 @@ describe('continuable settlement delivery', () => {
     )
   })
 
+  it('echoes only the text of a closing message that also carries reasoning', async () => {
+    // A reasoning model's closing message carries its private reasoning blocks
+    // alongside the visible answer; the parent's notice must relay the answer
+    // without adopting the child's reasoning as user-message content.
+    const reasoningThenText: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'child private reasoning' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'child private reasoning' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'text-delta', index: 1, text: 'the answer' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'the answer' } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const { ctx, parent } = await setup([reasoningThenText, textResponse('parent ack')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    const notice = settlementNotices(parent)[0]!
+    expect(notice.text).toBe(
+      `Background subagent ${started.childId} finished and will do no further work unless you send it more.`
+      + '\nIts closing message:\nthe answer',
+    )
+    // The flat-text helper above would hide a leaked reasoning block; inspect
+    // the raw notice content so only text blocks may reach the parent.
+    const raw = parent.session.events.flatMap(event => event.type === 'user/message'
+      && event.data.source.kind === 'subagent-settled' ? [event.data] : [])[0]
+    expect(raw?.content.map(block => block.type)).toEqual(['text', 'text', 'text'])
+  })
+
+  it('reads a closing message without text as no closing message', async () => {
+    const reasoningOnly: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'cut off mid-thought' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'cut off mid-thought' } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    const { ctx, parent } = await setup([reasoningOnly, textResponse('parent ack')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toBe(
+      `Background subagent ${started.childId} ran out of room before it finished.`
+      + '\nIt left no closing message.',
+    )
+  })
+
   it('tells the parent a policy-rejected delivery was declined, not finished', async () => {
     const { ctx, parent } = await setup([textResponse('parent ack')])
     // A pre-step rejection on the child — a UserPromptSubmit deny, a policy
