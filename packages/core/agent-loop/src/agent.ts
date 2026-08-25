@@ -36,6 +36,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 
+/** Productive preflight redispatches allowed before provider recovery owns admission. */
+const MAX_REQUEST_PREFLIGHT_ATTEMPTS = 8
+
 type Phase =
   | { kind: 'idle'; lastTurn: number }
   | {
@@ -505,12 +508,12 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
-    const header = canonicalHeader({
+    const header = deepFreeze(structuredClone(canonicalHeader({
       config,
       ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
       ...system ? { system } : {},
       ...tools.length > 0 ? { tools } : {},
-    })
+    })))
     const baseline = this.session.requestHeader()
     if (!this.requestHeaderLogged) {
       this.session.append('request/header', { header, reason: baseline === undefined ? 'initial' : 'resume' })
@@ -533,25 +536,33 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
-    // The preflight waterfall admits the exact canonical request before its
-    // messages are derived. A retry decision must follow durable log growth
-    // (compaction appends), so the anchor assertion turns a non-productive
-    // retry into a loud listener defect instead of a silent hot loop.
-    let preflightAnchor = session.events.length
-    while (true) {
+    // Only replacement commits justify redispatch. Log-only activity can be
+    // unrelated or a failed compaction bracket and must not create a hot loop.
+    let preflightGeneration = session.surface.replaceGeneration
+    for (let attempt = 1; attempt <= MAX_REQUEST_PREFLIGHT_ATTEMPTS; attempt += 1) {
       const action = await this.dispatch.waterfall(
         'agent/request-preflight',
-        { turn, step, header, contextWindow, signal },
+        {
+          turn,
+          step,
+          header,
+          contextWindow,
+          attempt,
+          maxAttempts: MAX_REQUEST_PREFLIGHT_ATTEMPTS,
+          signal,
+        },
         () => Promise.resolve<RequestPreflightAction>(undefined),
       )
       signal.throwIfAborted()
       if (action?.kind !== 'retry') break
-      if (session.events.length === preflightAnchor) {
+      const currentGeneration = session.surface.replaceGeneration
+      if (action.surfaceGeneration !== currentGeneration
+        || currentGeneration <= preflightGeneration) {
         throw new Error(
-          `agent "${this.id}": agent/request-preflight returned retry without a durable session change`,
+          `agent "${this.id}": agent/request-preflight returned retry without a newer replacement surface`,
         )
       }
-      preflightAnchor = session.events.length
+      preflightGeneration = currentGeneration
     }
 
     // Admission passed: derive the boundary messages only now, so a retrying

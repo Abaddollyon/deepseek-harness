@@ -153,6 +153,10 @@ export function capRangeForReplayBudget(
   budgetTokens: number,
 ): { start: number; end: number } | null {
   const nodes = session.surface.nodes
+  if (nodes.length !== measurement.nodes.length
+    || nodes.some((seq, index) => seq !== measurement.nodes[index]?.seq)) {
+    throw new Error('compaction: token-meter surface does not match the current session surface')
+  }
   const startIdx = nodes.indexOf(range.start)
   let endIdx = nodes.indexOf(range.end)
   if (startIdx === -1 || endIdx === -1) {
