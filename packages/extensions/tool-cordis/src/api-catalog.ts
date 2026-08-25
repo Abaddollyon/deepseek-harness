@@ -3635,7 +3635,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailure',
-    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n}',
+    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: LlmFailureCode;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n}',
+  },
+  {
+    name: 'LlmFailureCode',
+    declaration: 'export type LlmFailureCode = keyof LlmFailureCodeMap extends never ? never : LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {});',
+  },
+  {
+    name: 'LlmFailureCodeMap',
+    declaration: 'export interface LlmFailureCodeMap {\n    quota: typeof QUOTA_EXCEEDED_CODE;\n    rateLimit: \'RATE_LIMIT\';\n}',
   },
   {
     name: 'LlmModelContext',
@@ -4498,6 +4506,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SubagentDescriptorData = OneShotSubagentDescriptorData | ContinuableSubagentDescriptorData;',
   },
   {
+    name: 'SubagentFailure',
+    declaration: 'export interface SubagentFailure {\n    readonly code: LlmFailureCode;\n    readonly retryAfterMs?: number;\n}',
+  },
+  {
     name: 'SubagentFollowupOptions',
     declaration: 'export interface SubagentFollowupOptions {\n    readonly source: MessageSource;\n    readonly signal: AbortSignal;\n}',
   },
@@ -4519,7 +4531,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentResult',
-    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly diagnostic?: string;\n    readonly stopReason: SubagentStopReason;\n}',
+    declaration: 'export interface SubagentResult {\n    readonly output: ContentBlock[];\n    readonly structured?: unknown;\n    readonly diagnostic?: string;\n    readonly failure?: SubagentFailure;\n    readonly stopReason: SubagentStopReason;\n}',
   },
   {
     name: 'SubagentRun',

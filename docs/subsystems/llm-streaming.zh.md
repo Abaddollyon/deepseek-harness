@@ -216,7 +216,7 @@ interface LlmFailure {
   /** Human-readable provider or transport failure. */
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
-  readonly code: string
+  readonly code: LlmFailureCode
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
