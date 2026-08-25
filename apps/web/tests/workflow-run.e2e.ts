@@ -177,10 +177,17 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     expect(await terminalPhase.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     await terminalPhase.click()
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
-    await expect.poll(
-      () => page.getByRole('button', { name: /^Open Reply with exactly the word/ }).count(),
-      { timeout: 10_000 },
-    ).toBe(0)
+    // Settlement keeps the member navigable: its child Session row is still in
+    // the ordinary list, and sessions.open works on a finished child.
+    const settledMember = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
+    await settledMember.waitFor({ timeout: 10_000 })
+    await settledMember.click()
+    await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
+
+    // Return to the parent: the reload scenario below rebuilds ITS record.
+    await page.getByRole('tree', { name: 'Sessions' })
+      .getByRole('treeitem', { name: /Use the workflow tool exactly/ }).click()
+    await page.locator('[data-workflow-run][data-run-status="completed"]').waitFor()
   }, 90_000)
 
   it('rebuilds the terminal record from history after reload', async () => {
@@ -199,8 +206,12 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     expect(await phase.getAttribute('aria-expanded')).toBe('false')
     await phase.click()
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
-    expect(await page.getByRole('button', { name: /^Open Reply with exactly the word/ }).count()).toBe(0)
-
+    // The rebuilt terminal member is still a navigation button: the child
+    // Session row survives the reload in the ordinary list.
+    const reloadedMember = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
+    await reloadedMember.waitFor()
+    await reloadedMember.click()
+    await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
   }, 60_000)
 
   it('stays clean and owns only its one golden', async () => {
