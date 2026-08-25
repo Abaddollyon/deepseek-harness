@@ -13,18 +13,9 @@ import type { SubagentFailure } from './types.ts'
  * @returns known routing facts, or undefined when the code is unclassified.
  */
 export function subagentFailureFromLlmFailure(failure: LlmFailure): SubagentFailure | undefined {
-  const cause = failure.code === QUOTA_EXCEEDED_CODE
-    ? 'quota'
-    : failure.code === 'RATE_LIMIT'
-      ? 'rate-limit'
-      : failure.code === 'SERVER' || failure.code === 'TIMEOUT' || failure.code === 'TRANSPORT'
-        ? 'transient'
-        : failure.code === 'AUTH' || failure.code === 'INVALID_CREDENTIAL' || failure.code === 'INVALID_REQUEST'
-          ? 'permanent'
-          : undefined
-  if (cause === undefined) return undefined
+  if (failure.code !== QUOTA_EXCEEDED_CODE && failure.code !== 'RATE_LIMIT') return undefined
   return Object.freeze({
-    cause,
+    code: failure.code,
     ...failure.providerRetryAfterMs === undefined ? {} : { retryAfterMs: failure.providerRetryAfterMs },
   })
 }

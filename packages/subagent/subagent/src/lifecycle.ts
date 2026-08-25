@@ -17,12 +17,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailure } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
-import type { SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
+import type { SubagentFailure, SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
+import { subagentFailureFromLlmFailure } from './failure.ts'
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -42,6 +43,8 @@ export interface ActivationTerminal {
    * same detail the one-shot tool path already reports.
    */
   readonly diagnostic?: string
+  /** Structured provider failure facts when teardown preserved a known LLM failure. */
+  readonly failure?: SubagentFailure
 }
 
 /** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
@@ -52,13 +55,19 @@ const TERMINAL_DIAGNOSTIC_LIMIT = 4096
  * @param failure - the thrown value that ended the epoch.
  * @returns the diagnostic member, omitted when the failure carries no text.
  */
-function terminalDiagnostic(failure: unknown): { diagnostic?: string } {
+function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
   const text = String(failure)
   if (text.length === 0) return {}
   const bounded = Buffer.byteLength(text, 'utf8') <= TERMINAL_DIAGNOSTIC_LIMIT
     ? text
     : Buffer.from(text, 'utf8').subarray(0, TERMINAL_DIAGNOSTIC_LIMIT).toString('utf8')
-  return { diagnostic: bounded }
+  const structured = failure instanceof Error
+    ? subagentFailureFromLlmFailure(failure as unknown as LlmFailure)
+    : undefined
+  return {
+    diagnostic: bounded,
+    ...structured === undefined ? {} : { failure: structured },
+  }
 }
 
 /**

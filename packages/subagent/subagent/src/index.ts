@@ -79,7 +79,6 @@ export type {
   SubagentCapabilities,
   SubagentProvider,
   SubagentFailure,
-  SubagentFailureCause,
   SubagentResult,
   SubagentRun,
   SubagentStartRequest,

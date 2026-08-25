@@ -11,7 +11,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailureCode } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
@@ -213,19 +213,15 @@ export interface SubagentStopReasonMap {
 /** The union over {@link SubagentStopReasonMap} — widens automatically as backends merge in variants. */
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
-/** Closed provider-neutral failure causes exposed to branchable consumers. */
-export type SubagentFailureCause = 'quota' | 'rate-limit' | 'transient' | 'permanent'
-
 /**
  * Machine-readable provider failure facts retained alongside diagnostic text.
  *
- * Every present cause is a known classification; an absent `failure` means the
- * run did not fail or no cause was learned. Future causes must not be assumed
- * retryable: consumers must use a default branch that stops retrying.
+ * `code` is the LLM seam's merge-extensible failure code; consumers must use a
+ * documented default for unrecognised codes and treat them as non-retryable.
  */
 export interface SubagentFailure {
-  /** Closed provider-neutral cause used for routing and retry decisions. */
-  readonly cause: SubagentFailureCause
+  /** Typed provider failure code used for routing and retry decisions. */
+  readonly code: LlmFailureCode
   /** Provider-requested delay before another attempt, in milliseconds. */
   readonly retryAfterMs?: number
 }

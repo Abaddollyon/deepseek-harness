@@ -49,7 +49,7 @@ import {
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
 import { seedDescriptorTurn } from './descriptor-seed.ts'
-import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentResult, SubagentStartRequest } from './types.ts'
+import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentFailure, SubagentResult, SubagentStartRequest } from './types.ts'
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SubagentError } from './error.ts'
 import type SubagentActivationSetupRegistry from './activation-setup-registry.ts'
@@ -298,6 +298,7 @@ function settlementSummary(
   childId: SessionId,
   stopReason: SubagentResult['stopReason'],
   diagnostic?: string,
+  failure?: SubagentFailure,
 ): string {
   const subject = `Background subagent ${childId}`
   // A failure the parent cannot name is a failure it will misattribute: without
@@ -315,14 +316,26 @@ function settlementSummary(
     // the child had claimed, so the parent must not treat the task as done.
     case 'refusal':
       return `${subject} declined the task.`
-    case 'error':
-      return `${subject} failed before it finished.${reason}`
+    case 'error': {
+      const classification = failure === undefined ? '' : failure.code === 'QUOTA'
+        ? " The provider's quota for this route is exhausted; do not retry this route."
+        : failure.code === 'RATE_LIMIT'
+          ? ` The provider is temporarily rate-limiting this route; wait ${formatRetryAfter(failure.retryAfterMs)} before retrying.`
+          : ''
+      return `${subject} failed before it finished.${classification}${reason}`
+    }
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */
     default:
       return `${subject} ended abnormally (${String(stopReason)}) before it finished.`
   }
+}
+
+/** Render a known provider delay in the unit a parent should wait. */
+function formatRetryAfter(retryAfterMs: number | undefined): string {
+  if (retryAfterMs === undefined) return 'before retrying'
+  return `${retryAfterMs / 1000} seconds before retrying`
 }
 
 /** Whether one settlement attempt opened the disposal transaction. */
@@ -1472,7 +1485,7 @@ export class SubagentContinuationManager {
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
-      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic)
+      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic, terminal.failure)
       // The parent-facing echo relays only the closing text. The terminal
       // output is the raw final assistant message, whose reasoning blocks are
       // the child's private work product and whose remaining non-text blocks

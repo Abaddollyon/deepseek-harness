@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-26-structured-subagent-failure-signal.md
-2026-08-26-structured-subagent-failure-signal.md: 241b578ce245cc9354126614bd23ba8e58f68ec4
-2026-08-26-structured-subagent-failure-signal.zh.md: 366e218161a0a7bc0b3a558ff8ae7622d9eff12d
+2026-08-26-structured-subagent-failure-signal.md: dbfd2514e800093a2d7e0c2f071d169145c80316
+2026-08-26-structured-subagent-failure-signal.zh.md: 2e931764f81e266da7a91badff1e4ca5cd03ef60

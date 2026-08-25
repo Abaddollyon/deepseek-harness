@@ -10,22 +10,22 @@ A child result previously carried only bounded diagnostic text. A parent could r
 
 ## Decision
 
-SubagentResult.failure is an optional machine-readable companion to diagnostic. diagnostic remains bounded human/model-readable context; failure carries a closed provider-neutral cause union (quota, rate-limit, transient, or permanent) and an optional provider-requested retry delay in milliseconds. A present failure always names a known cause. An absent failure means the run did not fail or no cause was learned.
+SubagentResult.failure is an optional machine-readable companion to diagnostic. diagnostic remains bounded human/model-readable context; failure carries the LLM seam’s merge-extensible typed failure code and an optional provider-requested retry delay in milliseconds. A present failure always names a known code. An absent failure means the run did not fail or no cause was learned.
 
-Unknown or unclassified errors do not synthesize a cause. Consumers must treat future unrecognised union members as non-retryable by default.
+Unknown or unclassified errors do not synthesize a failure. Consumers must use a default branch and treat future unrecognised codes as non-retryable.
 
-The mapping helper consumes existing structured LlmFailure facts, but the subagent seam owns its own taxonomy. Importing the LLM failure-code type was considered and rejected: subagent providers can be non-LLM processes, and making SubagentResult depend on an LLM-specific taxonomy would let one consumer dictate the capability seam.
+The subagent-level closed cause taxonomy was considered and rejected: the subagent seam already depends on dsh-llm, and reusing its typed failure-code vocabulary avoids duplicate public classifications while preserving non-LLM failures as absent signals.
 
 ## Alternatives considered
 
 **Parse diagnostic text.** Rejected because wording is not a stable branch key and would recreate repeated quota retries.
 
-**Use the LLM failure-code type in SubagentResult.** Rejected because the subagent seam also serves crashes, teardown failures, and non-LLM providers. The seam maps known LLM facts into its provider-neutral cause union instead.
+**Create a separate subagent cause union.** Rejected because the seam already depends on dsh-llm and its typed failure-code vocabulary is sufficient evidence-backed routing data; a second taxonomy would duplicate public choices.
 
-**Add an unknown union member.** Rejected because it overlaps with an absent optional failure. Absence unambiguously means no known cause; present values are classifications.
+**Add an unknown member or synthesize a code.** Rejected because an absent optional failure already means no cause was learned. Guessing would make an orchestrator retry an error that cannot succeed.
 
 This note partially supersedes the deferred classification discussion in [background settlement diagnostics](../bug-fix/2026-08-25-background-settlement-diagnostic.md), which remains authoritative for bounded readable diagnostics.
 
 ## Consequences
 
-One-shot and background integration points can stop dispatching on quota, wait using retry-after, or reroute on known transient failures without exposing credentials or raw provider payloads. The protected lifecycle integrations remain separate from this contract change.
+One-shot local results and background settlement notices now carry the signal. The parent-facing notice says the provider quota is exhausted or is temporarily rate-limiting the route, and includes retry-after seconds only when known; it never exposes transport vocabulary, credentials, or raw provider payloads. The existing teardown diagnostic remains unchanged and is still bounded.
