@@ -3,7 +3,7 @@ import type {
   SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import {
-  deriveFlat, deriveGroups, deriveSearchResults, workspaceLabel, relativeTime,
+  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel, relativeTime,
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
@@ -25,9 +25,14 @@ const workspace = (id: string, sessionIds: string[], title = id): WorkspaceView 
   workspaceId: wid(id), path: `/projects/${id}`, title,
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 })
-const view = (expandedGroups: readonly string[] = [], ungroupedOrder?: readonly string[]) => ({
+const view = (
+  expandedGroups: readonly string[] = [],
+  ungroupedOrder?: readonly string[],
+  pinnedSessionIds?: readonly string[],
+) => ({
   expandedGroups,
   ...(ungroupedOrder === undefined ? {} : { ungroupedOrder }),
+  ...(pinnedSessionIds === undefined ? {} : { pinnedSessionIds }),
 })
 const noArchive: readonly SessionId[] = []
 const archived = (...ids: string[]): readonly SessionId[] => ids.map(sid)
@@ -486,6 +491,64 @@ describe('deriveSearchResults', () => {
   })
 })
 
+describe('user-pinned threads', () => {
+  it('renders pinned sessions in pin order and skips ids that cannot render', () => {
+    const blank = { ...summary('blank-s', 9), blank: true }
+    const subagent = { ...summary('sub-s', 8), origin: 'subagent' as const }
+    const sessions = {
+      ...list(summary('a-s', 3), summary('b-s', 5), blank, subagent, summary('gone-s', 1)),
+      current: blank.id,
+    }
+    // Unknown ids, blanks (even the visible current one), subagent children,
+    // and archived sessions drop out in place; the stored pin list is not
+    // rewritten, so an archived pin revives on unarchive.
+    const rows = derivePinnedSessions(
+      sessions, archived('gone-s'), ['ghost-s', 'b-s', 'blank-s', 'sub-s', 'gone-s', 'a-s'],
+    )
+    expect(rows.map(row => row.id)).toEqual([sid('b-s'), sid('a-s')])
+  })
+
+  it('omits pinned sessions from their group and restores the accounted position on unpin', () => {
+    const sessions = list(summary('a-s', 3), summary('b-s', 2), summary('c-s', 1))
+    const workspaces = [workspace('alpha', ['a-s', 'b-s', 'c-s'])]
+    const pinned = deriveGroups(sessions, workspaces, noArchive, view(['alpha'], undefined, ['b-s']))
+    expect(pinned[0]!.sessions.map(node => node.id)).toEqual([sid('a-s'), sid('c-s')])
+    expect(pinned[0]!.sessionCount).toBe(2)
+
+    // Unpin returns the row to its accounted slot, not to a recency default.
+    const restored = deriveGroups(sessions, workspaces, noArchive, view(['alpha'], undefined, []))
+    expect(restored[0]!.sessions.map(node => node.id)).toEqual([sid('a-s'), sid('b-s'), sid('c-s')])
+  })
+
+  it('omits pinned loose sessions from the Ungrouped bucket', () => {
+    const sessions = list(summary('loose-a', 2), summary('loose-b', 1))
+    const groups = deriveGroups(
+      sessions, [], noArchive, view([UNGROUPED_KEY], ['loose-a', 'loose-b'], ['loose-a']),
+    )
+    expect(groups[0]!.key).toBe(UNGROUPED_KEY)
+    expect(groups[0]!.sessions.map(node => node.id)).toEqual([sid('loose-b')])
+    expect(derivePinnedSessions(sessions, noArchive, ['loose-a']).map(node => node.id)).toEqual([sid('loose-a')])
+  })
+
+  it('keeps a user-pinned live session out of the folded group holdout', () => {
+    // The double-render trap: a session that is both user-pinned and live in a
+    // folded group renders only in the Pinned section — never also as the
+    // automatic holdout row under the folded header.
+    const sessions = list(
+      { ...summary('pinned-live', 3), running: true },
+      { ...summary('free-live', 2), running: true },
+      summary('idle', 1),
+    )
+    const workspaces = [workspace('alpha', ['pinned-live', 'free-live', 'idle'])]
+    const pins = ['pinned-live']
+    const group = deriveGroups(sessions, workspaces, noArchive, view([], undefined, pins))[0]!
+    expect(group.expanded).toBe(false)
+    expect(group.pinned.map(node => node.id)).toEqual([sid('free-live')])
+    expect(group.sessionCount).toBe(2)
+    expect(derivePinnedSessions(sessions, noArchive, pins).map(node => node.id)).toEqual([sid('pinned-live')])
+  })
+})
+
 describe('createWorkspaceViewStore', () => {
   it('stores grouping, ordering, Workspace expansion, and recent-session view order', () => {
     const store = createWorkspaceViewStore().create()
@@ -503,6 +566,16 @@ describe('createWorkspaceViewStore', () => {
       sessionOrderByAccount: { alpha: ['one', 'two'] },
       sessionUpdatedAtByAccount: { alpha: { one: 1, two: 2 } },
     })
+  })
+
+  it('toggles user pins, appending new pins in gesture order', () => {
+    const store = createWorkspaceViewStore().create()
+    expect(store.getSnapshot().pinnedSessionIds).toEqual([])
+    store.actions.togglePinnedSession('one')
+    store.actions.togglePinnedSession('two')
+    expect(store.getSnapshot().pinnedSessionIds).toEqual(['one', 'two'])
+    store.actions.togglePinnedSession('one')
+    expect(store.getSnapshot().pinnedSessionIds).toEqual(['two'])
   })
 
   it('removes view state outside the retained Workspace key set', () => {

@@ -77,6 +77,9 @@ export interface GroupNode {
    * hold in {@link sessions}. Empty while the group is expanded, so a session
    * never appears in both arrays; reorder and overflow paths read
    * {@link sessions} only and therefore never target a pinned row.
+   * This is the AUTOMATIC folded-group holdout — unrelated to user-pinned
+   * threads ({@link TreeView.pinnedSessionIds}), which leave their group
+   * entirely and render in the sidebar's Pinned section instead.
    */
   pinned: readonly SessionNode[]
 }
@@ -107,6 +110,14 @@ export interface TreeView {
   expandedGroups: readonly string[]
   /** Browser-local order for Sessions without a backing Workspace account. */
   ungroupedOrder?: readonly string[]
+  /**
+   * User-pinned Session ids (explicit, reload-surviving pins): excluded from
+   * every group and from the folded-group live holdout, so a pinned thread
+   * renders exactly once — in the Pinned section derived by
+   * {@link derivePinnedSessions}. Unrelated to {@link GroupNode.pinned}, the
+   * automatic live-row holdout of a folded group.
+   */
+  pinnedSessionIds?: readonly string[]
 }
 
 interface Group {
@@ -214,6 +225,7 @@ function groupByWorkspace(
   workspaces: readonly WorkspaceView[],
   archived: ReadonlySet<SessionId>,
   ungroupedOrder: readonly string[] | undefined,
+  userPinned: ReadonlySet<string>,
 ): Group[] {
   const groups: Group[] = []
   const accounted = new Set<SessionId>()
@@ -223,7 +235,9 @@ function groupByWorkspace(
       const summary = list.byId[id]
       if (summary === undefined) continue // account may lead the list pull; the row appears when the summary lands
       accounted.add(id)
-      if (!sessionVisible(summary, list.current, archived)) continue
+      // User-pinned rows leave the group but keep their accounting slot, so
+      // unpinning returns them to the same order position.
+      if (!sessionVisible(summary, list.current, archived) || userPinned.has(id)) continue
       members.push(summary)
     }
     groups.push(buildGroup(
@@ -234,7 +248,7 @@ function groupByWorkspace(
   const stray = list.ids
     .map(id => list.byId[id])
     .filter((s): s is SessionSummary =>
-      s !== undefined && !accounted.has(s.id) && sessionVisible(s, list.current, archived))
+      s !== undefined && !accounted.has(s.id) && !userPinned.has(s.id) && sessionVisible(s, list.current, archived))
   if (stray.length > 0) {
     groups.push(buildGroup(
       UNGROUPED_KEY,
@@ -311,7 +325,10 @@ function numberUntitledCollisions(rows: SessionNode[]): SessionNode[] {
  * local order. A folded group keeps no `sessions`, but still exposes its live
  * rows as `pinned` so running work never disappears behind a collapse. Blank
  * sessions are excluded except for the selected provisional New Session row;
- * archived sessions are excluded everywhere.
+ * archived sessions are excluded everywhere. User-pinned sessions
+ * ({@link TreeView.pinnedSessionIds}) are excluded from every group — and from
+ * the folded live holdout — because they render in the Pinned section
+ * ({@link derivePinnedSessions}) instead.
  * Content search lives outside this derivation
  * (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot (`current` feeds containsCurrent).
@@ -328,10 +345,11 @@ export function deriveGroups(
 ): GroupNode[] {
   const archived = new Set(archivedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
+  const userPinned = new Set<string>(view.pinnedSessionIds ?? [])
   const descendants = indexSubagentDescendants(list.byId)
   const currentGroup = list.current === undefined ? undefined : currentGroupKey(list.current, workspaces)
   const groups: GroupNode[] = []
-  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
+  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder, userPinned)) {
     const expanded = expandedGroups.has(g.key)
     const rows = g.sessions.map(session => sessionNode(session, descendants))
     groups.push({
@@ -344,17 +362,52 @@ export function deriveGroups(
       expanded,
       containsCurrent: g.key === currentGroup,
       sessions: expanded ? numberUntitledCollisions(rows) : [],
-      pinned: expanded ? [] : numberUntitledCollisions(rows.filter(isLive)),
+      // A user-pinned live session renders in the Pinned section instead; the
+      // folded holdout must not surface it a second time under the header.
+      pinned: expanded ? [] : numberUntitledCollisions(rows.filter(node => isLive(node) && !userPinned.has(node.id))),
     })
   }
   return groups
 }
 
 /**
+ * Derive the sidebar Pinned section: user-pinned Sessions in explicit pin
+ * order. Pins name threads, not groups, so one flat row set serves both the
+ * grouped and the flat browsing modes. Ids whose summary is missing, blank,
+ * or no longer visible (archived, subagent) are skipped in place — the stored
+ * pin list is never rewritten here, so an archived pin revives on unarchive.
+ * Unrelated to the folded-group live holdout ({@link GroupNode.pinned}).
+ * @param list - sessions list snapshot.
+ * @param archivedSessionIds - registry-global archive set.
+ * @param pinnedSessionIds - user-pinned Session ids in pin order.
+ * @returns pinned rows in render order.
+ */
+export function derivePinnedSessions(
+  list: SessionListState,
+  archivedSessionIds: readonly SessionId[],
+  pinnedSessionIds: readonly string[],
+): SessionNode[] {
+  const archived = new Set(archivedSessionIds)
+  const descendants = indexSubagentDescendants(list.byId)
+  const rows: SessionNode[] = []
+  for (const id of pinnedSessionIds) {
+    const summary = list.byId[id as SessionId]
+    // Blank rows are provisional placeholders and never carry the row menu,
+    // so a blank id can only arrive through stale persisted pins.
+    if (summary === undefined || summary.blank || !sessionVisible(summary, list.current, archived)) continue
+    rows.push(sessionNode(summary, descendants))
+  }
+  return numberUntitledCollisions(rows)
+}
+
+/**
  * Derive the flat session list ("In one list" mode): every session — fork
  * children included — as a top-level row, strictly newest-first. No grouping,
- * no parent/child adjacency. Content search lives outside this derivation
- * (see {@link deriveSearchResults}).
+ * no parent/child adjacency. User-pinned sessions stay IN this result on
+ * purpose: it feeds the flat order account, and dropping a pinned id there
+ * would cost the thread its manual position on unpin — the renderer filters
+ * pinned rows after the stored order is reconciled. Content search lives
+ * outside this derivation (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @returns flat rows in render order.

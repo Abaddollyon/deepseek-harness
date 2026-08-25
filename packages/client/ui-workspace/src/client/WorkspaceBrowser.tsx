@@ -20,7 +20,9 @@ import type {
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkspaceBrowserProps } from './contract/slots.ts'
 import type { SessionNode, SessionOrderBy } from './tree.ts'
-import { currentGroupKey, deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
+import {
+  currentGroupKey, deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, UNGROUPED_KEY,
+} from './tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
 import { WorkspacePickFlow } from './WorkspacePicker.tsx'
@@ -239,6 +241,15 @@ type SessionTreeProps = Pick<
   setSessionOrder: (accountKey: string, order: string[]) => void
   /** Registry-global archive set (hidden rows). */
   archivedSessionIds: readonly SessionNode['id'][]
+  /**
+   * User-pinned Session ids in pin order (browser-local, persisted in the
+   * view store). Distinct from the automatic folded-group live holdout
+   * (GroupNode.pinned): user pins render in the Pinned section at the top of
+   * the sidebar and are omitted from every group and the flat list.
+   */
+  pinnedSessionIds: readonly string[]
+  /** Pin/unpin one Session (row menu action; browser-local, survives reloads). */
+  togglePinnedSession: (sessionId: SessionNode['id']) => void
   /** Open the browser-owned rename dialog for a real Workspace group. */
   onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
@@ -251,9 +262,57 @@ type SessionTreeProps = Pick<
   orderBy: SessionOrderBy
 }
 
+/**
+ * The user-pinned threads section at the top of the sidebar: rows in explicit
+ * pin order, each rendered exactly once because the grouped tree and the flat
+ * list omit pinned ids. These are explicit, reload-surviving user pins —
+ * unrelated to the automatic live-row holdout a folded group renders under
+ * its header (GroupNode.pinned). Rows carry no drag wiring: pin order is the
+ * pin gesture's own sequence.
+ */
+function PinnedSessionSection({ rows, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned, flat = false, t }: {
+  rows: readonly SessionNode[]
+  currentId: SessionNode['id'] | undefined
+  now: number
+  onOpen: (id: SessionNode['id']) => void
+  onRename: (id: SessionNode['id'], currentTitle: string) => void
+  onFork: (id: SessionNode['id']) => void
+  onArchive: (id: SessionNode['id']) => void
+  onTogglePinned: (id: SessionNode['id']) => void
+  /** Render the rows without a leading status slot, matching the flat list. */
+  flat?: boolean | undefined
+  t: WorkspaceBrowserProps['t']
+}) {
+  if (rows.length === 0) return null
+  return (
+    <div className={css.groupSection}>
+      <div className={css.pinnedHeader} role="heading" aria-level={2}>
+        {t('section.pinned')}
+      </div>
+      {rows.map(node => (
+        <SessionNodeItem
+          key={node.id}
+          node={node}
+          currentId={currentId}
+          now={now}
+          onOpen={onOpen}
+          onRename={onRename}
+          onFork={onFork}
+          onArchive={onArchive}
+          onTogglePinned={onTogglePinned}
+          userPinned
+          flat={flat}
+          t={t}
+        />
+      ))}
+    </div>
+  )
+}
+
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
   useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
+  pinnedSessionIds, togglePinnedSession,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
@@ -326,8 +385,13 @@ function SessionTree({
       ...(sessionOrderByAccount[UNGROUPED_KEY] === undefined
         ? {}
         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
+      pinnedSessionIds,
     }),
-    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount],
+    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, pinnedSessionIds],
+  )
+  const pinnedRows = useMemo(
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
+    [list, archivedSessionIds, pinnedSessionIds],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -390,7 +454,18 @@ function SessionTree({
         role="tree"
         aria-label={t('section.sessions')}
       >
-        {groups.length === 0 && (
+        <PinnedSessionSection
+          rows={pinnedRows}
+          currentId={current}
+          now={now}
+          onOpen={open}
+          onRename={onSessionRename}
+          onFork={forkSession}
+          onArchive={onSessionArchive}
+          onTogglePinned={togglePinnedSession}
+          t={t}
+        />
+        {groups.length === 0 && pinnedRows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {groups.map((group) => {
@@ -492,6 +567,7 @@ function SessionTree({
                   onRename={onSessionRename}
                   onFork={forkSession}
                   onArchive={onSessionArchive}
+                  onTogglePinned={togglePinnedSession}
                   pinned
                   t={t}
                 />
@@ -545,6 +621,7 @@ function SessionTree({
                     onRename={onSessionRename}
                     onFork={forkSession}
                     onArchive={onSessionArchive}
+                    onTogglePinned={togglePinnedSession}
                     drag={dragProps}
                     t={t}
                   />
@@ -574,6 +651,7 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
+  pinnedSessionIds, togglePinnedSession,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
@@ -583,6 +661,8 @@ function FlatList({
   | 'onSessionRename'
   | 'onSessionArchive'
   | 'archivedSessionIds'
+  | 'pinnedSessionIds'
+  | 'togglePinnedSession'
   | 'orderBy'
   | 'sessionOrderByAccount'
   | 'sessionUpdatedAtByAccount'
@@ -591,10 +671,19 @@ function FlatList({
   | 't'
 >) {
   const list = useSessions(s => s)
+  // baseRows deliberately includes user-pinned sessions: it feeds the flat
+  // order account, and dropping a pinned id there would cost the thread its
+  // manual position. Pinned rows are filtered only from the rendered list,
+  // after the stored order has been reconciled.
   const baseRows = useMemo(
     () => deriveFlat(list, archivedSessionIds),
     [list, archivedSessionIds],
   )
+  const pinnedRows = useMemo(
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
+    [list, archivedSessionIds, pinnedSessionIds],
+  )
+  const pinnedSet = useMemo(() => new Set<string>(pinnedSessionIds), [pinnedSessionIds])
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)
   useEffect(() => {
@@ -622,7 +711,8 @@ function FlatList({
         const row = byId.get(id)
         return row === undefined ? [] : [row]
       })
-  }, [baseRows, sessionOrderByAccount, sessionIds])
+      .filter(row => !pinnedSet.has(row.id))
+  }, [baseRows, sessionOrderByAccount, sessionIds, pinnedSet])
   const [drag, setDrag] = useState<DragState | null>(null)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
@@ -637,7 +727,11 @@ function FlatList({
     const sourceIndex = rows.findIndex(row => row.id === activeDrag.sessionId)
     const anchorIndex = anchor === undefined ? rows.length : rows.findIndex(row => row.id === anchor)
     if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
-    const nextOrder = rows.map(row => row.id).filter(id => id !== activeDrag.sessionId)
+    // The account order — not the rendered rows — owns the edit: rendered
+    // rows omit user-pinned sessions, and rewriting the account without them
+    // would cost a pinned thread its position on unpin.
+    const accountOrder = reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
+    const nextOrder = accountOrder.filter(id => id !== activeDrag.sessionId)
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
     nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
     setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder.map(id => id as string))
@@ -646,7 +740,19 @@ function FlatList({
   return (
     <div className={clsx(css.treeBody, css.wide)}>
       <div className={clsx(css.list, css.flatList)} role="tree" aria-label={t('section.sessions')}>
-        {rows.length === 0 && (
+        <PinnedSessionSection
+          rows={pinnedRows}
+          currentId={list.current}
+          now={now}
+          onOpen={open}
+          onRename={onSessionRename}
+          onFork={forkSession}
+          onArchive={onSessionArchive}
+          onTogglePinned={togglePinnedSession}
+          flat
+          t={t}
+        />
+        {rows.length === 0 && pinnedRows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {rows.map((node) => {
@@ -661,6 +767,7 @@ function FlatList({
               onRename={onSessionRename}
               onFork={forkSession}
               onArchive={onSessionArchive}
+              onTogglePinned={togglePinnedSession}
               flat
               drag={{
                 start: () => {
@@ -840,6 +947,9 @@ export function WorkspaceBrowser({
   const groupExpansion = useStore(s => s.groupExpansion)
   const sessionOrderByAccount = useStore(s => s.sessionOrderByAccount)
   const sessionUpdatedAtByAccount = useStore(s => s.sessionUpdatedAtByAccount)
+  // User pins: explicit, browser-local, persisted in the view store — never
+  // sent to the Host. Distinct from the folded-group live holdout.
+  const pinnedSessionIds = useStore(s => s.pinnedSessionIds)
   const currentBlankSessionId = useSessions((state) => {
     const current = state.current
     return current !== undefined && state.byId[current]?.blank === true ? current : undefined
@@ -1238,6 +1348,8 @@ export function WorkspaceBrowser({
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                 archivedSessionIds={archivedSessionIds}
                 orderBy={orderBy}
+                pinnedSessionIds={pinnedSessionIds}
+                togglePinnedSession={actions.togglePinnedSession}
                 sessionOrderByAccount={sessionOrderByAccount}
                 sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
@@ -1259,6 +1371,8 @@ export function WorkspaceBrowser({
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
                 setSessionOrder={actions.setSessionOrder}
                 archivedSessionIds={archivedSessionIds}
+                pinnedSessionIds={pinnedSessionIds}
+                togglePinnedSession={actions.togglePinnedSession}
                 startSession={startSession}
                 open={open}
                 insertWorkspaceBefore={insertWorkspaceBefore}
