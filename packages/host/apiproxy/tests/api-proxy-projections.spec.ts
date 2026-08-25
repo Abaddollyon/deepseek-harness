@@ -362,6 +362,15 @@ describe('session/projection push frame', () => {
     return frames
   }
 
+  /**
+   * Let the open stream drain before the next append. A live agent loop awaits
+   * between committed events, so this is the delivery cadence the per-unit push
+   * contract below is written against; appending several events in one
+   * synchronous run instead exercises the mux queue's coalescing, which the
+   * following case owns.
+   */
+  const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
+
   it('broadcasts a frame per changed unit with the causing seq, and none for same-reference applies', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())
@@ -375,8 +384,10 @@ describe('session/projection push frame', () => {
 
     const now = vi.spyOn(Date, 'now').mockReturnValue(100)
     seedMessages(session, 1)
+    await settle()
     now.mockReturnValue(200)
     session.append('turn/start', { turn: 1 })
+    await settle()
     now.mockReturnValue(300)
     seedMessages(session, 1)
     now.mockRestore()
@@ -402,6 +413,81 @@ describe('session/projection push frame', () => {
     const tail = await proxy.sessions.history(request({ sessionId: session.id }))
     if (!tail.result.ok) throw new Error('unreachable')
     expect(tail.result.value.projections?.asOfSeq).toBe(pushes.at(-1)?.seq)
+  })
+
+  it('delivers only the newest value per unit when frames queue up undelivered', async () => {
+    const { ctx, session } = await harness(true)
+    ctx.sessionProjections.register(lastUserUnit())
+    const proxy = api(ctx)
+    await settle()
+    const abort = new AbortController()
+    const stream = proxy.events.mux({ rpcId: RpcId('t-proj-coalesce'), payload: {} }, abort.signal)
+
+    // No await between the appends, so every frame is still buffered when the
+    // next one supersedes it — the shape a busy host event loop produces.
+    seedMessages(session, 4)
+    session.append('turn/start', { turn: 1 })
+    const frames = await collect(stream, 2, abort)
+
+    const pushes = frames.filter(
+      (f): f is Extract<MuxFrame, { type: 'session/projection' }> => f.type === 'session/projection',
+    )
+    // One surviving frame per key, each carrying the final value at the final seq:
+    // exactly the state a client that applied the whole run would hold.
+    expect(pushes.map(push => push.key).sort()).toEqual(['sessionListMetadata', 'test/last-user'])
+    expect(pushes.find(push => push.key === 'test/last-user'))
+      .toEqual({ type: 'session/projection', sessionId: session.id, key: 'test/last-user', value: { text: 'm3' }, seq: 3 })
+    const metadata = pushes.find(push => push.key === 'sessionListMetadata')?.value as { blank: boolean; lastPromptAt: number | null }
+    expect(metadata.blank).toBe(false)
+    expect(metadata.lastPromptAt).toBeTypeOf('number')
+  })
+
+  it('never coalesces across sessions or across units', async () => {
+    const { ctx, session } = await harness(true)
+    const second = ctx.sessions.create()
+    ctx.sessionProjections.register(lastUserUnit())
+    const proxy = api(ctx)
+    await settle()
+    const abort = new AbortController()
+    const stream = proxy.events.mux({ rpcId: RpcId('t-proj-distinct'), payload: {} }, abort.signal)
+
+    seedMessages(session, 1)
+    seedMessages(second, 1)
+    const frames = await collect(stream, 4, abort)
+
+    const pushes = frames.filter(
+      (f): f is Extract<MuxFrame, { type: 'session/projection' }> => f.type === 'session/projection',
+    )
+    // Two sessions x two units: a key that mixed either axis would lose a value.
+    expect(new Set(pushes.map(push => push.sessionId + '|' + push.key)).size).toBe(4)
+    expect(pushes.filter(push => push.sessionId === second.id).map(push => push.key).sort())
+      .toEqual(['sessionListMetadata', 'test/last-user'])
+  })
+
+  it('keeps every session/event while coalescing the projections beside them', async () => {
+    const { ctx, session } = await harness(true)
+    ctx.sessionProjections.register(lastUserUnit())
+    const proxy = api(ctx)
+    await settle()
+    const abort = new AbortController()
+    const stream = proxy.events.mux({ rpcId: RpcId('t-proj-events-kept'), payload: {} }, abort.signal)
+    const frames: MuxFrame[] = []
+    const drained = (async () => {
+      for await (const envelope of stream) {
+        frames.push(envelope.payload)
+        if (frames.filter(f => f.type === 'session/event').length >= 5) abort.abort()
+      }
+    })()
+
+    seedMessages(session, 5)
+    await drained
+
+    // The durable log is the one thing coalescing must never touch: five
+    // appends, five frames, contiguous seqs.
+    const events = frames.filter(
+      (f): f is Extract<MuxFrame, { type: 'session/event' }> => f.type === 'session/event',
+    )
+    expect(events.map(frame => frame.event.seq)).toEqual([0, 1, 2, 3, 4])
   })
 
   it('emits no projection frames when the composition has no registry', async () => {

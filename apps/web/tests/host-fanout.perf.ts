@@ -31,6 +31,9 @@ import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 const CATALOG_SESSIONS = 1_560
 const LONG_SESSION_EVENTS = 1_724
 const STREAM_COUNTS = [0, 1, 2, 4, 8] as const
+// `blocked` and `paced` bracket every possible queue-policy effect: no drain
+// between appends at all, versus a drain after every turn.
+const MODES = ['blocked', 'paced'] as const
 const BURST_TURNS = 200
 const TOOL_TURN_INTERVAL = 5
 
@@ -42,7 +45,7 @@ function seedTools(ctx: Context): void {
     description: 'generic card tool',
     parameters: {},
     execute: reply,
-    presentCall: args => ({ card: 'generic', title: String((args as { title?: string }).title ?? 'call') }),
+    presentCall: args => ({ card: 'generic', title: (args as { title?: string }).title ?? 'call' }),
     presentResult: (_args, result) => ({ card: 'generic', title: result.isError ? 'failed' : 'done' }),
   }))
   ctx.tools.register(defineContentToolFixture({
@@ -50,7 +53,7 @@ function seedTools(ctx: Context): void {
     description: 'terminal card tool',
     parameters: {},
     execute: reply,
-    presentCall: args => ({ card: 'terminal', title: String((args as { cmd?: string }).cmd ?? '') }),
+    presentCall: args => ({ card: 'terminal', title: (args as { cmd?: string }).cmd ?? '' }),
     presentResult: () => ({ card: 'terminal', output: 'done' }),
   }))
 }
@@ -68,6 +71,16 @@ async function harness(): Promise<Context> {
   await ctx.plugin(TokenMeter)
   seedTools(ctx)
   return ctx
+}
+
+/**
+ * Create one session through the store. Typed here because this lane's compiler
+ * face does not pick up the `ctx.sessions` service augmentation.
+ * @param ctx - the composed host context.
+ * @returns the new session.
+ */
+function createSession(ctx: Context): Session {
+  return (ctx.sessions as { create: () => Session }).create()
 }
 
 /** Register a live Agent so the gateway's per-event agent lookups hit. */
@@ -128,16 +141,29 @@ function growSession(session: Session, target: number): void {
   }
 }
 
-/** Emit the measured burst and return how many events reached the log. */
-function emitBurst(session: Session, turns: number): number {
+/** Append one turn's worth of events. */
+function emitTurn(session: Session, turn: number): void {
+  session.append('turn/start', { turn })
+  for (let step = 1; step <= 3; step += 1) appendAssistant(session, turn, step)
+  if (turn % TOOL_TURN_INTERVAL === 0) {
+    for (let index = 0; index < 4; index += 1) appendToolPair(session, turn, 4, index)
+  }
+  session.append('turn/end', { turn })
+}
+
+/**
+ * Emit the measured burst and return how many events reached the log.
+ *
+ * `paced` models the real agent loop, which yields between turns so every open
+ * stream drains before the next append; `blocked` models a host whose event
+ * loop is busy (a long synchronous query, a stalled consumer), where frames pile
+ * up in the queue. The two bracket what any queue policy can possibly save.
+ */
+async function emitBurst(session: Session, turns: number, mode: 'paced' | 'blocked'): Promise<number> {
   const before = session.events.length
   for (let turn = 10_000; turn < 10_000 + turns; turn += 1) {
-    session.append('turn/start', { turn })
-    for (let step = 1; step <= 3; step += 1) appendAssistant(session, turn, step)
-    if (turn % TOOL_TURN_INTERVAL === 0) {
-      for (let index = 0; index < 4; index += 1) appendToolPair(session, turn, 4, index)
-    }
-    session.append('turn/end', { turn })
+    emitTurn(session, turn)
+    if (mode === 'paced') await macrotask()
   }
   return session.events.length - before
 }
@@ -150,14 +176,30 @@ function drain(stream: AsyncIterable<RpcRequest<MuxFrame>>, counter: Counter): P
       const type = envelope.payload.type
       if (type === 'session/event') counter.events += 1
       counter.byType[type] = (counter.byType[type] ?? 0) + 1
+      // The SSE handler serializes each delivered frame per stream; that is the
+      // per-frame delivery cost a dropped frame removes, so price it here.
+      const started = performance.now()
+      counter.bytes += JSON.stringify(envelope).length
+      counter.serializeMs += performance.now() - started
     }
   })()
 }
 
-interface Counter { frames: number; events: number; byType: Record<string, number> }
+interface Counter {
+  frames: number
+  events: number
+  bytes: number
+  serializeMs: number
+  byType: Record<string, number>
+}
 
 function newCounter(): Counter {
-  return { frames: 0, events: 0, byType: {} }
+  return { frames: 0, events: 0, bytes: 0, serializeMs: 0, byType: {} }
+}
+
+/** Yield to the macrotask queue, letting every open stream drain its buffer. */
+function macrotask(): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, 0) })
 }
 
 function rounded(value: number): number {
@@ -170,20 +212,21 @@ describe('manual host performance: mux fan-out', () => {
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
     const catalogStart = performance.now()
-    for (let index = 0; index < CATALOG_SESSIONS; index += 1) ctx.sessions.create()
-    const long = ctx.sessions.create()
+    for (let index = 0; index < CATALOG_SESSIONS; index += 1) createSession(ctx)
+    const long = createSession(ctx)
     attachAgent(ctx, long)
     growSession(long, LONG_SESSION_EVENTS)
     const seedMs = performance.now() - catalogStart
+    const longEvents = long.events.length
 
-    expect(ctx.sessions.list().length).toBe(CATALOG_SESSIONS + 1)
-    expect(long.events.length).toBeGreaterThanOrEqual(LONG_SESSION_EVENTS)
+    expect((ctx.sessions as { list: () => readonly Session[] }).list()).toHaveLength(CATALOG_SESSIONS + 1)
+    expect(longEvents).toBeGreaterThanOrEqual(LONG_SESSION_EVENTS)
 
     const report: Record<string, unknown>[] = []
     // The 0-stream row prices session.append itself, so every later row's
     // marginal column is fan-out cost alone rather than logging cost.
     let baseEmitMs = 0
-    for (const streams of STREAM_COUNTS) {
+    for (const mode of MODES) for (const streams of STREAM_COUNTS) {
       const aborts: AbortController[] = []
       const counters: Counter[] = []
       const drains: Promise<void>[] = []
@@ -207,7 +250,7 @@ describe('manual host performance: mux fan-out', () => {
 
       const burstStart = performance.now()
       const burstCpu = process.cpuUsage()
-      const emitted = emitBurst(long, BURST_TURNS)
+      const emitted = await emitBurst(long, BURST_TURNS, mode)
       const emitMs = performance.now() - burstStart
       const emitCpuMs = cpuMs(process.cpuUsage(burstCpu))
 
@@ -217,7 +260,7 @@ describe('manual host performance: mux fan-out', () => {
       for (const counter of counters) {
         for (const [type, count] of Object.entries(counter.byType)) census[type] = (census[type] ?? 0) + count
       }
-      if (streams > 0) console.log(`[host-fanout] streams=${String(streams)} frame census ${JSON.stringify(census)}`)
+      if (streams > 0) console.log(`[host-fanout] ${mode} streams=${String(streams)} census ${JSON.stringify(census)}`)
       const totalMs = performance.now() - burstStart
 
       for (const abort of aborts) abort.abort()
@@ -230,8 +273,12 @@ describe('manual host performance: mux fan-out', () => {
       if (streams === 0) baseEmitMs = emitMs
 
       report.push({
+        mode,
         streams,
         emitted,
+        delivered: counters.reduce((sum, c) => sum + c.frames, 0) - baselineFrames,
+        serializeMs: rounded(counters.reduce((sum, c) => sum + c.serializeMs, 0)),
+        kb: Math.round(counters.reduce((sum, c) => sum + c.bytes, 0) / 1024),
         openMs: rounded(openMs),
         openCpuMs: rounded(openCpuMs),
         openMsPerStream: rounded(openMs / streams),
@@ -243,7 +290,7 @@ describe('manual host performance: mux fan-out', () => {
       })
     }
 
-    console.log(`[host-fanout] seed ${rounded(seedMs)}ms for ${String(CATALOG_SESSIONS + 1)} sessions, long session ${String(long.events.length)} events`)
+    console.log(`[host-fanout] seed ${rounded(seedMs)}ms for ${String(CATALOG_SESSIONS + 1)} sessions, long session ${String(longEvents)} events`)
     console.table(report)
   })
 })
