@@ -37,6 +37,12 @@ export type { JsonlCompression } from './format.ts'
 const DEFAULT_PACK_CHUNKS = true
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
+ * Default bound on concurrent per-session reads during `list()`: one session's
+ * header probe is several small syscalls, and fanning them out turns listing
+ * 1k logs from a sequential syscall chain into a constant number of rounds.
+ */
+const DEFAULT_LIST_CONCURRENCY = 32
+/**
  * Internal scheduling constant, not deployment configuration: balance
  * frame-boundary event-loop yields against `setImmediate` overhead. One frame
  * remains an indivisible synchronous decode.
@@ -78,6 +84,12 @@ export interface Config {
   compression?: JsonlCompression
   /** Maximum cold Session preparations retained for history-to-resume reuse. */
   preparedSessionCacheSize?: number
+  /**
+   * Maximum concurrent per-session header reads during `list()`/`listSnapshots()`.
+   * Raise for high-latency filesystems (network mounts), lower to bound I/O
+   * pressure on congested disks.
+   */
+  listConcurrency?: number
   /** Fixed live-event coalescing window; not a backend completion deadline. */
   writeBatchMaxDelayMs?: number
 }
@@ -113,6 +125,41 @@ function isENOENT(error: unknown): boolean {
 }
 
 /**
+ * Map with bounded concurrency, preserving input order. Workers run every
+ * item even after a failure — a listing error must not strand half-probed
+ * state — and the failure thrown is the earliest one in input order, the
+ * same one a sequential walk would have reached first.
+ */
+async function mapConcurrent<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  const failures: Array<{ index: number; error: unknown }> = []
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next
+      next += 1
+      try {
+        results[index] = await fn(items[index] as T)
+      } catch (error) {
+        failures.push({ index, error })
+      }
+    }
+  }
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker(),
+  ))
+  if (failures.length > 0) {
+    throw failures.reduce((first, failure) => failure.index < first.index ? failure : first).error
+  }
+  return results
+}
+
+/**
  * The JSONL persistence backend. Load as a plugin; it registers as
  * `ctx.sessionPersistence` and (via the coordinator) installs the write-path
  * listeners. Its torn-tail marker carries the byte offset and any events
@@ -128,6 +175,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     packChunks: z.boolean().default(DEFAULT_PACK_CHUNKS),
     compression: JsonlCompressionSchema,
     preparedSessionCacheSize: z.number().step(1).min(1).default(DEFAULT_PREPARED_SESSION_CACHE_SIZE),
+    listConcurrency: z.number().step(1).min(1).default(DEFAULT_LIST_CONCURRENCY),
     writeBatchMaxDelayMs: z.number().step(1).min(1).max(MAX_WRITE_BATCH_DELAY_MS)
       .default(DEFAULT_WRITE_BATCH_MAX_DELAY_MS),
   })
@@ -144,6 +192,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private compression: JsonlCompression
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
   private rootEncodingCheck: Promise<void> | undefined
+  private readonly listConcurrency: number
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -156,6 +205,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       ?? DEFAULT_WRITE_BATCH_MAX_DELAY_MS
     this.packChunks = config.packChunks ?? DEFAULT_PACK_CHUNKS
     this.compression = config.compression ?? DEFAULT_COMPRESSION
+    this.listConcurrency = config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY
     this.assertUsableRoot()
     this.coordinator = new PersistenceCoordinator<JsonlTornMarker>(this.ctx, this, {
       preparedSessionCacheSize,
@@ -473,36 +523,52 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string }> = []
-    const ids = new Set<SessionId>()
-    for (const project of await this.listProjectDirs(signal)) {
-      signal?.throwIfAborted()
-      for (const dir of await this.listSessionDirs(project, signal)) {
+    // Directory walks and per-session header probes are independent reads;
+    // fanning them out under the configured bound keeps listing 1k logs at a
+    // constant number of I/O rounds instead of one sequential syscall chain
+    // per log (measured: ~350ms -> ~40ms warm for 1001 stub sessions).
+    const dirsByProject = await mapConcurrent(
+      await this.listProjectDirs(signal),
+      this.listConcurrency,
+      project => this.listSessionDirs(project, signal),
+    )
+    const sessionName = `session${logSuffix(this.compression)}`
+    const oppositeName = `session${logSuffix(this.oppositeCompression())}`
+    const discovered = await mapConcurrent(
+      dirsByProject.flat(),
+      this.listConcurrency,
+      async (dir): Promise<{ header: SessionHeader; path: string } | undefined> => {
         signal?.throwIfAborted()
-        const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
-        const oppositeExists = await this.exists(opposite)
+        // One directory read answers both file probes: an exists() per file
+        // would cost an open plus (on absence) a parent stat — the dominant
+        // per-session syscall chain under a 4-thread libuv pool.
+        const entries = await readdir(dir)
         signal?.throwIfAborted()
-        if (oppositeExists) throw this.encodingMismatch(opposite)
-        const path = join(dir, `session${logSuffix(this.compression)}`)
-        const pathExists = await this.exists(path)
-        signal?.throwIfAborted()
-        if (!pathExists) continue
+        if (entries.includes(oppositeName)) {
+          throw this.encodingMismatch(join(dir, oppositeName))
+        }
+        if (!entries.includes(sessionName)) return undefined
+        const path = join(dir, sessionName)
         // Read only headers so listing scales with session count, not log size.
         const first = this.compression === 'zstd'
           ? await this.readFirstZstdLine(path, signal)
           : await this.readFirstLine(path, signal)
         signal?.throwIfAborted()
-        if (first === undefined) continue // empty/half-written file
+        if (first === undefined) return undefined // empty/half-written file
         const meta = parseHeaderMeta(first)
-        if (meta === undefined) continue // not a session header
+        if (meta === undefined) return undefined // not a session header
         await this.assertStoredIdentity(path, meta, undefined, signal)
         signal?.throwIfAborted()
-        if (ids.has(meta.id)) {
-          throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
-        }
-        ids.add(meta.id)
-        artifacts.push({ header: meta, path })
+        return { header: meta, path }
+      },
+    )
+    const artifacts = discovered.filter(artifact => artifact !== undefined)
+    const ids = new Set<SessionId>()
+    for (const artifact of artifacts) {
+      if (ids.has(artifact.header.id)) {
+        throw new Error(`duplicate JSONL session id "${artifact.header.id}" appears in multiple project directories`)
       }
+      ids.add(artifact.header.id)
     }
     signal?.throwIfAborted()
     return artifacts
