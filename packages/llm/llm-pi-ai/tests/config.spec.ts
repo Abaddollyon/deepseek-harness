@@ -118,7 +118,7 @@ describe('auth recovery policy', () => {
             authRecovery: { retries: 1.5 },
           },
         },
-      } as unknown as Config)
+      })
     }).toThrow(/authRecovery.retries must be a non-negative integer/)
     expect(() => {
       assertServiceable({
@@ -130,7 +130,7 @@ describe('auth recovery policy', () => {
             authRecovery: { delayMs: -1 },
           },
         },
-      } as unknown as Config)
+      })
     }).toThrow(/authRecovery.delayMs must be a non-negative finite number/)
   })
 })
