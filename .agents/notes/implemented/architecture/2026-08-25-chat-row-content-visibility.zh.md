@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2025-08-28-chat-row-content-visibility.md) | 中文
+[English](2026-08-25-chat-row-content-visibility.md) | 中文
 
 ## Problem
 
