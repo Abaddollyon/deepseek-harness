@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/proposed/bug-fix/2026-08-25-pwsh-echo-free-capture.md
-2026-08-25-pwsh-echo-free-capture.md: 99e1b28d8fc0246a8a3b984384ab96cdad905ad8
-2026-08-25-pwsh-echo-free-capture.zh.md: 162c42d4e058d3869b43a3599953b9df2fac0220

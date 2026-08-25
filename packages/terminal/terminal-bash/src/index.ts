@@ -113,6 +113,7 @@ async function startupSession(
       await session.initialize(signal)
       return
     }
+    await session.initialize(signal)
     // pwsh cannot install its prompt from the environment: write the prompt
     // function through the session and wait for the first marker prompt,
     // which is also the readiness contract of the bash initialize path. The
@@ -124,19 +125,21 @@ async function startupSession(
     // prompt is actually visible (in the viewport or the retained scrollback
     // when it landed between sends), bounded by the send deadline.
     let viewport = ''
+    let first = true
     for (;;) {
-      const first = viewport.length === 0
       const operation = session.startSend({
         text: first ? ENCODING_PREAMBLE + PWSH_PROMPT_SETUP : '',
         submit: first,
         ...signal !== undefined ? { signal } : {},
       })
+      first = false
       const result = await operation.done
       if (result.waitReason === 'session_exit') throw new Error('PTY shell exited during startup')
       if (result.waitReason === 'timeout') throw new Error('PTY shell did not reach readiness before startup timeout')
       viewport = result.viewport
       const scrollback = session.read({ offset: 0, count: 20 }).text
-      if (viewport.includes(CONTROLLED_PROMPT) || scrollback.includes(CONTROLLED_PROMPT)) break
+      if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())
+        || scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) break
     }
     session.motd = viewport
   }

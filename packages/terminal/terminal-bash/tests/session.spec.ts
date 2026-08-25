@@ -148,6 +148,17 @@ async function initialize(session: LocalPtySession, terminal: FakeTerminal): Pro
 }
 
 describe('LocalPtySession readiness and output', () => {
+  it('answers split cursor position queries without retaining them', () => {
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config())
+
+    terminal.emitData('\x1b[')
+    terminal.emitData('6n')
+
+    expect(terminal.writes).toEqual(['\x1b[1;1R'])
+    expect(session.read({ offset: 0, count: 10 }).text).toBe('')
+  })
+
   it('lets queued terminal output run before the first post-write readiness poll', async () => {
     vi.useFakeTimers()
     const terminal = new FakeTerminal()
