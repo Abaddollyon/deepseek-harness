@@ -27,7 +27,7 @@ worker 仍提供实用的隔离：
 
 在 worker 内，脚本会收到 `args` 以及以下钩子：
 
-- `agent(prompt, { label, phase, schema, provider, model, reasoningEffort })` 启动一个宿主侧 subagent。提供 schema 时返回结构化值，否则返回最终文本。普通子 agent 失败会产生 `null`；
+- `agent(prompt, { label, phase, schema, provider, model, reasoningEffort })` 启动一个宿主侧 subagent。提供 schema 时返回结构化值，否则返回最终文本。普通子 agent 失败会产生 `null`。显式 `label` 还会持久化到子 Session 的 descriptor 中，使 Session 侧栏显示成员名称而不是回退为 Session id；
 - `parallel(thunks)` 在已配置的并发限制下运行 thunk；
 - `pipeline(items, ...stages)` 在没有跨阶段屏障的情况下传递 `(previous, item, index)`；
 - `phase(title)` 和 `log(message)` 发出观察器叙述。

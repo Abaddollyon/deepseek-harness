@@ -256,6 +256,20 @@ describe('dsh-workflow-worker-thread', () => {
       expect(provider.runs[0]!.request.parent).toBeDefined()
     })
 
+    it('agent({label}) persists the label on the child; an unlabelled call stays label-free', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`
+        await agent('named child', { label: 'scout' })
+        return await agent('anonymous child')
+      `))
+
+      expect(result.stopReason).toBe('completed')
+      // The seam persists request.label into the child's durable descriptor,
+      // which is the value the session sidebar projection displays.
+      expect(provider.runs[0]!.request.label).toBe('scout')
+      expect(provider.runs[1]!.request.label).toBeUndefined()
+    })
+
     it('agent({provider}) forwards provider-only agentOptions across the thread', async () => {
       const { ctx, parent, provider } = await setup()
       const result = await run(ctx, parent, scripted("return await agent('route me', { provider: 'openai' })"))
