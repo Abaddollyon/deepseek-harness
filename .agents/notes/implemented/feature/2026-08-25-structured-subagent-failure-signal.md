@@ -2,7 +2,7 @@
 
 Status: implemented
 
-English | [中文](2026-08-26-structured-subagent-failure-signal.zh.md)
+English | [中文](2026-08-25-structured-subagent-failure-signal.zh.md)
 
 ## Problem
 

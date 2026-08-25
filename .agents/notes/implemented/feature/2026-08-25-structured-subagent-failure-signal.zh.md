@@ -2,7 +2,7 @@
 
 状态：已实现
 
-[English](2026-08-26-structured-subagent-failure-signal.md) | 中文
+[English](2026-08-25-structured-subagent-failure-signal.md) | 中文
 
 ## 问题
 
