@@ -355,20 +355,69 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
   return undefined
 }
 
-/** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
+/**
+ * One queued frame whose key may be superseded before it is delivered. Only
+ * keyed frames are boxed; unkeyed ones sit in the buffer directly, so the
+ * dominant `session/event` traffic costs no extra allocation.
+ */
+class SupersedableSlot<F> {
+  /** The frame, or undefined once a newer frame for the same key replaced it. */
+  frame: F | undefined
+
+  /**
+   * @param key - the superseding key this slot occupies.
+   * @param frame - the frame to deliver unless it is superseded first.
+   */
+  constructor(readonly key: string, frame: F) {
+    this.frame = frame
+  }
+}
+
+/**
+ * Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return
+ * cleans up.
+ *
+ * A push may carry a superseding key. While an undelivered frame with that key
+ * is still buffered, a newer one replaces it in place and the older frame is
+ * never delivered. This is only sound for a frame whose payload is the COMPLETE
+ * current state of its key, so that the newer frame alone reconstructs
+ * everything the dropped one carried; {@link muxSupersedingKey} owns that
+ * judgement per frame kind, and a queue built without a key function coalesces
+ * nothing.
+ */
 class FrameQueue<F> {
-  private buffer: F[] = []
+  private buffer: (F | SupersedableSlot<F>)[] = []
+  /** Undelivered keyed slots, so a newer frame can find the one it supersedes. */
+  private readonly supersedable = new Map<string, SupersedableSlot<F>>()
   private waiter: (() => void) | undefined
   private done = false
 
+  /**
+   * @param keyFor - maps a frame to its superseding key, or undefined when the frame must always be delivered.
+   */
+  constructor(private readonly keyFor: (item: F) => string | undefined = () => undefined) {}
+
   push(item: F): void {
     if (this.done) return
-    this.buffer.push(item)
+    const key = this.keyFor(item)
+    if (key === undefined) {
+      this.buffer.push(item)
+    } else {
+      const prior = this.supersedable.get(key)
+      // Emptying the older slot rather than splicing it out keeps every other
+      // frame's queue position — and therefore every cross-key ordering — exactly
+      // as it was pushed.
+      if (prior !== undefined) prior.frame = undefined
+      const slot = new SupersedableSlot(key, item)
+      this.supersedable.set(key, slot)
+      this.buffer.push(slot)
+    }
     this.waiter?.()
   }
 
   end(): void {
     this.done = true
+    this.supersedable.clear()
     this.waiter?.()
   }
 
@@ -377,7 +426,17 @@ class FrameQueue<F> {
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       while (true) {
-        while (this.buffer.length > 0) yield this.buffer.shift() as F
+        while (this.buffer.length > 0) {
+          const next = this.buffer.shift() as F | SupersedableSlot<F>
+          if (!(next instanceof SupersedableSlot)) {
+            yield next
+            continue
+          }
+          // Only the slot still registered under the key may release it; a
+          // superseded slot's entry already belongs to its replacement.
+          if (this.supersedable.get(next.key) === next) this.supersedable.delete(next.key)
+          if (next.frame !== undefined) yield next.frame
+        }
         if (this.done || signal.aborted) return
         await new Promise<void>((resolve) => { this.waiter = resolve })
         this.waiter = undefined
@@ -387,6 +446,48 @@ class FrameQueue<F> {
       cleanup()
     }
   }
+}
+
+/**
+ * Separator for composite superseding keys. NUL cannot occur in a session id
+ * or a projection key, so no two distinct key pairs can collide into one.
+ */
+const SUPERSEDING_KEY_SEPARATOR = '\u0000'
+
+/**
+ * The superseding key of one mux frame, or undefined when the frame must be
+ * delivered no matter what follows it.
+ *
+ * Sole owner of the coalescing safety judgement, and deliberately narrow.
+ *
+ * `session/projection` qualifies on both counts a drop requires. It carries a
+ * unit's COMPLETE finished value plus the watermark `seq` it was computed at,
+ * and the client store applies it as `seq <= current ? ignore : replace` — so a
+ * frame that a newer one for the same `(session, key)` overtook inside this
+ * queue is precisely a frame the client would itself have discarded on arrival.
+ * It is also the only kind with the volume to matter: the token-meter units
+ * recomputed per event out-produce the session events themselves.
+ *
+ * Every other kind is unkeyed. `session/event` is a unique durable log entry,
+ * and dropping one opens a seq gap. `session/subscribed` is a per-generation
+ * re-baseline whose `lastSeq` gates the frames around it. The answerable
+ * `approval/requested` and `question/requested` are the only copy of a prompt
+ * the user must answer, and each `approval/resolved` / `question/resolved`
+ * settles one distinct pending item.
+ *
+ * `session/queue` and `session/jobs` are whole-snapshot last-wins frames that
+ * would be sound to coalesce, and are still excluded: both fire on rare user or
+ * registry actions rather than per event, so there were no frames to save, while
+ * collapsing a job's `running -> stopping -> killed` push run would cost a
+ * visible transition for nothing.
+ * @param envelope - the queued mux frame envelope.
+ * @returns the superseding key, or undefined to always deliver.
+ */
+function muxSupersedingKey(envelope: RpcRequest<MuxFrame>): string | undefined {
+  const frame = envelope.payload
+  return frame.type === 'session/projection'
+    ? 'projection' + SUPERSEDING_KEY_SEPARATOR + frame.sessionId + SUPERSEDING_KEY_SEPARATOR + frame.key
+    : undefined
 }
 
 /**
@@ -695,12 +796,16 @@ function viewFor(
   // is a scope whose chain passes through its preset; a cold read passes the
   // preset's standing key directly — no agent, no resume. An undefined scope
   // sees only the global layer, which is the pre-preset deployment shape.
-  scope?: ScopeKey,
+  //
+  // Resolved lazily, like `argsFor`: most events carry no view at all, and on
+  // the live path resolving the scope means an agent-registry lookup through
+  // the Context proxy — measurably the most expensive step in this function.
+  scopeFor?: () => ScopeKey | undefined,
 ): ToolEventView | undefined {
   try {
     if (event.type === 'tool/call') {
       const { name, arguments: raw } = event.data as ToolCallData
-      const view = ctx.tools.get(name, scope)?.presentCall?.(JSON.parse(raw))
+      const view = ctx.tools.get(name, scopeFor?.())?.presentCall?.(JSON.parse(raw))
       return view === undefined ? undefined : { for: 'call', view }
     }
     if (event.type === 'tool/result') {
@@ -709,7 +814,7 @@ function viewFor(
       const callId = message.source.callId
       const call = argsFor(callId) as { name: string; args: unknown } | undefined
       if (call === undefined) return undefined
-      const view = ctx.tools.get(call.name, scope)?.presentResult?.(call.args, {
+      const view = ctx.tools.get(call.name, scopeFor?.())?.presentResult?.(call.args, {
         content: result.content,
         isError: result.isError === true,
         ...meta === undefined ? {} : { meta },
@@ -755,9 +860,10 @@ function historyPage(
   scope?: ScopeKey,
 ): { events: HistoryEntry[]; hasMore: boolean } {
   const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+  const scopeFor = (): ScopeKey | undefined => scope
   return {
     events: page.events.map((event) => {
-      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
+      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scopeFor)
       return { event, ...view === undefined ? {} : { view } }
     }),
     hasMore: page.hasMore,
@@ -1313,6 +1419,50 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     const agent = ctx.agents.get(session.id)
     if (agent?.session !== session) return
     broadcast({ type: 'session/queue', sessionId: session.id, items: queueItems(agent, event.data) })
+  })
+
+  /**
+   * Per-session open-call table for result-view pairing. Bounded by the
+   * per-turn call count: entries clear on turn/end; a table miss (an event
+   * observed before this gateway existed) backscans the session's in-memory
+   * events instead.
+   */
+  const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+
+  // One listener for every connected consumer, not one per stream. The view,
+  // the call-table update, and the frame envelope are the same value for all of
+  // them, so computing them per stream repeated the presenter call and the
+  // agent lookup once per open tab. Sharing the envelope matches every other
+  // push here (see `broadcast`); a mux consumer reads rpcId only on answerable
+  // frames, which mint their own.
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (event.type === 'tool/call') {
+      const data = event.data as ToolCallData
+      try {
+        let table = openCalls.get(session.id)
+        if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
+        table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
+      } catch {
+        // Unparseable model arguments: leave the table unset; the result view soft-falls.
+      }
+    } else if (event.type === 'turn/end') {
+      openCalls.delete(session.id)
+    }
+    if (muxQueues.size === 0) return
+    const view = viewFor(
+      ctx, event,
+      callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
+      () => ctx.agents.get(session.id),
+    )
+    const envelope = frame<MuxFrame>({
+      type: 'session/event', sessionId: session.id, event,
+      ...view === undefined ? {} : { view },
+    })
+    for (const queue of muxQueues) queue.push(envelope)
+  })
+
+  ctx.on('session/disposed', (session: Session) => {
+    openCalls.delete(session.id)
   })
 
   /** Remove a wait before settling it: synchronous deletion makes the first claimant win. */
@@ -3489,7 +3639,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        const queue = new FrameQueue<RpcRequest<MuxFrame>>(muxSupersedingKey)
         muxQueues.add(queue)
         for (const session of ctx.sessions.list()) {
           subscribeSession(queue, session)
@@ -3528,31 +3678,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }
           }
         }
-        // Per-session open-call table for result-view pairing. Bounded by the
-        // per-turn call count: entries clear on turn/end; a table miss (stream
-        // opened mid-turn) backscans the session's in-memory events instead.
-        const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
+        // session/event fan-out is process-wide (one listener, one view, one
+        // envelope for every queue); this stream owns only its own baselines.
         const disposers = [
-          ctx.on('session/event', (session: Session, event: SessionEvent) => {
-            if (event.type === 'tool/call') {
-              const data = event.data as ToolCallData
-              try {
-                let table = openCalls.get(session.id)
-                if (table === undefined) openCalls.set(session.id, table = new Map<string, { name: string; args: unknown }>())
-                table.set(data.callId, { name: data.name, args: JSON.parse(data.arguments) })
-              } catch {
-                // Unparseable model arguments: leave the table unset; the result view soft-falls.
-              }
-            } else if (event.type === 'turn/end') {
-              openCalls.delete(session.id)
-            }
-            const view = viewFor(
-              ctx, event,
-              callId => openCalls.get(session.id)?.get(callId) ?? backscanArgs(session.events, callId),
-              ctx.agents.get(session.id),
-            )
-            queue.push(frame({ type: 'session/event', sessionId: session.id, event, ...view === undefined ? {} : { view } }))
-          }),
           ctx.on('session/created', (session: Session) => {
             subscribeSession(queue, session)
             // The subscribe frame clears the client's task mirror, and a
@@ -3563,9 +3691,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             if (views.length > 0) {
               queue.push(frame({ type: 'session/jobs', sessionId: session.id, jobs: views }))
             }
-          }),
-          ctx.on('session/disposed', (session: Session) => {
-            openCalls.delete(session.id)
           }),
           ...jobs === undefined ? [] : [jobs.onJobsChanged((owner) => {
             if (owner !== undefined) {
