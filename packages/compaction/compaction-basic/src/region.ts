@@ -134,6 +134,58 @@ export function selectCompactableRange(
 }
 
 /**
+ * Shrink a selected region's end so its priced replay fits the summarizer's
+ * admission budget, keeping the end on a balanced tool-pairing boundary. The
+ * region always keeps its head anchor and the retained tail only grows.
+ * Returns `null` when even the smallest balanced head region exceeds the
+ * budget: admission fails closed there instead of paying for a summarization
+ * call whose replay cannot fit the resolved context window.
+ * @param session - session supplying authoritative current surface positions.
+ * @param measurement - the measurement range selection already aligned to the surface.
+ * @param range - inclusive selected range to cap.
+ * @param budgetTokens - maximum priced tokens the replayed region may carry.
+ * @returns the capped inclusive range, or `null` when nothing balanced fits.
+ */
+export function capRangeForReplayBudget(
+  session: Session,
+  measurement: TokenMeasurement,
+  range: { start: number; end: number },
+  budgetTokens: number,
+): { start: number; end: number } | null {
+  const nodes = session.surface.nodes
+  if (nodes.length !== measurement.nodes.length
+    || nodes.some((seq, index) => seq !== measurement.nodes[index]?.seq)) {
+    throw new Error('compaction: token-meter surface does not match the current session surface')
+  }
+  const startIdx = nodes.indexOf(range.start)
+  let endIdx = nodes.indexOf(range.end)
+  if (startIdx === -1 || endIdx === -1) {
+    throw new Error(
+      `capRangeForReplayBudget: range ${range.start}-${range.end} is not on the current surface`,
+    )
+  }
+
+  let regionTokens = 0
+  for (let index = startIdx; index <= endIdx; index += 1) {
+    // Selection aligned priced nodes with surface positions before capping.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    regionTokens += measurement.nodes[index]!.tokens
+  }
+  while (endIdx > startIdx && regionTokens > budgetTokens) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    regionTokens -= measurement.nodes[endIdx]!.tokens
+    endIdx -= 1
+  }
+  if (regionTokens > budgetTokens) return null
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  while (endIdx > startIdx && !toolPairingBalancedAfter(session, nodes[endIdx]!)) endIdx -= 1
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  if (!toolPairingBalancedAfter(session, nodes[endIdx]!)) return null
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  return { start: range.start, end: nodes[endIdx]! }
+}
+
+/**
  * Run the single compaction transaction over one selected positional span.
  * Selection and validation are read-only. Idle/log validation and
  * `compaction/start` are synchronously adjacent, so the durable opening marker is

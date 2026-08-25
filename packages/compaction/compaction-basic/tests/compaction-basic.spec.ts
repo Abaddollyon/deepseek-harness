@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
+import { capRangeForReplayBudget, selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -24,7 +24,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { agentEvents, type Agent, type RequestErrorAction } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 
 const SIGNAL = new AbortController().signal
@@ -642,6 +642,7 @@ describe('pressure measurement and retention', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     }, ctx)
     const session = conversation(4)
     session.append('request/header', {
@@ -729,6 +730,18 @@ describe('pressure measurement and retention', () => {
       ...priced,
       nodes: priced.nodes.slice(1),
     }, 1)).toThrow(/does not match/)
+  })
+
+  it('rejects a stale priced surface before replay-budget capping', () => {
+    const ctx = createContext()
+    const session = conversation(2)
+    const priced = ctx.tokenMeter.measure(session)
+    const range = selectCompactableRange(session, priced, 1)
+    expect(range).not.toBeNull()
+    expect(() => capRangeForReplayBudget(session, {
+      ...priced,
+      nodes: priced.nodes.slice(1),
+    }, range!, Number.MAX_SAFE_INTEGER)).toThrow(/does not match/)
   })
 
   it('declines when rounding a cut would consume the only tool pair', () => {
@@ -1435,10 +1448,26 @@ describe('default one-shot summarizer', () => {
 })
 
 describe('automatic listener and loader composition', () => {
-  function preStep(ctx: Context, owner: Agent, signal = SIGNAL) {
+  function preflight(
+    ctx: Context,
+    owner: Agent,
+    signal = SIGNAL,
+    contextWindow: number | null = 1_000,
+  ): Promise<RequestPreflightAction> {
+    const header = owner.session.requestHeader()
+    if (header === undefined) throw new Error('test session needs a canonical request header')
     return agentEvents(ctx, owner).waterfall(
-      'agent/pre-step', { messages: [], turn: 1, step: 1, signal },
-      () => Promise.resolve({ kind: 'enter' as const, messages: [] }),
+      'agent/request-preflight',
+      {
+        turn: 1,
+        step: 1,
+        header,
+        contextWindow: contextWindow ?? undefined,
+        attempt: 1,
+        maxAttempts: 8,
+        signal,
+      },
+      () => Promise.resolve(undefined),
     )
   }
 
@@ -1462,35 +1491,50 @@ describe('automatic listener and loader composition', () => {
     return Object.assign(new Error(message), { code: CONTEXT_WINDOW_EXCEEDED_CODE })
   }
 
-  it('compacts before a step above threshold using the durable routed model and remains idle below it', async () => {
+  it('compacts before request derivation above threshold using the durable routed model and remains idle below it', async () => {
     const ctx = createContext()
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     const pressured = conversation(4)
-    await preStep(ctx, agent(pressured, 'unconfigured-agent-fallback'))
+    await preflight(ctx, agent(pressured, 'unconfigured-agent-fallback'))
     expect(pressured.events.some(event => event.type === 'compaction/summary')).toBe(true)
 
     const small = conversation(1)
-    await preStep(ctx, agent(small, MODEL))
+    await preflight(ctx, agent(small, MODEL))
     expect(small.events.some(event => event.type === 'compaction/start')).toBe(false)
     expect(compact.calls).toHaveLength(1)
   })
 
-  it('skips pre-step pressure when the step signal is already aborted', async () => {
+  it('declines without mutation when the summarizer replay budget cannot fit', async () => {
     const ctx = createContext()
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 8_192,
+    })
+    const session = conversation(4)
+    const before = [...session.surface.nodes]
+
+    await expect(preflight(ctx, agent(session, MODEL))).resolves.toBeUndefined()
+
+    expect(compact.calls).toHaveLength(0)
+    expect(session.surface.nodes).toEqual(before)
+    expect(session.events.some(event => event.type === 'compaction/start')).toBe(false)
+  })
+
+  it('skips request preflight pressure when the turn signal is already aborted', async () => {
+    const ctx = createContext()
+    new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 180,
+      maxTokens: 64,
     })
     const pressured = conversation(4)
-    const compactIfNeeded = vi.spyOn(compact, 'compactIfNeeded')
-
-    await expect(preStep(ctx, agent(pressured, MODEL), AbortSignal.abort('step aborted')))
-      .resolves.toEqual({ kind: 'enter', messages: [] })
-
-    expect(compactIfNeeded).not.toHaveBeenCalled()
+    await expect(preflight(ctx, agent(pressured, MODEL), AbortSignal.abort('step aborted')))
+      .resolves.toBeUndefined()
     expect(pressured.events.some(event => event.type === 'compaction/start')).toBe(false)
   })
 
@@ -1501,11 +1545,12 @@ describe('automatic listener and loader composition', () => {
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     compact.error = 'temporary failure'
     const session = conversation(4)
 
-    await expect(preStep(ctx, agent(session, MODEL))).resolves.toEqual({ kind: 'enter', messages: [] })
+    await expect(preflight(ctx, agent(session, MODEL))).resolves.toBeUndefined()
     expect(warnings).toContainEqual(expect.stringContaining('temporary failure'))
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
   })
@@ -1522,11 +1567,12 @@ describe('automatic listener and loader composition', () => {
     void new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     const session = conversation(4)
 
-    await preStep(ctx, agent(session, MODEL))
-    await preStep(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL), SIGNAL, null)
+    await preflight(ctx, agent(session, MODEL), SIGNAL, null)
 
     expect(warnings).toEqual([
       expect.stringContaining(`no context capacity for ${MODEL}/${MODEL}`),
@@ -1543,8 +1589,8 @@ describe('automatic listener and loader composition', () => {
     })
     const session = conversation(4)
 
-    await preStep(ctx, agent(session, MODEL))
-    await preStep(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL))
 
     expect(warnings).toEqual([
       expect.stringContaining('retainTokens (500) must be less than threshold tokens 500'),
@@ -1820,17 +1866,18 @@ describe('automatic listener and loader composition', () => {
     expect(session.surface.replaceGeneration).toBe(generation + 1)
   })
 
-  it('maxOverflowRetries:0 disables recovery without disabling post-step pressure', async () => {
+  it('maxOverflowRetries:0 disables preflight and overflow recovery', async () => {
     const ctx = createContext()
     void new TestCompactionEngine(ctx, {
       maxOverflowRetries: 0,
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     const session = conversation(4)
-    await preStep(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL))
     const summaries = session.events.filter(event => event.type === 'compaction/summary').length
-    expect(summaries).toBe(1)
+    expect(summaries).toBe(0)
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(false)
     expect(session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(summaries)
   })
@@ -1841,9 +1888,10 @@ describe('automatic listener and loader composition', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     const session = conversation(4)
-    await preStep(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL))
     expect(session.events.some(event => event.type === 'compaction/start')).toBe(false)
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(false)
   })
@@ -1869,11 +1917,12 @@ describe('automatic listener and loader composition', () => {
     const fiber = await ctx.plugin(TestCompactionEngine, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      maxTokens: 64,
     })
     await fiber.dispose()
 
     const session = conversation(4)
-    await preStep(ctx, agent(session, MODEL))
+    await preflight(ctx, agent(session, MODEL))
     expect(session.events.some(event => event.type === 'compaction/start')).toBe(false)
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(false)
   })

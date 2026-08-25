@@ -14,9 +14,10 @@ import type {
   InboxTarget,
   PreStepDecision,
   RequestErrorAction,
+  RequestPreflightAction,
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
   BlockAssembler,
   LlmError,
@@ -34,6 +35,9 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+
+/** Productive preflight redispatches allowed before provider recovery owns admission. */
+const MAX_REQUEST_PREFLIGHT_ATTEMPTS = 8
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -369,7 +373,7 @@ export class ReactLoopAgent implements Agent {
 
     while (true) {
       const { request, preparedCall } = await this.buildRequest(
-        turn, step, assembly.tools, system, this.session.deriveMessages(), signal,
+        turn, step, assembly.tools, system, signal,
       )
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
@@ -459,7 +463,6 @@ export class ReactLoopAgent implements Agent {
     step: number,
     tools: GenerateOptions['tools'] & object,
     system: string,
-    boundaryMessages: Message[],
     signal: AbortSignal,
   ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
     const { session } = this
@@ -505,12 +508,12 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
-    const header = canonicalHeader({
+    const header = deepFreeze(structuredClone(canonicalHeader({
       config,
       ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
       ...system ? { system } : {},
       ...tools.length > 0 ? { tools } : {},
-    })
+    })))
     const baseline = this.session.requestHeader()
     if (!this.requestHeaderLogged) {
       this.session.append('request/header', { header, reason: baseline === undefined ? 'initial' : 'resume' })
@@ -533,6 +536,38 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
+    // Only replacement commits justify redispatch. Log-only activity can be
+    // unrelated or a failed compaction bracket and must not create a hot loop.
+    let preflightGeneration = session.surface.replaceGeneration
+    for (let attempt = 1; attempt <= MAX_REQUEST_PREFLIGHT_ATTEMPTS; attempt += 1) {
+      const action = await this.dispatch.waterfall(
+        'agent/request-preflight',
+        {
+          turn,
+          step,
+          header,
+          contextWindow,
+          attempt,
+          maxAttempts: MAX_REQUEST_PREFLIGHT_ATTEMPTS,
+          signal,
+        },
+        () => Promise.resolve<RequestPreflightAction>(undefined),
+      )
+      signal.throwIfAborted()
+      if (action?.kind !== 'retry') break
+      const currentGeneration = session.surface.replaceGeneration
+      if (action.surfaceGeneration !== currentGeneration
+        || currentGeneration <= preflightGeneration) {
+        throw new Error(
+          `agent "${this.id}": agent/request-preflight returned retry without a newer replacement surface`,
+        )
+      }
+      preflightGeneration = currentGeneration
+    }
+
+    // Admission passed: derive the boundary messages only now, so a retrying
+    // listener's durable changes are part of the derived history.
+    const boundaryMessages = session.deriveMessages()
     const request = markAgentLoopRequest(deepFreeze({
       ...header.config,
       messages: boundaryMessages,
