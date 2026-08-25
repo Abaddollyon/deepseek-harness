@@ -408,10 +408,17 @@ async function executeCommand(
     }
     if (promptCompleted(result)) {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
-      return renderCaptured(
-        partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated),
-        config.maxOutputChars,
-      )
+      const captured = partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated)
+      // An idle prompt proves the PTY is waiting, which is equally true before a
+      // freshly started shell has echoed anything. Reporting that as a result
+      // renders nothing as clipped output, telling the model its result was
+      // truncated when no output existed to truncate. A result whose prefix
+      // merely scrolled out of the retained buffer still carries text and is
+      // reported as before; only the empty-and-incomplete case keeps polling,
+      // where the deadline remains the bound.
+      if (captured.text.length > 0 || !captured.incomplete) {
+        return renderCaptured(captured, config.maxOutputChars)
+      }
     }
     await pause()
   }
