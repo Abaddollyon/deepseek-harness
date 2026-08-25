@@ -246,6 +246,21 @@ describe('open', () => {
     // Overlapping seq-15 frame (== page tail turn/end) was dropped; 16 appended once.
     expect(seqs).toEqual([11, 13, 16])
   })
+
+  it('re-opens an errored window when a live frame proves the transport recovered', async () => {
+    const { api, session } = makeSession()
+    api.onHistory = () => Promise.reject(new Error('socket died'))
+    await session.open()
+    expect(session.getSnapshot().openState).toBe('error')
+    expect(api.callsOf('session.history')).toHaveLength(1)
+
+    // The transport is healthy again: a live frame arrives. Discarding it would
+    // leave the window errored until the user reloaded the page.
+    api.onHistory = () => histResponse(plainTurn(10, 3, '问', '答'))
+    session.handleMuxEnvelope('r1' as never, { type: 'session/event', sessionId: SID, event: ev.user(16, '恢复后的消息') })
+    await vi.waitFor(() => { expect(session.getSnapshot().openState).toBe('open') })
+    expect(api.callsOf('session.history')).toHaveLength(2)
+  })
 })
 
 
