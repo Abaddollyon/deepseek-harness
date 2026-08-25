@@ -163,6 +163,71 @@ export function workspaceTitleOf(cwd: string): string {
 }
 
 /**
+ * Per-field row equality for projection identity reuse: unchanged rows keep
+ * their object reference across publishes so row-level consumers (keyed
+ * sidebar rows, byId selectors) skip reconciliation for rows nothing moved.
+ */
+function sameSessionSummary(a: SessionSummary, b: SessionSummary): boolean {
+  return a.id === b.id
+    && a.title === b.title
+    && a.displayTitle === b.displayTitle
+    && a.cwd === b.cwd
+    && a.agentPreset === b.agentPreset
+    && a.parentId === b.parentId
+    && a.origin === b.origin
+    && a.running === b.running
+    && a.pendingInteraction === b.pendingInteraction
+    && a.completed === b.completed
+    && a.blank === b.blank
+    && a.updatedAt === b.updatedAt
+    && a.projectionValues === b.projectionValues
+}
+
+/** Compare a record by key set and per-value equality without allocating a normalized copy. */
+function sameRecord<T>(
+  next: Readonly<Record<string, T>>,
+  previous: Readonly<Record<string, T>>,
+  equal: (nextValue: T, previousValue: T) => boolean = (nextValue, previousValue) => nextValue === previousValue,
+): boolean {
+  const nextKeys = Object.keys(next)
+  const previousKeys = Object.keys(previous)
+  return nextKeys.length === previousKeys.length
+    && nextKeys.every(key => Object.hasOwn(previous, key) && equal(next[key] as T, previous[key] as T))
+}
+
+/** Compare decoded catalog rows by wire value so a refreshed catalog keeps its record identity. */
+function sameCatalogEntry(
+  a: SubagentCatalogSnapshot['entries'][number],
+  b: SubagentCatalogSnapshot['entries'][number],
+): boolean {
+  if (a.kind !== b.kind || a.id !== b.id) return false
+  if (a.kind === 'diagnostic' || b.kind === 'diagnostic') {
+    return a.kind === 'diagnostic' && b.kind === 'diagnostic' && a.reason === b.reason
+  }
+  return a.mode === b.mode
+    && a.activity === b.activity
+    && a.hasChildren === b.hasChildren
+    && a.label === b.label
+}
+
+/** Catalog snapshots may be rebuilt from fresh but equivalent decoded rows. */
+function sameCatalogSnapshot(a: SubagentCatalogSnapshot, b: SubagentCatalogSnapshot): boolean {
+  return a.state === b.state
+    && a.parentAvailable === b.parentAvailable
+    && a.error === b.error
+    && a.entries.length === b.entries.length
+    && a.entries.every((entry, index) => sameCatalogEntry(entry, b.entries[index] as typeof entry))
+}
+
+/** Address values may be reconstructed while their route remains unchanged. */
+function sameSubagentAddress(a: SubagentAddress | undefined, b: SubagentAddress | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined
+    && a.parentSessionId === b.parentSessionId
+    && a.childSessionId === b.childSessionId
+    && a.mode === b.mode)
+}
+
+/**
  * Display title projection: durable title, project directory basename, then
  * the raw id.
  */
@@ -658,6 +723,7 @@ export class SessionRuntime implements ISessions {
 
   /** Project the manager's list snapshot into the store (title derivation is display-only). */
   private projectList(): void {
+    const previous = this.list.getSnapshot()
     const {
       items, current, phase, subagentsByParent, jobsBySession, currentAddress,
     } = this.manager.getListSnapshot()
@@ -665,7 +731,7 @@ export class SessionRuntime implements ISessions {
     const byId: Record<SessionId, SessionSummary> = {}
     for (const entry of items) {
       ids.push(entry.sessionId)
-      byId[entry.sessionId] = {
+      const next: SessionSummary = {
         id: entry.sessionId,
         displayTitle: displayTitleOf(entry.title, entry.cwd, entry.sessionId),
         running: entry.running,
@@ -684,6 +750,10 @@ export class SessionRuntime implements ISessions {
         ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
         ...(entry.agentPreset !== undefined ? { agentPreset: entry.agentPreset } : {}),
       }
+      const previousRow = previous.byId[entry.sessionId]
+      byId[entry.sessionId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+        ? previousRow
+        : next
     }
     if (current !== undefined && currentAddress !== undefined) {
       const seen = new Set<SessionId>()
@@ -696,8 +766,9 @@ export class SessionRuntime implements ISessions {
         if (child?.kind !== 'child') break
         const displayTitle = child.label ?? childId
         const summary = byId[childId]
+        const previousRow = previous.byId[childId]
         if (summary === undefined) {
-          byId[childId] = {
+          const next: SessionSummary = {
             id: childId,
             displayTitle,
             parentId: address.parentSessionId,
@@ -706,8 +777,14 @@ export class SessionRuntime implements ISessions {
             blank: false,
             updatedAt: 0,
           }
+          byId[childId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+            ? previousRow
+            : next
         } else if (summary.displayTitle !== displayTitle) {
-          byId[childId] = { ...summary, displayTitle }
+          const next: SessionSummary = { ...summary, displayTitle }
+          byId[childId] = previousRow !== undefined && sameSessionSummary(previousRow, next)
+            ? previousRow
+            : next
         }
         const parent = byId[address.parentSessionId]
         if (parent !== undefined && parent.origin !== 'subagent') break
@@ -729,7 +806,36 @@ export class SessionRuntime implements ISessions {
         ...(currentAddress === undefined ? {} : { subagentAddress: currentAddress }),
       })
     }
-    this.list.set({ ids, byId, current, phase, subagentsByParent, jobsBySession, currentAddress })
+    const stableIds = previous.ids.length === ids.length
+      && previous.ids.every((id, index) => id === ids[index])
+      ? previous.ids
+      : ids
+    const stableById = sameRecord(byId, previous.byId) ? previous.byId : byId
+    const stableSubagentsByParent = sameRecord(
+      subagentsByParent, previous.subagentsByParent, sameCatalogSnapshot)
+      ? previous.subagentsByParent
+      : subagentsByParent
+    const stableJobsBySession = sameRecord(jobsBySession, previous.jobsBySession)
+      ? previous.jobsBySession
+      : jobsBySession
+    const stableCurrentAddress = sameSubagentAddress(currentAddress, previous.currentAddress)
+      ? previous.currentAddress
+      : currentAddress
+    // Every projection publishes, including one whose values all held: the
+    // manager also notifies for gestures that move nothing in the list (opening
+    // the session that is already current, a Workspace connect that reuses the
+    // current blank session), and subscribers waiting for such a gesture would
+    // never hear it. Reused field identities are what keep the cost down —
+    // consumers reading rows or catalogs bail out on the unchanged reference.
+    this.list.set({
+      ids: stableIds,
+      byId: stableById,
+      current,
+      phase,
+      subagentsByParent: stableSubagentsByParent,
+      jobsBySession: stableJobsBySession,
+      currentAddress: stableCurrentAddress,
+    })
     this.pruneScopes()
   }
 

@@ -94,6 +94,48 @@ describe('list store projection', () => {
     await Promise.resolve()
     expect(b.svc.list.getSnapshot().ids).toContain('s2')
   })
+
+  it('reuses row and record identity across an equivalent republish while still notifying subscribers', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 's1', cwd: '/w' }, { id: 's2' }])
+    // The first open mints the session scope, whose projection values reach the
+    // row on the next pass; the second settles the projection.
+    b.svc.open(sid('s1'))
+    b.svc.open(sid('s1'))
+    const before = b.svc.list.getSnapshot()
+    const notified = vi.fn()
+    b.svc.list.subscribe(notified)
+
+    // Opening the session that is already current moves no list value (the same
+    // pass a Workspace connect reusing the current blank session produces). The
+    // gesture must still reach subscribers — suppressing the publish was the
+    // agent-preset staging bug — but every field nothing moved keeps its
+    // reference, so row and record consumers reconcile nothing.
+    b.svc.open(sid('s1'))
+
+    expect(notified).toHaveBeenCalledTimes(1)
+    const after = b.svc.list.getSnapshot()
+    expect(after.ids).toBe(before.ids)
+    expect(after.byId).toBe(before.byId)
+    expect(after.byId[sid('s1')]).toBe(before.byId[sid('s1')])
+    expect(after.byId[sid('s2')]).toBe(before.byId[sid('s2')])
+    expect(after.subagentsByParent).toBe(before.subagentsByParent)
+    expect(after.jobsBySession).toBe(before.jobsBySession)
+  })
+
+  it('replaces only the moved row when one session starts running', async () => {
+    const b = bench()
+    await feedList(b, [{ id: 's1' }, { id: 's2' }])
+    const before = b.svc.list.getSnapshot()
+    b.svc.handleHostEnvelope({ rpcId: 'r1' as never, payload: { type: 'host/session-status', sessionId: sid('s2'), running: true } as never })
+    await Promise.resolve()
+    const after = b.svc.list.getSnapshot()
+    expect(after.byId[sid('s2')]?.running).toBe(true)
+    expect(after.byId[sid('s2')]).not.toBe(before.byId[sid('s2')])
+    expect(after.byId[sid('s1')]).toBe(before.byId[sid('s1')])
+    expect(after.byId).not.toBe(before.byId)
+    expect(after.ids).toBe(before.ids)
+  })
 })
 
 describe('search', () => {
