@@ -294,8 +294,16 @@ function disposalOf(activation: Activation): Promise<void> | undefined {
  * @param stopReason - how the child's last ordinary turn ended.
  * @returns the model-facing opening line of the settlement notice.
  */
-function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
+function settlementSummary(
+  childId: SessionId,
+  stopReason: SubagentResult['stopReason'],
+  diagnostic?: string,
+): string {
   const subject = `Background subagent ${childId}`
+  // A failure the parent cannot name is a failure it will misattribute: without
+  // this, an exhausted provider quota and a crashed child read identically, and
+  // the parent retries the route that cannot serve it.
+  const reason = diagnostic === undefined ? '' : ` Reason: ${diagnostic}`
   switch (stopReason) {
     case 'completed':
       return `${subject} finished and will do no further work unless you send it more.`
@@ -308,7 +316,7 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
     case 'refusal':
       return `${subject} declined the task.`
     case 'error':
-      return `${subject} failed before it finished.`
+      return `${subject} failed before it finished.${reason}`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */
@@ -1464,7 +1472,7 @@ export class SubagentContinuationManager {
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
-      const summary = settlementSummary(activation.childId, terminal.stopReason)
+      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic)
       // The parent-facing echo relays only the closing text. The terminal
       // output is the raw final assistant message, whose reasoning blocks are
       // the child's private work product and whose remaining non-text blocks

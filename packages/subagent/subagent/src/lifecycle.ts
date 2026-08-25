@@ -33,6 +33,32 @@ export interface ActivationTerminal {
   readonly stopReason: SubagentResult['stopReason']
   /** The epoch's final assistant content, absent when it produced none or failed. */
   readonly output?: ContentBlock[]
+  /**
+   * Why the epoch failed, for a `stopReason` of `error` raised by teardown
+   * rather than by the child's own turn. The parent cannot otherwise tell a
+   * provider refusal from a quota exhaustion from a crash, and the delivery
+   * report is the only place it learns the epoch ended at all. Bounded to
+   * {@link TERMINAL_DIAGNOSTIC_LIMIT} and carrying the failure's own text, the
+   * same detail the one-shot tool path already reports.
+   */
+  readonly diagnostic?: string
+}
+
+/** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
+const TERMINAL_DIAGNOSTIC_LIMIT = 4096
+
+/**
+ * Render a teardown failure as bounded diagnostic text.
+ * @param failure - the thrown value that ended the epoch.
+ * @returns the diagnostic member, omitted when the failure carries no text.
+ */
+function terminalDiagnostic(failure: unknown): { diagnostic?: string } {
+  const text = String(failure)
+  if (text.length === 0) return {}
+  const bounded = Buffer.byteLength(text, 'utf8') <= TERMINAL_DIAGNOSTIC_LIMIT
+    ? text
+    : Buffer.from(text, 'utf8').subarray(0, TERMINAL_DIAGNOSTIC_LIMIT).toString('utf8')
+  return { diagnostic: bounded }
 }
 
 /**
@@ -190,7 +216,7 @@ export function createActivationObserver(
   // output: an answer this harness could not durably release is not a result.
   const terminal = (failure: unknown): ActivationTerminal => failure === undefined
     ? captured
-    : { stopReason: 'error' }
+    : { stopReason: 'error', ...terminalDiagnostic(failure) }
   return {
     start: (child: Agent): void => {
       boundary = child.session.events.length
