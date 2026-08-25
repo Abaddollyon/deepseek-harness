@@ -1,4 +1,5 @@
 # Agent Note: Run fork master CI on hosted infrastructure
+
 Status: implemented
 
 English | [中文](2026-08-25-fork-master-hosted-ci.zh.md)
