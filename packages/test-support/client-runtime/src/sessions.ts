@@ -6,7 +6,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
   AgentContext, ConversationSnapshot, ISessions, ObservableSnapshot, ProjectionsFace, SessionFace, SessionId,
   SessionListState, SessionProvideDescriptor, SessionSearchResultItem, SessionSummary, SnapshotStore,
-  SubagentAddress,
+  SubagentAddress, WorkspaceId,
 } from '@deepseek-ai/dsh-client-runtime/client'
 // The double reports the wire schema's own search bound, like the production
 // service — a transport-varying limit would be a fiction no client can see.
@@ -185,9 +185,12 @@ export class TestSessions implements ISessions {
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'search' | 'fork'
+      | 'clear' | 'search' | 'fork' | 'create'
     args: unknown[]
   }[] = []
+
+  /** Minted-id counter for {@link TestSessions.create} (collision-proof against fixture ids). */
+  private createdCount = 0
 
   /** The wire schema's `session.search` result bound (production parity). */
   readonly searchResultLimit = SESSION_SEARCH_RESULT_LIMIT
@@ -476,6 +479,20 @@ export class TestSessions implements ISessions {
   search(query: string, signal: AbortSignal): ReturnType<ISessions['search']> {
     this.calls.push({ method: 'search', args: [query, signal] })
     return Promise.resolve({ ok: true, value: this.searchStub?.(query, signal) ?? { items: [], hasMore: false } })
+  }
+
+  /**
+   * Recorded create stub mirroring the production resolution guarantee: the
+   * minted session is in the list store (blank, as a fresh log) and not
+   * selected before the promise resolves, so a follow-up open() targets it
+   * the way the New Session flows do.
+   * @param opts - optional target Workspace (recorded; the bench owns membership).
+   * @returns the minted session id.
+   */
+  async create(opts?: { workspaceId?: WorkspaceId }): Promise<SessionId> {
+    this.calls.push({ method: 'create', args: [opts ?? {}] })
+    this.createdCount += 1
+    return this.add({ id: `created-${this.createdCount}`, summary: { blank: true } }, { current: false })
   }
 
   /**

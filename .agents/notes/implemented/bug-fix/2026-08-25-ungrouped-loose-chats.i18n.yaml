@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-ungrouped-loose-chats.md
+2026-08-25-ungrouped-loose-chats.md: d30453ac516ee120fa8f0cc1fb53f6fcc9b38263
+2026-08-25-ungrouped-loose-chats.zh.md: 6911a9ffc1ed81af430ea0b265024e0436222b6e

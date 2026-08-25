@@ -9,7 +9,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  RpcResult, SessionId, SubagentAddress,
+  RpcResult, SessionId, SubagentAddress, WorkspaceId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { HostObservable, SessionMaybeProvideInfo } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AgentContext } from '../agents/scope.ts'
@@ -34,6 +34,18 @@ export interface ISessions {
    * (fixture included) reports the same number.
    */
   readonly searchResultLimit: number
+  /**
+   * Create a session on the host. Omitting `workspaceId` leaves the new
+   * session outside every Workspace — it lists under the sidebar's Ungrouped
+   * bucket and the Host assigns its default cwd. On resolution the session
+   * is in the list store and `open()` can target it (the same synchronous-
+   * addressability guarantee as {@link ISessions.fork}); the further create
+   * options (explicit cwd, caller-preallocated id) stay on the concrete
+   * class for runtime-internal callers.
+   * @param opts - optional target Workspace.
+   * @returns the new session id.
+   */
+  create(opts?: { workspaceId?: WorkspaceId }): Promise<SessionId>
   /**
    * Select a session as current.
    * @param id - session id (must exist in the list; unknown ids fail loud).

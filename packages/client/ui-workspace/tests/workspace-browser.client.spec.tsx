@@ -70,6 +70,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     useStore: bindSnapshotSelector(store),
     actions: store.actions,
     startSession: vi.fn(),
+    createLooseSession: vi.fn(),
     open: vi.fn(),
     searchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     searchResultLimit: 20,
@@ -700,20 +701,62 @@ describe('WorkspaceBrowser', () => {
     expect(startSession).toHaveBeenCalledWith(wid('alpha'))
   })
 
-  it('reveals the Ungrouped bucket holding a loose current session; its header has no menu and its ＋ is inert', async () => {
-    const startSession = vi.fn()
+  it('reveals the Ungrouped bucket holding a loose current session; its header has no menu', async () => {
     const b = mount({
       useSessions: hook(sessionState([summary('loose', 1)], { current: sid('loose') })),
       useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
-      startSession,
     })
     // The bucket is a group like any other: navigating into it opens it, and
     // the persisted fold bit records that.
     await waitFor(() => { expect(screen.getByText('loose')).toBeTruthy() })
     expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
     expect(screen.queryByRole('button', { name: '工作区“未分组会话”的操作' })).toBeNull()
+  })
+
+  it('creates a loose chat from the Ungrouped bucket\'s ＋, expanding the bucket first', () => {
+    const startSession = vi.fn()
+    const createLooseSession = vi.fn()
+    const b = mount({
+      useSessions: hook(sessionState([summary('loose', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
+      startSession,
+      createLooseSession,
+    })
+    // Same contract as the Workspace rows: the group opens before the action
+    // runs, so the new row is visible when the Session state arrives.
+    createLooseSession.mockImplementation(() => {
+      expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
+    })
     fireEvent.click(screen.getByRole('button', { name: '在“未分组会话”中新建会话' }))
+    expect(createLooseSession).toHaveBeenCalledOnce()
+    // A loose chat belongs to no Workspace: the workspace-scoped start path
+    // must not run for it.
     expect(startSession).not.toHaveBeenCalled()
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
+  })
+
+  it('renders a loose chat exactly once across the folded holdout and the Pinned section', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('loose', 1, { running: true })])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
+    })
+    // Folded by default: the live loose row survives as the bucket's held
+    // row — exactly one rendering of the Session.
+    expect(groupHeader('未分组会话').getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getAllByText('loose')).toHaveLength(1)
+
+    // A user pin moves the thread to the Pinned section: still exactly one
+    // rendering, and the bucket folds away because nothing remains in it.
+    act(() => { b.store.actions.togglePinnedSession(sid('loose')) })
+    expect(screen.getByText('已置顶')).toBeTruthy()
+    expect(screen.getAllByText('loose')).toHaveLength(1)
+    expect(screen.queryByText('未分组会话')).toBeNull()
+
+    // Unpinning returns the thread to the bucket's folded holdout.
+    act(() => { b.store.actions.togglePinnedSession(sid('loose')) })
+    expect(screen.queryByText('已置顶')).toBeNull()
+    expect(screen.getAllByText('loose')).toHaveLength(1)
+    expect(screen.getByText('未分组会话')).toBeTruthy()
   })
 
   it('opens the current session\'s group on navigation and never re-opens it against a deliberate fold', async () => {

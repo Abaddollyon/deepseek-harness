@@ -98,6 +98,13 @@ export type WorkspaceBrowserInjected = {
    * Workspace, then the recent Workspace, or clear into the New Session view.
    */
   startSession: (workspaceId?: WorkspaceId) => void
+  /**
+   * Create a Session outside every Workspace and open it — the Ungrouped
+   * bucket's own New Session action. The bucket's Sessions belong to no
+   * Workspace, so the workspace-scoped {@link WorkspaceBrowserInjected.startSession}
+   * cannot serve it; creation leaves the Host to assign its default cwd.
+   */
+  createLooseSession: () => void
   /** Open a real Session. */
   open: (sessionId: SessionId) => void
   /**
