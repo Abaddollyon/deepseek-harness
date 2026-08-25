@@ -32,8 +32,9 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
   const inbox = useSession(s => s.queue)
   const queue = useMemo(() => inbox.filter(row => row.placement === 'queued'), [inbox])
   const running = useSession(s => s.running)
-  // Older session snapshots omit the addressed-subagent marker; absence still denotes an ordinary session.
-  const queueMutable = useSession(s => s.subagent === null || s.subagent === undefined)
+  // Nullish on purpose: an omitted addressed-subagent marker still denotes an
+  // ordinary session — reading absence as a subagent hid the queued-row controls.
+  const queueMutable = useSession(s => s.subagent == null)
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)
   const [busy, setBusy] = useState<QueueItemId | null>(null)
   const [collapsed, setCollapsed] = useState(true)

@@ -20,6 +20,11 @@ function headerText(headers: Record<string, unknown>[]): string[] {
   return headers.map(h => JSON.stringify(h))
 }
 
+/** Resolve a fetch input to its URL string; a Request's default stringification is useless. */
+function requestUrl(input: RequestInfo | URL): string {
+  return input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+}
+
 beforeEach(() => {
   vi.stubEnv('PI_TEST_KEY', 'test-key')
 })
@@ -108,9 +113,12 @@ describe('PiAiAdapter auth recovery', () => {
     const tokenCalls: Record<string, string>[] = []
     const realFetch = globalThis.fetch
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
+      const url = requestUrl(input)
       if (url.includes('platform.claude.com')) {
-        tokenCalls.push(JSON.parse(String(init?.body)) as Record<string, string>)
+        // The double posts a JSON string; BodyInit also admits streams and blobs.
+        const body = init?.body
+        if (typeof body !== 'string') throw new Error('auth-recovery double expects a string token-request body')
+        tokenCalls.push(JSON.parse(body) as Record<string, string>)
         return new Response(JSON.stringify({
           access_token: 'new-access',
           refresh_token: 'new-refresh',
@@ -156,7 +164,7 @@ describe('PiAiAdapter auth recovery', () => {
     })
     const realFetch = globalThis.fetch
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      String(input).includes('platform.claude.com')
+      requestUrl(input).includes('platform.claude.com')
         ? Promise.resolve(new Response('token endpoint down', { status: 500 }))
         : realFetch(input, init))
     const observed: { provider: string; refreshed: boolean; error?: string }[] = []
@@ -231,7 +239,7 @@ describe('PiAiAdapter auth recovery', () => {
     let releaseRefresh: ((error: Error) => void) | undefined
     const realFetch = globalThis.fetch
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      String(input).includes('platform.claude.com')
+      requestUrl(input).includes('platform.claude.com')
         ? new Promise<Response>((_resolve, reject) => { releaseRefresh = reject })
         : realFetch(input, init))
     const providers: Record<string, PiAiProviderProfile> = {
@@ -268,6 +276,8 @@ describe('PiAiAdapter auth recovery', () => {
     const auth = memoryAuth({
       anthropic: { type: 'oauth', access: 'old-access', refresh: 'old-refresh', expires: Date.now() + 3_600_000 },
     })
+    // The adapter must survive and report a credential-store failure that is not an Error.
+    // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- the non-Error rejection IS the scenario under test
     auth.credentials.modify = () => Promise.reject('plain string failure')
     const observed: { provider: string; refreshed: boolean; error?: string }[] = []
     const providers: Record<string, PiAiProviderProfile> = {
@@ -318,7 +328,7 @@ describe('auth recovery through the plugin composition', () => {
     const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
     const realFetch = globalThis.fetch
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      String(input).includes('platform.claude.com')
+      requestUrl(input).includes('platform.claude.com')
         ? Promise.resolve(new Response(JSON.stringify({
           access_token: 'new-access',
           refresh_token: 'new-refresh',
@@ -333,7 +343,11 @@ describe('auth recovery through the plugin composition', () => {
     expect(server.paths).toHaveLength(2)
     await expect(ctx.credentials.readRecord(recordKeyFor('anthropic'))).resolves.toEqual({
       kind: 'grant',
-      payload: expect.objectContaining({ access: 'new-access', refresh: 'new-refresh' }),
+      // objectContaining resolves to any; the assertion names the matched grant fields.
+      payload: expect.objectContaining({ access: 'new-access', refresh: 'new-refresh' }) as {
+        access: string
+        refresh: string
+      },
     })
   })
 
@@ -341,7 +355,7 @@ describe('auth recovery through the plugin composition', () => {
     const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
     const realFetch = globalThis.fetch
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      String(input).includes('platform.claude.com')
+      requestUrl(input).includes('platform.claude.com')
         ? Promise.resolve(new Response('token endpoint down', { status: 500 }))
         : realFetch(input, init))
     const ctx = await oauthHarness(server.url)
@@ -352,7 +366,8 @@ describe('auth recovery through the plugin composition', () => {
     expect(server.paths).toHaveLength(2)
     await expect(ctx.credentials.readRecord(recordKeyFor('anthropic'))).resolves.toEqual({
       kind: 'grant',
-      payload: expect.objectContaining({ access: 'old-access' }),
+      // objectContaining resolves to any; the assertion names the matched grant field.
+      payload: expect.objectContaining({ access: 'old-access' }) as { access: string },
     })
   })
 })
