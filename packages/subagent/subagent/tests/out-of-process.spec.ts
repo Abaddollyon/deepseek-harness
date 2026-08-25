@@ -131,6 +131,7 @@ describe('settleRunResult', () => {
     const result = await settleRunResult({
       attempt: async () => { throw new Error('transport died') },
       collectOutput: () => [],
+      collectFailure: () => ({ code: 'QUOTA', retryAfterMs: 5_000 }),
       cancelled: () => false,
       onError: (error, stopReason) => {
         seen.push(`${stopReason}:${error.message}`)
@@ -139,7 +140,7 @@ describe('settleRunResult', () => {
       signal: controller.signal,
       onAbort,
     })
-    expect(result.stopReason).toBe('error')
+    expect(result).toMatchObject({ stopReason: 'error', failure: { code: 'QUOTA', retryAfterMs: 5_000 } })
     expect(seen).toEqual(['error:transport died'])
   })
 

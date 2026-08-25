@@ -69,6 +69,7 @@ import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 
 export * from './out-of-process.ts'
+export { subagentFailureFromLlmFailure } from './failure.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
 export type {
@@ -77,6 +78,7 @@ export type {
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
   SubagentProvider,
+  SubagentFailure,
   SubagentResult,
   SubagentRun,
   SubagentStartRequest,
