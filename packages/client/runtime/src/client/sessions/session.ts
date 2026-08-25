@@ -690,7 +690,17 @@ export class Session implements SessionFace {
       this.liveBuffer.push({ event, view })
       return
     }
-    if (this.openState !== 'open') return // cold/error: no window upkeep (history fully backfills on open)
+    if (this.openState === 'error') {
+      // A live frame proves the transport recovered, so the history request that
+      // failed can succeed now. Re-open instead of discarding: one transient
+      // failure otherwise silences the window permanently — every later event is
+      // dropped and only a reload restores it. The rebuild backfills this event,
+      // so it is deliberately not buffered, and open() is idempotent while a
+      // retry is in flight, so a burst cannot pile up requests.
+      void this.open()
+      return
+    }
+    if (this.openState !== 'open') return // cold: never opened, so history fully backfills on open
     const tailSeq = this.windowTailSeq()
     if (tailSeq !== null && event.seq > tailSeq + 1) {
       this.liveBuffer.push({ event, view })
