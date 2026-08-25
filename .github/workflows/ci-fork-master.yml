@@ -2,7 +2,7 @@ name: CI fork master
 
 on:
   push:
-    branches: [master]
+    branches: [master, fix/fork-ci-master]
   workflow_dispatch:
 
 permissions:
