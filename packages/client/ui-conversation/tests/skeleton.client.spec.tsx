@@ -103,6 +103,8 @@ function mount(
     composerBlock?: { reason: string }
     /** Mutable view ledger used by registration-order regressions. */
     viewTabs?: ViewTab[]
+    /** Render the cold start: no session selected anywhere. */
+    noSession?: boolean
   } = {},
 ) {
   const root = sid('root')
@@ -127,7 +129,7 @@ function mount(
       ...listed && options.nestedSubagent === true && { [parent]: parentRow },
       ...listed && { [SID]: childRow },
     },
-    current: SID,
+    current: options.noSession === true ? undefined : SID,
     phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
   })
   const workspaces = createSnapshotStore<WorkspaceListState>(workspaceState(workspaceRows))
@@ -255,7 +257,7 @@ function mount(
       : (opts?.fallback ?? null)
   )) as ConversationRootProps['renderSlotChain']
   const props: ConversationRootProps = {
-    sessionId: SID,
+    sessionId: options.noSession === true ? undefined : SID,
     SessionProvider: ({ children }) => children(SID),
     useSession,
     useSessions: bindSnapshotSelector(sessions),
@@ -316,12 +318,13 @@ describe('ConversationRoot resident composer', () => {
     expect(seat('conversation.input.plan')).toEqual({ locked: true })
   })
 
-  it('lets the no-workspace posture win over a block', () => {
+  it('lets the no-session posture win over a block', () => {
     // Picking a workspace is the earlier prerequisite; naming a model first
-    // would send the user somewhere they cannot act yet.
+    // would send the user somewhere they cannot act yet. The posture exists
+    // only with no session at all: a real session is usable without one.
     const b = mount(conversationSnapshot({ composerPhase: 'blank' }), [], undefined, {
-      summaryBlank: true,
       composerBlock: { reason: 'select a model first' },
+      noSession: true,
     })
     const box = b.view.getByRole('textbox') as HTMLTextAreaElement
     expect(box.disabled).toBe(false)
@@ -330,6 +333,40 @@ describe('ConversationRoot resident composer', () => {
     expect(box.placeholder).not.toBe('select a model first')
     const modelSeat = b.seatOwners.filter(call => call.key === 'conversation.input.model').at(-1)?.owner
     expect(modelSeat).toEqual({ locked: true })
+  })
+
+  it('a workspace-less session presents a usable composer, its chip still offering the picker', () => {
+    // A loose chat: a real Session no Workspace accounts for. The Host
+    // assigns its default cwd, so the composer is live — never a workspace
+    // prompt — and hero typing/submission work like any blank session's.
+    const b = mount(conversationSnapshot({ composerPhase: 'blank', blank: true }), [], undefined, {
+      summaryBlank: true,
+    })
+    const box = b.view.getByRole('textbox') as HTMLTextAreaElement
+    expect(box.disabled).toBe(false)
+    expect(box.readOnly).toBe(false)
+    expect(box.placeholder).toBe('描述你想要构建的内容')
+    fireEvent.change(box, { target: { value: 'loose draft' } })
+    expect(b.chat.store.getSnapshot().draft).toBe('loose draft')
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(b.sink).toHaveBeenCalledWith('loose draft', [], 'queue', expect.any(AbortSignal))
+    // The unpicked chip still opens the picker: a loose chat can move into a
+    // Workspace until its first message.
+    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
+    const owner = b.pickerOwner() as { open: boolean }
+    expect(owner.open).toBe(true)
+  })
+
+  it('a raised block still wins for a workspace-less session', () => {
+    // The session exists, so the workspace prerequisite no longer applies and
+    // the blocker's own reason owns the inert posture.
+    const b = mount(conversationSnapshot({ composerPhase: 'blank', blank: true }), [], undefined, {
+      summaryBlank: true,
+      composerBlock: { reason: 'select a model first' },
+    })
+    const box = b.view.getByRole('textbox') as HTMLTextAreaElement
+    expect(box.disabled).toBe(true)
+    expect(box.placeholder).toBe('select a model first')
   })
 
   it('keeps composer text in the machine, mirrors to the chat store, and submits through the sink', () => {

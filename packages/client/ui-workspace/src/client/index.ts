@@ -74,6 +74,15 @@ export function apply(ctx: ClientContext): void {
     // Explicit group actions keep their target; unscoped New Session inherits
     // the current Session Workspace before the recent-Workspace fallback.
     startSession: (workspaceId) => { ctx.workspaces.startSession(workspaceId) },
+    // The Ungrouped bucket's ＋ births a Session with no Workspace attachment
+    // and navigates to it; failures are non-fatal console diagnostics, the
+    // same posture as startSession's connect failures.
+    createLooseSession: () => {
+      ctx.sessions.create({}).then(
+        (sessionId) => { ctx.sessions.open(sessionId) },
+        (reason: unknown) => { console.warn('loose session failed:', reason) },
+      )
+    },
     open: (sessionId) => { ctx.sessions.open(sessionId) },
     searchSessions,
     searchResultLimit: ctx.sessions.searchResultLimit,

@@ -221,7 +221,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
-  'useSessions' | 'startSession' | 'open' | 'forkSession'
+  'useSessions' | 'startSession' | 'createLooseSession' | 'open' | 'forkSession'
   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
 > & {
   /** Host account home for POSIX hover-path abbreviation. */
@@ -311,7 +311,7 @@ function PinnedSessionSection({ rows, currentId, now, onOpen, onRename, onFork, 
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
-  useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
+  useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds,
   pinnedSessionIds, togglePinnedSession,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
@@ -536,9 +536,14 @@ function SessionTree({
                   setGroupExpanded(group.key, !group.expanded)
                 }}
                 onCreate={() => {
+                  // Opening the group first keeps the new row visible when the
+                  // Session state arrives. The Ungrouped bucket has no
+                  // Workspace start path: its ＋ births a loose chat.
+                  setGroupExpanded(group.key, true)
                   if (group.workspaceId !== undefined) {
-                    setGroupExpanded(group.key, true)
                     startSession(group.workspaceId)
+                  } else {
+                    createLooseSession()
                   }
                 }}
                 drag={workspaceDragProps}
@@ -922,6 +927,7 @@ export function WorkspaceBrowser({
   open,
   renameSession,
   forkSession,
+  createLooseSession,
   renameWorkspace,
   deleteWorkspace,
   insertWorkspaceBefore,
@@ -1374,6 +1380,7 @@ export function WorkspaceBrowser({
                 pinnedSessionIds={pinnedSessionIds}
                 togglePinnedSession={actions.togglePinnedSession}
                 startSession={startSession}
+                createLooseSession={createLooseSession}
                 open={open}
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 insertSessionBefore={insertSessionBefore}
