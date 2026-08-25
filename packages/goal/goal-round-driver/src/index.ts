@@ -432,7 +432,9 @@ export function apply(ctx: Context): void {
           attempt.stale = true
           /* v8 ignore next -- followup reserves the live agent before publishing a queued attempt */
           if (state.agent.status === 'running') {
-            state.agent.cancel({ kind: 'parent' })
+            // The driver interrupts only its own round; pending input it does
+            // not own survives teardown for the next lifecycle.
+            state.agent.cancel({ kind: 'parent' }, { keepInbox: true })
             waits.push(state.agent.whenIdle())
           }
         }

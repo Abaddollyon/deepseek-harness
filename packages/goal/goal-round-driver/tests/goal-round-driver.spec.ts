@@ -870,6 +870,26 @@ describe('same-session goal driving', () => {
     expect(test.adapter.requests).toHaveLength(0)
   })
 
+  it('preserves queued human work across driver teardown', async () => {
+    const test = await harness(['hang'])
+    test.ctx.goals.create(test.agent, { objective: 'teardown keeps foreign inbox' })
+    await waitForRequests(test.adapter, 1)
+
+    test.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'human queued' }],
+      source: { kind: 'user' },
+    }))
+    await test.driver.dispose()
+
+    // The driver owns only its round: queued input it never claimed survives
+    // the interruption for the next lifecycle.
+    expect(test.agent.inbox.nextTurn.map(message => message.content[0]))
+      .toEqual([{ type: 'text', text: 'human queued' }])
+    expect(test.agent.session.events.some(event =>
+      event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
+    expect(test.agent.status).toBe('idle')
+  })
+
   it('resets process-local scheduling state at a session-start edge', async () => {
     const test = await harness([textResponse('after explicit resume')])
     const created = test.ctx.goals.create(test.agent, { objective: 'restart safely', maxGoalRounds: 1 })

@@ -567,7 +567,9 @@ export class AgentLoop extends Service implements AgentFactory {
         // to drop the agent, so nothing should still hold it.
         if (machine === undefined) await machineReady.promise
         if (machine !== undefined) {
-          machine.cancel({ kind: 'disposed' })
+          // Pending inbox work is durable session state, not runtime residue:
+          // keep it so a later resume of the same session can claim it again.
+          machine.cancel({ kind: 'disposed' }, { keepInbox: true })
           await machine.whenIdle()
           await machine.scope.dispose()
         }
