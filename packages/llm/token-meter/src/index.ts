@@ -184,6 +184,11 @@ export class TokenMeter extends Service {
     }))
   }
 
+  /** Estimate the non-surface tokens in one canonical request envelope. */
+  estimateHeader(header: EpochHeader | undefined): number {
+    return estimateHeader(header)
+  }
+
   /** Resolve the routed model's image pricing, when the llm service and route declare one. */
   private _routeImagePricing(header: EpochHeader | undefined): LlmImageRequestPricing | undefined {
     const config = header?.config

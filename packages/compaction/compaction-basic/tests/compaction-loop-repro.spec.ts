@@ -267,9 +267,14 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
         && event.data.step === precedingResult.data.step + 1
         && event.seq < compactStart!.seq,
       )
+      const nextAssistant = events.find(event =>
+        event.type === 'assistant/message'
+        && event.data.step === precedingResult.data.step + 1,
+      )
       expect(precedingResult.seq).toBeLessThan(compactStart!.seq)
       expect(precedingStepEnd!.seq).toBeLessThan(compactStart!.seq)
       expect(nextStepStart!.seq).toBeLessThan(compactStart!.seq)
+      expect(compactStart!.seq).toBeLessThan(nextAssistant!.seq)
     } finally {
       await ctx.fiber.dispose()
     }

@@ -38,7 +38,12 @@ sequenceDiagram
   Driver->>Session: <code>step/start</code>
   Driver->>Session: <code>user/message</code> per entered message
   Driver->>Prompt: <code>system-prompt/assemble</code> waterfall
-  Driver->>LLM: <code>agent/request</code> waterfall, then <code>llm/stream</code> waterfall
+  Driver->>Hooks: <code>agent/request</code> waterfall
+  Driver->>Session: append canonical request/header and request/context
+  Driver->>Hooks: <code>agent/request-preflight</code> waterfall
+  Hooks-->>Driver: admit or retry after a replacement commit
+  Driver-->>Driver: derive messages from admitted surface
+  Driver->>LLM: <code>llm/stream</code> waterfall
   LLM-->>Driver: StreamChunk*
   Driver->>Session: <code>assistant/chunk</code>*
   Session-->>SDK: <code>session/event</code> <code>assistant/chunk</code>*
@@ -78,7 +83,7 @@ sequenceDiagram
 
 `assistant/message` 事件会记录每次成功的提供方调用，包括返回空内容或以 `max-tokens` 结束的调用。空内容不会进入派生历史，但该持久事件仍会保留用量，并通过 `sourceEventSeqs` 精确列出对应的 `assistant/chunk` 事件，包括显式空列表。
 
-`dsh-compaction-basic` 在派生请求之前通过 `agent/pre-step` 处理压力，而 `agent/request-error` 仅用于规范的上下文溢出。任一触发条件满足后，系统都会先执行可选的工具结果剪枝，再选择摘要。恢复发生在失败步骤结束之后、失败轮次结束之前；只有当剪枝或摘要生成推进了 surface replacement generation 时，系统才会开启一个全新的重试轮次，否则仍以原始请求错误为准。
+`dsh-compaction-basic` 在规范 header 记录之后、派生请求之前通过 `agent/request-preflight` 处理精确路由压力，而 `agent/request-error` 保留为提供方确认溢出的后备。只有当剪枝或摘要推进 surface replacement generation 时，预检才会重试；循环会验证 generation 并限制有效的重新分派次数。摘要之前，压缩会根据实际摘要模型容量为输出、envelope 和指令预留 token；如果没有平衡回放范围可容纳，它不会改变持久历史。提供方错误恢复也只有在表层推进后才开启新重试轮次，否则仍以原始请求错误为准。
 
 以返回的 `agent/pre-step` 决策为准；通过包装 `next()` 的监听器会保留下游消息，除非有意替换这些消息。steering（中途引导）和注入的上下文在后续的认领操作取得其下一步骤批次后，会经过同一 waterfall（瀑布式事件）。若轮次在步骤开始前中止，未开始的已认领批次会被持久地放回 inbox，并跳过监听器已重新入队的消息，因此任何模型请求都未见过的输入能在被中止的轮次后幸存。
 
