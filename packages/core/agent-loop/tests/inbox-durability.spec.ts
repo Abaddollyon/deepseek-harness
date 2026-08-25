@@ -203,6 +203,16 @@ describe('pre-step abort restores the claimed batch', () => {
     expect(request).toContain('continue')
   })
 
+  it('rejects overlapping maintenance while the agent is active', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    const agent = ctx.agentLoop.create(SessionId('maintenance-overlap'), { provider: 'mock', model: 'mock' })
+    const release = Promise.withResolvers<undefined>()
+    const running = agent.runMaintenance(async () => release.promise)
+    expect(() => agent.runMaintenance(async () => undefined)).toThrow(/already has active work/)
+    release.resolve(undefined)
+    await running
+  })
+
   it('keeps a pending inbox across disposal so a remount can resume it', async () => {
     const sessionId = SessionId('inbox-survives-teardown')
     const first = await persistentHarness(new MockAdapter([]))

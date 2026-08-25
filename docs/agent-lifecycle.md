@@ -27,11 +27,11 @@ sequenceDiagram
   Driver-->>SDK: <code>agent/inbox/claimed</code> { message, turn } per message
   Driver->>Hooks: <code>agent/pre-step</code> waterfall
   Hooks-->>Driver: authoritative reject or enter(messages)
-  alt proposed step rejected or pre-step failed
+  alt ordinary reject or pre-step failure
     Driver-->>Driver: claimed batch stays removed, the open turn spends no step
-    opt the turn aborts before the step starts
-      Driver-->>Driver: unstarted claimed batch restored to the inbox
-    end
+  else turn signal aborts before pre-step completes
+    Agent-->>Driver: restore the claimed batch for retry or the next turn
+    Driver-->>Agent: teardown removes only the exact owned queued prompt after cancellation settles
   else enter proposed step
   Driver->>Session: <code>step/start</code>
   Driver->>Session: <code>user/message</code> per entered message
@@ -78,7 +78,7 @@ The `assistant/message` event records every successful provider call, including 
 
 `dsh-compaction-basic` uses `agent/pre-step` for pressure before request derivation and `agent/request-error` only for canonical context overflow. Once either trigger qualifies, optional tool-result pruning runs before summary selection. Recovery works between the closed failed step and failed turn close, and opens a fresh retry turn only when pruning or summarization advances the surface replacement generation; otherwise the original request error remains authoritative.
 
-The returned `agent/pre-step` decision is authoritative; listeners wrapping `next()` preserve downstream messages unless replacement is intentional. Steering and injected context pass through the same waterfall after a later claim operation takes their next-step batch. An abort before the step starts durably restores the unstarted claimed batch to the inbox, skipping any message a listener already re-queued, so input no model request ever saw survives the aborted turn.
+The returned `agent/pre-step` decision is authoritative; listeners wrapping `next()` preserve downstream messages and `startsRequestSeries` unless replacement is intentional. Steering and injected context pass through the same waterfall after a later claim operation takes their next-step batch.
 
 SDK users that need replayable transcript data should consume `session/event`; `agent/*` is the live coordination API for queue/status, prompt interception, request construction, steering, continuation, and errors.
 

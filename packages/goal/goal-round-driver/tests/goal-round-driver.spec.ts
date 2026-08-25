@@ -834,6 +834,24 @@ describe('same-session goal driving', () => {
     expect(test.adapter.requests).toHaveLength(0)
   })
 
+  it('preserves a cleared reservation when downstream resets the session lifecycle', async () => {
+    const test = await harness([])
+    let reset = false
+    test.ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      if (messages[0]?.source.kind === 'goal' && !reset) {
+        reset = true
+        agentEvents(test.ctx, agent).emit('agent/session-start', { source: 'resume' })
+        return { kind: 'reject' as const }
+      }
+      return next()
+    })
+    test.ctx.goals.create(test.agent, { objective: 'reset during downstream rejection' })
+
+    await test.agent.whenIdle()
+    expect(test.ctx.goals.get(test.agent)).toMatchObject({ phase: 'active', roundsStarted: 0 })
+    expect(test.adapter.requests).toHaveLength(0)
+  })
+
   it('disarms and cancels an admitted round before driver teardown completes', async () => {
     const test = await harness(['hang'])
     test.ctx.goals.create(test.agent, { objective: 'survive plugin unload' })
@@ -853,13 +871,18 @@ describe('same-session goal driving', () => {
   it('cancels an accepted queued round and awaits its driver task during teardown', async () => {
     const test = await harness([])
     let unloading: Promise<void> | undefined
+    let ownedId: string | undefined
+    let owned: UserMessage | undefined
     onInboxMessage(test.ctx, test.agent, (message) => {
       if (message.source.kind === 'goal' && unloading === undefined) {
+        ownedId = message.id
+        owned = message
         unloading = Promise.resolve(test.driver.dispose())
       }
     })
     test.ctx.goals.create(test.agent, { objective: 'unload while queued' })
     await vi.waitFor(() => { expect(unloading).toBeDefined() })
+    if (owned === undefined) throw new Error('missing owned queued prompt')
     await unloading
 
     expect(test.ctx.goals.get(test.agent)).toMatchObject({
@@ -868,6 +891,34 @@ describe('same-session goal driving', () => {
       roundsStarted: 0,
     })
     expect(test.adapter.requests).toHaveLength(0)
+    expect(ownedId).toBeDefined()
+    expect(test.agent.inbox.nextTurn.some(message => message.id === ownedId)).toBe(false)
+  })
+
+  it('removes a claimed prompt before a later ordinary followup after teardown', async () => {
+    const test = await harness([])
+    let owned: UserMessage | undefined
+    let disposal: Promise<void> | undefined
+    onClaimedMessage(test.ctx, test.agent, (message) => {
+      if (disposal !== undefined) return
+      owned = message
+      disposal = Promise.resolve(test.driver.dispose())
+    })
+    test.ctx.goals.create(test.agent, { objective: 'claimed teardown race' })
+    await vi.waitFor(() => { expect(disposal).toBeDefined() })
+    await disposal
+
+    expect(owned).toBeDefined()
+    expect(test.agent.inbox.nextTurn.some(message => message.id === owned?.id)).toBe(false)
+    test.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'ordinary after teardown' }],
+      source: { kind: 'user' },
+    }))
+    await test.agent.whenIdle()
+
+    expect(test.adapter.requests).toHaveLength(1)
+    expect(requestText(test.adapter.requests[0]!)).toContain('ordinary after teardown')
+    expect(test.adapter.requests.some(request => requestText(request).includes('claimed teardown race'))).toBe(false)
   })
 
   it('preserves queued human work across driver teardown', async () => {
@@ -1053,6 +1104,88 @@ describe('same-session goal driving', () => {
     expect(test.ctx.goals.get(test.agent)).toMatchObject({ phase: 'active', roundsStarted: 0 })
     expect(test.adapter.requests).toHaveLength(0)
     expect(test.agent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(true)
+  })
+
+  it('drops its claimed goal prompt while preserving foreign human input on teardown', async () => {
+    const test = await harness([])
+    let release: (() => void) | undefined
+    test.ctx.on('agent/pre-step', async ({ messages }, next) => {
+      if (messages[0]?.source.kind === 'goal' && release === undefined) {
+        await new Promise<void>((resolve) => { release = resolve })
+      }
+      return next()
+    })
+    test.ctx.goals.create(test.agent, { objective: 'drop owned prompt' })
+    await vi.waitFor(() => { expect(release).toBeDefined() })
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'foreign human' }], source: { kind: 'user' } }))
+    const disposal = Promise.resolve(test.driver.dispose())
+    release?.()
+    await disposal
+    expect(test.agent.inbox.nextTurn.map(message => message.content[0])).toEqual([
+      { type: 'text', text: 'foreign human' },
+    ])
+  })
+
+  it('removes only its exact claimed prompt when downstream throws on abort', async () => {
+    const test = await harness([])
+    let release: (() => void) | undefined
+    let foreign: UserMessage | undefined
+    test.ctx.on('agent/pre-step', async ({ messages, signal }, next) => {
+      if (messages[0]?.source.kind === 'goal' && release === undefined) {
+        foreign = createUserMessage({ content: messages[0].content, source: messages[0].source })
+        await new Promise<void>((resolve) => { release = resolve })
+        if (signal.aborted) {
+          if (foreign === undefined) throw new Error('missing foreign clone')
+          messages.splice(0, 1, foreign)
+          throw new Error('downstream abort sentinel')
+        }
+      }
+      return next()
+    })
+    test.ctx.goals.create(test.agent, { objective: 'downstream abort throw' })
+    await vi.waitFor(() => { expect(release).toBeDefined() })
+    const disposal = Promise.resolve(test.driver.dispose())
+    release?.()
+    await disposal
+    expect(test.agent.inbox.nextStep).toEqual([foreign])
+  })
+
+  it('drops its claimed goal prompt when downstream rejects on abort', async () => {
+    const test = await harness([])
+    let release: (() => void) | undefined
+    let foreign: UserMessage | undefined
+    test.ctx.on('agent/pre-step', async ({ messages, signal }, next) => {
+      if (messages[0]?.source.kind === 'goal' && release === undefined) {
+        foreign = createUserMessage({ content: messages[0].content, source: messages[0].source })
+        await new Promise<void>((resolve) => { release = resolve })
+        if (signal.aborted) {
+          if (foreign === undefined) throw new Error('missing foreign clone')
+          messages.push(foreign)
+          return { kind: 'reject' }
+        }
+      }
+      return next()
+    })
+    test.ctx.goals.create(test.agent, { objective: 'downstream abort reject' })
+    await vi.waitFor(() => { expect(release).toBeDefined() })
+    const disposal = Promise.resolve(test.driver.dispose())
+    release?.()
+    await disposal
+    expect(test.agent.inbox.nextStep).toEqual([foreign])
+  })
+
+  it('ignores discarded foreign input while a goal reservation is queued', async () => {
+    const test = await harness([])
+    let goalMessage: UserMessage | undefined
+    const dispose = onInboxMessage(test.ctx, test.agent, (message) => {
+      if (message.source.kind === 'goal' && message.source.round > 0) goalMessage = message
+    })
+    test.ctx.goals.create(test.agent, { objective: 'ignore foreign discard' })
+    await vi.waitFor(() => { expect(goalMessage).toBeDefined() })
+    const human = createUserMessage({ content: [{ type: 'text', text: 'foreign queued input' }], source: { kind: 'user' } })
+    test.agent.send(human, 'next-turn', false)
+    expect(test.agent.inbox.remove(human.id)).toBe(true)
+    dispose()
   })
 
   it('ignores session events without an exact owning agent and retires disposed agent state', async () => {
