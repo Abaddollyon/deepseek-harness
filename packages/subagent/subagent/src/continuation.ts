@@ -1465,12 +1465,18 @@ export class SubagentContinuationManager {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
       const summary = settlementSummary(activation.childId, terminal.stopReason)
+      // The parent-facing echo relays only the closing text. The terminal
+      // output is the raw final assistant message, whose reasoning blocks are
+      // the child's private work product and whose remaining non-text blocks
+      // are not content a user-role notice can carry; a closing message
+      // without text therefore still reads as no closing message.
+      const closing = terminal.output?.filter(block => block.type === 'text')
       const message = createUserMessage({
         content: [
           { type: 'text' as const, text: summary },
-          ...terminal.output === undefined
+          ...closing === undefined || closing.length === 0
             ? [{ type: 'text' as const, text: 'It left no closing message.' }]
-            : [{ type: 'text' as const, text: 'Its closing message:' }, ...terminal.output],
+            : [{ type: 'text' as const, text: 'Its closing message:' }, ...closing],
         ],
         source: {
           kind: 'subagent-settled' as const,
