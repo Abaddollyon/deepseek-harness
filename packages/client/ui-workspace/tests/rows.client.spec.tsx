@@ -606,6 +606,19 @@ describe('workspace browser rows', () => {
     }
   })
 
+  it('repaints when the relative-time bucket crosses a minute boundary', () => {
+    const node: SessionNode = {
+      id: sid('time-boundary'), title: 'Time boundary', blank: false,
+      running: false, runningSubagentCount: 0, completed: false, updatedAt: 0,
+    }
+    const view = render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
+      onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} onTogglePinned={vi.fn()} t={t} />)
+    expect(screen.getByText('刚刚')).toBeTruthy()
+    view.rerender(<SessionNodeItem node={node} currentId={undefined} now={60_000} onOpen={vi.fn()}
+      onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} onTogglePinned={vi.fn()} t={t} />)
+    expect(screen.getByText('1分钟')).toBeTruthy()
+  })
+
   it.each([
     ['approval', '等待审批'],
     ['plan-review', '计划待审'],
