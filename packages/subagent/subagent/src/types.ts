@@ -213,6 +213,22 @@ export interface SubagentStopReasonMap {
 /** The union over {@link SubagentStopReasonMap} — widens automatically as backends merge in variants. */
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
+/** Provider-neutral cause of a failed child run that callers can branch on. */
+export type SubagentFailureCause = 'quota' | 'rate-limit' | 'transient' | 'permanent' | 'unknown'
+
+/**
+ * Machine-readable provider failure facts retained on a failed child result.
+ *
+ * The cause is deliberately smaller than provider error taxonomies so a parent
+ * can stop dispatching, wait, or reroute without parsing diagnostic text.
+ */
+export interface SubagentFailure {
+  /** Closed provider-neutral cause used for retry and routing decisions. */
+  readonly cause: SubagentFailureCause
+  /** Provider-requested delay before another attempt, in milliseconds. */
+  readonly retryAfterMs?: number
+}
+
 /**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
@@ -240,6 +256,8 @@ export interface SubagentResult {
    * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
    */
   readonly diagnostic?: string
+  /** Structured retry/routing facts when the provider identified a failure cause. */
+  readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
 }
