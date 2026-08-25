@@ -1989,8 +1989,13 @@ describe('continuable settlement delivery', () => {
 
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    // The parent is told WHY. A teardown failure is the one ending the child
+    // cannot describe itself, so without the reason an exhausted provider quota
+    // and a crashed scope reach the parent as the same sentence.
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.\nIt left no closing message.`,
+      `Background subagent ${started.childId} failed before it finished.`
+      + ` Reason: SubagentError: subagent "${started.childId}" activation handle disposal failed: scope unwind failed`
+      + '\nIt left no closing message.',
     )
   })
 
