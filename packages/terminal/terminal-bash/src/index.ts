@@ -143,11 +143,16 @@ async function startupSession(
       if (result.waitReason === 'timeout') throw new Error('PTY shell did not reach readiness before startup timeout')
       viewport = result.viewport
       const scrollback = session.read({ offset: 0, count: 20 }).text
-      if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())
-        || scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) break
+      if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) {
+        session.motd += viewport
+        break
+      }
+      if (scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) {
+        session.motd = scrollback
+        break
+      }
       await new Promise(resolve => setTimeout(resolve, config.pollIntervalMs))
     }
-    session.motd += viewport
   }
   if (signal === undefined) {
     await start()

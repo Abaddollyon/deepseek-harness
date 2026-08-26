@@ -83,6 +83,7 @@ class LocalSendOperation implements TerminalSendOperation {
   private finished = false
   private cancellationRequested = false
   private outputSeen = false
+  private pwshSilenceDeferred = false
   private initialForegroundLeftWait: boolean
   private initialForegroundPgid: number | undefined
 
@@ -115,6 +116,7 @@ class LocalSendOperation implements TerminalSendOperation {
   append(text: string): void {
     if (!this.finished) {
       this.outputSeen ||= text.length > 0
+      this.pwshSilenceDeferred = false
       this.output.append(text)
     }
   }
@@ -139,6 +141,12 @@ class LocalSendOperation implements TerminalSendOperation {
 
   readOutput(): TerminalSendRead {
     return this.output.consume()
+  }
+
+  deferPwshSilenceOnce(): boolean {
+    if (this.pwshSilenceDeferred) return false
+    this.pwshSilenceDeferred = true
+    return true
   }
 
   setInitialForeground(foreground: SubprocessTerminalForeground | undefined): void {
@@ -496,8 +504,12 @@ export class LocalPtySession implements TerminalBackendSession {
       // on waiting for shell ownership instead of letting a child marker suppress
       // readiness until the absolute timeout.
       const pwshRendering = this.config.shellDialect === 'pwsh' && operation.hasOutput
-      const handoffGrace = this.promptSeen || pwshRendering ? this.config.handoffGraceMs : 0
+      const handoffGrace = pwshRendering
+        ? this.config.idleSilenceMs + this.config.handoffGraceMs
+        : this.promptSeen ? this.config.handoffGraceMs : 0
       if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace) {
+        // Give a delayed PowerShell marker one I/O phase after the silence threshold.
+        if (pwshRendering && operation.deferPwshSilenceOnce()) return
         this.settleActive('inferred_idle')
       }
     } catch (error: unknown) {

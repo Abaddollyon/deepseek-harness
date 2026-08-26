@@ -386,16 +386,17 @@ describe('BashTerminalBackend startup rollback', () => {
     await ctx.plugin(EmptySandbox)
     await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: '/workspace' })
     const sends: TerminalSendRequest[] = []
+    let retained = ''
     const session = {
       motd: '',
       initialize: async () => {},
       close: async () => {},
       startSend: (request: TerminalSendRequest) => {
         sends.push(request)
-        const second = sends.length > 1
+        if (sends.length > 1) retained = 'dsh> '
         return {
           done: Promise.resolve({
-            viewport: second ? 'dsh> ' : '',
+            viewport: '',
             waitReason: 'inferred_idle' as const,
             sessionStatus: { kind: 'running' as const }, truncated: false,
           }),
@@ -403,7 +404,7 @@ describe('BashTerminalBackend startup rollback', () => {
           cancel: () => false,
         }
       },
-      read: () => ({ text: '', totalLines: 0, lineBegin: 0, lineEnd: 0, truncated: false }),
+      read: () => ({ text: retained, totalLines: 0, lineBegin: 0, lineEnd: 0, truncated: false }),
     } as unknown as LocalPtySession
     const backend = new BashTerminalBackend(
       ctx,
