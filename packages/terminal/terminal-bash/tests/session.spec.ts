@@ -148,15 +148,34 @@ async function initialize(session: LocalPtySession, terminal: FakeTerminal): Pro
 }
 
 describe('LocalPtySession readiness and output', () => {
-  it('answers split cursor position queries without retaining them', () => {
+  it('answers cursor queries for a live session and treats rejected replies as advisory', async () => {
     const terminal = new FakeTerminal()
     const session = new LocalPtySession(terminal, config())
 
+    terminal.emitData('\x1b[6n')
+    await Promise.resolve()
+    expect(terminal.writes).toEqual(['\x1b[1;1R'])
+
+    session.startSend({ text: '', submit: false })
+    await Promise.resolve()
     terminal.emitData('\x1b[')
     terminal.emitData('6n')
-
-    expect(terminal.writes).toEqual(['\x1b[1;1R'])
+    await Promise.resolve()
+    expect(terminal.writes).toEqual(['\x1b[1;1R', '\x1b[1;1R'])
     expect(session.read({ offset: 0, count: 10 }).text).toBe('')
+
+    terminal.throwWrite = true
+    terminal.emitData('\x1b[6n')
+    await Promise.resolve()
+    expect(session.status()).toEqual({ kind: 'running' })
+
+    terminal.throwWrite = false
+    terminal.autoExitOnKill = false
+    const closing = session.close('test complete')
+    terminal.emitData('\x1b[6n')
+    terminal.emitExit()
+    await closing
+    expect(terminal.writes).toEqual(['\x1b[1;1R', '\x1b[1;1R'])
   })
 
   it('lets queued terminal output run before the first post-write readiness poll', async () => {
@@ -272,6 +291,28 @@ describe('LocalPtySession readiness and output', () => {
     await vi.advanceTimersByTimeAsync(10)
     expect(settled).toBe(true)
     expect((await operation.done).waitReason).toBe('stdin_read')
+  })
+
+  it('keeps silent inputs responsive while extending the pwsh rendering grace', async () => {
+    vi.useFakeTimers()
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config({
+      shellDialect: 'pwsh', idleSilenceMs: 50, handoffGraceMs: 40, timeoutMs: 200,
+    }))
+    await initialize(session, terminal)
+
+    const silent = session.startSend({ text: 'secret', submit: true })
+    await vi.advanceTimersByTimeAsync(60)
+    expect((await silent.done).waitReason).toBe('inferred_idle')
+
+    const rendered = session.startSend({ text: 'Write-Output hi', submit: true })
+    terminal.emitData('Write-Output hi')
+    let settled = false
+    void rendered.done.then(() => { settled = true })
+    await vi.advanceTimersByTimeAsync(80)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(10)
+    expect((await rendered.done).waitReason).toBe('inferred_idle')
   })
 
   it('distinguishes inferred idle, timeout, exit signal, and operation reads', async () => {

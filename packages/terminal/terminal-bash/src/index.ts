@@ -105,11 +105,11 @@ function spawnArgv(ctx: Context, config: ResolvedConfig, policy: SandboxExecutio
 // session already owns the send lifecycle the race protects.
 async function startupSession(
   session: LocalPtySession,
-  dialect: ShellDialect,
+  config: ResolvedConfig,
   signal?: AbortSignal,
 ): Promise<void> {
   const start = async (): Promise<void> => {
-    if (dialect === 'bash') {
+    if (config.shellDialect === 'bash') {
       await session.initialize(signal)
       return
     }
@@ -123,10 +123,15 @@ async function startupSession(
     // non-ASCII output. The banner-to-prompt gap can outlast the silence
     // bound, so the wait loops over follow-up sends until the controlled
     // prompt is actually visible (in the viewport or the retained scrollback
-    // when it landed between sends), bounded by the send deadline.
+    // when it landed between sends), bounded by the startup timeout.
     let viewport = ''
     let first = true
+    const bootstrapDeadline = Date.now() + config.timeoutMs
     for (;;) {
+      signal?.throwIfAborted()
+      if (!first && Date.now() >= bootstrapDeadline) {
+        throw new Error('PTY shell did not reach readiness before startup timeout')
+      }
       const operation = session.startSend({
         text: first ? ENCODING_PREAMBLE + PWSH_PROMPT_SETUP : '',
         submit: first,
@@ -140,8 +145,9 @@ async function startupSession(
       const scrollback = session.read({ offset: 0, count: 20 }).text
       if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())
         || scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) break
+      await new Promise(resolve => setTimeout(resolve, config.pollIntervalMs))
     }
-    session.motd = viewport
+    session.motd += viewport
   }
   if (signal === undefined) {
     await start()
@@ -193,7 +199,7 @@ export class BashTerminalBackend implements TerminalBackend {
     })
     const session = this.createSession(terminal, this.config)
     try {
-      await startupSession(session, this.config.shellDialect, spec.signal)
+      await startupSession(session, this.config, spec.signal)
       return session
     } catch (error) {
       try {

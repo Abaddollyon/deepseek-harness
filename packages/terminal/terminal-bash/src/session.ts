@@ -89,7 +89,6 @@ class LocalSendOperation implements TerminalSendOperation {
   constructor(
     maxBytes: number,
     readonly startedAt: number,
-    readonly canInferWithoutOutput: boolean,
     private readonly onCancel: () => void,
   ) {
     this.output = new BoundedTextBuffer(maxBytes)
@@ -251,7 +250,6 @@ export class LocalPtySession implements TerminalBackendSession {
     const operation = new LocalSendOperation(
       this.config.maxReadBytes,
       Date.now(),
-      request.text.length === 0 && !request.submit,
       () => { this.interrupt(operation) },
     )
     this.active = operation
@@ -387,10 +385,11 @@ export class LocalPtySession implements TerminalBackendSession {
     let cursor = 0
     while ((cursor = combined.indexOf(CURSOR_POSITION_QUERY, cursor)) >= 0) {
       cursor += CURSOR_POSITION_QUERY.length
+      if (this.closing) continue
       // The line-oriented backend has no screen cursor; a stable valid reply
       // lets interactive line editors finish rendering without exposing coordinates.
-      void this.terminal.write(CURSOR_POSITION_RESPONSE).catch((error: unknown) => {
-        this.onTransportFailure(error)
+      void this.terminal.write(CURSOR_POSITION_RESPONSE).catch((_writeError: unknown) => {
+        // A cursor report is advisory; session operations retain readiness and timeout ownership.
       })
     }
     this.cursorQueryCarry = ''
@@ -485,10 +484,8 @@ export class LocalPtySession implements TerminalBackendSession {
         return
       }
       const elapsed = Date.now() - operation.startedAt
-      // Historical scrollback cannot prove that the current write reached the shell.
-      const sendHasOutput = operation.hasOutput
-      const readinessHasOutput = !this.initializing || this.scrollback.snapshot().text.length > 0
-      const acceptsStdinWait = readinessHasOutput && foreground !== undefined
+      const startupHasOutput = !this.initializing || this.scrollback.snapshot().text.length > 0
+      const acceptsStdinWait = startupHasOutput && foreground !== undefined
         && operation.acceptsStdinWait(foreground.processGroupId, foreground.inputWaiting)
       if (elapsed >= this.config.exactProbeAfterMs && acceptsStdinWait) {
         this.settleActive('stdin_read')
@@ -498,9 +495,9 @@ export class LocalPtySession implements TerminalBackendSession {
       // child also inherits PROMPT_COMMAND. Silence therefore remains the bound
       // on waiting for shell ownership instead of letting a child marker suppress
       // readiness until the absolute timeout.
-      const handoffGrace = this.promptSeen ? this.config.handoffGraceMs : 0
-      const acceptsSilence = sendHasOutput || (!this.initializing && operation.canInferWithoutOutput)
-      if (acceptsSilence && idleFor >= this.config.idleSilenceMs + handoffGrace) {
+      const pwshRendering = this.config.shellDialect === 'pwsh' && operation.hasOutput
+      const handoffGrace = this.promptSeen || pwshRendering ? this.config.handoffGraceMs : 0
+      if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace) {
         this.settleActive('inferred_idle')
       }
     } catch (error: unknown) {

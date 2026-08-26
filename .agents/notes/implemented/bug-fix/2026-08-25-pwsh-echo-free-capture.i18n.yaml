@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-pwsh-echo-free-capture.md
-2026-08-25-pwsh-echo-free-capture.md: 451343cfef64f1383648a389b6da297be0eefdf4
-2026-08-25-pwsh-echo-free-capture.zh.md: 0b1b44a4b85767e4c544b5a3eb68c801631a8f16
+2026-08-25-pwsh-echo-free-capture.md: ef2f2d4a44bdbcd7ab0f9fbcf28025876da2a750
+2026-08-25-pwsh-echo-free-capture.zh.md: cad25bd5cfe15f8dd33e407def10e7f27ad0ee53

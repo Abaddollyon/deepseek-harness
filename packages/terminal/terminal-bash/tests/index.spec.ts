@@ -350,7 +350,7 @@ describe('BashTerminalBackend startup rollback', () => {
     let sent: TerminalSendRequest | undefined
     const session = {
       motd: '',
-      initialize: async () => {},
+      initialize: async () => { session.motd = 'native> ' },
       close: async () => {},
       startSend: (request: TerminalSendRequest) => {
         sent = request
@@ -373,7 +373,7 @@ describe('BashTerminalBackend startup rollback', () => {
     )
     expect(await backend.spawn(spec(agent(ctx)))).toBe(session)
     expect(sent).toMatchObject({ text: ENCODING_PREAMBLE + PWSH_PROMPT_SETUP, submit: true })
-    expect(session.motd).toBe('setup-echo dsh> ')
+    expect(session.motd).toBe('native> setup-echo dsh> ')
     expect(spawned?.env).toMatchObject({
       TERM: 'dumb', NO_COLOR: '1', DSH_SHELL: '1', DSH_SESSION_ID: 'agent', DSH_PTY_SESSION_ID: 'pty-1',
     })
@@ -438,6 +438,13 @@ describe('BashTerminalBackend startup rollback', () => {
     await expect(exited.spawn(spec(agent(ctx)))).rejects.toThrow('PTY shell exited during startup')
     const timedOut = new BashTerminalBackend(ctx, { ...config(), shellDialect: 'pwsh' }, async () => terminalHandle(), () => sessionFor('timeout'))
     await expect(timedOut.spawn(spec(agent(ctx)))).rejects.toThrow('did not reach readiness before startup timeout')
+    const inferred = new BashTerminalBackend(
+      ctx,
+      { ...config(), shellDialect: 'pwsh', timeoutMs: 10, pollIntervalMs: 1 },
+      async () => terminalHandle(),
+      () => sessionFor('inferred_idle'),
+    )
+    await expect(inferred.spawn(spec(agent(ctx)))).rejects.toThrow('did not reach readiness before startup timeout')
   })
 
   it('forwards the spawn signal into the pwsh bootstrap sends', async () => {

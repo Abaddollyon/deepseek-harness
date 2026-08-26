@@ -92,6 +92,7 @@ type StubMode =
   | 'end-only'
   | 'init-exit'
   | 'init-timeout'
+  | 'init-idle-then-prompt'
   | 'spawn-error'
   | 'send-error'
   | 'prompt-after-idle'
@@ -100,8 +101,8 @@ type StubMode =
   | 'paged-scrollback'
   | 'with-echo'
   | 'with-wrapped-echo'
+  | 'with-wrapped-echo-crlf'
   | 'wrapped-echo-then-normal'
-  | 'foreign-marker-then-normal'
   | 'wrapped-echo-prompt'
   | 'exit-after-send'
   | 'prompt-collision'
@@ -109,12 +110,12 @@ type StubMode =
 const START_PATTERN = /__DSH_PERSISTENT_PWSH_START_[^_]+(?:-[^_]+)*__/
 const END_PATTERN = /__DSH_PERSISTENT_PWSH_END_[^:]+:/
 
-function wrapPhysicalLines(value: string, width: number): string {
+function wrapPhysicalLines(value: string, width: number, separator = '\n'): string {
   const lines: string[] = []
   for (let offset = 0; offset < value.length; offset += width) {
     lines.push(value.slice(offset, offset + width))
   }
-  return lines.join('\n')
+  return lines.join(separator)
 }
 
 class StubTerminalSession implements TerminalBackendSession {
@@ -127,6 +128,8 @@ class StubTerminalSession implements TerminalBackendSession {
   sends = 0
   pendingText = ''
   latestOutput = ''
+  promptSetups = 0
+  delayedInitialization = false
   historyTruncated = false
   throwOnSend = false
 
@@ -137,6 +140,7 @@ class StubTerminalSession implements TerminalBackendSession {
   startSend(request: TerminalSendRequest): TerminalSendOperation {
     this.sends += 1
     if (request.text.startsWith('function prompt')) {
+      this.promptSetups += 1
       if (this.mode === 'init-exit') {
         this.statusValue = { kind: 'exited', exitCode: 1, signal: null }
         return this.operation(Promise.resolve(this.result('', 'session_exit')))
@@ -144,7 +148,18 @@ class StubTerminalSession implements TerminalBackendSession {
       if (this.mode === 'init-timeout') {
         return this.operation(Promise.resolve(this.result('', 'timeout')))
       }
+      if (this.mode === 'init-idle-then-prompt') {
+        this.scrollback = ''
+        this.delayedInitialization = true
+        return this.operation(Promise.resolve(this.result('', 'inferred_idle')))
+      }
       return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')))
+    }
+    if (this.delayedInitialization && request.text.length === 0) {
+      this.delayedInitialization = false
+      this.mode = 'normal'
+      this.scrollback = this.motd
+      return this.operation(Promise.resolve(this.result('', 'inferred_idle')))
     }
     if (this.mode === 'send-error') throw new Error('stub send failed')
     if (this.throwOnSend) throw new Error('PTY session has exited')
@@ -188,13 +203,6 @@ class StubTerminalSession implements TerminalBackendSession {
     this.pendingText = ''
     const start = START_PATTERN.exec(sent)?.[0]
     const end = END_PATTERN.exec(sent)?.[0]
-    if (this.mode === 'foreign-marker-then-normal' && request.text.length > 0) {
-      this.mode = 'normal'
-      this.pendingText = request.text
-      const output = `__DSH_PERSISTENT_PWSH_START_previous__\n__DSH_PERSISTENT_PWSH_END_previous:0\n${this.motd}`
-      this.scrollback += output
-      return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
-    }
     if (this.mode === 'wrapped-echo-then-normal' && request.text.length > 0) {
       this.mode = 'normal'
       this.pendingText = request.text
@@ -207,10 +215,12 @@ class StubTerminalSession implements TerminalBackendSession {
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
     }
-    if (this.mode === 'with-echo' || this.mode === 'with-wrapped-echo') {
+    if (this.mode === 'with-echo' || this.mode === 'with-wrapped-echo' || this.mode === 'with-wrapped-echo-crlf') {
       // The PSReadLine echo renders the submitted wrapper before the real
       // markers; the tool must strip it from the captured result.
-      const echoed = this.mode === 'with-wrapped-echo' ? wrapPhysicalLines(sent, 31) : sent
+      const echoed = this.mode === 'with-wrapped-echo'
+        ? wrapPhysicalLines(sent, 31)
+        : this.mode === 'with-wrapped-echo-crlf' ? wrapPhysicalLines(sent, 31, '\r\n') : sent
       const output = `${echoed}\n${start ?? ''}\nhello from stub\n${end ?? ''}0\n${this.motd}`
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
@@ -388,6 +398,14 @@ describe('tool-pwsh-persistent', () => {
     expect(ctx.tools.get('pwsh')).toBeUndefined()
   })
 
+  it('waits for a retained initialization prompt without resubmitting setup', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-idle-then-prompt')
+
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+    expect(stub.sessions[0]!.promptSetups).toBe(1)
+    expect(stub.sessions[0]!.sends).toBe(3)
+  })
+
   it('strips the echoed wrapper from captured output', async () => {
     const { ctx, owner, stub } = await setup({ backendType: 'stub' })
     await call(ctx, owner, 'warm up')
@@ -411,19 +429,18 @@ describe('tool-pwsh-persistent', () => {
     expect(result).not.toContain('Invoke-Expression')
   })
 
+  it('strips a wrapper echo split with CRLF terminal lines', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'with-wrapped-echo-crlf'
+
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+  })
+
   it('keeps polling when wrapped echo is followed by stale readiness', async () => {
     const { ctx, owner, stub } = await setup({ backendType: 'stub' })
     await call(ctx, owner, 'warm up')
     stub.sessions[0]!.mode = 'wrapped-echo-then-normal'
-
-    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
-    expect(stub.sessions[0]!.sends).toBe(4)
-  })
-
-  it('keeps polling when readiness carries output from a prior command', async () => {
-    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
-    await call(ctx, owner, 'warm up')
-    stub.sessions[0]!.mode = 'foreign-marker-then-normal'
 
     expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
     expect(stub.sessions[0]!.sends).toBe(4)

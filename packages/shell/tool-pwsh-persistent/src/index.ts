@@ -23,8 +23,6 @@ const TIMEOUT_CODE = 'PERSISTENT_PWSH_TIMEOUT'
 // scrollback is assembled only when a command settles or needs partial output.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
-const START_MARKER_PREFIX = '__DSH_PERSISTENT_PWSH_START_'
-const END_MARKER_PREFIX = '__DSH_PERSISTENT_PWSH_END_'
 
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
 
@@ -110,26 +108,19 @@ function stripInputEcho(text: string, wrapper: string): string {
   const projected: string[] = []
   const rawOffsets: number[] = []
   for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]
-    if (character === undefined || character === '\n') continue
+    const character = text[index] as string
+    if (character === '\n' || character === '\r') continue
     projected.push(character)
     rawOffsets.push(index)
   }
   const projectedStart = projected.join('').indexOf(wrapper)
   if (projectedStart < 0) return text
-  const rawStart = rawOffsets[projectedStart]
-  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1]
-  if (rawStart === undefined || rawEnd === undefined) return text
+  // Projection characters and offsets are appended in lockstep.
+  const rawStart = rawOffsets[projectedStart] as number
+  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1] as number
   // PowerShell's line editor inserts display-width line breaks into the echo;
   // matching only the exact submitted source keeps command-output lines intact.
   return text.slice(0, rawStart) + text.slice(rawEnd + 1)
-}
-
-function hasOnlyForeignMarkers(text: string, marker: CommandMarkers, wrapper: string): boolean {
-  const cleaned = stripInputEcho(text, wrapper)
-  return (cleaned.includes(START_MARKER_PREFIX) || cleaned.includes(END_MARKER_PREFIX))
-    && !cleaned.includes(marker.start)
-    && !cleaned.includes(marker.end)
 }
 
 function commandOutput(
@@ -347,6 +338,7 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
             count: SCROLLBACK_PAGE_LINES,
           }).text
           if (promptCompleted(result) || scrollback.trimEnd().endsWith(SHELL_PROMPT.trimEnd())) break
+          await pause()
         }
         return spawned.sessionId
       } catch (error: unknown) {
@@ -377,6 +369,7 @@ async function executeCommand(
   const id = await shells.get(owner, commandDeadline.signal)
   const marker = markers()
   const wrapped = wrapCommand(command, marker)
+  const fallbackLimit = wrapped.length + config.maxOutputChars + SHELL_PROMPT.length
   let first = true
   let fallback = ''
   let fallbackTruncated = false
@@ -407,8 +400,9 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    fallback += incremental.delta
-    fallbackTruncated ||= incremental.truncated || result.truncated
+    const fallbackRemaining = Math.max(0, fallbackLimit - fallback.length)
+    fallback += incremental.delta.slice(0, fallbackRemaining)
+    fallbackTruncated ||= incremental.delta.length > fallbackRemaining || incremental.truncated || result.truncated
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {
@@ -438,7 +432,7 @@ async function executeCommand(
         ctx, shells, owner, id, result.sessionStatus, marker, wrapped, fallback, fallbackTruncated, config,
       )
     }
-    if (promptCompleted(result) && !hasOnlyForeignMarkers(fallback, marker, wrapped)) {
+    if (promptCompleted(result)) {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
       const captured = partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated)
       // An idle prompt proves the PTY is waiting, which is equally true before a
