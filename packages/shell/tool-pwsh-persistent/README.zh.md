@@ -33,7 +33,7 @@
 
 #### 模型看到什么
 
-命令共享每个 Agent 的一个 shell，因此 cwd、`$env:` 变量、函数和后台任务跨调用保留。结果排除私有完成标记、shell 提示符与回显的输入行（PSReadLine 会把提交的输入渲染回输出流；marker 锚定提取与包装器原文剥离将其移除）。非零包装命令追加 `[exit code: N]` —— 命令运行原生程序时是精确的原生退出码，PowerShell 终止性错误为 `1`。shell 在报告状态前退出的，改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]` 或 `[shell exited]`（backend 两者都没有时；Windows 强杀按无 signal 的 exit 1 报告），然后重置并告知模型下一次调用从全新 shell 开始。长输出保留最早的前缀并附裁剪提示；若 PTY 已丢弃该前缀，结果会明确说明。超时返回有界的部分输出、关闭不确定的 shell 并报告重置。
+命令共享每个 Agent 的一个 shell，因此 cwd、`$env:` 变量、函数和后台任务跨调用保留。结果排除私有完成标记、shell 提示符与回显的输入行（PSReadLine 会把提交的输入渲染回输出流；marker 锚定提取与可跨越终端插入换行的精确包装器原文匹配将其移除）。非零包装命令追加 `[exit code: N]` —— 命令运行原生程序时是精确的原生退出码，PowerShell 终止性错误为 `1`。shell 在报告状态前退出的，改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]` 或 `[shell exited]`（backend 两者都没有时；Windows 强杀按无 signal 的 exit 1 报告），然后重置并告知模型下一次调用从全新 shell 开始。长输出保留最早的前缀并附裁剪提示；若 PTY 已丢弃该前缀，结果会明确说明。超时返回有界的部分输出、关闭不确定的 shell 并报告重置。
 
 #### Token 影响
 
@@ -46,7 +46,7 @@
 ## 已知限制与延后工作
 
 - 工具需要拥有 Agent 与一个真实支持 pwsh 方言的 terminal backend（Windows ConPTY 或 POSIX 上的 pwsh）。
-- **输入回显不可避免**：PowerShell 的 PSReadLine 会把提交的输入渲染回终端流，且没有 `stty -echo` 的对应物。完整结果中 marker 锚定提取排除回显；包装器原文剥离覆盖回退路径，但跨越终端宽度的包装器折行可能在部分输出结果中残留片段回显，受 `maxOutputChars` 约束。
+- **输入回显不可避免**：PowerShell 的行编辑器会把提交的输入渲染回终端流，移除 PSReadLine 也不会抑制这种渲染。完整结果中 marker 锚定提取排除回显，回退路径中的包装器原文匹配可跨越物理换行。若终端回滚区在捕获前裁掉了包装器的一部分，无法匹配的片段仍可能保留在受 `maxOutputChars` 约束的不完整结果中。
 - 模型命令中的裸 ESC 字符不受支持：PSReadLine 会在执行前吞掉它们。包装器转义它需要的控制字节（`[char]27` 构造的 OSC 标记、body 的反引号转义）。
 - 模型重定义 `prompt` 函数会移除就绪标记；shell 随后退化为静默档而非 marker 快路径。
 - 命令执行期间没有交互 stdin：读取输入的前台命令会阻塞到就绪超时，随后重置 shell。

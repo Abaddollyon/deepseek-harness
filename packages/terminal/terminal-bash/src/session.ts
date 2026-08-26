@@ -23,6 +23,9 @@ import type {
 import type { ResolvedConfig } from './config.ts'
 import { CONTROLLED_PROMPT, TerminalSanitizer } from './sanitize.ts'
 
+const CURSOR_POSITION_QUERY = '\x1b[6n'
+const CURSOR_POSITION_RESPONSE = '\x1b[1;1R'
+
 function utf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text) <= maxBytes) return { text, truncated: false }
   const chars = Array.from(text)
@@ -79,6 +82,8 @@ class LocalSendOperation implements TerminalSendOperation {
   private readonly promise: PromiseWithResolvers<TerminalSendResult>
   private finished = false
   private cancellationRequested = false
+  private outputSeen = false
+  private pwshSilenceDeferred = false
   private initialForegroundLeftWait: boolean
   private initialForegroundPgid: number | undefined
 
@@ -104,8 +109,16 @@ class LocalSendOperation implements TerminalSendOperation {
     return this.cancellationRequested
   }
 
+  get hasOutput(): boolean {
+    return this.outputSeen
+  }
+
   append(text: string): void {
-    if (!this.finished) this.output.append(text)
+    if (!this.finished) {
+      this.outputSeen ||= text.length > 0
+      this.pwshSilenceDeferred = false
+      this.output.append(text)
+    }
   }
 
   settle(waitReason: TerminalWaitReason, sessionStatus: TerminalSessionStatus, inheritedTruncation: boolean): void {
@@ -128,6 +141,12 @@ class LocalSendOperation implements TerminalSendOperation {
 
   readOutput(): TerminalSendRead {
     return this.output.consume()
+  }
+
+  deferPwshSilenceOnce(): boolean {
+    if (this.pwshSilenceDeferred) return false
+    this.pwshSilenceDeferred = true
+    return true
   }
 
   setInitialForeground(foreground: SubprocessTerminalForeground | undefined): void {
@@ -184,6 +203,7 @@ export class LocalPtySession implements TerminalBackendSession {
   private closing = false
   private closePromise: Promise<void> | undefined
   private transportFailure: Error | undefined
+  private cursorQueryCarry = ''
 
   constructor(
     private readonly terminal: SubprocessTerminalHandle,
@@ -363,7 +383,30 @@ export class LocalPtySession implements TerminalBackendSession {
 
   private readonly onTerminalData = (chunk: Buffer | Uint8Array | string): void => {
     const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
-    this.onData(this.decoder.decode(bytes, { stream: true }))
+    const data = this.decoder.decode(bytes, { stream: true })
+    this.respondToCursorPositionQueries(data)
+    this.onData(data)
+  }
+
+  private respondToCursorPositionQueries(data: string): void {
+    const combined = this.cursorQueryCarry + data
+    let cursor = 0
+    while ((cursor = combined.indexOf(CURSOR_POSITION_QUERY, cursor)) >= 0) {
+      cursor += CURSOR_POSITION_QUERY.length
+      if (this.closing) continue
+      // The line-oriented backend has no screen cursor; a stable valid reply
+      // lets interactive line editors finish rendering without exposing coordinates.
+      void this.terminal.write(CURSOR_POSITION_RESPONSE).catch((_writeError: unknown) => {
+        // A cursor report is advisory; session operations retain readiness and timeout ownership.
+      })
+    }
+    this.cursorQueryCarry = ''
+    for (let length = Math.min(CURSOR_POSITION_QUERY.length - 1, combined.length); length > 0; length -= 1) {
+      const suffix = combined.slice(-length)
+      if (!CURSOR_POSITION_QUERY.startsWith(suffix)) continue
+      this.cursorQueryCarry = suffix
+      break
+    }
   }
 
   private readonly onTerminalEnd = (): void => {
@@ -460,8 +503,13 @@ export class LocalPtySession implements TerminalBackendSession {
       // child also inherits PROMPT_COMMAND. Silence therefore remains the bound
       // on waiting for shell ownership instead of letting a child marker suppress
       // readiness until the absolute timeout.
-      const handoffGrace = this.promptSeen ? this.config.handoffGraceMs : 0
+      const pwshRendering = this.config.shellDialect === 'pwsh' && operation.hasOutput
+      const handoffGrace = pwshRendering
+        ? this.config.idleSilenceMs + this.config.handoffGraceMs
+        : this.promptSeen ? this.config.handoffGraceMs : 0
       if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace) {
+        // Give a delayed PowerShell marker one I/O phase after the silence threshold.
+        if (pwshRendering && operation.deferPwshSilenceOnce()) return
         this.settleActive('inferred_idle')
       }
     } catch (error: unknown) {

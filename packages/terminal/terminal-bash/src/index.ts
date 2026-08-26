@@ -105,14 +105,15 @@ function spawnArgv(ctx: Context, config: ResolvedConfig, policy: SandboxExecutio
 // session already owns the send lifecycle the race protects.
 async function startupSession(
   session: LocalPtySession,
-  dialect: ShellDialect,
+  config: ResolvedConfig,
   signal?: AbortSignal,
 ): Promise<void> {
   const start = async (): Promise<void> => {
-    if (dialect === 'bash') {
+    if (config.shellDialect === 'bash') {
       await session.initialize(signal)
       return
     }
+    await session.initialize(signal)
     // pwsh cannot install its prompt from the environment: write the prompt
     // function through the session and wait for the first marker prompt,
     // which is also the readiness contract of the bash initialize path. The
@@ -122,23 +123,36 @@ async function startupSession(
     // non-ASCII output. The banner-to-prompt gap can outlast the silence
     // bound, so the wait loops over follow-up sends until the controlled
     // prompt is actually visible (in the viewport or the retained scrollback
-    // when it landed between sends), bounded by the send deadline.
+    // when it landed between sends), bounded by the startup timeout.
     let viewport = ''
+    let first = true
+    const bootstrapDeadline = Date.now() + config.timeoutMs
     for (;;) {
-      const first = viewport.length === 0
+      signal?.throwIfAborted()
+      if (!first && Date.now() >= bootstrapDeadline) {
+        throw new Error('PTY shell did not reach readiness before startup timeout')
+      }
       const operation = session.startSend({
         text: first ? ENCODING_PREAMBLE + PWSH_PROMPT_SETUP : '',
         submit: first,
         ...signal !== undefined ? { signal } : {},
       })
+      first = false
       const result = await operation.done
       if (result.waitReason === 'session_exit') throw new Error('PTY shell exited during startup')
       if (result.waitReason === 'timeout') throw new Error('PTY shell did not reach readiness before startup timeout')
       viewport = result.viewport
       const scrollback = session.read({ offset: 0, count: 20 }).text
-      if (viewport.includes(CONTROLLED_PROMPT) || scrollback.includes(CONTROLLED_PROMPT)) break
+      if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) {
+        session.motd += viewport
+        break
+      }
+      if (scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) {
+        session.motd = scrollback
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, config.pollIntervalMs))
     }
-    session.motd = viewport
   }
   if (signal === undefined) {
     await start()
@@ -190,7 +204,7 @@ export class BashTerminalBackend implements TerminalBackend {
     })
     const session = this.createSession(terminal, this.config)
     try {
-      await startupSession(session, this.config.shellDialect, spec.signal)
+      await startupSession(session, this.config, spec.signal)
       return session
     } catch (error) {
       try {
