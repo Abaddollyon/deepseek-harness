@@ -253,6 +253,7 @@ flowchart TD
     pkg_jobs["jobs"]
     pkg_jobs_local["jobs-local"]
     pkg_jobs_store_domain["jobs-store-domain"]
+    pkg_run_supervisor["run-supervisor"]
     pkg_tool_jobs["tool-jobs"]
   end
   subgraph group_lsp["packages/lsp"]
@@ -884,6 +885,16 @@ flowchart TD
   pkg_jobs_local --> pkg_scope
   pkg_jobs_local --> pkg_session
   pkg_jobs_local --> pkg_timeout
+  pkg_run_supervisor --> pkg_agent
+  pkg_run_supervisor --> pkg_invariants
+  pkg_run_supervisor --> pkg_jobs
+  pkg_run_supervisor --> pkg_jobs_store_domain
+  pkg_run_supervisor --> pkg_llm
+  pkg_run_supervisor --> pkg_output_retention
+  pkg_run_supervisor --> pkg_session
+  pkg_run_supervisor --> pkg_session_persistence
+  pkg_run_supervisor --> pkg_timeout
+  pkg_run_supervisor --> pkg_workflow
   pkg_tool_jobs --> pkg_agent
   pkg_tool_jobs --> pkg_invariants
   pkg_tool_jobs --> pkg_jobs
@@ -1868,6 +1879,7 @@ flowchart TD
 | [`tool-call-timeout-policy`](../packages/guard/timeout-policy) | `guard` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |
 | [`tool-ask-user`](../packages/interaction/tool-ask-user) | `interaction` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`tools`](../packages/core/tools), [`user-questions`](../packages/interaction/user-questions) |
 | [`jobs-local`](../packages/jobs/jobs-local) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`jobs-store-domain`](../packages/jobs/jobs-store-domain), [`output-retention`](../packages/util/output-retention), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`timeout`](../packages/util/timeout) |
+| [`run-supervisor`](../packages/jobs/run-supervisor) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`jobs-store-domain`](../packages/jobs/jobs-store-domain), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`timeout`](../packages/util/timeout), [`workflow`](../packages/workflow/workflow) |
 | [`tool-jobs`](../packages/jobs/tool-jobs) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`tool-lsp`](../packages/lsp/tool-lsp) | `lsp` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`lsp`](../packages/lsp/lsp), [`system-prompt`](../packages/core/system-prompt), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |
 | [`mcp-client`](../packages/mcp/mcp-client) | `mcp` | [`attachment`](../packages/attachment/attachment), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`scope`](../packages/core/scope), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |

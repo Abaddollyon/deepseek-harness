@@ -576,8 +576,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Background job registry',
     mode: 'seam',
     implementations: ['jobs-local'],
-    consumers: ['tool-bash', 'tool-terminal', 'tool-subagent', 'tool-jobs'],
-    note: 'Producers (background bash, PTY sends, and subagent delegations) register running work; tool-jobs is the model-facing controller that reads, lists, and kills it; jobs-local is the process-local registry.',
+    consumers: ['tool-bash', 'tool-terminal', 'tool-subagent', 'tool-jobs', 'run-supervisor'],
+    note: 'Producers (background bash, PTY sends, and subagent delegations) register running work; tool-jobs is the model-facing controller that reads, lists, and kills it; jobs-local is the process-local registry; run-supervisor reconciles durable records at boot.',
   },
   {
     key: 'jobStore',
@@ -585,8 +585,8 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Durable job store',
     mode: 'seam',
     implementations: ['jobs-store-domain'],
-    consumers: ['jobs-local'],
-    note: 'jobs-store-domain declares the JobStore seam and provides it over the storage domain form; jobs-local mirrors records here when persist is enabled and restores them at boot.',
+    consumers: ['jobs-local', 'run-supervisor'],
+    note: 'jobs-store-domain declares the JobStore seam and provides it over the storage domain form; jobs-local mirrors records here when persist is enabled and restores them at boot; run-supervisor reads restored records to reconcile them.',
   },
   {
     key: 'web',
