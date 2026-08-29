@@ -90,8 +90,11 @@ describe.skipIf(MODE === 'record')('web e2e: background job list', () => {
       arguments: { command: COMMAND, description: 'Hold a background slot open', run_in_background: true },
       agent,
     })
+    // Durable registry ids are '<kind>-<uuid>'; assert that exact shape so a
+    // regression to counter ids (or a malformed id) fails here instead of
+    // silently re-pinning the old format.
     const reported = started.content.map(block => block.type === 'text' ? block.text : '').join('')
-    const matched = /\bbash-\d+\b/.exec(reported)
+    const matched = /\bbash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.exec(reported)
     if (matched === null) throw new Error(`background bash reported no job id: ${reported}`)
     jobId = JobId(matched[0])
 

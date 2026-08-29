@@ -216,10 +216,21 @@ it('lets a preset producer reach the background-job registry', async () => {
       },
       agent: handle.agent,
     })
+    // Durable registry ids are '<kind>-<uuid>': pin the exact report shape
+    // (one text block, UUID-shaped id) and read the id the producer minted
+    // instead of asserting a counter-minted literal.
     expect({ isError: started.isError, content: started.content }).toEqual({
       isError: false,
-      content: [{ type: 'text', text: 'started background job bash-1' }],
+      content: [{
+        type: 'text',
+        text: expect.stringMatching(
+          /^started background job bash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        ) as unknown as string,
+      }],
     })
+    const startedText = started.content.map(block => block.type === 'text' ? block.text : '').join('')
+    const jobId = /^started background job (bash-[0-9a-f-]{36})$/.exec(startedText)?.[1]
+    if (jobId === undefined) throw new Error('background bash reported no job id: ' + startedText)
 
     // The controller reads what the producer started: same registry, one
     // owner. A per-preset registry would list nothing here even on success.
@@ -231,8 +242,15 @@ it('lets a preset producer reach the background-job registry', async () => {
       agent: handle.agent,
     })
     expect(listed.isError).toBe(false)
+    // job_list renders the ordinal-first row '#<ordinal> [<kind>] <status> —
+    // <label> (id: <id>)'; pin the whole line so a rendering regression fails.
     expect(listed.content).toEqual([
-      { type: 'text', text: expect.stringContaining('bash-1 [bash]') as unknown as string },
+      {
+        type: 'text',
+        text: expect.stringMatching(
+          new RegExp('^#1 \\[bash\\] running — printf SHIPPED_BACKGROUND_OK \\(id: ' + jobId + '\\)$'),
+        ) as unknown as string,
+      },
     ])
 
     // The full round trip: the output a host-plane producer wrote is collected
@@ -241,7 +259,7 @@ it('lets a preset producer reach the background-job registry', async () => {
       signal,
       callId: ToolCallId('shipped-task-output'),
       name: 'job_output',
-      arguments: { job_id: 'bash-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: handle.agent,
     })
     expect(collected.isError).toBe(false)
