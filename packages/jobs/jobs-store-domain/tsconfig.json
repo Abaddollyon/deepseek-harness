@@ -18,25 +18,19 @@
       "path": "../../../vendor/schemastery"
     },
     {
-      "path": "../../core/agent"
-    },
-    {
-      "path": "../../core/scope"
-    },
-    {
       "path": "../../core/session"
     },
     {
-      "path": "../../util/output-retention"
+      "path": "../../storage/storage"
+    },
+    {
+      "path": "../../storage/storage-domain"
     },
     {
       "path": "../../util/timeout"
     },
     {
       "path": "../jobs"
-    },
-    {
-      "path": "../jobs-store-domain"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

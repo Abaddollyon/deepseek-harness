@@ -250,6 +250,7 @@ flowchart TD
   subgraph group_jobs["packages/jobs"]
     pkg_jobs["jobs"]
     pkg_jobs_local["jobs-local"]
+    pkg_jobs_store_domain["jobs-store-domain"]
     pkg_tool_jobs["tool-jobs"]
   end
   subgraph group_lsp["packages/lsp"]
@@ -715,11 +716,11 @@ flowchart TD
   pkg_permission_presets --> pkg_settings
   pkg_permission_presets --> pkg_shell
   pkg_permission_presets --> pkg_user_approval
-  pkg_jobs_local --> pkg_agent
-  pkg_jobs_local --> pkg_invariants
-  pkg_jobs_local --> pkg_jobs
-  pkg_jobs_local --> pkg_scope
-  pkg_jobs_local --> pkg_timeout
+  pkg_jobs_store_domain --> pkg_invariants
+  pkg_jobs_store_domain --> pkg_jobs
+  pkg_jobs_store_domain --> pkg_session
+  pkg_jobs_store_domain --> pkg_storage_domain
+  pkg_jobs_store_domain --> pkg_timeout
   pkg_lsp_stdio --> pkg_brand
   pkg_lsp_stdio --> pkg_fs
   pkg_lsp_stdio --> pkg_invariants
@@ -873,6 +874,14 @@ flowchart TD
   pkg_tool_ask_user --> pkg_invariants
   pkg_tool_ask_user --> pkg_tools
   pkg_tool_ask_user --> pkg_user_questions
+  pkg_jobs_local --> pkg_agent
+  pkg_jobs_local --> pkg_invariants
+  pkg_jobs_local --> pkg_jobs
+  pkg_jobs_local --> pkg_jobs_store_domain
+  pkg_jobs_local --> pkg_output_retention
+  pkg_jobs_local --> pkg_scope
+  pkg_jobs_local --> pkg_session
+  pkg_jobs_local --> pkg_timeout
   pkg_tool_jobs --> pkg_agent
   pkg_tool_jobs --> pkg_invariants
   pkg_tool_jobs --> pkg_jobs
@@ -1829,7 +1838,7 @@ flowchart TD
 | [`fs-e2b`](../packages/e2b/fs-e2b) | `e2b` | [`e2b`](../packages/e2b/e2b), [`fs`](../packages/fs/fs), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`command-feedback`](../packages/feedback/command-feedback) | `feedback` | [`anonymous-user-id`](../packages/identity/anonymous-user-id), [`commands`](../packages/interaction/commands), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`session-telemetry`](../packages/session/session-telemetry) |
 | [`permission-presets`](../packages/interaction/permission-presets) | `interaction` | [`commands`](../packages/interaction/commands), [`invariants`](../packages/runtime-diagnostics/invariants), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`session`](../packages/core/session), [`session-projection`](../packages/session/session-projection), [`settings`](../packages/settings/settings), [`shell`](../packages/shell/shell), [`user-approval`](../packages/interaction/user-approval) |
-| [`jobs-local`](../packages/jobs/jobs-local) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`scope`](../packages/core/scope), [`timeout`](../packages/util/timeout) |
+| [`jobs-store-domain`](../packages/jobs/jobs-store-domain) | `jobs` | [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`session`](../packages/core/session), [`storage-domain`](../packages/storage/storage-domain), [`timeout`](../packages/util/timeout) |
 | [`lsp-stdio`](../packages/lsp/lsp-stdio) | `lsp` | [`brand`](../packages/util/brand), [`fs`](../packages/fs/fs), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`lsp`](../packages/lsp/lsp), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`session-title-llm`](../packages/session/session-title-llm) | `session` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`session-title`](../packages/session/session-title), [`timeout`](../packages/util/timeout) |
 | [`bash-local`](../packages/shell/bash-local) | `shell` | [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings), [`shell`](../packages/shell/shell), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
@@ -1856,6 +1865,7 @@ flowchart TD
 | [`repeat-tool-reminder`](../packages/guard/repeat-tool-reminder) | `guard` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`tools`](../packages/core/tools) |
 | [`tool-call-timeout-policy`](../packages/guard/timeout-policy) | `guard` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |
 | [`tool-ask-user`](../packages/interaction/tool-ask-user) | `interaction` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`tools`](../packages/core/tools), [`user-questions`](../packages/interaction/user-questions) |
+| [`jobs-local`](../packages/jobs/jobs-local) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`jobs-store-domain`](../packages/jobs/jobs-store-domain), [`output-retention`](../packages/util/output-retention), [`scope`](../packages/core/scope), [`session`](../packages/core/session), [`timeout`](../packages/util/timeout) |
 | [`tool-jobs`](../packages/jobs/tool-jobs) | `jobs` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`tool-lsp`](../packages/lsp/tool-lsp) | `lsp` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`lsp`](../packages/lsp/lsp), [`system-prompt`](../packages/core/system-prompt), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |
 | [`mcp-client`](../packages/mcp/mcp-client) | `mcp` | [`attachment`](../packages/attachment/attachment), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`scope`](../packages/core/scope), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools) |

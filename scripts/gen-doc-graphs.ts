@@ -580,6 +580,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Producers (background bash, PTY sends, and subagent delegations) register running work; tool-jobs is the model-facing controller that reads, lists, and kills it; jobs-local is the process-local registry.',
   },
   {
+    key: 'jobStore',
+    pkg: 'jobs-store-domain',
+    title: 'Durable job store',
+    mode: 'seam',
+    implementations: ['jobs-store-domain'],
+    consumers: ['jobs-local'],
+    note: 'jobs-store-domain declares the JobStore seam and provides it over the storage domain form; jobs-local mirrors records here when persist is enabled and restores them at boot.',
+  },
+  {
     key: 'web',
     pkg: 'web',
     title: 'Web access provider registry',

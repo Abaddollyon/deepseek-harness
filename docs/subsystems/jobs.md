@@ -6,7 +6,7 @@ Types shared by long-running producers, `ctx.jobs`, and job controls. The [runti
 
 ## Ids and status
 
-`JobId` is a [branded id](core.md#branded-ids) generated as `<kind>-N`. Access control relies on owner authorization, not id secrecy. `JobKind` derives from a merge-extensible map; the registry treats kinds as opaque id namespaces.
+`JobId` is a [branded id](core.md#branded-ids) generated as `<kind>-<uuid>` — or `<kind>-<idHint>` when the producer supplies a stable fragment — so a persisted id is never re-minted for different work. Access control relies on owner authorization, not id secrecy. `JobKind` derives from a merge-extensible map; the registry treats kinds as opaque id namespaces. Snapshots additionally carry a per-owner 1-based display `ordinal`, the short model-facing handle beside the durable id.
 
 ```ts type-equiv
 /**
@@ -48,6 +48,19 @@ interface JobStart {
    * open to any caller until service disposal.
    */
   owner?: Agent
+  /**
+   * Durable resume policy for this producer's work. Only consulted when the
+   * registry persists records; omission means a persisted record is not
+   * resumable and is settled honestly after a host restart.
+   */
+  durability?: JobDurability
+  /**
+   * Producer-supplied stable id fragment: the job registers as
+   * `<kind>-<idHint>` instead of the minted `<kind>-<uuid>`. Must be
+   * non-empty and must not collide with a registered or persisted id — a
+   * collision fails the registration loudly before {@link run} is invoked.
+   */
+  idHint?: string
   /**
    * Start the work after preflight and synchronously return its hooks. Called
    * once; a throw leaves nothing registered, and the producer must clean up any
@@ -105,8 +118,16 @@ Snapshots are fresh read-only projections. `ownerSession` carries the shared `Se
  * a fresh object per call, never live registry state.
  */
 interface JobSnapshot {
-  /** The registry-issued id (`<kind>-N`). */
+  /** The registry-issued id (`<kind>-<uuid>`, or `<kind>-<idHint>`). */
   id: JobId
+  /**
+   * 1-based display ordinal within the owner's bucket (registration order),
+   * kept for model-facing lists so the model never has to repeat a 36-char
+   * uuid to tell jobs apart. Process-local presentation state: restored
+   * records are re-numbered in startedAt order on boot, so the ordinal is not
+   * stable across restarts — the id is.
+   */
+  ordinal: number
   /** The producer kind the job was registered with. */
   kind: JobKind
   /** The producer-supplied one-line label. */
@@ -121,6 +142,18 @@ interface JobSnapshot {
   ownerSession?: SessionId
   /** Current lifecycle state. */
   status: JobStatus
+  /**
+   * Whether a persisted record of this job could be re-adopted after a host
+   * restart: true exactly when the producer supplied a non-null
+   * {@link JobDurability.resumeSpec}.
+   */
+  resumable: boolean
+  /**
+   * The process incarnation that owns the record. Matches the current
+   * process's `PROCESS_INCARNATION` for work started (or adopted) here, and
+   * names the writing process for a restored record still awaiting a resumer.
+   */
+  incarnation: string
   /** Kind-specific status detail, present once the producer supplied one (usually terminal). */
   detail?: string
   /** Epoch ms when the job was registered. */
@@ -185,7 +218,7 @@ Implementations must honor these semantics:
  * leaves nothing registered; after it returns, registration cannot fail.
  * Settlement records the outcome, notifies listeners, and releases waiters.
  * @param spec - job identity, owner, and synchronous starter.
- * @returns the registry-issued `<kind>-N` id.
+ * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
  */
 abstract start(spec: JobStart): JobId
 
@@ -275,6 +308,20 @@ abstract onJobDone(listener: JobDoneListener): () => void
 abstract onJobsChanged(listener: JobsChangedListener): () => void
 
 /**
+ * Register a resume handler for one job kind. On boot the registry replays
+ * every non-terminal persisted record of this kind that a previous process
+ * incarnation wrote: a handler that returns hooks adopts the record under
+ * its original id; `undefined` settles it honestly as `failed` with detail
+ * `'not resumable after host restart'`. Registration is an effect scoped to
+ * the registering context; at most one resumer may serve a kind at a time,
+ * and a duplicate registration fails loudly.
+ * @param kind - producer kind whose persisted records the handler serves.
+ * @param resume - decides adoption per record; see {@link JobResumer}.
+ * @returns disposer that unregisters the handler.
+ */
+abstract registerResumer(kind: JobKind, resume: JobResumer): () => void
+
+/**
  * Attach an effect-scoped controller that can read and stop jobs. It serves the
  * owners its registering context's scope covers, and {@link start} refuses an
  * owner no attached controller serves.
@@ -287,4 +334,52 @@ abstract attachController(name: string): () => void
 Types: [Agent](core.md)
 
 Source: [`packages/jobs/jobs/src/index.ts`](../../packages/jobs/jobs/src/index.ts)
+
+<a id="ctxjobstore--jobstore-abstract-seam"></a>
+
+### `ctx.jobStore` — `JobStore` (abstract seam)
+
+Abstract durable job store. Subclass, implement the abstract members, and load the subclass as a plugin — it registers as `ctx.jobStore` (one implementation per context; loading a second throws, cordis' standard duplicate-service behavior).
+
+Contract highlights for implementations:
+
+- Reads are synchronous over authoritative in-memory state and reflect writes that are still queued (read-your-writes).
+- put replaces the whole record (job records are monotone lifecycle snapshots, so last-write-wins per id is correct) and its returned promise settles with the durability of the latest queued value.
+- A rejected write must reject the caller's promise; the caller — not the store — owns the degrade decision.
+
+```ts cordis-catalog
+/**
+ * Snapshot every persisted record, including values still queued to write.
+ * @returns fresh array of stored records in medium order with queued
+ * overlays applied.
+ */
+abstract list(): JobRecord[]
+
+/**
+ * Read one record, including a value still queued to write.
+ * @param id - record key.
+ * @returns the record, or `undefined` when absent.
+ */
+abstract get(id: JobId): JobRecord | undefined
+
+/**
+ * Insert or replace one record durably. Writes may be coalesced per id;
+ * the promise settles with the durability of the latest value queued for
+ * that id and rejects when the medium refuses it.
+ * @param record - the full new record (no partial merge).
+ * @returns resolution after the write (or its coalesced successor) lands.
+ */
+abstract put(record: JobRecord): Promise<void>
+
+/**
+ * Delete one record durably, discarding any queued write for the same id
+ * (the queued writers' promises resolve — their record was superseded by a
+ * deliberate removal, not lost).
+ * @param id - record key.
+ * @returns `true` when a stored or queued record existed.
+ */
+abstract delete(id: JobId): Promise<boolean>
+```
+
+Source: [`packages/jobs/jobs-store-domain/src/index.ts`](../../packages/jobs/jobs-store-domain/src/index.ts)
 <!-- END GENERATED cordis-surface -->

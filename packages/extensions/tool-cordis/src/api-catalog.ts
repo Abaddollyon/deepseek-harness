@@ -1036,7 +1036,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract start(spec: JobStart): JobId',
         description: 'Preflight access, validation, owner cleanup, and implementation-owned admission before starting and atomically registering work. Any preflight rejection leaves no job id or execution resource. A throwing starter leaves nothing registered; after it returns, registration cannot fail. Settlement records the outcome, notifies listeners, and releases waiters.',
         parameters: [{ name: 'spec', description: 'job identity, owner, and synchronous starter.' }],
-        returns: 'the registry-issued `<kind>-N` id.',
+        returns: 'the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.',
       },
       {
         signature: 'abstract list(caller?: Agent): JobSnapshot[]',
@@ -1081,10 +1081,52 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'disposer that unregisters the listener.',
       },
       {
+        signature: 'abstract registerResumer(kind: JobKind, resume: JobResumer): () => void',
+        description: 'Register a resume handler for one job kind. On boot the registry replays every non-terminal persisted record of this kind that a previous process incarnation wrote: a handler that returns hooks adopts the record under its original id; `undefined` settles it honestly as `failed` with detail `\'not resumable after host restart\'`. Registration is an effect scoped to the registering context; at most one resumer may serve a kind at a time, and a duplicate registration fails loudly.',
+        parameters: [{ name: 'kind', description: 'producer kind whose persisted records the handler serves.' }, { name: 'resume', description: 'decides adoption per record; see {@link JobResumer}.' }],
+        returns: 'disposer that unregisters the handler.',
+      },
+      {
         signature: 'abstract attachController(name: string): () => void',
         description: 'Attach an effect-scoped controller that can read and stop jobs. It serves the owners its registering context\'s scope covers, and start refuses an owner no attached controller serves.',
         parameters: [{ name: 'name', description: 'diagnostic label; duplicate names remain independent.' }],
         returns: 'disposer that detaches this controller.',
+      },
+    ],
+  },
+  {
+    key: 'jobStore',
+    summary: 'Abstract durable job store.',
+    description: 'Abstract durable job store. Subclass, implement the abstract members, and load the subclass as a plugin — it registers as `ctx.jobStore` (one implementation per context; loading a second throws, cordis\' standard duplicate-service behavior).\n\nContract highlights for implementations:\n\n- Reads are synchronous over authoritative in-memory state and reflect writes that are still queued (read-your-writes).\n- put replaces the whole record (job records are monotone lifecycle snapshots, so last-write-wins per id is correct) and its returned promise settles with the durability of the latest queued value.\n- A rejected write must reject the caller\'s promise; the caller — not the store — owns the degrade decision.',
+    methods: [
+      {
+        signature: 'abstract readonly incarnation: string',
+        description: 'The process incarnation stamped into records this store writes (see `PROCESS_INCARNATION`).',
+        parameters: [],
+      },
+      {
+        signature: 'abstract list(): JobRecord[]',
+        description: 'Snapshot every persisted record, including values still queued to write.',
+        parameters: [],
+        returns: 'fresh array of stored records in medium order with queued overlays applied.',
+      },
+      {
+        signature: 'abstract get(id: JobId): JobRecord | undefined',
+        description: 'Read one record, including a value still queued to write.',
+        parameters: [{ name: 'id', description: 'record key.' }],
+        returns: 'the record, or `undefined` when absent.',
+      },
+      {
+        signature: 'abstract put(record: JobRecord): Promise<void>',
+        description: 'Insert or replace one record durably. Writes may be coalesced per id; the promise settles with the durability of the latest value queued for that id and rejects when the medium refuses it.',
+        parameters: [{ name: 'record', description: 'the full new record (no partial merge).' }],
+        returns: 'resolution after the write (or its coalesced successor) lands.',
+      },
+      {
+        signature: 'abstract delete(id: JobId): Promise<boolean>',
+        description: 'Delete one record durably, discarding any queued write for the same id (the queued writers\' promises resolve — their record was superseded by a deliberate removal, not lost).',
+        parameters: [{ name: 'id', description: 'record key.' }],
+        returns: '`true` when a stored or queued record existed.',
       },
     ],
   },
@@ -4173,6 +4215,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type JobDoneListener = (snapshot: JobSnapshot, owner: Agent | undefined) => void | PromiseLike<void>;',
   },
   {
+    name: 'JobDurability',
+    declaration: 'export interface JobDurability {\n    resumeSpec?: JsonValue;\n    recordSession?: SessionId;\n}',
+  },
+  {
     name: 'JobHooks',
     declaration: 'export interface JobHooks {\n    cancel(reason?: string): void;\n    done: Promise<JobOutcome>;\n    readOutput?(): string;\n}',
   },
@@ -4197,16 +4243,28 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface JobRead {\n    text: string;\n    snapshot: JobSnapshot;\n}',
   },
   {
+    name: 'JobRecord',
+    declaration: 'export type JobRecord = z.infer<typeof jobRecordSchema>;',
+  },
+  {
+    name: 'JobResumeCandidate',
+    declaration: 'export interface JobResumeCandidate {\n    readonly id: JobId;\n    readonly kind: JobKind;\n    readonly label: string;\n    readonly ownerSession?: SessionId;\n    readonly resumeSpec: JsonValue;\n    readonly startedAt: number;\n    readonly priorIncarnation: string;\n}',
+  },
+  {
+    name: 'JobResumer',
+    declaration: 'export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined;',
+  },
+  {
     name: 'JobsChangedListener',
     declaration: 'export type JobsChangedListener = (owner: Agent | undefined) => void;',
   },
   {
     name: 'JobSnapshot',
-    declaration: 'export interface JobSnapshot {\n    id: JobId;\n    kind: JobKind;\n    label: string;\n    outputLimitBytes?: number;\n    ownerSession?: SessionId;\n    status: JobStatus;\n    detail?: string;\n    startedAt: number;\n    finishedAt?: number;\n    reported: boolean;\n}',
+    declaration: 'export interface JobSnapshot {\n    id: JobId;\n    ordinal: number;\n    kind: JobKind;\n    label: string;\n    outputLimitBytes?: number;\n    ownerSession?: SessionId;\n    status: JobStatus;\n    resumable: boolean;\n    incarnation: string;\n    detail?: string;\n    startedAt: number;\n    finishedAt?: number;\n    reported: boolean;\n}',
   },
   {
     name: 'JobStart',
-    declaration: 'export interface JobStart {\n    kind: JobKind;\n    label: string;\n    outputLimitBytes?: number;\n    owner?: Agent;\n    run(): JobHooks;\n}',
+    declaration: 'export interface JobStart {\n    kind: JobKind;\n    label: string;\n    outputLimitBytes?: number;\n    owner?: Agent;\n    durability?: JobDurability;\n    idHint?: string;\n    run(): JobHooks;\n}',
   },
   {
     name: 'JobStatus',
