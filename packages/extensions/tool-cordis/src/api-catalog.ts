@@ -2797,6 +2797,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Workflow Service Definition contract. Invalid requests throw before publication; a live run is holder-owned, its result never rejects, cancellation and disposal are bounded, and disposal waits for child cleanup within that bound. Lifecycle listener failures are contained, and `workflow/end` fires exactly once as the result settles.',
     methods: [
       {
+        signature: 'abstract readonly maxRunWallMs: number',
+        description: 'Resolved whole-run wall-clock ceiling in milliseconds; `0` means unbounded.',
+        parameters: [],
+      },
+      {
         signature: 'abstract start(request: WorkflowStartRequest): WorkflowRun',
         description: 'Parse and execute a workflow script.',
         parameters: [{ name: 'request', description: 'the script, its `args`, the parent agent, and an optional cancel signal.' }],
