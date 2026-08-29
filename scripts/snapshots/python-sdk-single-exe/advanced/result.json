@@ -3490,7 +3490,8 @@
           "data": {
             "version": 2,
             "mode": "one-shot",
-            "provider": "spawn"
+            "provider": "spawn",
+            "label": "workflow-child"
           }
         }
       }
