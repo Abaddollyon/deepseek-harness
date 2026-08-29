@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type { Worker } from 'node:worker_threads'
@@ -11,6 +11,7 @@ import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowMeta, WorkflowResult, WorkflowResultInfo, WorkflowRun, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow'
 import * as workerEngineModule from '../src/index.ts'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import WorkerThreadWorkflowEngine, { type Config } from '../src/index.ts'
 import { workerSpawnEnv } from '../src/host.ts'
 import { HostToWorkerType, WorkerToHostType } from '../src/protocol.ts'
@@ -206,6 +207,17 @@ async function run(ctx: Context, parent: Agent, source: { script: string; meta: 
 }
 
 describe('dsh-workflow-worker-thread', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('fails load when maxRunWallMs exceeds the Node timer range', async () => {
+    await expect(setup({
+      config: { maxRunWallMs: MAX_TIMER_DELAY_MS + 1 },
+    })).rejects.toThrow(/config\.maxRunWallMs must be at most 2147483647/)
+    await expect(setup({
+      config: { maxRunWallMs: MAX_TIMER_DELAY_MS },
+    })).resolves.toBeTruthy()
+  })
+
   describe('script execution over a real worker thread', () => {
     it('runs a script end-to-end: agent() text results, phases, log, args, return value, events', async () => {
       const { ctx, parent, provider } = await setup({ reply: (_request, index) => text(`answer-${index}`) })
@@ -900,6 +912,38 @@ describe('dsh-workflow-worker-thread', () => {
       // The grace force-settle fires workflow/end exactly like an ordinary
       // settlement — a terminated script's death still reaches observers.
       expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, agentsStarted: 0 }])
+      await handle.dispose()
+    })
+
+    it('arms no wall timer when maxRunWallMs is zero', async () => {
+      vi.useFakeTimers()
+      const { ctx, parent } = await setup({ config: { maxRunWallMs: 0, disposeGraceMs: 10 } })
+      const timeout = vi.spyOn(globalThis, 'setTimeout')
+      timeout.mockClear()
+      const handle = ctx.workflowEngine.start({
+        ...scripted('await new Promise(() => {})'),
+        parent,
+      })
+      expect(timeout).not.toHaveBeenCalled()
+      handle.cancel('test cleanup')
+      await vi.advanceTimersByTimeAsync(10)
+      await handle.result
+      await handle.dispose()
+    })
+
+    it('cancels a stuck run through the ordinary cascade when maxRunWallMs expires', async () => {
+      vi.useFakeTimers()
+      const { ctx, parent } = await setup({ config: { maxRunWallMs: 25, disposeGraceMs: 10 } })
+      const handle = ctx.workflowEngine.start({
+        ...scripted('await new Promise(() => {})'),
+        parent,
+      })
+      await vi.advanceTimersByTimeAsync(25)
+      await vi.advanceTimersByTimeAsync(10)
+      await expect(handle.result).resolves.toMatchObject({
+        stopReason: 'cancelled',
+        error: 'workflow run cancelled: workflow run exceeded maxRunWallMs (25ms)',
+      })
       await handle.dispose()
     })
 

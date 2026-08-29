@@ -157,6 +157,7 @@ export class WorkerRun implements WorkflowRun {
   private workerDeathObserved = false
   private cancelReason: string | undefined
   private graceTimer: NodeJS.Timeout | undefined
+  private wallTimer: NodeJS.Timeout | undefined
   private readonly worker: Worker
   /** Set on `exit`: the thread is gone, so posting has nowhere to go. */
   private workerGone = false
@@ -185,6 +186,7 @@ export class WorkerRun implements WorkflowRun {
     init: WorkerInit,
     private readonly provider: string,
     private readonly disposeGraceMs: number,
+    maxRunWallMs: number,
     private readonly observer: ExecutionObserver,
     signal: AbortSignal | undefined,
   ) {
@@ -212,6 +214,12 @@ export class WorkerRun implements WorkflowRun {
       this.inputSignal = signal
       this.inputSignalAbort = onAbort
       signal.addEventListener('abort', onAbort, { once: true })
+    }
+    if (maxRunWallMs > 0) {
+      this.wallTimer = setTimeout(() => {
+        this.cancel(`workflow run exceeded maxRunWallMs (${maxRunWallMs}ms)`)
+      }, maxRunWallMs)
+      this.wallTimer.unref()
     }
   }
 
@@ -653,7 +661,7 @@ export class WorkerRun implements WorkflowRun {
     signal.removeEventListener('abort', onAbort)
   }
 
-  /** First settle wins; disarms the grace timer and releases the caller signal. */
+  /** First settle wins; disarms run timers and releases the caller signal. */
   private settleResult(result: WorkflowResult): void {
     // Every current terminal source claims ownership before calling here; keep
     // the fallback local so a future caller cannot resolve twice.
@@ -663,6 +671,7 @@ export class WorkerRun implements WorkflowRun {
     this.settled = true
     this.detachInputSignal()
     clearTimeout(this.graceTimer)
+    clearTimeout(this.wallTimer)
     this.settleResolve(result)
   }
 }

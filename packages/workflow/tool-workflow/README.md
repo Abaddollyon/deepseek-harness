@@ -12,9 +12,9 @@ Three parameters: `meta` (required identity data: `name`, `description`, and opt
 
 Collection is synchronous (like [`dsh-tool-subagent`](../../subagent/tool-subagent/README.md)): `execute` starts a run and awaits `run.result` inside a `try/finally` that always disposes the run, so the script and its children reach quiescence on every path. `exec.signal` is bridged to `run.cancel()` (including the already-aborted-before-start case). A non-`completed` stop reason maps to an `isError` result reporting the reason—never partial output as success; a parse/meta failure thrown synchronously by `start()` becomes an `isError` the model can correct from. Completion returns canonical `{ runId, agentsStarted, result }`; the Native renderer preserves the meta name, agent count, and JSON value, truncating only that projection at `maxResultChars`.
 
-For a root transport execution (`exec.parent` absent), the tool also projects the run into the calling Agent's Session: run-start after `start()` returns, matching member starts and endings filtered by `run.id`, then run-end only after `run.result` is available and `dispose()` has reached quiescence. Nested transport calls execute normally but write no workflow record. The first failed Session append disables later recording for that run, emits one warning, and leaves either no record or a legal continuous prefix without changing the tool result or cleanup.
+Every transport execution projects the run into the calling Agent's Session: run-start after `start()` returns, phase and narration progress filtered by `run.id`, matching member starts and endings, then run-end only after `run.result` is available and `dispose()` has reached quiescence. A nested Code Mode dispatch includes the enclosing model `parentCallId` instead of suppressing its record. The first failed Session append disables later recording for that run, emits one warning, and leaves either no record or a legal continuous prefix without changing the tool result or cleanup.
 
-The browser-safe `@deepseek-ai/dsh-tool-workflow/types` subpath owns these four log-only event payloads and their `SessionEventMap` declaration. The package invariant rejects duplicate starts, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append while accepting missing terminal suffixes.
+The browser-safe `@deepseek-ai/dsh-tool-workflow/types` subpath owns the six log-only events `run-start`, `phase`, `log`, `agent-start`, `agent-end`, and `run-end` plus their `SessionEventMap` declaration. Progress ordinals are positive and monotone within an open run. The package invariant rejects duplicate starts, invalid progress, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append while accepting missing terminal suffixes.
 
 ## Render intent
 
@@ -26,6 +26,8 @@ Decided up front (per the [render-intent Agent Note](../../../.agents/notes/impl
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
 | `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
+| `maxProgressEvents` | `2000` | Durable `phase`/`log` event ceiling per run; the final retained line is marked truncated and later progress is dropped. |
+| `maxLogChars` | `2000` | Per-line durable narration ceiling; longer lines are clipped and marked truncated. |
 
 ## Model Experience
 
@@ -83,4 +85,4 @@ Append-only; newly visible content follows the reusable request prefix and does 
 - **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays/scalars in a field; the canonical workflow result remains complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
 - **Run-wide workflow policy is fixed per tool registration** — the subagent backend, caps, and tool name are deployment config, not model-call arguments. Each `agent()` call still selects its own LLM target (`provider`, `model`, `reasoningEffort`) independently.
 - **A per-agent LLM target only binds for in-process children** — the shipped `spawn` backend applies the selected provider, model, and reasoning effort to the child agent; a remote subagent backend that ignores `agentOptions` ignores all three alike.
-- **Durable records are top-level and observational** — nested Code Mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **Durable records are observational** — root and nested Code Mode calls are recorded, but a recording failure intentionally degrades to an incomplete prefix rather than changing execution.

@@ -60,7 +60,7 @@ worker 仍提供实用的隔离：
 
 ## 取消与 dispose
 
-`WorkflowRun.cancel()` 会记录第一个原因、通知 worker 取消、中止每个待处理及已发布子 agent 共享的唯一信号，并启动 `disposeGraceMs` 定时器。worker 钩子会在下次 await 时抛出 `CANCELLED`。如果运行到期限仍未结算，宿主会将其以已取消状态兑现、为悬空的子 agent 生命周期事件配对，并终止 worker。
+`WorkflowRun.cancel()` 会记录第一个原因、通知 worker 取消、中止每个待处理及已发布子 agent 共享的唯一信号，并启动 `disposeGraceMs` 定时器。worker 钩子会在下次 await 时抛出 `CANCELLED`。如果运行到期限仍未结算，宿主会将其以已取消状态兑现、为悬空的子 agent 生命周期事件配对，并终止 worker。`maxRunWallMs` 非零时还会启动一个不阻止进程退出的整段运行定时器，并以 `workflow run exceeded maxRunWallMs (<ms>ms)` 原因进入完全相同的取消路径。
 
 subagent seam 只有一个取消通道：请求信号。不存在单独的子 agent 取消 RPC。已发布子 agent 使用 `run.dispose()` 清理；待处理的提供方启动在其 promise 拒绝或兑现前仍由提供方负责。
 
@@ -85,6 +85,7 @@ worker 错误、消息失败或提前退出会在清理前关闭消息接纳，�
 | `maxTotalAgents` | `1000` | 一次运行中的 `agent()` 调用总数。 |
 | `maxItemsPerCall` | `4096` | 一次 `parallel()` 或 `pipeline()` 调用接受的条目数。 |
 | `syncTimeoutMs` | `5000` | 脚本最初同步片段的 VM 超时时间。 |
+| `maxRunWallMs` | `0` | 整段运行的墙钟时间上限（毫秒）；`0` 表示不设上限。超过 Node 最大定时器延迟的值会在插件加载时失败。 |
 | `disposeGraceMs` | `5000` | 强制结算/终止之前的期限，也是公开 dispose 的期限。 |
 
 负责该引擎的消费方可以为一次运行设置 `WorkflowStartRequest.subagentProvider` 和 `WorkflowStartRequest.maxTotalAgents`。它们属于引擎级策略，不是脚本钩子或面向模型的选项；普通 `workflow` 工具不会设置两者。每次运行的子 agent 总数上限可以降低、但绝不能提高已配置的 `maxTotalAgents` 上限。
