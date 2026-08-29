@@ -48,6 +48,11 @@
     "@deepseek-ai/dsh-workflow": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-run-supervisor": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "workspace:^"
   },
