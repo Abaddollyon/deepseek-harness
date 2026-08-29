@@ -586,6 +586,53 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/core/session/src/types.ts:329`](../packages/core/session/src/types.ts)
 
+### `run/*`
+
+<a id="runabandoned--log-only"></a>
+
+#### `run/abandoned` — log-only
+
+```ts persistence-catalog
+/**
+ * Boot reconciliation could not resume a run and settled it honestly.
+ * @param data - durable id, kind, the structured reason, and its detail.
+ */
+'run/abandoned': RunAbandonedData
+```
+
+来源：[`packages/jobs/run-supervisor/src/types.ts:75`](../packages/jobs/run-supervisor/src/types.ts)
+
+<a id="rundetached--log-only"></a>
+
+#### `run/detached` — log-only
+
+```ts persistence-catalog
+/**
+ * A durable run was handed from its starting tool to the supervisor.
+ * Declared here so the run/* vocabulary has one home; EMITTED by the
+ * later workflow slice (`@deepseek-ai/dsh-tool-workflow` under
+ * `ownership: 'supervisor'`), never by the run supervisor itself.
+ * @param data - stable run identity and resume policy.
+ */
+'run/detached': RunDetachedData
+```
+
+来源：[`packages/jobs/run-supervisor/src/types.ts:65`](../packages/jobs/run-supervisor/src/types.ts)
+
+<a id="runresumed--log-only"></a>
+
+#### `run/resumed` — log-only
+
+```ts persistence-catalog
+/**
+ * Boot reconciliation re-adopted a run that outlived its host process.
+ * @param data - durable id, kind, and the incarnation that wrote the record.
+ */
+'run/resumed': RunResumedData
+```
+
+来源：[`packages/jobs/run-supervisor/src/types.ts:70`](../packages/jobs/run-supervisor/src/types.ts)
+
 ### `sandbox/*`
 
 <a id="sandboxmode--log-only"></a>

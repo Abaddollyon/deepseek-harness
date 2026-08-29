@@ -30,10 +30,6 @@
       "types": "./lib/types/incarnation.d.ts",
       "default": "./lib/types/incarnation.js"
     },
-    "./incarnation": {
-      "types": "./lib/types/incarnation.d.ts",
-      "default": "./lib/types/incarnation.js"
-    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },

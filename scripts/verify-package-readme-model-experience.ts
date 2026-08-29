@@ -156,6 +156,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/jobs/jobs': { kind: 'indirect', reason: 'Producer and controller plugins own all model rendering over the job registry.' },
   'packages/jobs/jobs-local': { kind: 'indirect', reason: 'The registry backend delegates model rendering to producer plugins and dsh-tool-jobs.' },
   'packages/jobs/jobs-store-domain': { kind: 'indirect', reason: 'The durable store mirrors registry records; producer plugins and dsh-tool-jobs own all model rendering.' },
+  'packages/jobs/run-supervisor': { kind: 'indirect', reason: 'Boot outcomes reach the model only as appended session events and tool-jobs-shaped notices in the owner session log.' },
   'packages/examples/acp-demo': { kind: 'indirect', reason: 'The app bundle delegates request composition to dsh-agent-spine-demo and dsh-acp.' },
   'packages/boot/app-boot': { kind: 'indirect', reason: 'Only the loaded plugin tree contributes model context.' },
   'packages/boot/cmdline': { kind: 'none', reason: 'Resolves the process command line before any session exists; configured rows own every model-visible consequence.' },
