@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { JobId, JobRegistry } from '@deepseek-ai/dsh-jobs'
+import { JobId, JobRegistry, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type {
   JobDoneListener, JobRead, JobSnapshot, JobStart, JobsChangedListener,
 } from '@deepseek-ai/dsh-jobs'
@@ -15,9 +15,12 @@ class StubJobRegistry extends JobRegistry {
   snapshotOf(id: JobId): JobSnapshot {
     return {
       id,
+      ordinal: 1,
       kind: 'bash',
       label: 'sleep 60',
       status: 'running',
+      resumable: false,
+      incarnation: PROCESS_INCARNATION,
       startedAt: 0,
       reported: false,
     }
@@ -56,10 +59,20 @@ class StubJobRegistry extends JobRegistry {
     return () => {}
   }
 
+  registerResumer(): () => void {
+    return () => {}
+  }
+
   attachController(_name: string): () => void {
     return () => {}
   }
 }
+
+describe('PROCESS_INCARNATION', () => {
+  it('is one stable uuid per process, shared by every importer', () => {
+    expect(PROCESS_INCARNATION).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  })
+})
 
 describe('JobRegistry seam', () => {
   it('a concrete subclass registers as ctx.jobs and serves the abstract API', async () => {
@@ -78,6 +91,8 @@ describe('JobRegistry seam', () => {
     detachListener()
     const detachChanges = ctx.jobs.onJobsChanged(() => {})
     detachChanges()
+    const detachResumer = ctx.jobs.registerResumer('bash', () => undefined)
+    detachResumer()
     detachController()
   })
 

@@ -17,11 +17,13 @@ export const inject = ['invariants']
 function validateSnapshot(snapshot: JobSnapshot, owner: Agent | undefined, fail: InvariantFailure): void {
   const id = String(snapshot.id)
   const prefix = `${snapshot.kind}-`
-  const ordinal = Number(id.slice(prefix.length))
-  if (snapshot.kind.length === 0 || !id.startsWith(prefix)
-    || !Number.isSafeInteger(ordinal) || ordinal < 1) {
-    fail(`job snapshot id ${JSON.stringify(id)} must be ${JSON.stringify(prefix)} followed by a positive ordinal`)
+  if (snapshot.kind.length === 0 || !id.startsWith(prefix) || id.length === prefix.length) {
+    fail(`job snapshot id ${JSON.stringify(id)} must be ${JSON.stringify(prefix)} followed by a non-empty fragment`)
   }
+  if (!Number.isSafeInteger(snapshot.ordinal) || snapshot.ordinal < 1) {
+    fail(`job ${JSON.stringify(id)} ordinal must be a positive integer`)
+  }
+  if (snapshot.incarnation.length === 0) fail(`job ${JSON.stringify(id)} incarnation must be non-empty`)
   if (snapshot.label.length === 0) fail(`job ${JSON.stringify(id)} label must be non-empty`)
   if (!Number.isSafeInteger(snapshot.startedAt) || snapshot.startedAt < 0) {
     fail(`job ${JSON.stringify(id)} startedAt must be a non-negative epoch integer`)
@@ -36,8 +38,10 @@ function validateSnapshot(snapshot: JobSnapshot, owner: Agent | undefined, fail:
     fail(`job ${JSON.stringify(id)} finishedAt must be an epoch integer no earlier than startedAt`)
   }
 
-  const expectedOwner = owner?.id
-  if (snapshot.ownerSession !== expectedOwner) {
+  // A live owner must match the recorded session exactly. A record can carry
+  // an ownerSession with no live owner (restored after a restart, or a
+  // recordSession-only registration), so the reverse direction is not checked.
+  if (owner !== undefined && snapshot.ownerSession !== owner.id) {
     fail(`job ${JSON.stringify(id)} ownerSession does not match its completion owner`)
   }
 }

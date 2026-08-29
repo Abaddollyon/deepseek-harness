@@ -8,6 +8,7 @@
 |---|---|---|
 | [`jobs/`](jobs/README.zh.md) | 定义任务注册表和生命周期约定 | `ctx.jobs` |
 | [`jobs-local/`](jobs-local/README.zh.md) | 实现进程本地任务注册表 | 注册到 `ctx.jobs` |
+| [`jobs-store-domain/`](jobs-store-domain/README.zh.md) | 在 storage domain 形态上定义并实现持久任务存储 | `ctx.jobStore` |
 | [`tool-jobs/`](tool-jobs/README.zh.md) | 向模型公开任务控制和完成通知 | 注册到 `ctx.tools` |
 
 参见[后台任务运行时](../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.zh.md)和[任务注册表](../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.zh.md)决策。
