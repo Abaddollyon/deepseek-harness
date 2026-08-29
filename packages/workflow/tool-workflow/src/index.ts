@@ -3,8 +3,9 @@
  * subagents, and return the script's final value. It owns the model-facing schema and run lifecycle; script
  * parsing, execution, caps, and cancellation live behind `ctx.workflowEngine`
  * (`@deepseek-ai/dsh-workflow`), so a hardened engine swaps in without touching what the model
- * sees. Execution awaits `run.result` and always disposes the run; non-completed reasons become tool
- * errors, and background collection remains deferred. Presentation is an args-only generic card
+ * sees. Caller ownership awaits `run.result`; supervisor ownership registers a non-resumable Job and
+ * returns its handle immediately. Both lifecycles dispose before final settlement, and non-completed
+ * caller reasons become tool errors. Presentation is an args-only generic card
  * titled from `meta.name`. Explicit-ask usage guidance is registered as the tool's own prompt
  * section rather than deployment persona prose.
  * @module @deepseek-ai/dsh-tool-workflow
@@ -16,6 +17,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue, Session, SessionEventMap } from '@deepseek-ai/dsh-session'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type { RunDetachedData } from '@deepseek-ai/dsh-run-supervisor'
 import type {
   WorkflowResult, WorkflowRun, WorkflowRunId, WorkflowStopReason,
 } from '@deepseek-ai/dsh-workflow'
@@ -23,12 +26,22 @@ import type {
   ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowLogData,
   ToolWorkflowPhaseData, ToolWorkflowRunEndData, ToolWorkflowRunStartData,
 } from './types.ts'
+// Declaration merge only: makes ctx.systemPrompt visible for the section registration.
 import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
+// Declaration merges: ctx.jobs, the workflow job kind, and run/detached.
+import type {} from '@deepseek-ai/dsh-jobs'
+import type {} from '@deepseek-ai/dsh-run-supervisor/types'
+
+declare module '@deepseek-ai/dsh-jobs' {
+  interface JobKindMap {
+    workflow: 'workflow'
+  }
+}
 
 export const name = 'tool-workflow'
 export const inject = ['tools', 'workflowEngine', 'systemPrompt']
 
-/** Config: the model-facing tool name plus result and durable-progress caps. */
+/** Config: model-facing name, lifecycle ownership, and result/durable-progress caps. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
@@ -38,6 +51,8 @@ export interface Config {
   maxProgressEvents?: number
   /** Durable workflow narration ceiling per line, in characters (default 2000). */
   maxLogChars?: number
+  /** Run lifetime owner: the calling step or the background job supervisor (default `caller`). */
+  ownership?: 'caller' | 'supervisor'
 }
 
 export const Config: z<Config> = z.object({
@@ -45,6 +60,7 @@ export const Config: z<Config> = z.object({
   maxResultChars: z.natural().min(1).default(50_000),
   maxProgressEvents: z.natural().min(1).default(2000),
   maxLogChars: z.natural().min(1).default(2000),
+  ownership: z.union(['caller', 'supervisor'] as const).default('caller'),
 })
 
 type ResolvedConfig = Required<Config>
@@ -242,10 +258,52 @@ function renderResult(name: string, agentsStarted: number, value: JsonValue, max
   return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${clipped}`
 }
 
+/** Await a supervisor-owned run through quiescence and map it to one final-output job. */
+async function settleSupervisedRun(
+  run: WorkflowRun,
+  recorder: WorkflowRecorder,
+  maxResultChars: number,
+): Promise<JobOutcome> {
+  let result: WorkflowResult
+  try {
+    result = await run.result
+    await run.dispose()
+  } catch (error: unknown) {
+    recorder.abandon(run.id)
+    return { status: 'failed', detail: `workflow cleanup failed: ${String(error)}` }
+  }
+  recorder.finish(run.id, result.stopReason)
+  recorder.abandon(run.id)
+  switch (result.stopReason) {
+    case 'completed':
+      return {
+        status: 'completed',
+        output: renderResult(run.meta.name, result.agentsStarted, result.value as JsonValue, maxResultChars),
+      }
+    case 'cancelled':
+      return { status: 'killed', ...result.error === undefined ? {} : { detail: result.error } }
+    case 'error':
+      return { status: 'failed', detail: result.error ?? 'unknown error' }
+    /* v8 ignore start -- WorkflowStopReason is closed; a future variant must fail visibly. */
+    default:
+      return { status: 'failed', detail: `workflow ended abnormally (${String(result.stopReason satisfies never)})` }
+    /* v8 ignore stop */
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   // schemastery (the exported Config schema) has already filled the defaulted
   // fields; the assertion records that resolution, not a hidden fallback.
-  const { toolName, maxResultChars, maxProgressEvents, maxLogChars } = config as ResolvedConfig
+  const { toolName, maxResultChars, maxProgressEvents, maxLogChars, ownership } = config as ResolvedConfig
+  const jobs = ctx.get('jobs')
+  if (ownership === 'supervisor') {
+    if (ctx.workflowEngine.maxRunWallMs <= 0) {
+      throw new Error("tool-workflow: ownership 'supervisor' requires workflowEngine.maxRunWallMs > 0")
+    }
+    if (jobs === undefined) {
+      throw new Error("tool-workflow: ownership 'supervisor' requires @deepseek-ai/dsh-jobs in the same composition")
+    }
+  }
   const recorder = createWorkflowRecorder(ctx, maxProgressEvents, maxLogChars)
   // Usage policy ships with the tool (the master convention: tool guidance
   // lives in tool plugins as prompt sections, not in the deployment persona).
@@ -256,7 +314,12 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.tools.register(defineTool({
     name: toolName,
-    description: DESCRIPTION,
+    description: ownership === 'caller'
+      ? DESCRIPTION
+      : DESCRIPTION.replace(
+        'The run executes in the foreground: this call returns when the whole script finishes.',
+        'The run executes as a supervised background job: this call returns immediately with `{ runId, jobId, status: \"running\" }`; use `job_output` to collect its final output or `job_kill` to cancel it.',
+      ),
     parameters: {
       script: {
         type: 'string',
@@ -295,7 +358,7 @@ export function apply(ctx: Context, config: Config): void {
         description: 'Optional JSON input exposed to the script as the `args` global (wrap a bare list as a field, e.g. {"files": [...]}).',
       },
     },
-    output: {
+    output: ownership === 'caller' ? {
       schema: {
         type: 'object',
         additionalProperties: false,
@@ -307,7 +370,23 @@ export function apply(ctx: Context, config: Config): void {
       },
       render: (args, value) => [{
         type: 'text',
-        text: renderResult(args.meta.name, value.agentsStarted, value.result, maxResultChars),
+        text: renderResult(
+          args.meta.name, value.agentsStarted as number, value.result as JsonValue, maxResultChars,
+        ),
+      }],
+    } : {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          runId: { type: 'string', required: true },
+          jobId: { type: 'string', required: true },
+          status: { type: 'string', enum: ['running'], required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: JSON.stringify({ runId: value.runId, jobId: value.jobId, status: value.status }),
       }],
     },
     async execute(args, exec) {
@@ -327,15 +406,52 @@ export function apply(ctx: Context, config: Config): void {
         meta: args.meta,
         ...args.args !== undefined ? { args: args.args } : {},
         parent,
-        signal: exec.signal,
+        ...ownership === 'caller' ? { signal: exec.signal } : {},
       })
       // The shipped worker-thread engine publishes progress/member events from later
       // worker messages, after start() returns and this run record is active.
       recorder.start(parent.session, run, exec.parent === undefined ? undefined : exec.rootCallId)
 
-      // Bridge the tool's abort signal to the run: if the parent step is aborted while the
-      // script is in flight, cancel the whole run. The signal also enters the engine directly, but
-      // this local bridge preserves the tool contract even if an implementation ignores it.
+      if (ownership === 'supervisor') {
+        // The load-time assertion narrows the topology; caller ownership keeps Jobs optional.
+        /* v8 ignore next -- supervisor load asserted this captured service; Cordis tears the consumer down with its topology. */
+        if (jobs === undefined) throw new Error('tool-workflow: jobs disappeared after plugin load')
+        const label = `workflow: ${args.meta.name}`
+        let jobId
+        try {
+          jobId = jobs.start({
+            kind: 'workflow',
+            label,
+            owner: parent,
+            durability: { recordSession: parent.session.id },
+            idHint: String(run.id),
+            run: () => ({
+              cancel: (reason?: string) => { run.cancel(reason ?? 'workflow job killed') },
+              done: settleSupervisedRun(run, recorder, maxResultChars),
+            }),
+          })
+        } catch (error: unknown) {
+          run.cancel('workflow job registration failed')
+          void settleSupervisedRun(run, recorder, maxResultChars)
+          throw error
+        }
+        const detached: RunDetachedData = {
+          jobId,
+          kind: 'workflow',
+          label,
+          runId: run.id,
+          resumable: false,
+        }
+        try {
+          parent.session.append('run/detached', detached)
+        } catch (error: unknown) {
+          jobs.kill(jobId, parent, 'run/detached recording failed')
+          throw error
+        }
+        return { runId: run.id, jobId, status: 'running' as const }
+      }
+
+      // Caller ownership keeps the foreground abort bridge byte-identical.
       const onAbort = (): void => { run.cancel('parent step aborted') }
       exec.signal.addEventListener('abort', onAbort, { once: true })
 

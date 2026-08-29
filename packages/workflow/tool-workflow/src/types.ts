@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-tool-workflow/types
  */
 
-import type { CallId } from '@deepseek-ai/dsh-llm'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
   WorkflowAgentOutcome, WorkflowRunId, WorkflowStopReason,
@@ -16,7 +16,7 @@ export interface ToolWorkflowRunStartData {
   readonly runId: WorkflowRunId
   readonly name: string
   /** Root model call enclosing a nested transport dispatch. */
-  readonly parentCallId?: CallId
+  readonly parentCallId?: ToolCallId
 }
 
 /** Records one workflow phase announcement. */

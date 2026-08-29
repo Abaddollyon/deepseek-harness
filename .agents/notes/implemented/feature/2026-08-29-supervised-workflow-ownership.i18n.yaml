@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-29-supervised-workflow-ownership.md
+2026-08-29-supervised-workflow-ownership.md: 73df31290a77b1f42304d044d9abacff06c45653
+2026-08-29-supervised-workflow-ownership.zh.md: 67dcca21254eac4c4cf12b65879e380de6ec86e8
