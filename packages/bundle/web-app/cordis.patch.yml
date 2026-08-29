@@ -58,9 +58,13 @@
 
     # SQLite storage backend: keyed-row medium for write-heavy domains. The
     # jobs domain routes here so durable job records update as row writes, not
-    # whole-file JSON rewrites.
+    # whole-file JSON rewrites. Node 22 keeps node:sqlite behind an
+    # ExperimentalWarning that the built-CLI lazy-startup gate forbids, so the
+    # backend mounts — and the jobs route applies — only on Node >= 24; older
+    # engines keep every domain on the JSON default with identical semantics.
     - id: storage-sqlite
       name: '@deepseek-ai/dsh-storage-sqlite'
+      disabled: !!js Number(process.versions.node.split('.')[0]) < 24
       config:
         path: !!js dshHomePath('storages/domains.sqlite')
 
@@ -68,8 +72,7 @@
       name: '@deepseek-ai/dsh-storage-domain'
       config:
         backend: json
-        routes:
-          jobs: sqlite
+        routes: !!js Number(process.versions.node.split('.')[0]) < 24 ? {} : { jobs: 'sqlite' }
 
     # Durable job records (domain 'jobs') + boot reconciliation: resume what a
     # restart left resumable, settle the rest honestly, exactly one notice per
