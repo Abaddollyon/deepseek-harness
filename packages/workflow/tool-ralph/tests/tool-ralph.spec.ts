@@ -16,6 +16,7 @@ import * as toolRalph from '../src/index.ts'
 const testToolSignal = new AbortController().signal
 
 class StubEngine extends WorkflowEngine {
+  readonly maxRunWallMs = 0
   requests: WorkflowStartRequest[] = []
   cancels: string[] = []
   disposed = 0

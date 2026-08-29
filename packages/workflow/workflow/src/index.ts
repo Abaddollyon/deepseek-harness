@@ -155,6 +155,9 @@ export function isFatalWorkflowError(error: unknown): boolean {
  * result settles.
  */
 export abstract class WorkflowEngine extends Service {
+  /** Resolved whole-run wall-clock ceiling in milliseconds; `0` means unbounded. */
+  abstract readonly maxRunWallMs: number
+
   constructor(ctx: Context) {
     super(ctx, 'workflowEngine')
   }

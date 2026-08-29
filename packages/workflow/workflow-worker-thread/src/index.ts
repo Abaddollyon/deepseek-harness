@@ -127,11 +127,15 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
 
   private readonly config: ResolvedConfig
 
+  /** Resolved whole-run wall-clock ceiling exposed to owning consumers. */
+  readonly maxRunWallMs: number
+
   constructor(ctx: Context, config: Config) {
     super(ctx)
     // schemastery (static Config) has already filled the defaulted fields;
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
+    this.maxRunWallMs = this.config.maxRunWallMs
     // maxRunWallMs reaches setTimeout, which clamps a longer delay to 1 ms.
     if (this.config.maxRunWallMs > MAX_TIMER_DELAY_MS) {
       throw new Error(`dsh-workflow-worker-thread: config.maxRunWallMs must be at most ${MAX_TIMER_DELAY_MS} (Node clamps a longer setTimeout delay to 1ms), got ${String(this.config.maxRunWallMs)}`)

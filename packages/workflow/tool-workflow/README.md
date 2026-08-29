@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The model-facing **`workflow` tool**: run a JavaScript orchestration script that fans out subagents, and return the script's final value. This package owns the model-facing schema and run lifecycle over [`ctx.workflowEngine`](../workflow/README.md); script parsing, execution, caps, and cancellation live behind the seam, while the consumer retains ownership of the parent-facing schema and result envelope.
+The model-facing **`workflow` tool**: run a JavaScript orchestration script that fans out subagents, then either return its final value or hand the live run to the job supervisor. This package owns the model-facing schema and run lifecycle over [`ctx.workflowEngine`](../workflow/README.md); script parsing, execution, caps, and cancellation live behind the seam, while the consumer retains ownership of the parent-facing schema and result envelope.
 
 ## What the model sees
 
@@ -10,7 +10,7 @@ Three parameters: `meta` (required identity data: `name`, `description`, and opt
 
 ## Lifecycle
 
-Collection is synchronous (like [`dsh-tool-subagent`](../../subagent/tool-subagent/README.md)): `execute` starts a run and awaits `run.result` inside a `try/finally` that always disposes the run, so the script and its children reach quiescence on every path. `exec.signal` is bridged to `run.cancel()` (including the already-aborted-before-start case). A non-`completed` stop reason maps to an `isError` result reporting the reason—never partial output as success; a parse/meta failure thrown synchronously by `start()` becomes an `isError` the model can correct from. Completion returns canonical `{ runId, agentsStarted, result }`; the Native renderer preserves the meta name, agent count, and JSON value, truncating only that projection at `maxResultChars`.
+With the default `ownership: caller`, collection is byte-identical to the existing synchronous contract: `execute` passes `exec.signal`, awaits `run.result`, always disposes the run, and returns `{ runId, agentsStarted, result }`. With `ownership: supervisor`, the caller signal is not passed to the engine. The tool registers a non-resumable durable `workflow` job owned by the parent Agent, appends `run/detached`, and immediately returns `{ runId, jobId, status: running }`; `job_output` collects the bounded final rendering and `job_kill` reaches `run.cancel()`. Settlement waits for `run.result` and `run.dispose()` before closing the recorder. Plugin load fails unless Jobs exists and `ctx.workflowEngine.maxRunWallMs` is nonzero, so detached work is never unbounded by misconfiguration.
 
 Every transport execution projects the run into the calling Agent's Session: run-start after `start()` returns, phase and narration progress filtered by `run.id`, matching member starts and endings, then run-end only after `run.result` is available and `dispose()` has reached quiescence. A nested Code Mode dispatch includes the enclosing model `parentCallId` instead of suppressing its record. The first failed Session append disables later recording for that run, emits one warning, and leaves either no record or a legal continuous prefix without changing the tool result or cleanup.
 
@@ -28,6 +28,7 @@ Decided up front (per the [render-intent Agent Note](../../../.agents/notes/impl
 | `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
 | `maxProgressEvents` | `2000` | Durable `phase`/`log` event ceiling per run; the final retained line is marked truncated and later progress is dropped. |
 | `maxLogChars` | `2000` | Per-line durable narration ceiling; longer lines are clipped and marked truncated. |
+| `ownership` | `caller` | `caller` preserves foreground cancellation and result semantics; `supervisor` returns a job handle immediately and requires Jobs plus a nonzero engine `maxRunWallMs`. |
 
 ## Model Experience
 
@@ -69,7 +70,7 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. Success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; a cap adds `… [truncated: <omitted> more characters]` on a new line. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
+The full model-written script, metadata, and args remain in the assistant tool call. Under `ownership: supervisor`, the immediate result is compact JSON containing `{ runId, jobId, status: running }`; final text is collected through `job_output`. Under `ownership: caller`, success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; a cap adds `… [truncated: <omitted> more characters]` on a new line. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
 
 #### Token effect
 
@@ -81,7 +82,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 ## Known Limitations and Deferred Work
 
-- **The parent turn blocks until the whole workflow settles** — there is no background start/poll API, and cancellation discards partial output as an error.
+- **Caller ownership blocks; supervisor ownership cannot resume after restart** — `caller` retains foreground cancellation and errors; `supervisor` supports start/poll/kill, but reboot honest-settles an open workflow as cancelled because live worker and child state cannot be reconstructed.
 - **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays/scalars in a field; the canonical workflow result remains complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
 - **Run-wide workflow policy is fixed per tool registration** — the subagent backend, caps, and tool name are deployment config, not model-call arguments. Each `agent()` call still selects its own LLM target (`provider`, `model`, `reasoningEffort`) independently.
 - **A per-agent LLM target only binds for in-process children** — the shipped `spawn` backend applies the selected provider, model, and reasoning effort to the child agent; a remote subagent backend that ignores `agentOptions` ignores all three alike.

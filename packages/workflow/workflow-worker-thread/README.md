@@ -88,6 +88,8 @@ The host keeps a ledger of forwarded child starts. A graceful worker supplies th
 | `maxRunWallMs` | `0` | Whole-run wall-clock ceiling in milliseconds; `0` is unbounded. Values above Node's maximum timer delay fail at plugin load. |
 | `disposeGraceMs` | `5000` | Bound before force-settlement/termination and for public disposal. |
 
+The service instance publishes the resolved `maxRunWallMs` as `WorkflowEngine.maxRunWallMs`; ownership-transferring consumers use that read-only seam for load-time boundedness checks instead of copying this plugin's Config.
+
 An owning consumer may set `WorkflowStartRequest.subagentProvider` and `WorkflowStartRequest.maxTotalAgents` for one run. These are engine-level policy, not script hooks or model-facing options; the ordinary `workflow` tool leaves both unset. A per-run total-child cap may lower but never raise the configured `maxTotalAgents` ceiling.
 
 ## Model Experience

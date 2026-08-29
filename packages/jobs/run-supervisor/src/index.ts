@@ -45,6 +45,7 @@ import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
 import { PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs/incarnation'
 import type { JobId, JobKind, JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
+import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
 // Loads the Context.sessionPersistence augmentation; the service itself is
 // resolved optionally through ctx.get.
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -213,6 +214,40 @@ function statusText(view: TerminalView): string {
 function hasRunEvent(events: readonly SessionEvent[], jobId: JobId): boolean {
   return events.some(event => (event.type === 'run/resumed' || event.type === 'run/abandoned')
     && event.data.jobId === jobId)
+}
+
+interface WorkflowCloser {
+  readonly type: 'tool-workflow/agent-end' | 'tool-workflow/run-end'
+  readonly data: { readonly runId: WorkflowRunId; readonly seq?: number; readonly outcome?: 'cancelled'; readonly stopReason?: 'cancelled' }
+}
+
+/** Close every workflow member and run left open by a prior host incarnation. */
+function workflowClosers(events: readonly SessionEvent[], jobId: JobId, kind: string): WorkflowCloser[] {
+  if (kind !== 'workflow') return []
+  // Workflow event declarations live in the optional producer package; inspect
+  // their stable persistence shape without adding a reverse package edge.
+  const loose = events as readonly { readonly type: string; readonly data: Record<string, unknown> }[]
+  const detached = loose.find(event => event.type === 'run/detached'
+    && event.data.jobId === jobId
+    && event.data.kind === 'workflow')
+  const runIdValue = detached?.data.runId
+  if (typeof runIdValue !== 'string') return []
+  const runId = runIdValue as WorkflowRunId
+  if (loose.some(event => event.type === 'tool-workflow/run-end' && event.data.runId === runId)) return []
+  const ended = new Set(loose
+    .filter(event => event.type === 'tool-workflow/agent-end' && event.data.runId === runId)
+    .map(event => event.data.seq))
+  const closers: WorkflowCloser[] = loose
+    .filter(event => event.type === 'tool-workflow/agent-start'
+      && event.data.runId === runId
+      && typeof event.data.seq === 'number'
+      && !ended.has(event.data.seq))
+    .map(event => ({
+      type: 'tool-workflow/agent-end',
+      data: { runId, seq: event.data.seq as number, outcome: 'cancelled' },
+    }))
+  closers.push({ type: 'tool-workflow/run-end', data: { runId, stopReason: 'cancelled' } })
+  return closers
 }
 
 /**
@@ -772,24 +807,41 @@ export class RunSupervisor {
     const live = this.ctx.get('agents')?.get(owner)
     if (live !== undefined) {
       if (hasRunEvent(live.session.events, event.data.jobId)) return
-      if (event.type === 'run/resumed') live.session.append('run/resumed', event.data)
-      else live.session.append('run/abandoned', event.data)
+      if (event.type === 'run/resumed') {
+        live.session.append('run/resumed', event.data)
+      } else {
+        for (const closer of workflowClosers(live.session.events, event.data.jobId, event.data.kind)) {
+          (live.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
+        }
+        live.session.append('run/abandoned', event.data)
+      }
       return
     }
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return
     const inspection = await persistence.inspect(owner, pass.deadline.signal)
     if (hasRunEvent(inspection.events, event.data.jobId)) return
-    const stored = { type: event.type, seq: inspection.events.length, time: Date.now(), data: event.data } as SessionEvent
+    const closers = event.type === 'run/abandoned'
+      ? workflowClosers(inspection.events, event.data.jobId, event.data.kind)
+      : []
+    const batch = [...closers, event].map((item, index) => ({
+      type: item.type, seq: inspection.events.length + index, time: Date.now(), data: item.data,
+    }) as SessionEvent)
     try {
-      await persistence.append(owner, [stored])
+      await persistence.append(owner, batch)
     } catch (error: unknown) {
       // The session may have come live between resolution and append (its
       // next seq moved); retry through the live lane before giving up.
       const raced = this.ctx.get('agents')?.get(owner)
       if (raced === undefined || hasRunEvent(raced.session.events, event.data.jobId)) throw error
-      if (event.type === 'run/resumed') raced.session.append('run/resumed', event.data)
-      else raced.session.append('run/abandoned', event.data)
+      if (event.type === 'run/resumed') {
+        raced.session.append('run/resumed', event.data)
+      } else {
+        for (const closer of workflowClosers(raced.session.events, event.data.jobId, event.data.kind)) {
+          (raced.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
+        }
+        raced.session.append('run/abandoned', event.data)
+      }
     }
   }
 }

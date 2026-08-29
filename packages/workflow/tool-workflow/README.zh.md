@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-面向模型的 **`workflow` 工具**：运行一段扇出 subagent 的 JavaScript 编排脚本，并返回脚本的最终值。本包负责基于 [`ctx.workflowEngine`](../workflow/README.zh.md) 定义面向模型的 schema 和运行生命周期；脚本解析、执行、上限与取消位于 seam 之后，消费方仍负责面向父级的 schema 和结果包络。
+面向模型的 **`workflow` 工具**：运行一段扇出 subagent 的 JavaScript 编排脚本，然后返回最终值，或把仍在运行的任务移交给作业监督器。本包负责基于 [`ctx.workflowEngine`](../workflow/README.zh.md) 定义面向模型的 schema 和运行生命周期；脚本解析、执行、上限与取消位于 seam 之后，消费方仍负责面向父级的 schema 和结果包络。
 
 ## 模型看到的内容
 
@@ -10,7 +10,7 @@
 
 ## 生命周期
 
-收集是同步的（类似 [`dsh-tool-subagent`](../../subagent/tool-subagent/README.zh.md)）：`execute` 启动运行并等待 `run.result`；这些操作位于 `try/finally` 中，该结构总会 dispose（资源释放）运行，使脚本及其子 agent（智能体）在每条路径上完全停稳。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果，绝不会把局部输出当作成功；`start()` 同步抛出的解析／meta 失败会变成模型可据以修正的 `isError`。完成时返回规范值 `{ runId, agentsStarted, result }`；Native 渲染器保留 meta 名称、agent 数量和 JSON 值，只会在 `maxResultChars` 处截断该投影。
+默认 `ownership: caller` 逐字节保留原有同步约定：`execute` 传入 `exec.signal`、等待 `run.result`、始终 dispose 运行，并返回 `{ runId, agentsStarted, result }`。设置 `ownership: supervisor` 后，调用方 signal 不会传入引擎；工具会注册一个由父 Agent 所有、不可恢复的持久 `workflow` 作业，追加 `run/detached`，并立即返回 `{ runId, jobId, status: running }`。`job_output` 收集有界最终结果，`job_kill` 会到达 `run.cancel()`；作业结算会等待 `run.result` 和 `run.dispose()` 后再关闭记录器。若组合中没有 Jobs，或 `ctx.workflowEngine.maxRunWallMs` 为零，插件加载会失败，避免移交后的任务因配置错误而无限运行。
 
 每次 transport 执行都会把运行投影到调用 Agent 的 Session：`start()` 返回后写 run-start，按 `run.id` 记录阶段与叙述进度以及匹配的成员开始与结束，并且只在 `run.result` 已取得且 `dispose()` 完全停稳后写 run-end。嵌套 Code Mode dispatch 不再抑制记录，而是携带所属模型调用的 `parentCallId`。任一次 Session append 首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变工具结果和清理。
 
@@ -28,6 +28,7 @@
 | `maxResultChars` | `50000` | 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
 | `maxProgressEvents` | `2000` | 每次运行持久化的 `phase`／`log` 事件上限；最后保留的一行标记为截断，后续进度被丢弃。 |
 | `maxLogChars` | `2000` | 每行持久叙述的字符上限；更长的行会被截断并标记。 |
+| `ownership` | `caller` | `caller` 保留前台步骤取消与结果语义；`supervisor` 立即返回作业句柄，并要求 Jobs 与非零引擎 `maxRunWallMs`。 |
 
 ## 模型体验
 
@@ -69,7 +70,7 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 #### 模型看到的内容
 
-由模型编写的完整脚本、元数据和 args 会保留在 assistant 工具调用中。成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及经过美化打印且依赖数据的 JSON；达到上限时，会在新行添加 `… [truncated: <omitted> more characters]`。失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`。中间子 agent 消息会被省略。
+由模型编写的完整脚本、元数据和 args 会保留在 assistant 工具调用中。`ownership: supervisor` 的即时结果是包含 `{ runId, jobId, status: running }` 的紧凑 JSON；最终文本通过 `job_output` 收集。`ownership: caller` 的成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及经过美化打印且依赖数据的 JSON；达到上限时，会在新行添加 `… [truncated: <omitted> more characters]`。失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`。中间子 agent 消息会被省略。
 
 #### Token 影响
 
@@ -81,7 +82,7 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 ## 已知限制与暂缓事项
 
-- **父级轮次会阻塞到整个工作流结算**：没有后台启动／轮询接口，取消会丢弃局部输出并返回错误。
+- **调用方所有权会阻塞；监督器所有权在重启后不可恢复**：`caller` 保留前台取消和错误语义；`supervisor` 支持启动／轮询／终止，但重启会把开放工作流如实结算为已取消，因为无法重建实时 worker 与子 agent 状态。
 - **`args` 必须是对象，Native 结果文本有界**：调用方把顶层数组／标量包装到字段中；规范工作流结果保持完整，超过 `maxResultChars` 的 JSON 会在面向模型的投影中截断，而不是存储在检索句柄背后。
 - **每次工具注册的全局工作流策略固定**：subagent 后端、上限和工具名称属于部署配置，不是模型调用参数。每次 `agent()` 调用仍可独立选择自己的 LLM 目标（`provider`、`model`、`reasoningEffort`）。
 - **按 agent 的 LLM 目标只在进程内子 agent 上生效**：随包发布的 `spawn` 后端会把所选提供方、模型和推理等级应用到子 agent；忽略 `agentOptions` 的远程 subagent 后端会同样忽略这三者。
