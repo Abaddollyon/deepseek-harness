@@ -50,6 +50,7 @@
 {"type":"assistant/message","data":{"turn":1,"step":4,"message":{"role":"assistant","content":[{"type":"tool-call","id":"advanced-workflow","name":"workflow","arguments":"{\"script\":\"phase('Delegate')\\nconst reply = await agent('Reply with exactly WORKFLOW_CHILD_OK and nothing else.', { label: 'workflow-child' })\\nreturn { reply }\",\"meta\":{\"name\":\"advanced-acp-snapshot\",\"description\":\"exercise one workflow child through ACP\"}}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"ebeca5c6-68ae-43b3-87c3-c48fdfe416c8"},"usage":{"inputTokens":3,"outputTokens":3}},"sourceEventSeqs":[43,44,45,46,47],"surfaceOp":"append"}
 {"type":"tool/call","data":{"turn":1,"step":4,"callId":"advanced-workflow","name":"workflow","arguments":"{\"script\":\"phase('Delegate')\\nconst reply = await agent('Reply with exactly WORKFLOW_CHILD_OK and nothing else.', { label: 'workflow-child' })\\nreturn { reply }\",\"meta\":{\"name\":\"advanced-acp-snapshot\",\"description\":\"exercise one workflow child through ACP\"}}"}}
 {"type":"tool-workflow/run-start","data":{"runId":"8ae2383b-3e28-438d-b9fd-1823db77fdaa","name":"advanced-acp-snapshot"}}
+{"type":"tool-workflow/phase","data":{"runId":"8ae2383b-3e28-438d-b9fd-1823db77fdaa","title":"Delegate","ordinal":1}}
 {"type":"tool-workflow/agent-start","data":{"runId":"8ae2383b-3e28-438d-b9fd-1823db77fdaa","seq":1,"label":"workflow-child","phase":"Delegate","childId":"33333333-3333-4333-8333-333333333333"}}
 {"type":"tool-workflow/agent-end","data":{"runId":"8ae2383b-3e28-438d-b9fd-1823db77fdaa","seq":1,"outcome":"completed"}}
 {"type":"tool-workflow/run-end","data":{"runId":"8ae2383b-3e28-438d-b9fd-1823db77fdaa","stopReason":"completed"}}
@@ -61,9 +62,9 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":5,"chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"advanced-undefine","name":"cordis_undefine","arguments":"{\"pluginId\":\"snap-1\"}"}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":5,"chunk":{"type":"usage","usage":{"inputTokens":3,"outputTokens":3}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":5,"chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}}
-{"type":"assistant/message","data":{"turn":1,"step":5,"message":{"role":"assistant","content":[{"type":"tool-call","id":"advanced-undefine","name":"cordis_undefine","arguments":"{\"pluginId\":\"snap-1\"}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"1291ce3c-e568-4f0d-a95a-5157b8b2cc75"},"usage":{"inputTokens":3,"outputTokens":3}},"sourceEventSeqs":[57,58,59,60,61],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":1,"step":5,"message":{"role":"assistant","content":[{"type":"tool-call","id":"advanced-undefine","name":"cordis_undefine","arguments":"{\"pluginId\":\"snap-1\"}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"1291ce3c-e568-4f0d-a95a-5157b8b2cc75"},"usage":{"inputTokens":3,"outputTokens":3}},"sourceEventSeqs":[58,59,60,61,62],"surfaceOp":"append"}
 {"type":"tool/call","data":{"turn":1,"step":5,"callId":"advanced-undefine","name":"cordis_undefine","arguments":"{\"pluginId\":\"snap-1\"}"}}
-{"type":"tool/result","data":{"turn":1,"step":5,"message":{"source":{"kind":"tool","callId":"advanced-undefine"},"content":[{"type":"tool-result","toolCallId":"advanced-undefine","content":[{"type":"text","text":"Removed dynamic Plugin snap-1 and all of its Packages."}],"isError":false}],"role":"user","id":"dd45db06-baa0-4e48-ad52-681b511c8f80"}},"sourceEventSeqs":[63],"surfaceOp":"append"}
+{"type":"tool/result","data":{"turn":1,"step":5,"message":{"source":{"kind":"tool","callId":"advanced-undefine"},"content":[{"type":"tool-result","toolCallId":"advanced-undefine","content":[{"type":"text","text":"Removed dynamic Plugin snap-1 and all of its Packages."}],"isError":false}],"role":"user","id":"dd45db06-baa0-4e48-ad52-681b511c8f80"}},"sourceEventSeqs":[64],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":5}}
 {"type":"step/start","data":{"turn":1,"step":6}}
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
@@ -71,6 +72,6 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ADVANCED_ACP_OK"}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"usage","usage":{"inputTokens":3,"outputTokens":3}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":6,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
-{"type":"assistant/message","data":{"turn":1,"step":6,"message":{"role":"assistant","content":[{"type":"text","text":"ADVANCED_ACP_OK"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"a32b89ce-13ed-48ba-a7f9-24144b94ec56"},"usage":{"inputTokens":3,"outputTokens":3}},"sourceEventSeqs":[67,68,69,70,71],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":1,"step":6,"message":{"role":"assistant","content":[{"type":"text","text":"ADVANCED_ACP_OK"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"},"id":"a32b89ce-13ed-48ba-a7f9-24144b94ec56"},"usage":{"inputTokens":3,"outputTokens":3}},"sourceEventSeqs":[68,69,70,71,72],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":6}}
 {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}

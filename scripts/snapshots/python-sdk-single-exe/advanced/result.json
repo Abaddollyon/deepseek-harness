@@ -1082,8 +1082,18 @@
       }
     },
     {
-      "type": "tool-workflow/agent-start",
+      "type": "tool-workflow/phase",
       "seq": 59,
+      "time": 0,
+      "data": {
+        "runId": "{{workflow-run}}",
+        "title": "Delegate",
+        "ordinal": 1
+      }
+    },
+    {
+      "type": "tool-workflow/agent-start",
+      "seq": 60,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1095,7 +1105,7 @@
     },
     {
       "type": "tool-workflow/agent-end",
-      "seq": 60,
+      "seq": 61,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1105,7 +1115,7 @@
     },
     {
       "type": "tool-workflow/run-end",
-      "seq": 61,
+      "seq": 62,
       "time": 0,
       "data": {
         "runId": "{{workflow-run}}",
@@ -1114,7 +1124,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 62,
+      "seq": 63,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1148,7 +1158,7 @@
     },
     {
       "type": "step/end",
-      "seq": 63,
+      "seq": 64,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1157,7 +1167,7 @@
     },
     {
       "type": "step/start",
-      "seq": 64,
+      "seq": 65,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1166,7 +1176,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 65,
+      "seq": 66,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1180,7 +1190,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 66,
+      "seq": 67,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1196,7 +1206,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 67,
+      "seq": 68,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1215,7 +1225,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 68,
+      "seq": 69,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1231,7 +1241,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 69,
+      "seq": 70,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1246,7 +1256,7 @@
     },
     {
       "type": "assistant/message",
-      "seq": 70,
+      "seq": 71,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1274,17 +1284,17 @@
         }
       },
       "sourceEventSeqs": [
-        65,
         66,
         67,
         68,
-        69
+        69,
+        70
       ],
       "surfaceOp": "append"
     },
     {
       "type": "tool/call",
-      "seq": 71,
+      "seq": 72,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1296,7 +1306,7 @@
     },
     {
       "type": "tool/result",
-      "seq": 72,
+      "seq": 73,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1324,13 +1334,13 @@
         }
       },
       "sourceEventSeqs": [
-        71
+        72
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 73,
+      "seq": 74,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1339,7 +1349,7 @@
     },
     {
       "type": "step/start",
-      "seq": 74,
+      "seq": 75,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1348,7 +1358,7 @@
     },
     {
       "type": "request/header",
-      "seq": 75,
+      "seq": 76,
       "time": 0,
       "data": {
         "header": {
@@ -1384,7 +1394,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 76,
+      "seq": 77,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1398,7 +1408,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 77,
+      "seq": 78,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1412,7 +1422,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 78,
+      "seq": 79,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1429,7 +1439,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 79,
+      "seq": 80,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1445,7 +1455,7 @@
     },
     {
       "type": "assistant/chunk",
-      "seq": 80,
+      "seq": 81,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1460,7 +1470,7 @@
     },
     {
       "type": "assistant/message",
-      "seq": 81,
+      "seq": 82,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1486,17 +1496,17 @@
         }
       },
       "sourceEventSeqs": [
-        76,
         77,
         78,
         79,
-        80
+        80,
+        81
       ],
       "surfaceOp": "append"
     },
     {
       "type": "step/end",
-      "seq": 82,
+      "seq": 83,
       "time": 0,
       "data": {
         "turn": 1,
@@ -1505,7 +1515,7 @@
     },
     {
       "type": "turn/end",
-      "seq": 83,
+      "seq": 84,
       "time": 0,
       "data": {
         "turn": 1,
@@ -3405,6 +3415,22 @@
       }
     },
     {
+      "method": "session.event",
+      "payload": {
+        "sessionId": "{{parent}}",
+        "event": {
+          "type": "tool-workflow/phase",
+          "seq": 59,
+          "time": 0,
+          "data": {
+            "runId": "{{workflow-run}}",
+            "title": "Delegate",
+            "ordinal": 1
+          }
+        }
+      }
+    },
+    {
       "method": "subagent.started",
       "payload": {
         "parentSessionId": "{{parent}}",
@@ -3490,7 +3516,8 @@
           "data": {
             "version": 2,
             "mode": "one-shot",
-            "provider": "spawn"
+            "provider": "spawn",
+            "label": "workflow-child"
           }
         }
       }
@@ -3653,7 +3680,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/agent-start",
-          "seq": 59,
+          "seq": 60,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -3875,7 +3902,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/agent-end",
-          "seq": 60,
+          "seq": 61,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -3891,7 +3918,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool-workflow/run-end",
-          "seq": 61,
+          "seq": 62,
           "time": 0,
           "data": {
             "runId": "{{workflow-run}}",
@@ -3906,7 +3933,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 62,
+          "seq": 63,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3946,7 +3973,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 63,
+          "seq": 64,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3961,7 +3988,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 64,
+          "seq": 65,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3976,7 +4003,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 65,
+          "seq": 66,
           "time": 0,
           "data": {
             "turn": 1,
@@ -3996,7 +4023,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 66,
+          "seq": 67,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4018,7 +4045,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 67,
+          "seq": 68,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4043,7 +4070,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 68,
+          "seq": 69,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4065,7 +4092,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 69,
+          "seq": 70,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4086,7 +4113,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 70,
+          "seq": 71,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4114,11 +4141,11 @@
             }
           },
           "sourceEventSeqs": [
-            65,
             66,
             67,
             68,
-            69
+            69,
+            70
           ],
           "surfaceOp": "append"
         }
@@ -4130,7 +4157,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/call",
-          "seq": 71,
+          "seq": 72,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4148,7 +4175,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "tool/result",
-          "seq": 72,
+          "seq": 73,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4176,7 +4203,7 @@
             }
           },
           "sourceEventSeqs": [
-            71
+            72
           ],
           "surfaceOp": "append"
         }
@@ -4188,7 +4215,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 73,
+          "seq": 74,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4203,7 +4230,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/start",
-          "seq": 74,
+          "seq": 75,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4218,7 +4245,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "request/header",
-          "seq": 75,
+          "seq": 76,
           "time": 0,
           "data": {
             "header": {
@@ -4260,7 +4287,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 76,
+          "seq": 77,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4280,7 +4307,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 77,
+          "seq": 78,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4300,7 +4327,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 78,
+          "seq": 79,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4323,7 +4350,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 79,
+          "seq": 80,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4345,7 +4372,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/chunk",
-          "seq": 80,
+          "seq": 81,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4366,7 +4393,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "assistant/message",
-          "seq": 81,
+          "seq": 82,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4392,11 +4419,11 @@
             }
           },
           "sourceEventSeqs": [
-            76,
             77,
             78,
             79,
-            80
+            80,
+            81
           ],
           "surfaceOp": "append"
         }
@@ -4408,7 +4435,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "step/end",
-          "seq": 82,
+          "seq": 83,
           "time": 0,
           "data": {
             "turn": 1,
@@ -4423,7 +4450,7 @@
         "sessionId": "{{parent}}",
         "event": {
           "type": "turn/end",
-          "seq": 83,
+          "seq": 84,
           "time": 0,
           "data": {
             "turn": 1,
