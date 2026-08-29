@@ -198,6 +198,29 @@ describe('workflow-run Conversation Definition', () => {
     })
   })
 
+  it('folds phase announcements and narration into the card model', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'tool-workflow/run-start', { runId: 'progress', name: 'progress' }),
+      at(3, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 1 }),
+      at(4, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 2 }),
+      at(5, 'tool-workflow/log', {
+        runId: 'progress', message: 'searching', ordinal: 3, truncated: true,
+      }),
+      at(6, 'tool-workflow/log', { runId: 'progress', message: 'done', ordinal: 4 }),
+      at(7, 'tool-workflow/run-end', { runId: 'progress', stopReason: 'completed' }),
+    ])
+    expect(workflowData(value)).toEqual({
+      name: 'progress',
+      status: 'completed',
+      phases: [{ key: 'value:8:Research', phase: 'Research', members: [] }],
+      narration: [
+        { message: 'searching', ordinal: 3, truncated: true },
+        { message: 'done', ordinal: 4 },
+      ],
+    })
+  })
+
   it('folds same-phase cancellation and a turn-level interruption', () => {
     const cancelled = assembler([
       at(1, 'turn/start', { turn: 1 }),

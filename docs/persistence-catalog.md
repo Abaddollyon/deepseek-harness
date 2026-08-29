@@ -987,7 +987,7 @@ Source: [`packages/core/session/src/types.ts:280`](../packages/core/session/src/
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:86`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -1001,7 +1001,35 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:81`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowlog--log-only"></a>
+
+#### `tool-workflow/log` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow narration line.
+ * @param data - run identity, narration, progress ordinal, and clipping marker.
+ */
+'tool-workflow/log': ToolWorkflowLogData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:76`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowphase--log-only"></a>
+
+#### `tool-workflow/phase` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow phase announcement.
+ * @param data - run identity, phase title, and progress ordinal.
+ */
+'tool-workflow/phase': ToolWorkflowPhaseData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:71`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -1015,7 +1043,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:91`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -1023,13 +1051,13 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow
 
 ```ts persistence-catalog
 /**
- * Opens one top-level workflow record.
- * @param data - stable run identity and display name.
+ * Opens one workflow record.
+ * @param data - stable run identity, display name, and optional enclosing call.
  */
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:66`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

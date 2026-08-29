@@ -989,7 +989,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:86`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -1003,7 +1003,35 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:81`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowlog--log-only"></a>
+
+#### `tool-workflow/log` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow narration line.
+ * @param data - run identity, narration, progress ordinal, and clipping marker.
+ */
+'tool-workflow/log': ToolWorkflowLogData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:76`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowphase--log-only"></a>
+
+#### `tool-workflow/phase` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow phase announcement.
+ * @param data - run identity, phase title, and progress ordinal.
+ */
+'tool-workflow/phase': ToolWorkflowPhaseData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:71`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -1017,7 +1045,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:91`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -1025,13 +1053,13 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 ```ts persistence-catalog
 /**
- * Opens one top-level workflow record.
- * @param data - stable run identity and display name.
+ * Opens one workflow record.
+ * @param data - stable run identity, display name, and optional enclosing call.
  */
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:66`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

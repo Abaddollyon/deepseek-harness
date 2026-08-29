@@ -4,7 +4,8 @@ import type {
 import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
-  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData,
+  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowLogData,
+  ToolWorkflowPhaseData,
 } from '@deepseek-ai/dsh-tool-workflow/types'
 import type { WorkflowAgentOutcome, WorkflowStopReason } from '@deepseek-ai/dsh-workflow/types'
 
@@ -32,6 +33,8 @@ export interface WorkflowRunChatData {
   readonly name: string
   readonly status: WorkflowRunStatus
   readonly phases: readonly WorkflowRunPhaseData[]
+  /** Durable narration, omitted for records written before progress capture. */
+  readonly narration?: readonly Omit<ToolWorkflowLogData, 'runId'>[]
 }
 
 declare module '@deepseek-ai/dsh-client-ui-chat/client' {
@@ -49,6 +52,8 @@ interface WorkflowState {
   readonly name: string
   readonly stopReason?: WorkflowStopReason
   readonly members: readonly WorkflowMemberState[]
+  readonly phaseTitles?: readonly string[]
+  readonly narration?: readonly Omit<ToolWorkflowLogData, 'runId'>[]
 }
 
 /**
@@ -95,6 +100,10 @@ function projectWorkflow(
   const interrupted = state.stopReason === undefined
     && locationClosed(location)
   const phases = new Map<string, { phase: string | null; members: WorkflowRunMemberData[] }>()
+  for (const title of state.phaseTitles ?? []) {
+    const key = workflowPhaseKey(title)
+    if (!phases.has(key)) phases.set(key, { phase: title, members: [] })
+  }
   for (const member of state.members) {
     const phase = member.phase === undefined ? null : member.phase
     const key = workflowPhaseKey(phase)
@@ -123,7 +132,21 @@ function projectWorkflow(
       ? interrupted ? 'interrupted' : 'running'
       : statusFromStopReason(state.stopReason),
     phases: projectedPhases,
+    ...state.narration === undefined ? {} : { narration: state.narration },
   }
+}
+
+function updatePhase(state: WorkflowState, data: ToolWorkflowPhaseData): WorkflowState {
+  return { ...state, phaseTitles: [...(state.phaseTitles ?? []), data.title] }
+}
+
+function updateLog(state: WorkflowState, data: ToolWorkflowLogData): WorkflowState {
+  const line: Omit<ToolWorkflowLogData, 'runId'> = {
+    message: data.message,
+    ordinal: data.ordinal,
+    ...data.truncated === undefined ? {} : { truncated: data.truncated },
+  }
+  return { ...state, narration: [...(state.narration ?? []), line] }
 }
 
 function updateAgentStart(state: WorkflowState, data: ToolWorkflowAgentStartData): WorkflowState {
@@ -151,7 +174,9 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
   target: 'chat',
   match: (event) => {
     if (event.type === 'tool-workflow/run-start') return { id: String(event.data.runId), role: 'start' }
-    if (event.type === 'tool-workflow/agent-start'
+    if (event.type === 'tool-workflow/phase'
+      || event.type === 'tool-workflow/log'
+      || event.type === 'tool-workflow/agent-start'
       || event.type === 'tool-workflow/agent-end'
       || event.type === 'tool-workflow/run-end') {
       return { id: String(event.data.runId), role: 'update' }
@@ -165,6 +190,12 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
     return { name: match.event.data.name, members: [] }
   },
   update: (context, match) => {
+    if (match.event.type === 'tool-workflow/phase') {
+      return updatePhase(context.state, match.event.data)
+    }
+    if (match.event.type === 'tool-workflow/log') {
+      return updateLog(context.state, match.event.data)
+    }
     if (match.event.type === 'tool-workflow/agent-start') {
       return updateAgentStart(context.state, match.event.data)
     }

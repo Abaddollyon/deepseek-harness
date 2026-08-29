@@ -3157,12 +3157,16 @@ export interface Config {
 需要：`tools` · `workflowEngine` · `systemPrompt`
 
 ```ts config-catalog
-/** Config: the model-facing tool name plus result rendering caps. */
+/** Config: the model-facing tool name plus result and durable-progress caps. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
   /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
   maxResultChars?: number
+  /** Durable phase/log event ceiling per run (default 2000). */
+  maxProgressEvents?: number
+  /** Durable workflow narration ceiling per line, in characters (default 2000). */
+  maxLogChars?: number
 }
 ```
 
@@ -3440,6 +3444,8 @@ export interface Config {
   maxItemsPerCall?: number
   /** vm timeout for the script's initial synchronous slice, inside the worker (default 5000 ms). */
   syncTimeoutMs?: number
+  /** Whole-run wall-clock ceiling; 0 leaves the run unbounded (default 0 ms). */
+  maxRunWallMs?: number
   /**
    * How long after a cancellation an unsettled script may keep running before
    * the run force-settles `cancelled` and its worker is TERMINATED (default
@@ -3449,7 +3455,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
+来源：[`packages/workflow/workflow-worker-thread/src/index.ts:33`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
 ## 无配置的可加载插件
 
