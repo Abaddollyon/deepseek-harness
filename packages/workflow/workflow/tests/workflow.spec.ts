@@ -10,6 +10,7 @@ import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '../src/
 
 /** A minimal concrete subclass exposing the protected emit helper for tests. */
 class StubEngine extends WorkflowEngine {
+  readonly maxRunWallMs = 0
   start(request: WorkflowStartRequest): WorkflowRun {
     void request
     throw new Error('not under test')

@@ -157,6 +157,7 @@ interface BootOptions {
   config?: SupervisorConfig
   persistence?: ReturnType<typeof fakePersistence> | undefined
   liveAgents?: string[]
+  liveEvents?: Record<string, SessionEvent[]>
 }
 
 /** Boot a persisting registry over one store, then the supervisor over both. */
@@ -176,6 +177,9 @@ async function boot(options: BootOptions = {}) {
   const agents = new Map<string, StubAgent>()
   for (const id of options.liveAgents ?? []) {
     const stub = stubAgent(ctx, id)
+    for (const event of options.liveEvents?.[id] ?? []) {
+      (stub.agent.session.append as unknown as (type: string, data: unknown) => void)(event.type, event.data)
+    }
     ctx.agents.register(stub.agent)
     agents.set(id, stub)
   }
@@ -743,6 +747,72 @@ describe('RunSupervisor store/registry mismatch', () => {
   })
 })
 
+describe('RunSupervisor workflow honest settlement', () => {
+  it('closes stranded members and the workflow before run/abandoned', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, ownerSession: SessionId('alice') })
+    const runId = 'workflow-run'
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId, name: 'audit' } },
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId, seq: 1, label: 'done', childId: 'child-1' } },
+      { type: 'tool-workflow/agent-start', seq: 2, time: 3, data: { runId, seq: 2, label: 'stranded', childId: 'child-2' } },
+      { type: 'tool-workflow/agent-end', seq: 3, time: 4, data: { runId, seq: 1, outcome: 'completed' } },
+      { type: 'tool-workflow/agent-start', seq: 4, time: 5, data: { runId, seq: 'invalid', label: 'invalid', childId: 'bad' } },
+      { type: 'run/detached', seq: 5, time: 6, data: {
+        jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false,
+      } },
+    ] as SessionEvent[]]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    tracked(await boot({ records: [record], persistence }))
+    expect(logs.get('alice')?.slice(6).map(event => [event.type, event.data])).toEqual([
+      ['tool-workflow/agent-end', { runId, seq: 2, outcome: 'cancelled' }],
+      ['tool-workflow/run-end', { runId, stopReason: 'cancelled' }],
+      ['run/abandoned', {
+        jobId: record.id, kind: 'workflow', reason: 'not-resumable', detail: DETAIL_NOT_RESUMABLE,
+      }],
+    ])
+  })
+
+  it('closes a workflow directly in a live owner session', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, ownerSession: SessionId('alice') })
+    const runId = 'live-workflow'
+    const { agents } = tracked(await boot({
+      records: [record], liveAgents: ['alice'], liveEvents: { alice: [
+        { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId, name: 'live' } },
+        { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId, seq: 3, label: 'child', childId: 'child' } },
+        { type: 'run/detached', seq: 2, time: 3, data: {
+          jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false,
+        } },
+      ] as SessionEvent[] },
+    }))
+    expect(agents.get('alice')?.agent.session.events.slice(3).map(event => event.type)).toEqual([
+      'tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned',
+    ])
+  })
+
+  it('does not duplicate closers for an already-ended workflow', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, ownerSession: SessionId('alice') })
+    const runId = 'ended-workflow'
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'run/detached', seq: 0, time: 1, data: {
+        jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false,
+      } },
+      { type: 'tool-workflow/run-end', seq: 1, time: 2, data: { runId, stopReason: 'cancelled' } },
+    ] as SessionEvent[]]])
+    tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
+    expect(logs.get('alice')?.map(event => event.type)).toEqual([
+      'run/detached', 'tool-workflow/run-end', 'run/abandoned',
+    ])
+  })
+
+  it('does not synthesize workflow closers without a matching detached run', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, ownerSession: SessionId('alice') })
+    const logs = new Map<string, SessionEvent[]>([['alice', [seedEvent()]]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    tracked(await boot({ records: [record], persistence }))
+    expect(logs.get('alice')?.map(event => event.type)).toEqual(['turn/start', 'run/abandoned'])
+  })
+})
+
 describe('RunSupervisor notice bounds', () => {
   it('honors the record outputLimitBytes with a head-truncated marker', async () => {
     const record = storedRecord({ resumeSpec: null, outputLimitBytes: 80, label: 'a very long label that will not fit the byte cap' })
@@ -1036,13 +1106,20 @@ describe('RunSupervisor internals (defensive lanes)', () => {
 
   it('retries an offline append through the live lane when the session comes live mid-append', async () => {
     const logs = new Map<string, SessionEvent[]>([['heidi', []]])
-    const record = storedRecord({ ownerSession: SessionId('heidi'), resumeSpec: null })
+    const record = storedRecord({ kind: 'workflow', ownerSession: SessionId('heidi'), resumeSpec: null })
     const shared = fakeStore(new Map([[String(record.id), record]]))
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
     ctx.provide('jobStore', shared.store)
     const stub = stubAgent(ctx, 'heidi')
+    const runId = 'raced-workflow'
+    ;(stub.agent.session.append as unknown as (type: string, data: unknown) => void)(
+      'tool-workflow/agent-start', { runId, seq: 1, label: 'child', childId: 'child' },
+    )
+    ;(stub.agent.session.append as unknown as (type: string, data: unknown) => void)('run/detached', {
+      jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false,
+    })
     const persistence = fakePersistence({
       logs,
       appended: [],
@@ -1062,6 +1139,9 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     const events = runEvents(stub.agent.session, 'run/abandoned')
     expect(events).toHaveLength(1)
     expect(events[0]?.data).toMatchObject({ jobId: record.id, reason: 'not-resumable' })
+    expect(stub.agent.session.events.map(event => event.type)).toEqual([
+      'tool-workflow/agent-start', 'run/detached', 'tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned',
+    ])
   })
 
   it('contains an offline append failure when no lane can reach the session', async () => {

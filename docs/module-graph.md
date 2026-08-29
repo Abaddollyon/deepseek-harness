@@ -995,13 +995,6 @@ flowchart TD
   pkg_llm_replay --> pkg_invariants
   pkg_llm_replay --> pkg_llm
   pkg_llm_replay --> pkg_session
-  pkg_tool_workflow --> pkg_agent
-  pkg_tool_workflow --> pkg_invariants
-  pkg_tool_workflow --> pkg_llm
-  pkg_tool_workflow --> pkg_session
-  pkg_tool_workflow --> pkg_system_prompt
-  pkg_tool_workflow --> pkg_tools
-  pkg_tool_workflow --> pkg_workflow
   pkg_subagent_acp --> pkg_agent
   pkg_subagent_acp --> pkg_invariants
   pkg_subagent_acp --> pkg_llm
@@ -1112,12 +1105,22 @@ flowchart TD
   pkg_tool_ralph --> pkg_system_prompt
   pkg_tool_ralph --> pkg_tools
   pkg_tool_ralph --> pkg_workflow
+  pkg_tool_workflow --> pkg_agent
+  pkg_tool_workflow --> pkg_invariants
+  pkg_tool_workflow --> pkg_jobs
+  pkg_tool_workflow --> pkg_llm
+  pkg_tool_workflow --> pkg_run_supervisor
+  pkg_tool_workflow --> pkg_session
+  pkg_tool_workflow --> pkg_system_prompt
+  pkg_tool_workflow --> pkg_tools
+  pkg_tool_workflow --> pkg_workflow
   pkg_workflow_worker_thread --> pkg_agent
   pkg_workflow_worker_thread --> pkg_brand
   pkg_workflow_worker_thread --> pkg_invariants
   pkg_workflow_worker_thread --> pkg_llm
   pkg_workflow_worker_thread --> pkg_session
   pkg_workflow_worker_thread --> pkg_subagent
+  pkg_workflow_worker_thread --> pkg_timeout
   pkg_workflow_worker_thread --> pkg_tools
   pkg_workflow_worker_thread --> pkg_workflow
   pkg_subagent_fork_in_process --> pkg_agent
@@ -1642,7 +1645,6 @@ flowchart TD
 | [`tool-terminal`](../packages/terminal/tool-terminal) | `terminal` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`output-retention`](../packages/util/output-retention), [`system-prompt`](../packages/core/system-prompt), [`terminal`](../packages/terminal/terminal), [`tools`](../packages/core/tools) |
 | [`agent-loop-testkit`](../packages/test-support/agent-loop-testkit) | `test-support` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools) |
 | [`llm-replay`](../packages/test-support/llm-replay) | `test-support` | [`compaction`](../packages/compaction/compaction), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session) |
-| [`tool-workflow`](../packages/workflow/tool-workflow) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
 | [`subagent-acp`](../packages/subagent/subagent-acp) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`subagent-claude-code`](../packages/subagent/subagent-claude-code) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
 | [`subagent-codex`](../packages/subagent/subagent-codex) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess), [`timeout`](../packages/util/timeout) |
@@ -1660,7 +1662,8 @@ flowchart TD
 | [`tool-bash`](../packages/shell/tool-bash) | `shell` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`shell`](../packages/shell/shell), [`shell-env`](../packages/shell/shell-env), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`user-approval`](../packages/interaction/user-approval) |
 | [`tool-pwsh`](../packages/shell/tool-pwsh) | `shell` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`sandbox`](../packages/sandbox/sandbox), [`sandbox-policy`](../packages/sandbox/sandbox-policy), [`shell`](../packages/shell/shell), [`shell-env`](../packages/shell/shell-env), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`user-approval`](../packages/interaction/user-approval) |
 | [`tool-ralph`](../packages/workflow/tool-ralph) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`subagent`](../packages/subagent/subagent), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
-| [`workflow-worker-thread`](../packages/workflow/workflow-worker-thread) | `workflow` | [`agent`](../packages/core/agent), [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
+| [`tool-workflow`](../packages/workflow/tool-workflow) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`jobs`](../packages/jobs/jobs), [`llm`](../packages/llm/llm), [`run-supervisor`](../packages/jobs/run-supervisor), [`session`](../packages/core/session), [`system-prompt`](../packages/core/system-prompt), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
+| [`workflow-worker-thread`](../packages/workflow/workflow-worker-thread) | `workflow` | [`agent`](../packages/core/agent), [`brand`](../packages/util/brand), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`timeout`](../packages/util/timeout), [`tools`](../packages/core/tools), [`workflow`](../packages/workflow/workflow) |
 | [`subagent-fork-in-process`](../packages/subagent/subagent-fork-in-process) | `subagent` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subagent-in-process-driver`](../packages/subagent/subagent-in-process-driver) |
 | [`subagent-spawn-in-process`](../packages/subagent/subagent-spawn-in-process) | `subagent` | [`invariants`](../packages/runtime-diagnostics/invariants), [`subagent`](../packages/subagent/subagent), [`subagent-in-process-driver`](../packages/subagent/subagent-in-process-driver) |
 | [`client-connection`](../packages/client/connection) | `client` | [`attachment`](../packages/attachment/attachment), [`commands`](../packages/interaction/commands), [`host-apiproxy`](../packages/host/apiproxy), [`host-webserver`](../packages/host/webserver), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`session`](../packages/core/session), [`tools`](../packages/core/tools) |

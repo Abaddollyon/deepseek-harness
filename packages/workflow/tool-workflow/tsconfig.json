@@ -27,6 +27,12 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../jobs/jobs"
+    },
+    {
+      "path": "../../jobs/run-supervisor"
+    },
+    {
       "path": "../../core/tools"
     },
     {

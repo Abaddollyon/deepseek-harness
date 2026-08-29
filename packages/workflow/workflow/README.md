@@ -10,7 +10,7 @@ The package root is the Host face. The browser-safe `@deepseek-ai/dsh-workflow/t
 
 ## Service and run contract
 
-`WorkflowEngine.start(request): WorkflowRun` validates enough synchronously to reject a malformed meta block, unparseable script, unavailable provider route, or unsupported per-run limit before a run exists. Once returned, `WorkflowRun.result` never rejects: execution failures resolve with `stopReason: 'error'`, and cancellation resolves with `cancelled` within the engine's bounded grace.
+`WorkflowEngine.start(request): WorkflowRun` validates enough synchronously to reject a malformed meta block, unparseable script, unavailable provider route, or unsupported per-run limit before a run exists. Once returned, `WorkflowRun.result` never rejects: execution failures resolve with `stopReason: 'error'`, and cancellation resolves with `cancelled` within the engine's bounded grace. Every provider also exposes its resolved whole-run ceiling as `WorkflowEngine.maxRunWallMs` (`0` means unbounded), so an ownership-transferring consumer can fail at plugin load instead of duplicating provider config.
 
 A run is holder-owned. Engine-plugin unload prevents new starts but does not revoke accepted runs. The holder must call `dispose()` on every path; disposal cancels remaining work and reaches or abandons quiescence within the documented bound.
 

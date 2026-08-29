@@ -88,6 +88,8 @@ worker 错误、消息失败或提前退出会在清理前关闭消息接纳，�
 | `maxRunWallMs` | `0` | 整段运行的墙钟时间上限（毫秒）；`0` 表示不设上限。超过 Node 最大定时器延迟的值会在插件加载时失败。 |
 | `disposeGraceMs` | `5000` | 强制结算/终止之前的期限，也是公开 dispose 的期限。 |
 
+服务实例通过 `WorkflowEngine.maxRunWallMs` 发布已解析的 `maxRunWallMs`；移交所有权的消费方使用这个只读 seam 做加载时有界性检查，而不是复制本插件的 Config。
+
 负责该引擎的消费方可以为一次运行设置 `WorkflowStartRequest.subagentProvider` 和 `WorkflowStartRequest.maxTotalAgents`。它们属于引擎级策略，不是脚本钩子或面向模型的选项；普通 `workflow` 工具不会设置两者。每次运行的子 agent 总数上限可以降低、但绝不能提高已配置的 `maxTotalAgents` 上限。
 
 ## 模型体验
