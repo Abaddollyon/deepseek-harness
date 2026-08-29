@@ -59,6 +59,18 @@ class StubEngine extends WorkflowEngine {
     settle(result)
   }
 
+  phase(id: WorkflowRunIdType, title: string): void {
+    this.emitWorkflowEvent('workflow/phase', {
+      id, meta: this.requests[Number(String(id).slice(4)) - 1]!.meta,
+    }, title)
+  }
+
+  log(id: WorkflowRunIdType, message: string): void {
+    this.emitWorkflowEvent('workflow/log', {
+      id, meta: this.requests[Number(String(id).slice(4)) - 1]!.meta,
+    }, message)
+  }
+
   agentStart(id: WorkflowRunIdType, agent: WorkflowAgentInfo): void {
     this.emitWorkflowEvent('workflow/agent-start', {
       id,
@@ -74,7 +86,7 @@ class StubEngine extends WorkflowEngine {
   }
 }
 
-async function setup(config?: { toolName?: string; maxResultChars?: number }) {
+async function setup(config?: toolWorkflow.Config) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -93,6 +105,7 @@ function execute(ctx: Context, args: unknown, extra?: {
   agent?: Agent
   signal?: AbortSignal
   parent?: ToolExecutionToken
+  rootCallId?: CallId
 }): Promise<ToolExecutionResult> {
   return ctx.tools.execute({
     signal: testToolSignal,
@@ -102,6 +115,7 @@ function execute(ctx: Context, args: unknown, extra?: {
     ...extra?.agent ? { agent: extra.agent } : {},
     ...extra?.signal ? { signal: extra.signal } : {},
     ...extra?.parent ? { parent: extra.parent } : {},
+    ...extra?.rootCallId ? { rootCallId: extra.rootCallId } : {},
   })
 }
 
@@ -198,20 +212,45 @@ describe('dsh-tool-workflow', () => {
       ])
   })
 
-  it('does not record nested transport executions', async () => {
+  it('records nested transport executions with their enclosing model call', async () => {
     const { ctx, engine, parent, session } = await setup()
     const pending = execute(ctx, { script: SCRIPT, meta: META }, {
       agent: parent,
       parent: Symbol('outer') as ToolExecutionToken,
+      rootCallId: CallId('outer-call'),
     })
     await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
     engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 0 })
     expect((await pending).isError).toBe(false)
-    expect(session.events).toEqual([])
+    expect(session.events.map(event => [event.type, event.data])).toEqual([
+      ['tool-workflow/run-start', { runId: 'run-1', name: 'audit', parentCallId: 'outer-call' }],
+      ['tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }],
+    ])
+  })
+
+  it('records bounded, clipped workflow progress with monotone ordinals', async () => {
+    const { ctx, engine, parent, session } = await setup({ maxProgressEvents: 3, maxLogChars: 4 })
+    const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
+    const runId = WorkflowRunId('run-1')
+    engine.phase(runId, 'Scan')
+    engine.log(runId, 'abcdef')
+    engine.log(runId, 'last')
+    engine.phase(runId, 'dropped')
+    engine.log(runId, 'dropped')
+    engine.settleRun(runId, { value: null, stopReason: 'completed', agentsStarted: 0 })
+    expect((await pending).isError).toBe(false)
+    expect(session.events.slice(1, -1).map(event => [event.type, event.data])).toEqual([
+      ['tool-workflow/phase', { runId: 'run-1', title: 'Scan', ordinal: 1 }],
+      ['tool-workflow/log', { runId: 'run-1', message: 'abcd', ordinal: 2, truncated: true }],
+      ['tool-workflow/log', { runId: 'run-1', message: 'last', ordinal: 3, truncated: true }],
+    ])
   })
 
   it.each([
     'tool-workflow/run-start',
+    'tool-workflow/phase',
+    'tool-workflow/log',
     'tool-workflow/agent-start',
     'tool-workflow/agent-end',
     'tool-workflow/run-end',
@@ -228,6 +267,8 @@ describe('dsh-tool-workflow', () => {
     const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
     await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
     const runId = WorkflowRunId('run-1')
+    engine.phase(runId, 'phase')
+    engine.log(runId, 'log')
     engine.agentStart(runId, {
       seq: 1, label: 'member', childId: SessionId('child-1'),
     })
@@ -242,10 +283,15 @@ describe('dsh-tool-workflow', () => {
     const types = session.events.map(event => event.type)
     const expectedPrefixes = {
       'tool-workflow/run-start': [],
-      'tool-workflow/agent-start': ['tool-workflow/run-start'],
-      'tool-workflow/agent-end': ['tool-workflow/run-start', 'tool-workflow/agent-start'],
+      'tool-workflow/phase': ['tool-workflow/run-start'],
+      'tool-workflow/log': ['tool-workflow/run-start', 'tool-workflow/phase'],
+      'tool-workflow/agent-start': ['tool-workflow/run-start', 'tool-workflow/phase', 'tool-workflow/log'],
+      'tool-workflow/agent-end': [
+        'tool-workflow/run-start', 'tool-workflow/phase', 'tool-workflow/log', 'tool-workflow/agent-start',
+      ],
       'tool-workflow/run-end': [
-        'tool-workflow/run-start', 'tool-workflow/agent-start', 'tool-workflow/agent-end',
+        'tool-workflow/run-start', 'tool-workflow/phase', 'tool-workflow/log',
+        'tool-workflow/agent-start', 'tool-workflow/agent-end',
       ],
     } as const
     expect(types).toEqual(expectedPrefixes[failedType])

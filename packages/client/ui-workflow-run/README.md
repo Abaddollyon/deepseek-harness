@@ -2,13 +2,13 @@
 
 English | [中文](README.zh.md)
 
-The browser plugin that reconstructs durable top-level workflow runs as independent Chat nodes. It consumes the four `tool-workflow/*` Session events owned by [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md), registers one `ConversationNodeDefinition`, and renders through the keyed `conversation.chat.node` slot without changing the existing workflow tool card.
+The browser plugin that reconstructs durable workflow runs as independent Chat nodes. It consumes the six `tool-workflow/*` Session events owned by [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md), registers one `ConversationNodeDefinition`, and renders through the keyed `conversation.chat.node` slot without changing the existing workflow tool card.
 
 ## Durable state and replay
 
-`tool-workflow/run-start` creates one Context keyed by `runId`; member starts, member endings, and the run ending update that Context in log order. A history tail containing only updates remains pending until an older page supplies the unique start, after which prepend, complete replay, and live append produce the same state. A closed Turn or Step with missing terminal events presents the affected run or members as interrupted without changing the tool result.
+`tool-workflow/run-start` creates one Context keyed by `runId`; phase announcements, narration logs, member starts, member endings, and the run ending update that Context in log order. A history tail containing only updates remains pending until an older page supplies the unique start, after which prepend, complete replay, and live append produce the same state. A closed Turn or Step with missing terminal events presents the affected run or members as interrupted without changing the tool result.
 
-Phase groups come only from members that actually started. Exact phase strings share a group, an omitted phase is distinct from the empty string, and settlement changes status without removing or reordering members.
+Phase groups come from durable `tool-workflow/phase` announcements as well as members that actually started, so an announced zero-member phase remains in the model. Exact phase strings share a group, an omitted phase is distinct from the empty string, and settlement changes status without removing or reordering members. Durable `tool-workflow/log` lines fold into the optional narration list; older records without either event retain byte-identical data and rendering.
 
 ## Presentation and navigation
 
@@ -30,6 +30,6 @@ None.
 
 ## Known Limitations and Deferred Work
 
-- Only top-level calls through `dsh-tool-workflow` produce these records; nested Code Mode calls and direct `WorkflowEngine` consumers do not.
+- Calls through `dsh-tool-workflow`, including nested Code Mode calls, produce these records; direct `WorkflowEngine` consumers do not.
 - Navigation follows the ordinary Session list: a member stays openable after settlement while its child row is listed, but a member whose child Session the list does not contain (for example a remote row) never exposes an opener from this node.
 - The node shows run, phase, member identity, and status only; scripts, outputs, errors, logs, usage, static topology, and controls remain outside this surface.

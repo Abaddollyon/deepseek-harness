@@ -60,7 +60,7 @@ Child results are projected and snapshotted before crossing from the host to the
 
 ## Cancellation and disposal
 
-`WorkflowRun.cancel()` records the first reason, tells the worker to cancel, aborts the one signal shared by every pending and published child, and arms the `disposeGraceMs` timer. Worker hooks then throw `CANCELLED` at their next await. If the run remains unsettled at the deadline, the host resolves it as cancelled, pairs stranded child lifecycle events, and terminates the worker.
+`WorkflowRun.cancel()` records the first reason, tells the worker to cancel, aborts the one signal shared by every pending and published child, and arms the `disposeGraceMs` timer. Worker hooks then throw `CANCELLED` at their next await. If the run remains unsettled at the deadline, the host resolves it as cancelled, pairs stranded child lifecycle events, and terminates the worker. When nonzero, `maxRunWallMs` arms an unref'd whole-run timer that enters this identical path with reason `workflow run exceeded maxRunWallMs (<ms>ms)`.
 
 The subagent seam has one cancellation channel: the request signal. There is no separate child-cancel RPC. Published child teardown uses `run.dispose()`; pending provider starts remain provider-owned until their promise rejects or fulfills.
 
@@ -85,6 +85,7 @@ The host keeps a ledger of forwarded child starts. A graceful worker supplies th
 | `maxTotalAgents` | `1000` | Total `agent()` calls in one run. |
 | `maxItemsPerCall` | `4096` | Items accepted by one `parallel()` or `pipeline()` call. |
 | `syncTimeoutMs` | `5000` | VM timeout for the script's initial synchronous slice. |
+| `maxRunWallMs` | `0` | Whole-run wall-clock ceiling in milliseconds; `0` is unbounded. Values above Node's maximum timer delay fail at plugin load. |
 | `disposeGraceMs` | `5000` | Bound before force-settlement/termination and for public disposal. |
 
 An owning consumer may set `WorkflowStartRequest.subagentProvider` and `WorkflowStartRequest.maxTotalAgents` for one run. These are engine-level policy, not script hooks or model-facing options; the ordinary `workflow` tool leaves both unset. A per-run total-child cap may lower but never raise the configured `maxTotalAgents` ceiling.
