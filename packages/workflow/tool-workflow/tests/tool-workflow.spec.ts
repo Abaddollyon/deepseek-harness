@@ -4,6 +4,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WorkflowRunId, WorkflowEngine } from '@deepseek-ai/dsh-workflow'
 import type {
@@ -13,6 +14,8 @@ import type {
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import WorkerThreadWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { JobId } from '@deepseek-ai/dsh-jobs'
 import * as toolWorkflow from '../src/index.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -21,6 +24,7 @@ const testToolSignal = new AbortController().signal
 
 /** A controllable engine standing in behind ctx.workflowEngine (the tool's only seam). */
 class StubEngine extends WorkflowEngine {
+  readonly maxRunWallMs: number = 1000
   requests: WorkflowStartRequest[] = []
   cancels: string[] = []
   disposed = 0
@@ -87,15 +91,28 @@ class StubEngine extends WorkflowEngine {
   }
 }
 
+class UnboundedStubEngine extends StubEngine {
+  override readonly maxRunWallMs = 0
+}
+
 async function setup(config?: toolWorkflow.Config) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(StubEngine)
+  if (config?.ownership === 'supervisor') {
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, {})
+    ctx.jobs.attachController('workflow-test')
+  }
   await ctx.plugin(toolWorkflow, config ?? {})
   const engine = ctx.workflowEngine as StubEngine
   const session = Session.create(SessionId('caller'))
-  const parent = { id: session.id, options: {}, session } as unknown as Agent
+  const parent = {
+    id: session.id, options: {}, session,
+    ...config?.ownership === 'supervisor' ? { ctx, status: 'idle' as const } : {},
+  } as unknown as Agent
+  if (config?.ownership === 'supervisor') ctx.agents.register(parent)
   return { ctx, engine, parent, session }
 }
 
@@ -106,7 +123,7 @@ function execute(ctx: Context, args: unknown, extra?: {
   agent?: Agent
   signal?: AbortSignal
   parent?: ToolExecutionToken
-  rootCallId?: CallId
+  rootCallId?: ToolCallId
 }): Promise<ToolExecutionResult> {
   return ctx.tools.execute({
     signal: testToolSignal,
@@ -121,6 +138,35 @@ function execute(ctx: Context, args: unknown, extra?: {
 }
 
 describe('dsh-tool-workflow', () => {
+  it('fails at plugin load when supervisor ownership has no Jobs service', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(StubEngine)
+    await expect(ctx.plugin(toolWorkflow, { ownership: 'supervisor' })).rejects.toThrow(
+      "ownership 'supervisor' requires @deepseek-ai/dsh-jobs",
+    )
+  })
+
+  it('fails at plugin load when supervisor ownership has an unbounded workflow engine', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(UnboundedStubEngine)
+    await ctx.plugin(LocalJobRegistry, {})
+    ctx.jobs.attachController('workflow-test')
+    await expect(ctx.plugin(toolWorkflow, { ownership: 'supervisor' })).rejects.toThrow(
+      "ownership 'supervisor' requires workflowEngine.maxRunWallMs > 0",
+    )
+  })
+
+  it('rewrites the supervised description at its exact foreground anchor', async () => {
+    const { ctx } = await setup({ ownership: 'supervisor' })
+    const description = ctx.tools.get('workflow')?.description
+    expect(description).toContain('supervised background job')
+    expect(description).not.toContain('returns when the whole script finishes')
+  })
+
   it('starts a run with the script/args/parent/signal and renders the completed value', async () => {
     const { ctx, engine, parent } = await setup()
     const controller = new AbortController()
@@ -137,6 +183,110 @@ describe('dsh-tool-workflow', () => {
     expect(rendered).toContain('workflow "audit" completed (7 agents)')
     expect(rendered).toContain('"findings"')
     expect(engine.disposed).toBe(1)
+  })
+
+  it('returns a non-resumable supervised job immediately without binding the caller signal', async () => {
+    const { ctx, engine, parent, session } = await setup({ ownership: 'supervisor' })
+    const controller = new AbortController()
+    const result = await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent, signal: controller.signal })
+    if (result.isError) throw new Error((result.content[0] as { text: string }).text)
+    expect(result.isError).toBe(false)
+    expect(result.value).toEqual({ runId: 'run-1', jobId: 'workflow-run-1', status: 'running' })
+    expect(engine.requests[0]!.signal).toBeUndefined()
+    expect(ctx.jobs.get(JobId('workflow-run-1'), parent)).toMatchObject({
+      kind: 'workflow', label: 'workflow: audit', status: 'running', resumable: false,
+    })
+    expect(session.events.map(event => [event.type, event.data])).toEqual([
+      ['tool-workflow/run-start', { runId: 'run-1', name: 'audit' }],
+      ['run/detached', {
+        jobId: 'workflow-run-1', kind: 'workflow', label: 'workflow: audit', runId: 'run-1', resumable: false,
+      }],
+    ])
+    controller.abort('step settled')
+    expect(engine.cancels).toEqual([])
+    engine.settleRun(WorkflowRunId('run-1'), { value: { answer: 42 }, stopReason: 'completed', agentsStarted: 2 })
+    const settled = await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)
+    expect(settled.status).toBe('completed')
+    expect(engine.disposed).toBe(1)
+    expect(ctx.jobs.read(JobId('workflow-run-1'), parent).text).toContain('\"answer\": 42')
+    expect(session.events.at(-1)).toMatchObject({
+      type: 'tool-workflow/run-end', data: { runId: 'run-1', stopReason: 'completed' },
+    })
+  })
+
+  it('routes a workflow job kill through run.cancel and closes after disposal', async () => {
+    const { ctx, engine, parent, session } = await setup({ ownership: 'supervisor' })
+    const started = await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    if (started.isError) throw new Error((started.content[0] as { text: string }).text)
+    expect(started.isError).toBe(false)
+    expect(ctx.jobs.kill(JobId('workflow-run-1'), parent, 'user stopped workflow')).toBe('requested')
+    expect(engine.cancels).toEqual(['user stopped workflow'])
+    expect(ctx.jobs.get(JobId('workflow-run-1'), parent).status).toBe('stopping')
+    const settled = await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)
+    expect(settled).toMatchObject({ status: 'killed', detail: 'user stopped workflow', reported: true })
+    expect(engine.disposed).toBe(1)
+    expect(session.events.at(-1)).toMatchObject({
+      type: 'tool-workflow/run-end', data: { runId: 'run-1', stopReason: 'cancelled' },
+    })
+  })
+
+  it('maps supervised error, cancellation-without-detail, and cleanup failure outcomes', async () => {
+    {
+      const { ctx, engine, parent } = await setup({ ownership: 'supervisor' })
+      await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+      engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'error', agentsStarted: 0 })
+      expect(await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)).toMatchObject({
+        status: 'failed', detail: 'unknown error',
+      })
+    }
+    {
+      const { ctx, engine, parent } = await setup({ ownership: 'supervisor' })
+      await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+      engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'cancelled', agentsStarted: 0 })
+      const settled = await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)
+      expect(settled.status).toBe('killed')
+      expect(settled.detail).toBeUndefined()
+    }
+    {
+      const { ctx, engine, parent } = await setup({ ownership: 'supervisor' })
+      await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+      ctx.jobs.kill(JobId('workflow-run-1'), parent)
+      expect(engine.cancels).toEqual(['workflow job killed'])
+      await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)
+    }
+    {
+      const { ctx, engine, parent } = await setup({ ownership: 'supervisor' })
+      engine.disposeBarrier = Promise.reject(new Error('dispose broke'))
+      await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+      engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 0 })
+      expect(await ctx.jobs.wait(JobId('workflow-run-1'), 1000, parent)).toMatchObject({
+        status: 'failed', detail: 'workflow cleanup failed: Error: dispose broke',
+      })
+    }
+  })
+
+  it('cancels and settles the run when job registration fails', async () => {
+    const { ctx, engine, parent } = await setup({ ownership: 'supervisor' })
+    vi.spyOn(ctx.jobs, 'start').mockImplementation(() => { throw new Error('registry down') })
+    const result = await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    expect(result.isError).toBe(true)
+    expect((result.content[0] as { text: string }).text).toContain('registry down')
+    expect(engine.cancels).toEqual(['workflow job registration failed'])
+    await vi.waitFor(() => { expect(engine.disposed).toBe(1) })
+  })
+
+  it('kills the registered job when run/detached cannot be recorded', async () => {
+    const { ctx, engine, parent, session } = await setup({ ownership: 'supervisor' })
+    const append = session.append.bind(session)
+    vi.spyOn(session, 'append').mockImplementation(((type: string, data: unknown) => {
+      if (type === 'run/detached') throw new Error('session read-only')
+      return (append as (type: string, data: unknown) => unknown)(type, data)
+    }) as typeof session.append)
+    const result = await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    expect(result.isError).toBe(true)
+    expect((result.content[0] as { text: string }).text).toContain('session read-only')
+    expect(engine.cancels).toEqual(['run/detached recording failed'])
+    await vi.waitFor(() => { expect(engine.disposed).toBe(1) })
   })
 
   it('records one top-level run and its members in the calling Session after cleanup', async () => {
@@ -218,7 +368,7 @@ describe('dsh-tool-workflow', () => {
     const pending = execute(ctx, { script: SCRIPT, meta: META }, {
       agent: parent,
       parent: Symbol('outer') as ToolExecutionToken,
-      rootCallId: CallId('outer-call'),
+      rootCallId: ToolCallId('outer-call'),
     })
     await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
     engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 0 })
@@ -482,7 +632,7 @@ describe('dsh-tool-workflow', () => {
       await ctx.plugin(WorkerThreadWorkflowEngine, { disposeGraceMs: 30 })
       await ctx.plugin(toolWorkflow, {})
       const session = Session.create(SessionId('caller'))
-      const parent = { id: session.id, options: {}, session } as unknown as Agent
+      const parent = { id: session.id, options: {}, session, ctx } as unknown as Agent
       const controller = new AbortController()
       const pending = execute(ctx, {
         script: 'await new Promise(() => {})\nreturn 1',
