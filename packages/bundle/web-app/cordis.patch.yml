@@ -56,10 +56,29 @@
       config:
         root: !!js dshHomePath('storages')
 
+    # SQLite storage backend: keyed-row medium for write-heavy domains. The
+    # jobs domain routes here so durable job records update as row writes, not
+    # whole-file JSON rewrites.
+    - id: storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      config:
+        path: !!js dshHomePath('storages/domains.sqlite')
+
     - id: storage-domain
       name: '@deepseek-ai/dsh-storage-domain'
       config:
         backend: json
+        routes:
+          jobs: sqlite
+
+    # Durable job records (domain 'jobs') + boot reconciliation: resume what a
+    # restart left resumable, settle the rest honestly, exactly one notice per
+    # unreported completion.
+    - id: jobs-store-domain
+      name: '@deepseek-ai/dsh-jobs-store-domain'
+
+    - id: run-supervisor
+      name: '@deepseek-ai/dsh-run-supervisor'
 
     - id: message-feedback
       name: '@deepseek-ai/dsh-message-feedback'
@@ -329,6 +348,12 @@
 
 - id: tool-jobs
   disabled: true
+
+# Durable background jobs: mirror registry records into the domain store so the
+# run supervisor can reconcile them after a service restart.
+- id: jobs
+  config:
+    persist: true
 
 - id: tool-fs
   disabled: true
