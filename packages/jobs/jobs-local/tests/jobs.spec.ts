@@ -5,8 +5,9 @@ import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
-import { JobId } from '@deepseek-ai/dsh-jobs'
+import { JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type { JobHooks, JobKind, JobOutcome, JobSnapshot, JobStart } from '@deepseek-ai/dsh-jobs'
+import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
 
 declare module '@deepseek-ai/dsh-jobs' {
@@ -60,7 +61,9 @@ function producer(overrides: Partial<Omit<JobStart, 'run'> & JobHooks> = {}) {
   let settle!: (outcome: JobOutcome) => void
   let reject!: (error: unknown) => void
   const cancels: (string | undefined)[] = []
-  const { kind = 'bash', label = 'sleep 60', owner, outputLimitBytes, ...hookOverrides } = overrides
+  const {
+    kind = 'bash', label = 'sleep 60', owner, outputLimitBytes, idHint, durability, ...hookOverrides
+  } = overrides
   const hooks: JobHooks = {
     cancel(reason) { cancels.push(reason) },
     done: new Promise<JobOutcome>((res, rej) => { settle = res; reject = rej }),
@@ -71,9 +74,83 @@ function producer(overrides: Partial<Omit<JobStart, 'run'> & JobHooks> = {}) {
     label,
     ...owner !== undefined ? { owner } : {},
     ...outputLimitBytes !== undefined ? { outputLimitBytes } : {},
+    ...idHint !== undefined ? { idHint } : {},
+    ...durability !== undefined ? { durability } : {},
     run: () => hooks,
   }
   return { spec, settle, reject, cancels }
+}
+
+/**
+ * An in-memory {@link JobStore} double with injectable write failures. Shares
+ * its record map across instances the way the domain store shares a medium,
+ * so a second registry can "reboot" over the same records.
+ */
+function fakeStore(options: { incarnation?: string; records?: Map<string, JobRecord> } = {}) {
+  const records = options.records ?? new Map<string, JobRecord>()
+  const state = {
+    records,
+    puts: [] as JobRecord[],
+    deletes: [] as string[],
+    failNextPuts: 0,
+    throwOnPut: false,
+    failDeletes: false,
+    throwOnDelete: false,
+  }
+  const store = {
+    incarnation: options.incarnation ?? PROCESS_INCARNATION,
+    list: () => [...records.values()],
+    get: (id: string) => records.get(id),
+    put: (record: JobRecord): Promise<void> => {
+      if (state.throwOnPut) throw new Error('synchronous store failure')
+      if (state.failNextPuts > 0) {
+        state.failNextPuts -= 1
+        return Promise.reject(new Error('injected store failure'))
+      }
+      records.set(record.id, record)
+      state.puts.push(record)
+      return Promise.resolve()
+    },
+    delete: (id: string): Promise<boolean> => {
+      if (state.throwOnDelete) throw new Error('synchronous delete failure')
+      if (state.failDeletes) return Promise.reject(new Error('injected delete failure'))
+      state.deletes.push(id)
+      return Promise.resolve(records.delete(id))
+    },
+  } as unknown as JobStore
+  return { store, state }
+}
+
+/** Boot a persisting registry over one store double (controller attached, adoption settled). */
+async function bootPersisted(store: JobStore, config: JobsConfig = {}) {
+  const ctx = new Context()
+  await ctx.plugin(AgentRegistry)
+  ctx.provide('jobStore', store)
+  await ctx.plugin(LocalJobRegistry, { persist: true, ...config })
+  ctx.jobs.attachController('test-controller')
+  await tick()
+  return ctx
+}
+
+/** One persisted record shaped like a previous process incarnation wrote it. */
+function storedRecord(overrides: Partial<JobRecord> = {}): JobRecord {
+  return {
+    id: JobId('bash-11111111-2222-4333-8444-555555555555'),
+    kind: 'bash',
+    label: 'restored job',
+    ownerSession: null,
+    status: 'running',
+    detail: null,
+    output: null,
+    startedAt: 100,
+    finishedAt: null,
+    reported: false,
+    outputLimitBytes: null,
+    resumeSpec: null,
+    incarnation: 'prior-incarnation',
+    schemaVersion: 1,
+    ...overrides,
+  }
 }
 
 async function harness(config: JobsConfig = {}) {
@@ -196,7 +273,7 @@ describe('LocalJobRegistry.start', () => {
   it('rejects before producer start and id allocation, then admits immediately after settlement', async () => {
     const ctx = await harness({ maxConcurrentJobsPerOwner: 1 })
     const first = producer()
-    expect(ctx.jobs.start(first.spec)).toBe('bash-1')
+    expect(ctx.jobs.start(first.spec)).toMatch(/^bash-/)
 
     const blocked = producer()
     const run = vi.fn(() => blocked.spec.run())
@@ -206,7 +283,7 @@ describe('LocalJobRegistry.start', () => {
 
     first.settle({ status: 'completed' })
     await tick()
-    expect(ctx.jobs.start(blocked.spec)).toBe('bash-2')
+    expect(ctx.jobs.start(blocked.spec)).toMatch(/^bash-/)
   })
 
   it('keeps a stopping job in the bucket until producer settlement', async () => {
@@ -220,7 +297,7 @@ describe('LocalJobRegistry.start', () => {
 
     first.settle({ status: 'killed' })
     await tick()
-    expect(ctx.jobs.start(replacement.spec)).toBe('bash-2')
+    expect(ctx.jobs.start(replacement.spec)).toMatch(/^bash-/)
   })
 
   it.each(['completed', 'killed', 'failed'] as const)(
@@ -261,12 +338,84 @@ describe('LocalJobRegistry.start', () => {
     await disposeAgentScope(oldOwner)
   })
 
-  it('issues kind-prefixed ids from per-kind counters', async () => {
+  it('mints kind-prefixed uuid ids, never reusing one across kinds or restarts', async () => {
     const ctx = await harness()
-    expect(ctx.jobs.start(producer().spec)).toBe('bash-1')
-    expect(ctx.jobs.start(producer().spec)).toBe('bash-2')
-    expect(ctx.jobs.start(producer({ kind: 'subagent' }).spec)).toBe('subagent-1')
-    expect(ctx.jobs.start(producer({ kind: 'workflow' }).spec)).toBe('workflow-1')
+    const first = ctx.jobs.start(producer().spec)
+    const second = ctx.jobs.start(producer().spec)
+    const uuid = /^bash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    expect(first).toMatch(uuid)
+    expect(second).toMatch(uuid)
+    expect(first).not.toBe(second)
+    expect(ctx.jobs.start(producer({ kind: 'subagent' }).spec)).toMatch(/^subagent-/)
+  })
+
+  it('registers under the producer-supplied idHint and rejects collisions before the starter runs', async () => {
+    const ctx = await harness()
+    expect(ctx.jobs.start(producer({ idHint: 'stable' }).spec)).toBe('bash-stable')
+
+    const collided = producer({ idHint: 'stable' })
+    const run = vi.fn(() => collided.spec.run())
+    expect(() => ctx.jobs.start({ ...collided.spec, run }))
+      .toThrow('job id bash-stable is already registered (idHint collision)')
+    expect(run).not.toHaveBeenCalled()
+    expect(() => ctx.jobs.start(producer({ idHint: '' }).spec))
+      .toThrow('invalid idHint: expected a non-empty string')
+  })
+
+  it('numbers each owner bucket with its own 1-based display ordinals', async () => {
+    const ctx = await harness()
+    const alice = stubAgent(ctx, 'alice')
+    ctx.agents.register(alice)
+    const a1 = ctx.jobs.start(producer({ owner: alice }).spec)
+    const open1 = ctx.jobs.start(producer().spec)
+    const a2 = ctx.jobs.start(producer({ owner: alice, kind: 'subagent' }).spec)
+    const open2 = ctx.jobs.start(producer().spec)
+
+    expect(ctx.jobs.get(a1, alice).ordinal).toBe(1)
+    // The ordinal counts the owner's registrations across kinds.
+    expect(ctx.jobs.get(a2, alice).ordinal).toBe(2)
+    expect(ctx.jobs.get(open1).ordinal).toBe(1)
+    expect(ctx.jobs.get(open2).ordinal).toBe(2)
+  })
+
+  it('rejects a durability.recordSession that contradicts the owner session', async () => {
+    const ctx = await harness()
+    const owner = stubAgent(ctx, 'owner')
+    ctx.agents.register(owner)
+    const contradicted = producer({ owner })
+    expect(() => ctx.jobs.start({
+      ...contradicted.spec,
+      durability: { recordSession: SessionId('someone-else') },
+    })).toThrow('durability.recordSession "someone-else" does not name the owner\'s session "owner"')
+    // A matching recordSession is redundant but legal.
+    expect(() => ctx.jobs.start({
+      ...producer({ owner }).spec,
+      durability: { recordSession: SessionId('owner') },
+    })).not.toThrow()
+  })
+
+  it('fences a recordSession-only registration by that session id', async () => {
+    const ctx = await harness()
+    const insider = stubAgent(ctx, 'record-owner')
+    const outsider = stubAgent(ctx, 'other')
+    ctx.agents.register(insider)
+    ctx.agents.register(outsider)
+    const id = ctx.jobs.start({
+      ...producer().spec,
+      durability: { recordSession: SessionId('record-owner') },
+    })
+    expect(ctx.jobs.get(id, insider).ownerSession).toBe('record-owner')
+    expect(() => ctx.jobs.get(id, outsider)).toThrow('belongs to another session')
+  })
+
+  it('marks snapshots resumable exactly when a non-null resumeSpec was supplied', async () => {
+    const ctx = await harness()
+    const plain = ctx.jobs.start(producer().spec)
+    const nullSpec = ctx.jobs.start({ ...producer().spec, durability: { resumeSpec: null } })
+    const resumable = ctx.jobs.start({ ...producer().spec, durability: { resumeSpec: { arg: 1 } } })
+    expect(ctx.jobs.get(plain)).toMatchObject({ resumable: false, incarnation: PROCESS_INCARNATION })
+    expect(ctx.jobs.get(nullSpec).resumable).toBe(false)
+    expect(ctx.jobs.get(resumable).resumable).toBe(true)
   })
 })
 
@@ -599,9 +748,10 @@ describe('LocalJobRegistry owner isolation', () => {
     ctx.jobs.attachController('test-controller')
     expect(() => ctx.jobs.start(producer({ owner: stubAgent(ctx, 'a') }).spec))
       .toThrow('background job ownership requires the agent registry')
-    // The failed registration mutated nothing: no stored job, counter untouched.
+    // The failed registration mutated nothing: no stored job, no burned ordinal.
     expect(ctx.jobs.list()).toEqual([])
-    expect(ctx.jobs.start(producer().spec)).toBe('bash-1')
+    const id = ctx.jobs.start(producer().spec)
+    expect(ctx.jobs.get(id).ordinal).toBe(1)
   })
 
   it('a failed owner-cleanup attach leaves the registry unchanged and does not poison the owner', async () => {
@@ -626,7 +776,7 @@ describe('LocalJobRegistry owner isolation', () => {
         done: new Promise<JobOutcome>((res) => { settle = res }),
       }),
     })
-    expect(id).toBe('bash-1') // the failed attempt burned no counter
+    expect(ctx.jobs.get(id, ghost).ordinal).toBe(1) // the failed attempt burned no ordinal
     await disposeAgentScope(ghost)
     expect(cancels).toEqual(['owner disposed'])
     expect(ctx.jobs.list(ghost)).toEqual([])
@@ -1055,7 +1205,7 @@ describe('LocalJobRegistry.onJobsChanged', () => {
     ctx.jobs.onJobsChanged(changed => void seen.push(changed?.id))
 
     const id = ctx.jobs.start(producer().spec)
-    expect(id).toBe('bash-1')
+    expect(id).toMatch(/^bash-/)
     expect(seen).toEqual([undefined])
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('onJobsChanged listener threw'))
   })
@@ -1133,5 +1283,568 @@ describe('LocalJobRegistry teardown change notifications', () => {
     await fiber.dispose()
     // stopping (teardown cancel), settlement, then the final empty set.
     expect(seen).toEqual([undefined, undefined, undefined])
+  })
+})
+
+describe('LocalJobRegistry config validation', () => {
+  it.each([
+    [{ maxSettledJobs: -1 }],
+    [{ maxSettledJobs: 1.5 }],
+    [{ teardownGraceMs: 0 }],
+    [{ teardownGraceMs: 2_147_483_648 }],
+    [{ maxPersistedOutputBytes: 0 }],
+    [{ persist: 'yes' as unknown as boolean }],
+  ])('rejects invalid durability config at load: %o', async (config) => {
+    const ctx = new Context()
+    await expect(ctx.plugin(LocalJobRegistry, config)).rejects.toThrow()
+  })
+})
+
+describe('LocalJobRegistry durable persistence', () => {
+  it('mirrors registration, kill, and settlement, keeping reported as committed', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const p = producer({ durability: { resumeSpec: { cmd: 'rerun' } } })
+    const id = ctx.jobs.start(p.spec)
+    await tick()
+    expect(state.records.get(id)).toMatchObject({
+      id,
+      kind: 'bash',
+      status: 'running',
+      reported: false,
+      resumeSpec: { cmd: 'rerun' },
+      incarnation: PROCESS_INCARNATION,
+      schemaVersion: 1,
+    })
+
+    expect(ctx.jobs.kill(id, undefined, 'stop it')).toBe('requested')
+    await tick()
+    expect(state.records.get(id)).toMatchObject({ status: 'stopping', reported: true })
+
+    p.settle({ status: 'killed', detail: 'stopped', output: 'tail' })
+    await tick()
+    expect(state.records.get(id)).toMatchObject({ status: 'killed', detail: 'stopped', output: 'tail', reported: true })
+    expect(state.records.get(id)?.finishedAt).toBeTypeOf('number')
+  })
+
+  it('persists the reported flip a terminal read or wait performs', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const p = producer()
+    const id = ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    await tick()
+    expect(state.records.get(id)).toMatchObject({ status: 'completed', reported: false })
+
+    ctx.jobs.read(id)
+    await tick()
+    expect(state.records.get(id)).toMatchObject({ status: 'completed', reported: true })
+  })
+
+  it('clips persisted output to maxPersistedOutputBytes while in-memory reads stay complete', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxPersistedOutputBytes: 8 })
+    const p = producer({ kind: 'subagent' })
+    const id = ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed', output: '0123456789ABCDEF' })
+    await tick()
+
+    expect(ctx.jobs.read(id).text).toBe('0123456789ABCDEF')
+    const persisted = state.records.get(id)?.output ?? ''
+    expect(Buffer.byteLength(persisted)).toBeLessThanOrEqual(8)
+    expect(persisted.endsWith('ABCDEF')).toBe(true)
+  })
+
+  it('persist: false with a store mounted writes nothing', async () => {
+    const { store, state } = fakeStore()
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', store)
+    await ctx.plugin(LocalJobRegistry, { persist: false })
+    ctx.jobs.attachController('test-controller')
+    await tick()
+
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    await tick()
+    expect(state.puts).toEqual([])
+  })
+
+  it('a rejected store write logs and degrades that record to in-memory only', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    state.failNextPuts = 1
+    const degraded = producer()
+    const degradedId = ctx.jobs.start(degraded.spec)
+    await tick()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`disabled durable record for ${degradedId}`))
+
+    // Later transitions of the degraded record stay in-memory; the registry
+    // record remains authoritative and a healthy sibling still persists.
+    degraded.settle({ status: 'completed' })
+    await tick()
+    expect(state.records.has(degradedId)).toBe(false)
+    expect(ctx.jobs.get(degradedId)).toMatchObject({ status: 'completed' })
+
+    const healthy = producer()
+    const healthyId = ctx.jobs.start(healthy.spec)
+    await tick()
+    expect(state.records.has(healthyId)).toBe(true)
+  })
+
+  it('a synchronously throwing store put degrades the record the same way', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    state.throwOnPut = true
+    const id = ctx.jobs.start(producer().spec)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`disabled durable record for ${id}`))
+    expect(ctx.jobs.get(id).status).toBe('running')
+  })
+
+  it('mirrors records that started before the store mounted', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    const p = producer()
+    const id = ctx.jobs.start(p.spec)
+
+    const { store, state } = fakeStore()
+    ctx.provide('jobStore', store)
+    await tick()
+    expect(state.records.get(id)).toMatchObject({ id, status: 'running' })
+  })
+
+  it('stops writing when the store fiber disposes', async () => {
+    const { store, state } = fakeStore()
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const storeFiber = await ctx.plugin((inner: Context) => {
+      inner.provide('jobStore', store)
+    })
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    await tick()
+
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    await tick()
+    const written = state.puts.length
+    expect(written).toBeGreaterThan(0)
+
+    await storeFiber.dispose()
+    p.settle({ status: 'completed' })
+    await tick()
+    expect(state.puts.length).toBe(written)
+  })
+})
+
+describe('LocalJobRegistry restore and resume', () => {
+  it('restores terminal records with their reported flag and session fence intact', async () => {
+    const records = new Map<string, JobRecord>()
+    const unreported = storedRecord({
+      id: JobId('subagent-aaaaaaaa-1111-4111-8111-111111111111'),
+      kind: 'subagent',
+      status: 'completed',
+      output: 'saved answer',
+      startedAt: 50,
+      finishedAt: 60,
+      ownerSession: SessionId('alice'),
+    })
+    const reported = storedRecord({
+      id: JobId('bash-bbbbbbbb-2222-4222-8222-222222222222'),
+      status: 'failed',
+      detail: 'exit code: 3',
+      startedAt: 10,
+      finishedAt: 20,
+      reported: true,
+    })
+    records.set(unreported.id, unreported)
+    records.set(reported.id, reported)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+
+    // Ordinals are re-assigned in startedAt order; the fence keys on session.
+    expect(ctx.jobs.list(alice).map(job => ({ id: job.id, ordinal: job.ordinal, reported: job.reported }))).toEqual([
+      { id: reported.id, ordinal: 1, reported: true },
+      { id: unreported.id, ordinal: 1, reported: false },
+    ])
+    expect(ctx.jobs.list(bob).map(job => job.id)).toEqual([reported.id])
+    expect(() => ctx.jobs.read(unreported.id, bob)).toThrow('belongs to another session')
+
+    // Reading the restored output flips reported and persists the flip.
+    const read = ctx.jobs.read(unreported.id, alice)
+    expect(read.text).toBe('saved answer')
+    await tick()
+    expect(state.records.get(unreported.id)).toMatchObject({ reported: true })
+  })
+
+  it('honest-settles a non-resumable record from a previous incarnation at restore', async () => {
+    const records = new Map<string, JobRecord>()
+    const orphan = storedRecord()
+    records.set(orphan.id, orphan)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+
+    expect(ctx.jobs.get(orphan.id)).toMatchObject({
+      status: 'failed',
+      detail: 'not resumable after host restart',
+      reported: false,
+      resumable: false,
+    })
+    await tick()
+    expect(state.records.get(orphan.id)).toMatchObject({ status: 'failed', detail: 'not resumable after host restart' })
+  })
+
+  it('leaves a non-terminal record from this incarnation untouched (in-process reload guard)', async () => {
+    const records = new Map<string, JobRecord>()
+    const live = storedRecord({ incarnation: PROCESS_INCARNATION, resumeSpec: { keep: true } })
+    records.set(live.id, live)
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+
+    const resumer = vi.fn(() => undefined)
+    ctx.jobs.registerResumer('bash', resumer)
+    expect(resumer).not.toHaveBeenCalled()
+    expect(ctx.jobs.get(live.id).status).toBe('running')
+  })
+
+  it('replays a resumable record when its kind registers a resumer, adopting under the original id', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 }, ownerSession: SessionId('alice') })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+
+    // Visible and killable while awaiting its resumer.
+    expect(ctx.jobs.get(stored.id, stubAgent(ctx, 'alice'))).toMatchObject({ status: 'running', resumable: true, incarnation: 'prior-incarnation' })
+
+    let settle!: (outcome: JobOutcome) => void
+    const chunks = ['resumed delta']
+    const resume = vi.fn(() => ({
+      cancel: () => {},
+      done: new Promise<JobOutcome>((resolve) => { settle = resolve }),
+      readOutput: () => chunks.shift() ?? '',
+    }))
+    ctx.jobs.registerResumer('bash', resume)
+
+    expect(resume).toHaveBeenCalledWith({
+      id: stored.id,
+      kind: 'bash',
+      label: 'restored job',
+      ownerSession: 'alice',
+      resumeSpec: { arg: 7 },
+      startedAt: 100,
+      priorIncarnation: 'prior-incarnation',
+    })
+    const alice = stubAgent(ctx, 'alice')
+    expect(ctx.jobs.get(stored.id, alice)).toMatchObject({ status: 'running', incarnation: PROCESS_INCARNATION })
+    await tick()
+    expect(state.records.get(stored.id)).toMatchObject({ incarnation: PROCESS_INCARNATION })
+
+    expect(ctx.jobs.read(stored.id, alice).text).toBe('resumed delta')
+    settle({ status: 'completed', detail: 'resumed to completion' })
+    await tick()
+    expect(ctx.jobs.get(stored.id, alice)).toMatchObject({ status: 'completed', detail: 'resumed to completion' })
+    expect(state.records.get(stored.id)).toMatchObject({ status: 'completed' })
+  })
+
+  it('replays at restore when the resumer registered before the store adopted', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 1 } })
+    records.set(stored.id, stored)
+    const { store } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    const resume = vi.fn(() => undefined)
+    ctx.jobs.registerResumer('bash', resume)
+
+    ctx.provide('jobStore', store)
+    await tick()
+    expect(resume).toHaveBeenCalledTimes(1)
+  })
+
+  it('honest-settles when the resumer declines, and contains a throwing resumer', async () => {
+    const declinedRecord = storedRecord({ id: JobId('bash-cccccccc-3333-4333-8333-333333333333'), resumeSpec: { a: 1 } })
+    const throwingRecord = storedRecord({ id: JobId('pty-dddddddd-4444-4444-8444-444444444444'), kind: 'pty-send', resumeSpec: { b: 2 } })
+    const records = new Map<string, JobRecord>([[declinedRecord.id, declinedRecord], [throwingRecord.id, throwingRecord]])
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    ctx.jobs.registerResumer('bash', () => undefined)
+    expect(ctx.jobs.get(declinedRecord.id)).toMatchObject({ status: 'failed', detail: 'not resumable after host restart' })
+
+    ctx.jobs.registerResumer('pty-send', () => { throw new Error('resume boom') })
+    expect(ctx.jobs.get(throwingRecord.id)).toMatchObject({ status: 'failed' })
+    expect(ctx.jobs.get(throwingRecord.id).detail).toContain('resume handler threw')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('resume boom'))
+  })
+
+  it('rejects a duplicate resumer per kind and unregisters with its disposer', async () => {
+    const ctx = await harness()
+    const detach = ctx.jobs.registerResumer('bash', () => undefined)
+    expect(() => ctx.jobs.registerResumer('bash', () => undefined))
+      .toThrow('a resumer is already registered for job kind "bash"')
+    detach()
+    expect(() => ctx.jobs.registerResumer('bash', () => undefined)).not.toThrow()
+  })
+
+  it('kills a pending-resume record by settling it, forwarding the reason', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 1 } })
+    records.set(stored.id, stored)
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+
+    expect(ctx.jobs.kill(stored.id, undefined, 'no longer wanted')).toBe('requested')
+    expect(ctx.jobs.get(stored.id).status).toBe('stopping')
+    await tick()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'killed', detail: 'no longer wanted' })
+  })
+
+  it('kills a pending-resume record without a reason using the honest default detail', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 1 } })
+    records.set(stored.id, stored)
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+
+    expect(ctx.jobs.kill(stored.id)).toBe('requested')
+    await tick()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'killed', detail: 'killed before resume' })
+  })
+
+  it('contains an adopted producer whose done promise rejects', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 1 } })
+    records.set(stored.id, stored)
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    ctx.jobs.registerResumer('bash', () => ({
+      cancel: () => {},
+      done: Promise.reject(new Error('adopted transport exploded')),
+    }))
+    await tick()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'Error: adopted transport exploded' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('producer contract violation'))
+  })
+})
+
+describe('LocalJobRegistry settled retention', () => {
+  it('evicts only reported terminal records, FIFO per owner, dropping the durable mirror', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxSettledJobs: 1 })
+
+    const first = producer()
+    const firstId = ctx.jobs.start(first.spec)
+    const second = producer()
+    const secondId = ctx.jobs.start(second.spec)
+    first.settle({ status: 'completed' })
+    second.settle({ status: 'completed' })
+    await tick()
+
+    // Two unreported terminal records exceed the cap but both survive:
+    // evicting one would lose a completion notice the model never read.
+    expect(ctx.jobs.list().map(job => job.id)).toEqual([firstId, secondId])
+
+    ctx.jobs.read(firstId)
+    ctx.jobs.read(secondId)
+    await tick()
+    // Both reported: the older one is evicted down to the cap.
+    expect(ctx.jobs.list().map(job => job.id)).toEqual([secondId])
+    expect(state.deletes).toContain(firstId)
+    expect(() => ctx.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+  })
+
+  it('maxSettledJobs: 0 retains no reported terminal record and stays per-owner', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, { maxSettledJobs: 0 })
+    ctx.jobs.attachController('test-controller')
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+
+    const aliceJob = producer({ owner: alice })
+    const aliceId = ctx.jobs.start(aliceJob.spec)
+    const bobJob = producer({ owner: bob })
+    const bobId = ctx.jobs.start(bobJob.spec)
+    aliceJob.settle({ status: 'completed' })
+    bobJob.settle({ status: 'completed' })
+    await tick()
+
+    // The terminal read still answers, and its reported flip evicts the record.
+    expect(ctx.jobs.read(aliceId, alice).snapshot.status).toBe('completed')
+    expect(() => ctx.jobs.get(aliceId, alice)).toThrow('unknown job')
+    // Bob's unreported record is untouched by alice's eviction.
+    expect(ctx.jobs.list(bob).map(job => job.id)).toEqual([bobId])
+  })
+
+  it('evicts in-memory only when no store is mounted, and contains a synchronously throwing durable delete', async () => {
+    // persist: true with no store: eviction has no durable mirror to drop.
+    const bare = new Context()
+    await bare.plugin(AgentRegistry)
+    await bare.plugin(LocalJobRegistry, { persist: true, maxSettledJobs: 0 })
+    bare.jobs.attachController('test-controller')
+    const p1 = producer()
+    const id1 = bare.jobs.start(p1.spec)
+    p1.settle({ status: 'completed' })
+    await tick()
+    bare.jobs.read(id1)
+    expect(() => bare.jobs.get(id1)).toThrow('unknown job')
+
+    // A store whose delete throws synchronously is contained like a rejection.
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxSettledJobs: 0 })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const p2 = producer()
+    const id2 = ctx.jobs.start(p2.spec)
+    p2.settle({ status: 'completed' })
+    await tick()
+    state.throwOnDelete = true
+    ctx.jobs.read(id2)
+    expect(() => ctx.jobs.get(id2)).toThrow('unknown job')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`failed to evict durable record ${id2}`))
+  })
+
+  it('contains a failing durable eviction without losing the in-memory removal', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxSettledJobs: 0 })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    const p = producer()
+    const id = ctx.jobs.start(p.spec)
+    p.settle({ status: 'completed' })
+    await tick()
+    state.failDeletes = true
+    ctx.jobs.read(id)
+    await tick()
+    expect(() => ctx.jobs.get(id)).toThrow('unknown job')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`failed to evict durable record ${id}`))
+  })
+})
+
+describe('LocalJobRegistry teardown grace', () => {
+  it('force-fails producers that never release once teardownGraceMs expires', async () => {
+    const { store, state } = fakeStore()
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', store)
+    const fiber = await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    await tick()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    const id = ctx.jobs.start({
+      kind: 'bash',
+      label: 'wedged producer',
+      run: () => ({
+        cancel() { /* acknowledges but never settles done */ },
+        done: new Promise<JobOutcome>(() => {}),
+      }),
+    })
+    // A compliant sibling settles on cancel; the grace pass skips it.
+    let settleCompliant!: (outcome: JobOutcome) => void
+    ctx.jobs.start({
+      kind: 'bash',
+      label: 'compliant producer',
+      run: () => ({
+        cancel() { setTimeout(() => { settleCompliant({ status: 'killed' }) }, 1) },
+        done: new Promise<JobOutcome>((resolve) => { settleCompliant = resolve }),
+      }),
+    })
+
+    // Disposal must complete despite the wedged producer never settling.
+    await fiber.dispose()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('did not release within teardownGraceMs'))
+    await tick()
+    expect(state.records.get(id)).toMatchObject({
+      status: 'failed',
+      detail: 'producer did not release within teardownGraceMs; work may be orphaned',
+    })
+  })
+})
+
+describe('LocalJobRegistry owner index', () => {
+  it('stays equivalent to a linear scan under interleaved settle, kill, and disposal', async () => {
+    const ctx = await harness({ maxConcurrentJobsPerOwner: 100 })
+    const alice = stubAgent(ctx, 'alice')
+    const bob = stubAgent(ctx, 'bob')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+
+    interface InternalTask { owner?: Agent; status: string }
+    const service = ctx.jobs as unknown as {
+      store: Map<JobId, InternalTask>
+      activeTaskCount(owner?: Agent): number
+    }
+    const linearActive = (owner?: Agent): number => [...service.store.values()]
+      .filter(job => job.owner === owner && (job.status === 'running' || job.status === 'stopping'))
+      .length
+    const check = (): void => {
+      for (const owner of [alice, bob, undefined]) {
+        expect(service.activeTaskCount(owner)).toBe(linearActive(owner))
+      }
+    }
+
+    const live = [
+      producer({ owner: alice }), producer({ owner: alice }), producer({ owner: bob }), producer(),
+    ]
+    const ids = live.map(p => ctx.jobs.start(p.spec))
+    check()
+
+    ctx.jobs.kill(ids[0]!, alice)
+    check()
+    live[0]!.settle({ status: 'killed' })
+    live[2]!.settle({ status: 'completed' })
+    await tick()
+    check()
+
+    live[1]!.settle({ status: 'completed' })
+    await tick()
+    await disposeAgentScope(alice)
+    check()
+    // Alice's own records are gone; the unowned job remains visible to all.
+    expect(ctx.jobs.list(alice).map(job => job.id)).toEqual([ids[3]])
+    expect(ctx.jobs.list(bob)).toHaveLength(2)
+
+    live[3]!.settle({ status: 'completed' })
+    await tick()
+    check()
+    await disposeAgentScope(bob)
+    check()
+  })
+
+  it('tolerates removing a record whose owner bucket is already gone (internal guard)', async () => {
+    const ctx = await harness()
+    const service = ctx.jobs as unknown as { removeRecord(job: { id: JobId; ownerSession?: SessionId }): void }
+    expect(() => { service.removeRecord({ id: JobId('bash-gone'), ownerSession: SessionId('nobody') }) }).not.toThrow()
+  })
+
+  it('fails loud when the owner index references a missing record', async () => {
+    const ctx = await harness()
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    const service = ctx.jobs as unknown as { byOwner: Map<SessionId | undefined, Set<JobId>> }
+    service.byOwner.get(undefined)?.add(JobId('bash-ghost'))
+    expect(() => ctx.jobs.start(producer().spec)).toThrow('owner index references missing job bash-ghost')
+    // Restore consistency so the producer's settlement can commit cleanly.
+    service.byOwner.get(undefined)?.delete(JobId('bash-ghost'))
+    p.settle({ status: 'completed' })
+    await tick()
   })
 })

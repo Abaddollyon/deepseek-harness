@@ -9,17 +9,21 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  JobDoneListener, JobId, JobRead, JobSnapshot, JobStart, JobsChangedListener,
+  JobDoneListener, JobId, JobKind, JobRead, JobResumer, JobSnapshot, JobStart, JobsChangedListener,
 } from './types.ts'
 
 export { JobId } from './types.ts'
+export { PROCESS_INCARNATION } from './incarnation.ts'
 export type {
   JobDoneListener,
+  JobDurability,
   JobHooks,
   JobKind,
   JobKindMap,
   JobOutcome,
   JobRead,
+  JobResumeCandidate,
+  JobResumer,
   JobSnapshot,
   JobStart,
   JobStatus,
@@ -77,7 +81,7 @@ export abstract class JobRegistry extends Service {
    * leaves nothing registered; after it returns, registration cannot fail.
    * Settlement records the outcome, notifies listeners, and releases waiters.
    * @param spec - job identity, owner, and synchronous starter.
-   * @returns the registry-issued `<kind>-N` id.
+   * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
    */
   abstract start(spec: JobStart): JobId
 
@@ -165,6 +169,20 @@ export abstract class JobRegistry extends Service {
    * @returns disposer that unregisters the listener.
    */
   abstract onJobsChanged(listener: JobsChangedListener): () => void
+
+  /**
+   * Register a resume handler for one job kind. On boot the registry replays
+   * every non-terminal persisted record of this kind that a previous process
+   * incarnation wrote: a handler that returns hooks adopts the record under
+   * its original id; `undefined` settles it honestly as `failed` with detail
+   * `'not resumable after host restart'`. Registration is an effect scoped to
+   * the registering context; at most one resumer may serve a kind at a time,
+   * and a duplicate registration fails loudly.
+   * @param kind - producer kind whose persisted records the handler serves.
+   * @param resume - decides adoption per record; see {@link JobResumer}.
+   * @returns disposer that unregisters the handler.
+   */
+  abstract registerResumer(kind: JobKind, resume: JobResumer): () => void
 
   /**
    * Attach an effect-scoped controller that can read and stop jobs. It serves the

@@ -55,6 +55,8 @@ export const Config: z<Config> = z.object({
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
 export interface PublicJobSnapshot {
   id: string
+  /** Per-owner display ordinal; the short model-facing handle beside the durable id. */
+  ordinal: number
   kind: string
   label: string
   status: JobSnapshot['status']
@@ -69,6 +71,7 @@ const PUBLIC_TASK_SCHEMA = {
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
+    ordinal: { type: 'integer', required: true },
     kind: { type: 'string', required: true },
     label: { type: 'string', required: true },
     status: {
@@ -86,6 +89,7 @@ const PUBLIC_TASK_SCHEMA = {
 function publicJob(snapshot: JobSnapshot): PublicJobSnapshot {
   return {
     id: snapshot.id,
+    ordinal: snapshot.ordinal,
     kind: snapshot.kind,
     label: snapshot.label,
     status: snapshot.status,
@@ -347,9 +351,12 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'array', items: PUBLIC_TASK_SCHEMA },
       render: (_args, jobs) => [{
         type: 'text',
+        // The ordinal+kind handle keeps rows scannable now that ids carry a
+        // uuid; the full id stays present because it is what the other job
+        // tools accept.
         text: jobs.length === 0
           ? '(no background jobs)'
-          : jobs.map(t => `${t.id} [${t.kind}] ${t.status} — ${t.label}`).join('\n'),
+          : jobs.map(t => `#${t.ordinal} [${t.kind}] ${t.status} — ${t.label} (id: ${t.id})`).join('\n'),
       }],
     },
     execute(_args, exec) {

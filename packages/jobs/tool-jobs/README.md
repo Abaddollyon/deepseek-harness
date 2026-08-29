@@ -7,12 +7,12 @@ The model-facing controller for `ctx.jobs`: three kind-independent tools, comple
 ## Tools
 
 - `job_output(job_id, wait?, timeout_ms?)` reads without blocking by default. Stream jobs return only the next delta; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. `wait: true` waits up to the configured cap and leaves a still-running job alive on timeout.
-- `job_list()` returns caller-visible jobs as `<id> [<kind>] <status> — <label>`.
+- `job_list()` returns caller-visible jobs as `#<ordinal> [<kind>] <status> — <label> (id: <id>)`: the per-owner ordinal is the short scannable handle now that ids carry a uuid, and the full id stays present because it is what the other job tools accept.
 - `job_kill(job_id, reason?)` requests cancellation immediately and forwards the logged reason. Terminal jobs return a non-consuming snapshot.
 
 All three use generic UI cards: `read` for output and list, `execute` for kill.
 
-Their canonical values are `{ text, job }`, `PublicJobSnapshot[]`, and `{ outcome: 'cancellation-requested' | 'already-finished', job }`. A public snapshot carries id, kind, label, status/detail, and start/finish times; it deliberately omits `ownerSession` and the internal `reported` notice bit. Native renderers preserve the status and acknowledgement text above.
+Their canonical values are `{ text, job }`, `PublicJobSnapshot[]`, and `{ outcome: 'cancellation-requested' | 'already-finished', job }`. A public snapshot carries id, per-owner display ordinal, kind, label, status/detail, and start/finish times; it deliberately omits `ownerSession`, the internal `reported` notice bit, and the restart bookkeeping (`resumable`, `incarnation`). The persisted `reported` flag is what keeps this gating correct across a host restart: a restored record the model already collected produces no duplicate notice. Native renderers preserve the status and acknowledgement text above.
 
 When a producer supplies `outputLimitBytes`, `job_output`, terminal `job_kill`, and completion notices cap the complete Native UTF-8 result after adding status or notice text. Reads retain the output tail and control suffix when they fit; a bounded completion notice instead reserves `background job <id>` and the `job_output` collection instruction before spending remaining bytes on its variable kind, label, status, detail, and truncation marker. A prepended pre-execute listener captures the caller-visible job before policy, and each job-control definition's final-content callback applies its producer cap to single-text denials, short-circuits, normalized tool or pipeline failures, replacements, and blocks; structured multi-block policy results retain their shape. An existing producer truncation marker is reused rather than duplicated. Producers that omit the field retain the existing unbounded controller behavior.
 

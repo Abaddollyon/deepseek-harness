@@ -184,8 +184,8 @@ describe('bash tool through the agent loop', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-bg-'))
     dirs.push(dir)
     const sentinel = join(dir, 'release')
-    // The job id is deterministic (a fresh LocalJobRegistry counts per kind from 1),
-    // so the script can name `bash-1` without threading a generated id.
+    // The registry mints uuid job ids, so the collection call reads the id
+    // back from the start ack visible in its own request context.
     const adapter = new MockAdapter([
       toolCallResponse('call-1', 'bash', {
         command: `while [ ! -f ${JSON.stringify(sentinel)} ]; do sleep 0.02; done; echo bg-ok`,
@@ -193,7 +193,11 @@ describe('bash tool through the agent loop', () => {
         run_in_background: true,
       }),
       textResponse('Started it in the background.'),
-      toolCallResponse('call-2', 'job_output', { job_id: 'bash-1' }),
+      (options) => {
+        const jobId = /started background job (bash-[0-9a-f-]+)/.exec(JSON.stringify(options))?.[1]
+        if (jobId === undefined) throw new Error('start ack not visible to the collection turn')
+        return toolCallResponse('call-2', 'job_output', { job_id: jobId })
+      },
       textResponse('Background job finished.'),
     ])
     const ctx = await harness(adapter)
@@ -204,7 +208,8 @@ describe('bash tool through the agent loop', () => {
 
     const firstResult = findEvent(events(agent), 'tool/result')
     expect(firstResult.data.message.content[0].isError).toBe(false)
-    expect(resultText(firstResult)).toBe('started background job bash-1')
+    expect(resultText(firstResult)).toMatch(/^started background job bash-/)
+    const jobId = resultText(firstResult).slice('started background job '.length)
     // The turn closed with the task still running, so the notice cannot exist yet.
     const isNotice = (e: SessionEvent): e is SessionEvent<'user/message'> =>
       e.type === 'user/message' && e.data.source.kind === 'plugin'
@@ -227,7 +232,7 @@ describe('bash tool through the agent loop', () => {
     const notice = events(agent).find(isNotice)!
     const noticeText = notice.data.content
       .filter(block => block.type === 'text').map(block => block.text).join('')
-    expect(noticeText).toContain('background job bash-1 (bash: ')
+    expect(noticeText).toContain(`background job ${jobId} (bash: `)
     expect(noticeText).toContain('finished [status: completed, exit code: 0]')
     expect(notice.data.source).toMatchObject({
       kind: 'plugin',

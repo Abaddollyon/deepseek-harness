@@ -7,12 +7,12 @@
 ## 工具
 
 - `job_output(job_id, wait?, timeout_ms?)` 默认以非阻塞方式读取。流任务只返回下一个增量；最终输出任务在终止后返回结果。每个响应都以 `[status: ...]` 结尾。`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。
-- `job_list()` 以 `<id> [<kind>] <status> — <label>` 返回调用方可见的任务。
+- `job_list()` 以 `#<ordinal> [<kind>] <status> — <label> (id: <id>)` 返回调用方可见的任务：id 携带 uuid 之后，每所有者的序号是便于扫读的简短句柄，而完整 id 依然在场，因为其他任务工具接受的就是它。
 - `job_kill(job_id, reason?)` 立即请求取消并转发已记录的原因。终止任务返回非消费式快照。
 
 三个工具都使用通用 UI 卡片：output 和 list 使用 `read`，kill 使用 `execute`。
 
-它们的规范值依次为 `{ text, job }`、`PublicJobSnapshot[]` 和 `{ outcome: 'cancellation-requested' | 'already-finished', job }`。公共快照携带 id、kind、label、status/detail 及开始／结束时间；它有意省略 `ownerSession` 和内部 `reported` 通知位。原生 renderer 保留上述状态与确认文本。
+它们的规范值依次为 `{ text, job }`、`PublicJobSnapshot[]` 和 `{ outcome: 'cancellation-requested' | 'already-finished', job }`。公共快照携带 id、每所有者展示序号、kind、label、status/detail 及开始／结束时间；它有意省略 `ownerSession`、内部 `reported` 通知位与重启簿记（`resumable`、`incarnation`）。持久化的 `reported` 标志正是让这套门控跨宿主重启保持正确的机制：模型已经收集过的恢复记录不会产生重复通知。原生 renderer 保留上述状态与确认文本。
 
 当生产方提供 `outputLimitBytes` 时，`job_output`、针对已终止任务的 `job_kill` 和完成通知会在添加状态或通知文本后，对完整的原生 UTF-8 结果施加上限。只要能够容纳，读取就会保留输出尾部与控制后缀；有界完成通知则先为 `background job <id>` 和 `job_output` 收集指令预留空间，再把剩余字节用于可变的 kind、label、status、detail 与截断标记。一个前置 pre-execute 监听器会在策略运行前捕获调用方可见任务；每个任务控制定义的 final-content 回调会把其生产方上限应用到单文本拒绝、短路、规范化工具或流水线失败、替换和阻止；结构化多块策略结果保持自身形状。已有的生产方截断标记会复用，不会重复添加。省略该字段的生产方保留现有的无界控制器行为。
 

@@ -6,7 +6,7 @@
 
 ## 服务约定
 
-- `start(spec): JobId` 验证已附加的任务控制器、spec、确切且仍存活的 owner、可选的正数 `outputLimitBytes`，以及 Service Provider 所拥有的准入策略，然后只调用生产方的 `run()` 一次。预检拒绝或启动方抛出异常时都不会生成 job id 或注册工作；成功返回会直接提交，不再执行其他可能失败的步骤。
+- `start(spec): JobId` 验证已附加的任务控制器、spec、确切且仍存活的 owner、可选的正数 `outputLimitBytes`，以及 Service Provider 所拥有的准入策略，然后只调用生产方的 `run()` 一次。预检拒绝或启动方抛出异常时都不会生成 job id 或注册工作；成功返回会直接提交，不再执行其他可能失败的步骤。id 形如 `<kind>-<uuid>`（生产方提供稳定片段时为 `<kind>-<idHint>`），因此持久化的 id 绝不会被重新铸造给别的工作；快照携带每所有者从 1 起的 `ordinal`，作为面向模型的简短句柄。可选的 `durability` 块提供生产方拥有的 `resumeSpec`（供后续启动交回给 resumer）以及拥有持久记录的 `recordSession`。
 - `get(id, caller?)` 和 `list(caller?)` 返回非消费式快照。列表只包含调用方拥有及无 owner 的任务。
 - `read(id, caller?)` 消费流任务的唯一游标；对于最终输出任务，则以幂等方式读取终止输出。
 - `kill(id, caller?, reason?)` 在更改状态前调用生产方取消。取消抛出异常时任务保持运行；成功则把状态改为 `stopping`，并将终止交付标记为已报告。
@@ -14,10 +14,11 @@
 - `onJobDone(listener)` 观察每条终止记录及其精确 owner。监听器抛出的异常和产生的拒绝都会被隔离；系统不会等待监听器工作。
 - `onJobsChanged(listener)` 观察可见集合的变化——注册、每一次转入 stopping（包括 teardown 在等待缓慢生产者之前的那一次）、结算、owner 销毁时的移除，以及服务销毁提交的清空——只携带集合发生变化的那个 owner，或在无主任务变化、因而每个调用方的集合都随之变化时携带 `undefined`。它按 owner 分粒度，因为移除是任何逐任务记录都无法表达的变化；它也不是 `onJobDone` 的超集：它不含任何投递含义，也不把任何东西标为已上报。注册绑定的是调用方 fiber，因此挂在注册表之外的观察者仍能收到销毁时的清空。
 - `attachController(name)` 在其 effect 生命周期内声明任务控制器。当没有任何已附加的控制器服务于 spec 的所有者时，`start()` 会在生产方执行前失败。
+- `registerResumer(kind, resume)` 为一个 kind 注册启动回放处理器：对上一个进程 incarnation 写下的每条非终止持久记录，返回 hooks 的处理器以原 id 收养该记录，返回 `undefined` 则将其诚实结算为 `failed`，详情为 `not resumable after host restart`。注册是返回其 disposer 的 effect；同一 kind 同时只能有一个 resumer。
 
 这三类注册都是相对于所有者的，因为一个注册表要服务进程内的每一套组合。从不带 scope 的上下文注册的控制器或监听器服务于每个所有者；在某套 agent 组合的 scope 下注册的，则恰好服务于在该组合下组合出的 agent。因此，未加载任何控制器的组合无法借另一套组合的控制工具启动后台工作，而一次结算也只会通知其所有者所属组合注册的监听器。
 
-有 owner 的访问会比较任务的 `SessionId` 与调用方。`bash-1` 等 id 可预测，因此这道隔离是安全边界。无 owner 的任务向调用方开放，并持续到服务 dispose（资源释放）为止。
+有 owner 的访问会比较任务的 `SessionId` 与调用方——安全边界是这道围栏而非 id 的保密性，而且由于会话 id 随记录持久化，它能跨重启存续。无 owner 的任务向调用方开放。快照还携带 `resumable`（提供过非 null 的 `resumeSpec`）与 `incarnation`（拥有该记录的进程——`PROCESS_INCARNATION`，在模块加载时铸造一次的进程事实，因此进程内的插件重载绝不会把存活工作误认为重启孤儿）。
 
 `outputLimitBytes` 是生产方拥有的模型呈现策略，会原样携带到快照中。控制器在添加状态或通知元数据后应用它；注册表不会重写生产方输出，也不会为省略此字段的生产方虚构默认值。
 
@@ -37,4 +38,4 @@
 
 - **流输出只有一个消费游标**：独立观察者需要游标或快照 API。
 - **前台工作无法转为后台**：生产方在启动前选择前台或后台。
-- **约定是进程内的**：`JobStart.run()` 传入回调和确切的 `Agent` 对象；持久化或跨进程后端必须先重塑身份、重启、所有权与观察语义，才能实现此 seam。
+- **即便记录可持久化，执行仍是进程内的**：`JobStart.run()` 传入回调和确切的 `Agent` 对象，重启会摧毁正在运行的工作；持久记录加 `registerResumer` 只决定后续进程是重新收养它还是诚实结算它。
