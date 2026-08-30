@@ -6,10 +6,19 @@ import { describe, expect, it } from 'vitest'
 const root = resolve(import.meta.dirname, '..')
 const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
+// Keyless scans name the secrets context as a complete token, never one
+// accessor spelling: dotted (secrets.NAME), bracketed (secrets['NAME']),
+// whitespace-padded (secrets . NAME, secrets [ 'NAME' ]), and whole-context
+// (toJson(secrets)) references all carry it. Context names are
+// case-insensitive in workflow expressions, so the token scan is too.
+// Identifiers that only contain the substring (secretsManager,
+// DSH_SECRETS_BASELINE) stay acceptable: a word character on either side is
+// never the context.
+const SECRETS_CONTEXT_TOKEN = /\bsecrets\b/i
 
 describe('CI workflow', () => {
   it('isolates every pnpm action setup destination per runner', () => {
-    const files = ['.github/workflows/ci.yml', '.github/workflows/ci-master.yml']
+    const files = ['.github/workflows/ci.yml', '.github/workflows/ci-master.yml', '.github/workflows/ci-fork-master.yml']
     const setups: Array<{ jobName: string; step: unknown }> = []
     for (const file of files) {
       const workflow: unknown = yaml.load(readFileSync(resolve(root, file), 'utf8'))
@@ -260,6 +269,93 @@ describe('CI workflow', () => {
     // possible, so the first failure must not truncate the rest.
     expect(windowsObservational.env).toBeDefined()
     expect(windowsObservational.env).not.toMatchObject({ DSH_GATE_FAIL_FAST: '1' })
+  })
+
+  it('keeps the fork master gate hosted, keyless, and scoped to the fork mainline', () => {
+    // Fork-only gate: the upstream pools below are private to the upstream
+    // repository, so a fork gets no executing code gate from ci.yml or
+    // ci-master.yml. This workflow must therefore stay on public hosted
+    // runners, reference no secrets, and keep triggers on the final fork
+    // reality — master pushes, master-bound pull requests, and manual
+    // dispatch. Temporary branch triggers are never carried.
+    const workflow = loadWorkflow('.github/workflows/ci-fork-master.yml')
+    if (!isRecord(workflow.on) || !isRecord(workflow.jobs)) {
+      throw new TypeError('ci-fork-master workflow must define on and jobs')
+    }
+    expect(Object.keys(workflow.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch'])
+    expect(workflowEvent(workflow, 'push')).toEqual({ branches: ['master'] })
+    expect(workflowEvent(workflow, 'pull_request')).toEqual({ branches: ['master'] })
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(Object.keys(workflow.jobs)).toEqual(['fork-master-gate'])
+
+    const gate = workflowJob(workflow, 'fork-master-gate')
+    expect(gate['runs-on']).toBe('ubuntu-latest')
+    // Fork-only: the job must report skipped where the file travels with the
+    // repository (upstream or another fork), and manual dispatch must stay on
+    // master instead of targeting an arbitrary ref. The exact guard is pinned.
+    expect(gate.if).toBe(
+      "github.repository == 'Abaddollyon/deepseek-harness'"
+        + " && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master')",
+    )
+    const workflowJson = JSON.stringify(workflow)
+    // Keyless under every secrets context spelling: the whole parsed workflow
+    // carries no secrets token. The fixture test below pins which spellings
+    // the token rejects and which substring-only identifiers it admits.
+    expect(workflowJson).not.toMatch(SECRETS_CONTEXT_TOKEN)
+    expect(workflowJson).not.toContain('self-hosted')
+    expect(workflowJson).not.toContain('dsh-ubuntu')
+    expect(workflowJson).not.toContain('dsh-windows')
+    expect(workflowJson).not.toContain('vm-backup')
+    expect(workflowJson).not.toContain('dsh-win-ci')
+
+    // The gate runs the shared static aggregate and the unit suite, never a
+    // parallel gate definition; the archived-note seal gate receives the
+    // trusted pre-change commit for each event.
+    if (!Array.isArray(gate.steps)) throw new TypeError('fork master gate must define steps')
+    const commands = gate.steps.filter(isRecord)
+      .filter((step): step is Record<string, unknown> & { run: string } => typeof step.run === 'string')
+    expect(commands.map(step => step.run)).toContain('pnpm run check:ci:static')
+    expect(commands.map(step => step.run)).toContain('pnpm test')
+    const staticStep = commands.find(step => step.run === 'pnpm run check:ci:static')
+    expect(staticStep).toMatchObject({
+      env: {
+        DSH_ARCHIVE_BASE_REF: '${{ github.event.pull_request.base.sha || github.event.before || github.sha }}',
+      },
+    })
+  })
+
+  it('detects the secrets context as a boundary token, not one accessor spelling', () => {
+    // Bypass fixtures: every spelling that reaches the same context. A scan
+    // for one accessor form (/secrets[.[']/) missed the whitespace-padded and
+    // whole-context spellings below, so the policy pins the token itself.
+    const bypassFixtures = [
+      '${{ secrets.DSH_TOKEN }}',
+      "${{ secrets['DSH_TOKEN'] }}",
+      '${{ secrets . DSH_TOKEN }}',
+      "${{ secrets [ 'DSH_TOKEN' ] }}",
+      '${{ secrets\n\t.DSH_TOKEN }}',
+      '${{ toJson(secrets) }}',
+      "${{ fromJSON(toJson(secrets))['DSH_TOKEN'] }}",
+      '${{ SECRETS.DSH_TOKEN }}',
+    ]
+    expect(bypassFixtures.length).toBeGreaterThan(0)
+    for (const fixture of bypassFixtures) {
+      expect(fixture, `bypass fixture must trip the token scan: ${fixture}`).toMatch(SECRETS_CONTEXT_TOKEN)
+    }
+
+    // Positive fixtures: identifiers that only contain the substring never
+    // name the context, so the policy keeps admitting them.
+    const nonSecretFixtures = [
+      'secretsManager',
+      'mysecrets',
+      '${{ vars.DSH_SECRETS_BASELINE }}',
+      'DSH_KEYLESS_SECRETS_SCAN',
+      'secrets2',
+    ]
+    expect(nonSecretFixtures.length).toBeGreaterThan(0)
+    for (const fixture of nonSecretFixtures) {
+      expect(fixture, `non-secret fixture must stay admitted: ${fixture}`).not.toMatch(SECRETS_CONTEXT_TOKEN)
+    }
   })
 
   it('gives the Wine Host TypeScript compile the repository heap budget', () => {
