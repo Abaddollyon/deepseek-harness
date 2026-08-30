@@ -25,7 +25,7 @@ import { MAX_TIMER_DELAY_MS, deadline, timeoutOf } from '@deepseek-ai/dsh-timeou
 import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
 import { JobRegistry, JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type {
-  JobDoneListener, JobHooks, JobKind, JobOutcome, JobRead, JobResumeCandidate, JobResumer,
+  JobAdoptedListener, JobDoneListener, JobHooks, JobKind, JobOutcome, JobRead, JobResumeCandidate, JobResumer,
   JobSnapshot, JobStart, JobStatus, JobsChangedListener,
 } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
@@ -131,9 +131,10 @@ class JobLayer implements ScopeLayer {
   readonly controllers = new AnonymousEntries<symbol>()
   readonly listeners = new AnonymousEntries<JobDoneListener>()
   readonly changed = new AnonymousEntries<JobsChangedListener>()
+  readonly adopted = new AnonymousEntries<JobAdoptedListener>()
 
   isEmpty(): boolean {
-    return this.controllers.isEmpty() && this.listeners.isEmpty() && this.changed.isEmpty()
+    return this.controllers.isEmpty() && this.listeners.isEmpty() && this.changed.isEmpty() && this.adopted.isEmpty()
   }
 }
 
@@ -411,6 +412,10 @@ export class LocalJobRegistry extends JobRegistry {
     )
   }
 
+  onJobAdopted(listener: JobAdoptedListener): () => void {
+    return this.ctx.effect(() => this.layers.global.adopted.append(listener), 'jobs.onJobAdopted()')
+  }
+
   registerResumer(kind: JobKind, resume: JobResumer): () => void {
     const dispose = this.ctx.effect(() => {
       if (this.resumers.has(kind)) {
@@ -682,7 +687,7 @@ export class LocalJobRegistry extends JobRegistry {
    * same containment shape tool-workflow's recorder uses for a failing
    * session append.
    */
-  private persistRecord(job: TrackedTask): void {
+  private async persistRecord(job: TrackedTask): Promise<void> {
     if (!this.persist || job.persistDegraded) return
     const store = this.storeRef()
     if (store === undefined) return
@@ -691,7 +696,7 @@ export class LocalJobRegistry extends JobRegistry {
       this.selfCtx.logger.warn(`jobs: disabled durable record for ${job.id} after store write failed: ${String(error)}`)
     }
     try {
-      store.put(this.toRecord(job)).catch(degrade)
+      await store.put(this.toRecord(job))
     } catch (error: unknown) {
       degrade(error)
     }
@@ -859,8 +864,19 @@ export class LocalJobRegistry extends JobRegistry {
     job.cancel = hooks.cancel.bind(hooks)
     job.readOutput = hooks.readOutput?.bind(hooks)
     this.wireDone(job, hooks)
-    this.persistRecord(job)
-    this.notifyChanged(job.owner)
+    void this.persistRecord(job).then(() => {
+      this.notifyAdopted(this.snapshot(job), candidate.priorIncarnation)
+      this.notifyChanged(job.owner)
+    })
+  }
+
+  /** Notify global host observers while containing each observer failure. */
+  private notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): void {
+    for (const listener of this.layers.global.adopted.values()) {
+      try { listener(snapshot, priorIncarnation) } catch (error: unknown) {
+        this.selfCtx.logger.warn(`jobs: onJobAdopted listener threw: ${String(error)}`)
+      }
+    }
   }
 
   /**

@@ -243,3 +243,6 @@ export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined
  * set changed with it.
  */
 export type JobsChangedListener = (owner: Agent | undefined) => void
+
+/** Listener for one restored job adopted by a producer resumer. */
+export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void

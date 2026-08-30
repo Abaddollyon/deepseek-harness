@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -49,7 +50,7 @@ function fakeStore(records: Map<string, JobRecord> = new Map()) {
 /** One persisted record shaped like a previous process incarnation wrote it. */
 function storedRecord(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
-    id: JobId(`bash-${crypto.randomUUID()}`),
+    id: JobId(`bash-${randomUUID()}`),
     kind: 'bash',
     label: 'restored job',
     ownerSession: SessionId('alice'),
@@ -84,7 +85,6 @@ function fakePersistence(fake: FakePersistence) {
     supportsRawArtifacts: false,
     locate: () => undefined,
     create: () => Promise.resolve(),
-    load: () => Promise.reject(new Error('not implemented')),
     prepare: (id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> => {
       if (fake.prepareNever) {
         return new Promise((_, reject) => {
@@ -100,6 +100,10 @@ function fakePersistence(fake: FakePersistence) {
       return Promise.resolve(preparation)
     },
     inspect: (id: SessionId) => {
+      if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
+      return Promise.resolve({ meta: { id }, events: logs.get(id) ?? [] })
+    },
+    load: (id: SessionId) => {
       if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
       return Promise.resolve({ meta: { id }, events: logs.get(id) ?? [] })
     },
@@ -985,7 +989,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
 
     // onJobsChanged and onJobDone with no active pass are no-ops.
     internals.onJobsChanged()
-    internals.onJobDone({ id: JobId(`bash-${crypto.randomUUID()}`), status: 'completed', reported: false })
+    internals.onJobDone({ id: JobId(`bash-${randomUUID()}`), status: 'completed', reported: false })
 
     // onJobsChanged skips candidates whose store record disappeared, and
     // ones whose record reached a terminal state under this incarnation.
@@ -1027,7 +1031,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
 
     const ghostPass = fakePass()
     internals.deliverNoticeWhenLive(ghostPass, SessionId('alice'), {
-      id: JobId(`bash-${crypto.randomUUID()}`), kind: 'bash', label: 'ghost',
+      id: JobId(`bash-${randomUUID()}`), kind: 'bash', label: 'ghost',
       status: 'failed', detail: undefined, reported: false, outputLimitBytes: undefined,
     })
     await flush()
@@ -1039,12 +1043,12 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     // A settlement unrelated to any candidate or adopted record is ignored
     // even with a pass active.
     internals.activePass = fakePass()
-    internals.onJobDone({ id: JobId(`bash-${crypto.randomUUID()}`), status: 'completed', reported: false })
+    internals.onJobDone({ id: JobId(`bash-${randomUUID()}`), status: 'completed', reported: false })
     internals.activePass = undefined
 
     // An abandonment account without detail appends an empty one.
     const silentPass = fakePass()
-    const silentId = JobId(`bash-${crypto.randomUUID()}`)
+    const silentId = JobId(`bash-${randomUUID()}`)
     await internals.emitAbandoned(silentPass, SessionId('alice'), {
       id: silentId, kind: 'bash', label: 'silent', status: 'failed',
       detail: undefined, reported: true, outputLimitBytes: undefined,

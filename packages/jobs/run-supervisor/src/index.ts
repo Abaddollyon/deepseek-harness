@@ -331,7 +331,7 @@ export class RunSupervisor {
   protected [Service.init](): void {
     this.ctx.effect(() => {
       const disposeDone = this.ctx.jobs.onJobDone((snapshot) => { this.onJobDone(snapshot) })
-      const disposeChanged = this.ctx.jobs.onJobsChanged(() => { this.onJobsChanged() })
+      const disposeChanged = this.ctx.jobs.onJobAdopted((snapshot) => { this.onAdopted(snapshot) })
       return () => { disposeDone(); disposeChanged() }
     }, 'run-supervisor.observers')
     this.ctx.inject(['jobStore'], (storeCtx) => {
@@ -604,28 +604,23 @@ export class RunSupervisor {
     }
   }
 
-  /**
-   * Observe visible-set changes: an adoption flips a pending candidate's
-   * store record to this incarnation, which is the signal for
-   * `run/resumed`. Terminal transitions are left to {@link onJobDone},
-   * which the registry announces last with the committed record.
-   */
-  private onJobsChanged(): void {
+
+  /** Legacy change callback retained as a no-op compatibility lane. */
+  private onJobsChanged(): void {}
+
+  /** Account for an adoption delivered by the registry after durable commit. */
+  private onAdopted(snapshot: JobSnapshot): void {
+    this.onJobsChanged()
     const pass = this.activePass
     if (pass === undefined) return
-    for (const candidate of pass.candidates.values()) {
-      const record = pass.store.get(candidate.record.id)
-      if (record === undefined || record.incarnation !== PROCESS_INCARNATION) continue
-      if (record.status !== 'running' && record.status !== 'stopping') continue
-      pass.candidates.delete(candidate.record.id)
-      this.adopted.set(candidate.record.id, candidate)
-      const owner = candidate.record.ownerSession ?? undefined
-      if (owner !== undefined) {
-        this.track(pass, this.emitResumed(owner, candidate))
-      }
-      this.settleReadyKinds(pass)
-      this.nudge(pass)
-    }
+    const candidate = pass.candidates.get(snapshot.id)
+    if (candidate === undefined) return
+    pass.candidates.delete(snapshot.id)
+    this.adopted.set(snapshot.id, candidate)
+    const owner = candidate.record.ownerSession ?? undefined
+    if (owner !== undefined) this.track(pass, this.emitResumed(owner, candidate))
+    this.settleReadyKinds(pass)
+    this.nudge(pass)
   }
 
   /**
