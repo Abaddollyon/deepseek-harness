@@ -33,7 +33,7 @@ Choose this adapter when the same composition serves several providers, when a r
 
 ### Configure provider routes
 
-Each profile may set a `retryPolicy`; omission uses normal mode with five retries. `authRecovery` retries a pre-content 401/403 once by default after a best-effort stored OAuth refresh and bounded delay; set `retries: 0` to disable it. `apiKeyEnv` is a credential reference resolved per request through the harness credential seam, so no secret enters the configuration file; a reference that resolves to nothing fails the request with `MISSING_CREDENTIAL`. Omitting it leaves the route configured-but-keyless, which for an installed catalog route defers to pi-ai's provider-native ambient discovery.
+Each profile may set a `retryPolicy`; omission uses normal mode with five retries. `authRecovery` retries a pre-content 401/403 once by default after a best-effort stored OAuth refresh and bounded delay; it refreshes only the credential rejected by that request, skips a record another recovery already rotated, never rotates a stored grant for an API-key override, and bounds the complete serialized refresh operation with integer `streamIdleTimeoutMs`. Set `retries: 0` to disable it. `apiKeyEnv` is a credential reference resolved per request through the harness credential seam, so no secret enters the configuration file; a reference that resolves to nothing fails the request with `MISSING_CREDENTIAL`. Omitting it leaves the route configured-but-keyless, which for an installed catalog route defers to pi-ai's provider-native ambient discovery.
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-pi-ai'

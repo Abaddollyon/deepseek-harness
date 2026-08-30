@@ -105,6 +105,36 @@ describe('PiAiAdapter auth recovery', () => {
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
+  it('captures the credential produced by request-time OAuth refresh', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const auth = memoryAuth({
+      anthropic: { type: 'oauth', access: 'expired-access', refresh: 'expired-refresh', expires: 0 },
+    })
+    const realFetch = globalThis.fetch
+    const tokenFetch = vi.fn()
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!requestUrl(input).includes('platform.claude.com')) return realFetch(input, init)
+      tokenFetch()
+      return Promise.resolve(new Response(JSON.stringify({
+        access_token: 'request-access', refresh_token: 'request-refresh', expires_in: 3600,
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ anthropic: { baseURL: server.url + '/v1' } }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth,
+    }))
+
+    const result = await assemble(ctx, { provider: 'anthropic', model: 'claude-fable-5', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+    expect(tokenFetch).toHaveBeenCalledOnce()
+    expect(headerText(server.headers)).toEqual([expect.stringContaining('request-access')])
+    expect(auth.stored.get('anthropic')).toMatchObject({ type: 'oauth', access: 'request-access' })
+  })
+
   it('refreshes a stored OAuth credential once and retries with the rotated token', async () => {
     const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
     const auth = memoryAuth({
@@ -155,6 +185,165 @@ describe('PiAiAdapter auth recovery', () => {
     const seen = headerText(server.headers)
     expect(seen[0]).toContain('old-access')
     expect(seen[1]).toContain('new-access')
+  })
+
+  it('skips a redundant refresh after another recovery rotates the failed credential', async () => {
+    const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
+    const auth = memoryAuth({
+      anthropic: { type: 'oauth', access: 'old-access', refresh: 'old-refresh', expires: Date.now() + 3_600_000 },
+    })
+    const rotated = { type: 'oauth' as const, access: 'other-access', refresh: 'other-refresh', expires: Date.now() + 3_600_000 }
+    const modify = auth.credentials.modify.bind(auth.credentials)
+    auth.credentials.modify = (id, mutate) => {
+      auth.stored.set(id, rotated)
+      return modify(id, mutate)
+    }
+    const tokenFetch = vi.fn()
+    const realFetch = globalThis.fetch
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      if (requestUrl(input).includes('platform.claude.com')) {
+        tokenFetch()
+        return Promise.resolve(new Response('unexpected refresh', { status: 500 }))
+      }
+      return realFetch(input, init)
+    })
+    const observed: { provider: string; refreshed: boolean; error?: string }[] = []
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ anthropic: { baseURL: server.url + '/v1', authRecovery: { delayMs: 1 } } }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth,
+      onAuthRecovery: (detail) => { observed.push(detail) },
+    }))
+
+    const result = await assemble(ctx, { provider: 'anthropic', model: 'claude-fable-5', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(tokenFetch).not.toHaveBeenCalled()
+    expect(auth.stored.get('anthropic')).toEqual(rotated)
+    expect(observed).toEqual([{ provider: 'anthropic', refreshed: false }])
+  })
+
+  it('does not rotate stored OAuth when an API key override was rejected', async () => {
+    const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
+    const auth = memoryAuth({
+      anthropic: { type: 'oauth', access: 'stored-access', refresh: 'stored-refresh', expires: Date.now() + 3_600_000 },
+    })
+    const modify = vi.spyOn(auth.credentials, 'modify')
+    const observed: { provider: string; refreshed: boolean; error?: string }[] = []
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ anthropic: { baseURL: server.url + '/v1', authRecovery: { delayMs: 1 } } }),
+      resolveApiKey: () => Promise.resolve('static-api-key'),
+      auth,
+      onAuthRecovery: (detail) => { observed.push(detail) },
+    }))
+
+    const result = await assemble(ctx, { provider: 'anthropic', model: 'claude-fable-5', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(modify).not.toHaveBeenCalled()
+    expect(headerText(server.headers)).toEqual(expect.arrayContaining([
+      expect.stringContaining('static-api-key'),
+    ]))
+    expect(observed).toEqual([{ provider: 'anthropic', refreshed: false }])
+  })
+
+  it('does not rotate stored auth when a keyless catalog route has no OAuth flow', async () => {
+    const server = await mockServer([UNAUTHORIZED, UNAUTHORIZED])
+    const auth = memoryAuth({ deepseek: { type: 'api_key', key: 'stored-key' } })
+    const observed: { provider: string; refreshed: boolean; error?: string }[] = []
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['deepseek'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ deepseek: { baseURL: server.url, authRecovery: { delayMs: 1 } } }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth,
+      onAuthRecovery: (detail) => { observed.push(detail) },
+    }))
+
+    const result = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(headerText(server.headers)).toEqual([
+      expect.stringContaining('stored-key'),
+      expect.stringContaining('stored-key'),
+    ])
+    expect(observed).toEqual([{ provider: 'deepseek', refreshed: false }])
+  })
+
+  it('bounds credential-store serialization with the stream idle timeout', async () => {
+    const server = await mockServer([UNAUTHORIZED])
+    const auth = memoryAuth({
+      anthropic: { type: 'oauth', access: 'old-access', refresh: 'old-refresh', expires: Date.now() + 3_600_000 },
+    })
+    const modify = vi.fn(auth.credentials.modify.bind(auth.credentials))
+    auth.credentials.modify = (id, mutate, options) => new Promise((resolve, reject) => {
+      const signal = options?.signal
+      if (signal === undefined) {
+        resolve(modify(id, mutate, options))
+        return
+      }
+      const aborted = (): void => {
+        reject(signal.reason instanceof Error ? signal.reason : new Error('credential modification aborted'))
+      }
+      if (signal.aborted) aborted()
+      else signal.addEventListener('abort', aborted, { once: true })
+    })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({
+        anthropic: { baseURL: server.url + '/v1', streamIdleTimeoutMs: 20, authRecovery: { delayMs: 1 } },
+      }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth,
+    }))
+
+    const result = await assemble(ctx, { provider: 'anthropic', model: 'claude-fable-5', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+    expect(server.paths).toHaveLength(1)
+    expect(modify).not.toHaveBeenCalled()
+  })
+
+  it('bounds a stalled OAuth refresh with the stream idle timeout', async () => {
+    const server = await mockServer([UNAUTHORIZED])
+    const auth = memoryAuth({
+      anthropic: { type: 'oauth', access: 'old-access', refresh: 'old-refresh', expires: Date.now() + 3_600_000 },
+    })
+    const realFetch = globalThis.fetch
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!requestUrl(input).includes('platform.claude.com')) return realFetch(input, init)
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        const aborted = (): void => {
+          reject(signal?.reason instanceof Error ? signal.reason : new Error('auth recovery aborted'))
+        }
+        if (signal?.aborted) aborted()
+        else signal?.addEventListener('abort', aborted, { once: true })
+      })
+    })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({
+        anthropic: {
+          baseURL: server.url + '/v1',
+          streamIdleTimeoutMs: 20,
+          authRecovery: { delayMs: 1 },
+        },
+      }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth,
+    }))
+
+    const result = await assemble(ctx, { provider: 'anthropic', model: 'claude-fable-5', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+    expect(server.paths).toHaveLength(1)
   })
 
   it('retries with the current credential when the forced refresh fails', async () => {

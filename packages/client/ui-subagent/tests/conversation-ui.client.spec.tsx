@@ -182,8 +182,10 @@ describe('SubagentHeaderLineage', () => {
       },
     })
     const translate = vi.fn(base.t)
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     render(<SubagentHeaderLineage {...base} t={translate} />)
 
+    expect(consoleError).not.toHaveBeenCalled()
     expect(translate).toHaveBeenCalledWith('count.running.one', { count: 1 })
     expect(translate).toHaveBeenCalledWith('count.total.one', { count: 1 })
   })
@@ -238,6 +240,9 @@ describe('SubagentHeaderLineage', () => {
       .mockReturnValue({ bottom: 40, left: 50 } as DOMRect)
 
     fireEvent.click(trigger)
+    expect(screen.getByRole('tree')).toBeTruthy()
+    fireEvent.mouseLeave(trigger.parentElement!)
+    await advance(120)
     expect(screen.getByRole('tree')).toBeTruthy()
     fireEvent.click(trigger)
     expect(screen.queryByRole('tree')).toBeNull()
@@ -317,6 +322,24 @@ describe('SubagentHeaderLineage', () => {
 
     await vi.advanceTimersByTimeAsync(1)
     fireEvent.resize(window)
+    expect(screen.queryByRole('tree')).toBeNull()
+  })
+
+  it('clears click pinning when the trigger becomes hidden', async () => {
+    vi.useFakeTimers()
+    const view = render(<SubagentHeaderLineage {...props(catalog())} />)
+    fireEvent.click(screen.getByRole('button', { name: /2 个子代理/ }))
+    expect(screen.getByRole('tree')).toBeTruthy()
+
+    view.rerender(<SubagentHeaderLineage {...props(catalog({ entries: [] }))} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    view.rerender(<SubagentHeaderLineage {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /2 个子代理/ })
+    fireEvent.mouseEnter(trigger.parentElement!)
+    await act(async () => { await vi.advanceTimersByTimeAsync(150) })
+    expect(screen.getByRole('tree')).toBeTruthy()
+    fireEvent.mouseLeave(trigger.parentElement!)
+    await act(async () => { await vi.advanceTimersByTimeAsync(120) })
     expect(screen.queryByRole('tree')).toBeNull()
   })
 
