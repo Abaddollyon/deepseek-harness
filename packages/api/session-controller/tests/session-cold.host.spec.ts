@@ -412,7 +412,9 @@ describe('sessions.list cold merge', () => {
     const headers = Array.from({ length: 17 }, (_, index) => header('title-batch-' + String(index), index))
     vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
     let calls = 0
+    const batchIds: SessionId[][] = []
     const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation(async (ids) => {
+      batchIds.push([...ids])
       calls++
       if (calls === 1) throw new Error('first batch failed')
       return ids.map(id => ({ status: 'fulfilled' as const, sessionId: id, value: { session: headers.find(item => item.id === id), title: { title: 'title-' + id, eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } })) as never
@@ -420,6 +422,10 @@ describe('sessions.list cold merge', () => {
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     await remote.list(request({}))
     await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
+    expect(batchIds.slice(0, 2)).toEqual([
+      headers.slice(0, 16).map(item => item.id),
+      headers.slice(16).map(item => item.id),
+    ])
     await remote.list(request({}))
     await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(3) })
     const titled = await remote.list(request({}))
@@ -515,22 +521,21 @@ describe('sessions.list cold merge', () => {
     await ctx.plugin(AgentRegistry)
     installSessionReadTestServices(ctx)
     const source = header('pending-lifecycle-invalidation', 1)
-    const headers = [source, ...Array.from({ length: 16 }, (_, index) => header('pending-lifecycle-invalidation-' + String(index), index + 2))]
-    headers.push({ version: 0, id: sid('pending-lifecycle-invalidation-no-cwd'), createdAt: 99 })
+    const headers = [source, ...Array.from({ length: 15 }, (_, index) => header('pending-lifecycle-invalidation-' + String(index), index + 2))]
     vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
     const entered = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<unknown[]>()
     const batchIds: SessionId[][] = []
-    const _readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
+    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
       .mockImplementationOnce((ids, _signal) => { batchIds.push([...ids]); entered.resolve(undefined); return release.promise as never })
       .mockImplementationOnce((ids) => {
         batchIds.push([...ids])
-        return Promise.resolve([{ status: 'fulfilled', sessionId: headers[16]!.id, value: { session: headers[16]!, title: { title: 'stale', eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }]) as never
+        return Promise.resolve([{ status: 'fulfilled', sessionId: headers[0]!.id, value: { session: headers[0]!, title: { title: 'fresh', eventSeq: 3, updatedAt: 2, messageSeqs: [], source: { kind: 'fallback' } } } }]) as never
       })
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     await remote.list(request({}))
     await entered.promise
-    const invalidated = headers[16]!
+    const invalidated = headers[0]!
     const live = ctx.sessions.prepare(invalidated.id, { meta: invalidated })
     const detach = ctx.sessions.enter(live)
     ctx.sessions.announce(live)
@@ -538,7 +543,10 @@ describe('sessions.list cold merge', () => {
     release.resolve([{ status: 'fulfilled', sessionId: invalidated.id, value: { session: invalidated, title: { title: 'stale', eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }] as never)
     await new Promise<void>(resolve => setImmediate(resolve))
     await remote.list(request({}))
-    await vi.waitFor(() => { expect(batchIds.some(ids => ids.includes(invalidated.id))).toBe(true) })
+    await vi.waitFor(() => { expect(batchIds.filter(ids => ids.includes(invalidated.id)).length).toBeGreaterThan(1) })
+    const refreshed = await remote.list(request({}))
+    if (!refreshed.ok) throw new Error('list failed')
+    expect(refreshed.value.items.find(item => item.sessionId === invalidated.id)?.projections?.values.title).toBe('fresh')
     expect(batchIds.filter(ids => ids.length > 0).every(ids => ids.length <= 16)).toBe(true)
     await ctx.fiber.dispose()
   })
@@ -562,8 +570,15 @@ describe('sessions.list cold merge', () => {
     await new Promise<void>(resolve => setImmediate(resolve))
     expect(operationSignal.aborted).toBe(true)
     expect(disposed).toBe(false)
-    release.resolve([{ status: 'fulfilled', sessionId: source.id, value: { session: source, title: { title: 'late', eventSeq: 2, updatedAt: 100, messageSeqs: [], source: { kind: 'fallback' } } } }])
+    let getterReads = 0
+    const lateSession = {
+      id: source.id,
+      get createdAt() { getterReads++; return source.createdAt },
+      get cwd() { getterReads++; return source.cwd },
+    } as unknown as typeof source
+    release.resolve([{ status: 'fulfilled', sessionId: source.id, value: { session: lateSession, title: { title: 'late', eventSeq: 2, updatedAt: 100, messageSeqs: [], source: { kind: 'fallback' } } } }])
     await disposing
+    expect(getterReads).toBe(0)
     const after = await remote.list(request({}))
     expect(after.ok).toBe(false)
     expect(after).not.toMatchObject({ value: { items: [expect.objectContaining({ projections: { values: { title: 'late' } } })] } })

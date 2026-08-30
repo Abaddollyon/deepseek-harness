@@ -261,8 +261,7 @@ export class ApiSessionList {
         const batch = headers.slice(offset, offset + COLD_TITLE_BATCH_SIZE)
         const batchEntries = new Map<SessionId, ColdTitleCacheEntry>()
         for (const source of batch) {
-          const entry = this.coldTitles.get(source.id)
-          if (entry === undefined) continue
+          const entry = this.coldTitles.get(source.id) as ColdTitleCacheEntry
           const current = { ...entry }
           this.coldTitles.set(source.id, current)
           batchEntries.set(source.id, current)
