@@ -99,11 +99,22 @@ type StubMode =
   | 'empty-page-after-latest'
   | 'paged-scrollback'
   | 'with-echo'
+  | 'with-wrapped-echo'
+  | 'wrapped-echo-then-normal'
+  | 'wrapped-echo-prompt'
   | 'exit-after-send'
   | 'prompt-collision'
 
 const START_PATTERN = /__DSH_PERSISTENT_PWSH_START_[^_]+(?:-[^_]+)*__/
 const END_PATTERN = /__DSH_PERSISTENT_PWSH_END_[^:]+:/
+
+function wrapPhysicalLines(value: string, width: number): string {
+  const lines: string[] = []
+  for (let offset = 0; offset < value.length; offset += width) {
+    lines.push(value.slice(offset, offset + width))
+  }
+  return lines.join('\n')
+}
 
 class StubTerminalSession implements TerminalBackendSession {
   readonly motd = '__DSH_PERSISTENT_PWSH_PROMPT__ '
@@ -114,6 +125,7 @@ class StubTerminalSession implements TerminalBackendSession {
   mode: StubMode
   sends = 0
   pendingText = ''
+  latestOutput = ''
   historyTruncated = false
   throwOnSend = false
 
@@ -175,10 +187,23 @@ class StubTerminalSession implements TerminalBackendSession {
     this.pendingText = ''
     const start = START_PATTERN.exec(sent)?.[0]
     const end = END_PATTERN.exec(sent)?.[0]
-    if (this.mode === 'with-echo') {
+    if (this.mode === 'wrapped-echo-then-normal' && request.text.length > 0) {
+      this.mode = 'normal'
+      this.pendingText = request.text
+      const output = `${wrapPhysicalLines(request.text, 37)}\n${this.motd}`
+      this.scrollback += output
+      return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'wrapped-echo-prompt') {
+      const output = `${wrapPhysicalLines(sent, 29)}\npwsh: syntax error\n${this.motd}`
+      this.scrollback += output
+      return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'with-echo' || this.mode === 'with-wrapped-echo') {
       // The PSReadLine echo renders the submitted wrapper before the real
       // markers; the tool must strip it from the captured result.
-      const output = `${sent}\n${start ?? ''}\nhello from stub\n${end ?? ''}0\n${this.motd}`
+      const echoed = this.mode === 'with-wrapped-echo' ? wrapPhysicalLines(sent, 31) : sent
+      const output = `${echoed}\n${start ?? ''}\nhello from stub\n${end ?? ''}0\n${this.motd}`
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
     }
@@ -282,13 +307,14 @@ class StubTerminalSession implements TerminalBackendSession {
   }
 
   private result(viewport: string, waitReason: TerminalWaitReason) {
+    this.latestOutput = viewport
     return { viewport, waitReason, sessionStatus: this.statusValue, truncated: false }
   }
 
-  private operation(done: Promise<ReturnType<StubTerminalSession['result']>>, delta = ''): TerminalSendOperation {
+  private operation(done: Promise<ReturnType<StubTerminalSession['result']>>, delta?: string): TerminalSendOperation {
     return {
       done,
-      readOutput: () => ({ delta, truncated: false }),
+      readOutput: () => ({ delta: delta ?? this.latestOutput, truncated: false }),
       cancel: () => false,
     }
   }
@@ -360,6 +386,39 @@ describe('tool-pwsh-persistent', () => {
     stub.sessions[0]!.mode = 'with-echo'
     const result = text(await call(ctx, owner, 'Write-Output hi'))
     expect(result).toBe('hello from stub')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
+    expect(result).not.toContain('Invoke-Expression')
+  })
+
+  it('strips a wrapper echo split across physical terminal lines', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'with-wrapped-echo'
+
+    const result = text(await call(ctx, owner, 'Write-Output hi'))
+    expect(result).toBe('hello from stub')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
+    expect(result).not.toContain('Invoke-Expression')
+  })
+
+  it('keeps polling when wrapped echo is followed by stale readiness', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-then-normal'
+
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+    expect(stub.sessions[0]!.sends).toBe(4)
+  })
+
+  it('removes wrapped echo from prompt fallback diagnostics', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-prompt'
+
+    const result = text(await call(ctx, owner, 'bad syntax'))
+    expect(result).toContain('pwsh: syntax error')
     expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
     expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
     expect(result).not.toContain('Invoke-Expression')
