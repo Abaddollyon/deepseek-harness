@@ -92,6 +92,7 @@ type StubMode =
   | 'end-only'
   | 'init-exit'
   | 'init-timeout'
+  | 'init-idle-then-prompt'
   | 'spawn-error'
   | 'send-error'
   | 'prompt-after-idle'
@@ -142,6 +143,10 @@ class StubTerminalSession implements TerminalBackendSession {
       }
       if (this.mode === 'init-timeout') {
         return this.operation(Promise.resolve(this.result('', 'timeout')))
+      }
+      if (this.mode === 'init-idle-then-prompt') {
+        this.mode = 'normal'
+        return this.operation(Promise.resolve(this.result(this.motd, 'inferred_idle')))
       }
       return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')))
     }
@@ -611,6 +616,12 @@ describe('tool-pwsh-persistent', () => {
       expect(stub.sessions).toHaveLength(2)
     },
   )
+
+  it('retries init-idle-then-prompt with an empty observation', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-idle-then-prompt')
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+    expect(stub.sessions[0]?.sends).toBe(3)
+  })
 
   it.each(['init-exit', 'init-timeout'] as const)(
     'fails initialization and closes the unusable shell for %s',

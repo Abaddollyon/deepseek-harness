@@ -108,15 +108,14 @@ function stripInputEcho(text: string, wrapper: string): string {
   const rawOffsets: number[] = []
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index]
-    if (character === undefined || character === '\n') continue
-    projected.push(character)
+    if (character === '\n' || character === '\r') continue
+    projected.push(character as string)
     rawOffsets.push(index)
   }
   const projectedStart = projected.join('').indexOf(wrapper)
   if (projectedStart < 0) return text
-  const rawStart = rawOffsets[projectedStart]
-  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1]
-  if (rawStart === undefined || rawEnd === undefined) return text
+  const rawStart = rawOffsets[projectedStart] as number
+  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1] as number
   // PowerShell's line editor inserts display-width line breaks into the echo;
   // matching only the exact submitted source keeps command-output lines intact.
   return text.slice(0, rawStart) + text.slice(rawEnd + 1)
@@ -332,11 +331,7 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
           if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
             throw new Error('persistent pwsh shell did not accept initialization')
           }
-          const scrollback = ctx.terminals.read(owner, spawned.sessionId, {
-            offset: 0,
-            count: SCROLLBACK_PAGE_LINES,
-          }).text
-          if (promptCompleted(result) || scrollback.trimEnd().endsWith(SHELL_PROMPT.trimEnd())) break
+          if (result.waitReason === 'stdin_read') break
           await pause()
         }
         return spawned.sessionId
