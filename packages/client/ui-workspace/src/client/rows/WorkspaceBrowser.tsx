@@ -103,8 +103,8 @@ function reconciledSessionOrder(sessionIds: readonly SessionId[], stored: readon
 
 /** Newest update first with stable Session identity as the tie-break. */
 function compareSessionRecency(a: SessionId, b: SessionId, byId: SessionListState['byId']): number {
-  const aUpdatedAt = byId[a]?.updatedAt ?? Number.NEGATIVE_INFINITY
-  const bUpdatedAt = byId[b]?.updatedAt ?? Number.NEGATIVE_INFINITY
+  const aUpdatedAt = (byId[a] as { updatedAt: number }).updatedAt
+  const bUpdatedAt = (byId[b] as { updatedAt: number }).updatedAt
   if (aUpdatedAt !== bUpdatedAt) return bUpdatedAt - aUpdatedAt
   return a < b ? -1 : 1
 }
@@ -138,8 +138,7 @@ function nextSessionOrderAccount({
   }
   const updatedAt: Record<string, number> = {}
   for (const id of sessionIds) {
-    const session = list.byId[id]
-    if (session !== undefined) updatedAt[id] = session.updatedAt
+    updatedAt[id] = (list.byId[id] as { updatedAt: number }).updatedAt
   }
   const orderChanged = previousOrder === undefined
     || order.length !== previousOrder.length
@@ -174,7 +173,7 @@ function ViewOptionsMenu({ groupBy, orderBy, onGroupPick, onOrderPick, t }: {
       selectedIds={[groupBy, orderBy]}
       onSelect={(id) => {
         if (id === 'workspace' || id === 'flat') onGroupPick(id)
-        else if (id === 'manual' || id === 'updated') onOrderPick(id)
+        else onOrderPick(id as SessionOrderBy)
         setOpen(false)
       }}
       align="end"
@@ -417,11 +416,10 @@ function SessionTree({
     if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
     const accountSessionIds = activeDrag.accountKey === UNGROUPED_KEY
       ? orderedUngroupedSessionIds
-      : orderedWorkspaces.find(workspace => workspace.workspaceId === activeDrag.accountKey)?.sessionIds
-    if (accountSessionIds === undefined) return
+      : (orderedWorkspaces.find(workspace => workspace.workspaceId === activeDrag.accountKey) as { sessionIds: SessionId[] }).sessionIds
     const nextOrder = accountSessionIds.filter(id => id !== activeDrag.sessionId)
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
-    nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
+    nextOrder.splice(insertAt, 0, activeDrag.sessionId)
     setSessionOrder(activeDrag.accountKey, nextOrder.map(id => id as string))
     if (orderBy === 'updated' || activeDrag.accountKey === UNGROUPED_KEY) return
     insertSessionBefore(activeDrag.accountKey as WorkspaceId, activeDrag.sessionId, anchor).catch((reason: unknown) => {
@@ -485,11 +483,8 @@ function SessionTree({
               setWorkspaceDrag({ workspaceId, over: null })
             },
             end: () => {
-              if (workspaceDrag?.over !== null && workspaceDrag?.over !== undefined) {
-                commitWorkspaceDrag(workspaceDrag, workspaceDrag.over)
-              } else {
-                setWorkspaceDrag(null)
-              }
+              if (workspaceDrag?.over) commitWorkspaceDrag(workspaceDrag, workspaceDrag.over)
+              else setWorkspaceDrag(null)
               workspaceDropCommitted.current = false
             },
           }
@@ -503,8 +498,7 @@ function SessionTree({
           const dropWorkspace = workspaceId === undefined
             ? undefined
             : (half: 'before' | 'after') => {
-              if (workspaceDrag === null) return
-              commitWorkspaceDrag(workspaceDrag, { id: workspaceId, half })
+              commitWorkspaceDrag(workspaceDrag as WorkspaceDragState, { id: workspaceId, half })
             }
           return (
           // Group section: header row + expanded top-level session rows. The
@@ -546,21 +540,15 @@ function SessionTree({
                     setGroupExpanded(group.key, true)
                     startSession(group.workspaceId)
                   } else {
-                    if (createLooseSession !== undefined) createLooseSession()
+                    createLooseSession()
                   }
                 }}
                 drag={workspaceDragProps}
-                actions={group.workspaceId === undefined
+                actions={workspaceId === undefined
                   ? undefined
                   : {
-                    rename: () => {
-                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                      if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
-                    },
-                    delete: () => {
-                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
-                      if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
-                    },
+                    rename: () => { onRenameRequest(workspaceId, group.label) },
+                    delete: () => { onDeleteRequest(workspaceId, group.label) },
                   }}
               />
               {/* Folded group: its live rows stay reachable. They carry no drag
@@ -605,16 +593,13 @@ function SessionTree({
                   active: sameGroupDrag,
                   marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
                   hover: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
-                    setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
+                    setDrag({ ...drag as DragState, over: { id: node.id, half } })
                   },
                   drop: (half: 'before' | 'after') => {
-                  /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
-                    if (drag === null) return
-                    commitSessionDrag(drag, { id: node.id, half })
+                    commitSessionDrag(drag as DragState, { id: node.id, half })
                   },
                   end: () => {
-                    if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
+                    if (drag?.over) commitSessionDrag(drag, drag.over)
                     else setDrag(null)
                     sessionDropCommitted.current = false
                   },
@@ -716,10 +701,7 @@ function FlatList({
   const rows = useMemo(() => {
     const byId = new Map(baseRows.map(row => [row.id, row]))
     return reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
-      .flatMap((id) => {
-        const row = byId.get(id)
-        return row === undefined ? [] : [row]
-      })
+      .map(id => byId.get(id) as SessionNode)
       .filter(row => !pinnedSet.has(row.id))
   }, [baseRows, sessionOrderByAccount, sessionIds, pinnedSet])
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -742,7 +724,7 @@ function FlatList({
     const accountOrder = reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
     const nextOrder = accountOrder.filter(id => id !== activeDrag.sessionId)
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
-    nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
+    nextOrder.splice(insertAt, 0, activeDrag.sessionId)
     setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder.map(id => id as string))
   }
   const now = Date.now()
@@ -789,7 +771,7 @@ function FlatList({
                   setDrag(current => current === null ? current : { ...current, over: { id: node.id, half } })
                 },
                 drop: (half) => {
-                  if (drag !== null) commitDrag(drag, { id: node.id, half })
+                  commitDrag(drag as DragState, { id: node.id, half })
                 },
                 end: () => {
                   if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
@@ -1191,16 +1173,15 @@ export function WorkspaceBrowser({
     setDeleteError(null)
   }
   const confirmDelete = () => {
-    /* v8 ignore next -- the Modal is absent without a target and its button is disabled while deleting. */
-    if (deleting || deleteTarget === null) return
+    const target = deleteTarget as { workspaceId: WorkspaceId }
     setDeleting(true)
     setDeleteCommittedId(null)
     setDeleteError(null)
-    deleteWorkspace(deleteTarget.workspaceId).then(() => {
+    deleteWorkspace(target.workspaceId).then(() => {
       // Keep the confirmation pending until this component has rendered the
       // committed list projection without the deleted id. Closing earlier
       // exposes one stale React frame to the next Create Workspace gesture.
-      setDeleteCommittedId(deleteTarget.workspaceId)
+      setDeleteCommittedId(target.workspaceId)
     }).catch((reason: unknown) => {
       setDeleting(false)
       setDeleteError(reason instanceof Error ? reason.message : String(reason))

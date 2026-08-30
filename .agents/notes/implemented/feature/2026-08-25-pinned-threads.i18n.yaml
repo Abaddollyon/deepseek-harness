@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-25-pinned-threads.md
-2026-08-25-pinned-threads.md: f42c81fdbd425af4047974668826f21137011f0e
-2026-08-25-pinned-threads.zh.md: 99c1a8695f6117df6a94a6e82097fa7ba727a35d
+2026-08-25-pinned-threads.md: e86f1fda87a6cbed23c093a694b7f25341f0fa6b
+2026-08-25-pinned-threads.zh.md: e910b2d23fd19e2225dac1bfb37cfa88a295e536
