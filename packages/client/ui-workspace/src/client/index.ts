@@ -99,6 +99,13 @@ export function apply(ctx: Context): void {
     // Explicit group actions keep their target; unscoped New Session inherits
     // the current Session Workspace before the recent-Workspace fallback.
     startSession: (workspaceId) => { uiWorkspace.startSession(workspaceId) },
+    // Ungrouped creates a session without workspace attachment, then selects it.
+    createLooseSession: () => {
+      sessions.create({}).then(
+        sessionId => { sessions.open(sessionId) },
+        reason => { console.warn('loose session failed:', reason) },
+      )
+    },
     open: (sessionId) => { sessions.open(sessionId) },
     searchSessions,
     searchResultLimit: sessions.searchResultLimit,

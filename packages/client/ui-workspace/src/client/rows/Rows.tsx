@@ -5,7 +5,7 @@
  * except workspace Rename/Delete and session Rename/Fork/Pin/Archive; the session
  * and workspace hover cards are suppressed while a menu is open.
  */
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import clsx from 'clsx'
 import {
   HoverCard, IconAlarmClockOutline16, IconArchiveOutline20, IconBranchOutline16,
@@ -412,7 +412,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({
+function SessionNodeItemView({
   node, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned,
   drag, flat = false, pinned = false, userPinned = false, t,
 }: {
@@ -559,3 +559,37 @@ export function SessionNodeItem({
     />
   )
 }
+
+type SessionNodeItemProps = Parameters<typeof SessionNodeItemView>[0]
+
+/**
+ * Compare only render facts. Command callbacks are intentionally omitted: the
+ * browser creates id-keyed commands while deriving the row, and retaining the
+ * previous command is safe as long as these facts are unchanged. Time compares
+ * by its visible bucket so republishing the list does not repaint every row.
+ */
+function areSessionNodeItemPropsEqual(
+  previous: SessionNodeItemProps,
+  next: SessionNodeItemProps,
+): boolean {
+  const a = previous.node
+  const b = next.node
+  if (a.id !== b.id || a.title !== b.title || a.untitled !== b.untitled
+    || a.untitledNumber !== b.untitledNumber || a.blank !== b.blank
+    || a.pendingInteraction !== b.pendingInteraction || a.running !== b.running
+    || a.runningSubagentCount !== b.runningSubagentCount || a.completed !== b.completed
+    || a.updatedAt !== b.updatedAt
+    || (previous.node.id === previous.currentId) !== (next.node.id === next.currentId)
+    || previous.flat !== next.flat || previous.pinned !== next.pinned
+    || previous.userPinned !== next.userPinned || previous.t !== next.t) return false
+  const before = relativeTime(a.updatedAt, previous.now)
+  const after = relativeTime(b.updatedAt, next.now)
+  if (before.unit !== after.unit || before.n !== after.n) return false
+  if (previous.drag?.active === true || next.drag?.active === true) return previous.drag === next.drag
+  return previous.drag?.active === next.drag?.active
+    && previous.drag?.marker === next.drag?.marker
+    && (previous.drag === undefined) === (next.drag === undefined)
+}
+
+/** Memoized session row; unchanged list republish must not rebuild its subtree. */
+export const SessionNodeItem = memo(SessionNodeItemView, areSessionNodeItemPropsEqual)

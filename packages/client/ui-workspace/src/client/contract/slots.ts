@@ -103,6 +103,8 @@ export type WorkspaceBrowserInjected = {
    * Workspace, then the recent Workspace, or clear into the New Session view.
    */
   startSession: (workspaceId?: WorkspaceId) => void
+  /** Create and open a Session without Workspace attachment. */
+  createLooseSession: () => void
   /** Open a real Session. */
   open: (sessionId: SessionId) => void
   /**
