@@ -6,7 +6,7 @@ Status: implemented
 
 ## Problem
 
-pi-ai 为暴露了推理拆分的提供方上报推理/思考 token 拆分：OpenAI-completions 路由始终从 `completion_tokens_details.reasoning_tokens` 携带 `usage.reasoning`（模型未思考时为零），OpenAI Responses 路由读取 `output_tokens_details.reasoning_tokens`，Anthropic 路由读取 `output_tokens_details.thinking_tokens`。pi-ai 适配器的 `mapUsage` 丢弃了该字段，因此经 pi-ai 路由的每个会话记录的 usage 都不带 `reasoningTokens`，尽管自 DeepSeek 适配器开始填充以来 `TokenUsage` 一直带有这个可选字段。折叠会话日志的消费方——跨会话用量聚合、trajectory 的单请求检查器——对 pi-ai 路由只能渲染恒为零的推理数字。
+pi-ai 为暴露了推理拆分的提供方上报推理/思考 token 拆分：OpenAI-completions 路由始终从 `completion_tokens_details.reasoning_tokens` 携带 `usage.reasoning`（模型未思考时为零），OpenAI Responses 路由读取 `output_tokens_details.reasoning_tokens`，Anthropic 路由读取 `output_tokens_details.thinking_tokens`，Google Generative AI 与 Vertex 路由读取 `usageMetadata.thoughtsTokenCount`。pi-ai 适配器的 `mapUsage` 丢弃了该字段，因此经 pi-ai 路由的每个会话记录的 usage 都不带 `reasoningTokens`，尽管自 DeepSeek 适配器开始填充以来 `TokenUsage` 一直带有这个可选字段。折叠会话日志的消费方——跨会话用量聚合、trajectory 的单请求检查器——对 pi-ai 路由只能渲染恒为零的推理数字。
 
 ## Decision
 
@@ -28,4 +28,4 @@ pi-ai 为暴露了推理拆分的提供方上报推理/思考 token 拆分：Ope
 
 ## Consequences
 
-pi-ai 路由上的新会话记录真实的推理拆分；Anthropic 与 OpenAI-Responses 路由仅在提供方上报时记录。历史会话没有推理数据，因此跨会话读取方必须区分“未记录”与零。本就会在字段存在时渲染 `reasoningTokens` 的单请求 trajectory 检查器，现在无需改动即可为 pi-ai 路由显示数字。
+pi-ai 路由上的新会话记录真实的推理拆分；Anthropic、OpenAI Responses、Google Generative AI 与 Google Vertex 路由在提供方上报时记录，而 OpenAI completions 会提供包括零在内的拆分。历史会话没有推理数据，因此跨会话读取方必须区分“未记录”与零。本就会在字段存在时渲染 `reasoningTokens` 的单请求 trajectory 检查器，现在无需改动即可为 pi-ai 路由显示数字。

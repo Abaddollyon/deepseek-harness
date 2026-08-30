@@ -6,7 +6,7 @@ English | [中文](2026-08-24-pi-ai-reasoning-token-capture.zh.md)
 
 ## Problem
 
-pi-ai reports a reasoning/thinking token split for the providers that expose one: OpenAI-completions routes always carry `usage.reasoning` from `completion_tokens_details.reasoning_tokens` (zero when the model did not think), OpenAI Responses routes read `output_tokens_details.reasoning_tokens`, and Anthropic routes read `output_tokens_details.thinking_tokens`. The pi-ai adapter's `mapUsage` discarded that field, so every session routed through pi-ai recorded usage without `reasoningTokens` even though `TokenUsage` has carried the optional field since the DeepSeek adapter began populating it. Consumers folding session logs — cross-session usage aggregation, the trajectory per-request inspector — could only render a permanently zero reasoning figure for pi-ai routes.
+pi-ai reports a reasoning/thinking token split for the providers that expose one: OpenAI-completions routes always carry `usage.reasoning` from `completion_tokens_details.reasoning_tokens` (zero when the model did not think), OpenAI Responses routes read `output_tokens_details.reasoning_tokens`, Anthropic routes read `output_tokens_details.thinking_tokens`, and Google Generative AI and Vertex routes read `usageMetadata.thoughtsTokenCount`. The pi-ai adapter's `mapUsage` discarded that field, so every session routed through pi-ai recorded usage without `reasoningTokens` even though `TokenUsage` has carried the optional field since the DeepSeek adapter began populating it. Consumers folding session logs — cross-session usage aggregation, the trajectory per-request inspector — could only render a permanently zero reasoning figure for pi-ai routes.
 
 ## Decision
 
@@ -28,4 +28,4 @@ The `mapUsage` unit tests pin the pass-through (reported value, reported zero, a
 
 ## Consequences
 
-New sessions on pi-ai routes record real reasoning splits; Anthropic and OpenAI-Responses routes record them only when the provider reports them. Historical sessions keep no reasoning data, so cross-session readers must distinguish "not recorded" from zero. The per-request trajectory inspector, which already rendered `reasoningTokens` when present, now shows figures for pi-ai routes without further change.
+New sessions on pi-ai routes record real reasoning splits; Anthropic, OpenAI Responses, Google Generative AI, and Google Vertex routes record them when the provider reports them, while OpenAI completions supplies its split including zero. Historical sessions keep no reasoning data, so cross-session readers must distinguish "not recorded" from zero. The per-request trajectory inspector, which already rendered `reasoningTokens` when present, now shows figures for pi-ai routes without further change.
