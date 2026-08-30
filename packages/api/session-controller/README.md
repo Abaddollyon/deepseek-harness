@@ -43,6 +43,8 @@ The Session object also carries local submission echoes: `session.beginSubmissio
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
+Cold list rows remain visible immediately. Durable titles are warmed through bounded `sessionQuery.readTitleSnapshots` reads and appear on a later poll; failed or cancelled batches remain retryable, cache entries are limited to visible cold rows, and live-session transitions invalidate cached titles.
+
 -----
 
 <a id="model-experience"></a>
