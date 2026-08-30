@@ -332,7 +332,7 @@ describe('PiAiAdapter auth recovery', () => {
       profiles: () => resolveProfiles({
         anthropic: {
           baseURL: server.url + '/v1',
-          streamIdleTimeoutMs: 20,
+          streamIdleTimeoutMs: 250,
           authRecovery: { delayMs: 1 },
         },
       }),
