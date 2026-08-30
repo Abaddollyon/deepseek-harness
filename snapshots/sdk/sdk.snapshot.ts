@@ -51,6 +51,7 @@ import {
   type RunResult,
   type SdkPromptContentBlock,
 } from '@deepseek-ai/dsh-sdk-client'
+import { ISOLATED_PROJECT_ROOT_MARKER, isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 
 const corpusRoot = fileURLToPath(new URL('../', import.meta.url))
 
@@ -67,6 +68,8 @@ const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 const mode = process.env.DSH_SNAPSHOT ?? 'replay'
 const recording = mode === 'record'
 const refreshing = mode === 'refresh'
+// The harness-planted project-root marker is runtime state too: committed
+// workspace.expected trees cannot carry a `.git` path (Git refuses it).
 const RUNTIME_WORKSPACE_ENTRIES = [
   '.agents',
   '.child-dsh',
@@ -74,6 +77,7 @@ const RUNTIME_WORKSPACE_ENTRIES = [
   '.dsh-sdk-background-release',
   '.replay-fixtures',
   '.snapshot-patches',
+  ISOLATED_PROJECT_ROOT_MARKER,
 ] as const
 const dshSdkDiagnosticChildPatch = fileURLToPath(new URL(
   './subagent-dsh-sdk-diagnostic/child.cordis.yml',
@@ -514,6 +518,7 @@ async function runScenario(scenario: CorpusScenario): Promise<{
       await cp(join(workspaceDir, entry), join(cwd, entry), { recursive: true, verbatimSymlinks: true })
     }
   }
+  await isolateWorkspaceProjectRoot(cwd)
   const initialWorkspace = await captureWorkspaceSnapshot(cwd, {
     ignoredRootEntries: RUNTIME_WORKSPACE_ENTRIES,
   })
