@@ -415,7 +415,9 @@ describe('PiAiAdapter provider routing', () => {
     expect(result.finish).toEqual({
       kind: 'error',
       failure: {
-        message: `pi-ai detected context overflow for model "${model.id}"`,
+        // The fallback surfaces the resolved catalog capacity and the
+        // input that exceeded it, not just the model name.
+        message: `pi-ai detected context overflow for model "${model.id}" at resolved context window ${model.contextWindow} tokens (input ${model.contextWindow + 1}, cache-read 0)`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
