@@ -100,8 +100,8 @@ export function apply(ctx: Context): void {
     // Ungrouped creates a session without workspace attachment, then selects it.
     createLooseSession: () => {
       sessions.create({}).then(
-        sessionId => { sessions.open(sessionId) },
-        reason => { console.warn('loose session failed:', reason) },
+        (sessionId) => { sessions.open(sessionId) },
+        (reason: unknown) => { console.warn('loose session failed:', reason) },
       )
     },
     open: (sessionId) => { sessions.open(sessionId) },
