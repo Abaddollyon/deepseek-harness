@@ -84,7 +84,7 @@ kind: "package-reference"
 
 ### scope 分层
 
-`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。
+`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是有意的例外：采用观察者一律注册到全局层，因为运行监督器的采用核算是全宿主范围的。标记写入是必需的而非尽力的：store 缺失或拒绝写入时，生产方钩子会被取消并落入诚实的本地恢复失败，而不是让任务在本 incarnation 下无标记运行。该失败无法镜像覆盖前一个 incarnation 的持久记录；store 随后重新挂载时会以该持久记录替换本地失败，并通过已注册的 resumer 重试。每次通告都发生在重新盖章的记录——本进程 incarnation 加上作为 `adoptedFromIncarnation` 记录的前一个 incarnation——持久化提交之后，并且所有观察者都被等待完毕才接上生产方的完成接线，因此账目一定先于它必须识别的任何结算落位。
 
 ### 准入与结算
 

@@ -111,6 +111,8 @@ interface TrackedTask {
   adoptedFromIncarnation: string | undefined
   /** Set after a rejected store write; the record degrades to in-memory only. */
   persistDegraded: boolean
+  /** A durable prior-incarnation record owns this id and replaces this local failure on remount. */
+  restoreOnStoreAdoption: boolean
   /** Resolves once the terminal snapshot is recorded and listeners notified. */
   settled: Promise<void>
   /** Resolver for {@link settled}, called by the first effective settlement. */
@@ -297,6 +299,7 @@ export class LocalJobRegistry extends JobRegistry {
       pendingResume: false,
       adoptedFromIncarnation: undefined,
       persistDegraded: false,
+      restoreOnStoreAdoption: false,
       settled,
       markSettled,
       waiters: 0,
@@ -764,8 +767,10 @@ export class LocalJobRegistry extends JobRegistry {
    * for those were skipped because there was nothing to write to).
    */
   private adoptStore(store: JobStore): void {
-    this.restoreRecords(store)
-    for (const job of this.store.values()) void this.persistRecord(job)
+    const durableIds = this.restoreRecords(store)
+    for (const job of this.store.values()) {
+      if (!durableIds.has(job.id)) void this.persistRecord(job)
+    }
   }
 
   /**
@@ -778,11 +783,19 @@ export class LocalJobRegistry extends JobRegistry {
    * not mistake live work for orphans. Restored records carry their session
    * fence but no live `Agent`, so changes announce through the global lane.
    */
-  private restoreRecords(store: JobStore): void {
-    const records = store.list()
-      .filter(record => !this.store.has(record.id))
+  private restoreRecords(store: JobStore): Set<JobId> {
+    const stored = store.list()
+    const durableIds = new Set(stored.map(record => record.id))
+    const records = stored
+      .filter((record) => {
+        const existing = this.store.get(record.id)
+        if (existing === undefined) return true
+        if (!existing.restoreOnStoreAdoption) return false
+        this.removeRecord(existing)
+        return true
+      })
       .sort((left, right) => left.startedAt - right.startedAt || String(left.id).localeCompare(String(right.id)))
-    if (records.length === 0) return
+    if (records.length === 0) return durableIds
     for (const record of records) {
       const job = this.restoredTask(record)
       this.insertRecord(job)
@@ -799,6 +812,7 @@ export class LocalJobRegistry extends JobRegistry {
       if (resume !== undefined) this.tryResume(job, resume)
     }
     this.notifyChanged(undefined)
+    return durableIds
   }
 
   /** Build the in-memory task for one persisted record. */
@@ -834,6 +848,7 @@ export class LocalJobRegistry extends JobRegistry {
       pendingResume: !isTerminal(record.status),
       adoptedFromIncarnation: record.adoptedFromIncarnation,
       persistDegraded: false,
+      restoreOnStoreAdoption: false,
       settled,
       markSettled,
       waiters: 0,
@@ -889,6 +904,10 @@ export class LocalJobRegistry extends JobRegistry {
     if (!await this.commitAdoptionMarker(job)) {
       job.adoptedFromIncarnation = undefined
       job.incarnation = candidate.priorIncarnation
+      // The prior durable record remains authoritative. Keep this local failure
+      // from overwriting it, then replace the failure if that store remounts.
+      job.persistDegraded = true
+      job.restoreOnStoreAdoption = true
       this.cancelHooksQuietly(job, hooks, 'resume adoption was not persisted')
       this.settle(job, { status: 'failed', detail: ADOPTION_NOT_DURABLE_DETAIL })
       return
@@ -910,14 +929,13 @@ export class LocalJobRegistry extends JobRegistry {
   /**
    * Commit the re-stamped record carrying the adoption marker. The put is
    * awaited and its failure reported, because the marker is the only proof a
-   * later boot can account the adoption from. When the store that carried
-   * the record is already gone the adoption proceeds unmarked — no lane is
-   * left to write through.
+   * later boot can account the adoption from. There are no unmarked
+   * adoptions: a store that is already gone rejects the adoption exactly like
+   * a failing put.
    */
   private async commitAdoptionMarker(job: TrackedTask): Promise<boolean> {
     const store = this.storeRef()
-    if (store === undefined) return true
-    if (job.persistDegraded) return false
+    if (store === undefined) return false
     try {
       await store.put(this.toRecord(job))
       return true

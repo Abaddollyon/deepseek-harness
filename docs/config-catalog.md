@@ -955,10 +955,59 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Mirror records to `ctx.jobStore` (default false). Explicit opt-in: a
+   * mounted store with `persist: false` writes nothing. With `persist: true`
+   * and no store mounted, records stay in-memory until a store appears — the
+   * composition owns providing one.
+   */
+  persist?: boolean
+  /**
+   * Per-owner cap on retained terminal records (default 100). Excess REPORTED
+   * terminal records are evicted FIFO; an unreported terminal record always
+   * survives eviction pressure, because evicting it would lose the completion
+   * notice the model never read. `0` retains no reported terminal records.
+   */
+  maxSettledJobs?: number
+  /**
+   * Milliseconds service teardown waits for producers to release before
+   * force-failing their records with an orphan warning and continuing
+   * (default 10000). Bounds `disposeAll` so a producer that never settles
+   * cannot wedge process shutdown.
+   */
+  teardownGraceMs?: number
+  /**
+   * UTF-8 byte cap applied to a record's final output before it is persisted
+   * (default 65536). Independent of the per-notice `outputLimitBytes`; the
+   * in-memory output is never clipped.
+   */
+  maxPersistedOutputBytes?: number
 }
 ```
 
-Source: [`packages/jobs/jobs-local/src/index.ts:31`](../packages/jobs/jobs-local/src/index.ts)
+Source: [`packages/jobs/jobs-local/src/index.ts:49`](../packages/jobs/jobs-local/src/index.ts)
+
+<a id="deepseek-aidsh-jobs-store-domain"></a>
+
+## `@deepseek-ai/dsh-jobs-store-domain`
+
+Requires: `storageDomain`
+
+```ts config-catalog
+/** Configures the domain-backed job store. */
+export interface Config {
+  /** Domain (and backend unit) name the store opens; omission defaults to 'jobs'. */
+  domainName?: string
+  /**
+   * Per-id write coalescing window in milliseconds: rapid successive puts of
+   * one record within the window land as a single durable write of the
+   * latest value (default 200).
+   */
+  writeBatchMaxDelayMs?: number
+}
+```
+
+Source: [`packages/jobs/jobs-store-domain/src/index.ts:93`](../packages/jobs/jobs-store-domain/src/index.ts)
 
 <a id="deepseek-aidsh-llm-deepseek"></a>
 
@@ -1728,6 +1777,46 @@ export interface Config {
 ```
 
 Source: [`packages/guard/repeat-tool-reminder/src/index.ts:28`](../packages/guard/repeat-tool-reminder/src/index.ts)
+
+<a id="deepseek-aidsh-run-supervisor"></a>
+
+## `@deepseek-ai/dsh-run-supervisor`
+
+Requires: `jobs`
+
+```ts config-catalog
+/** Configuration for the run supervisor. */
+export interface Config {
+  /**
+   * Resume restorable runs at boot (default true). `false` honest-settles
+   * every pending prior-incarnation record: a deployment may prefer a clean
+   * boot over adoption.
+   */
+  resumeOnBoot?: boolean
+  /**
+   * Milliseconds the whole reconciliation pass may take before every still
+   * pending record honest-settles with `'boot reconciliation timed out'`
+   * (default 30000). Bounds owner restoration and the wait for producer
+   * resumers to register.
+   */
+  bootResumeTimeoutMs?: number
+  /**
+   * Maximum prior-incarnation runs one owner session may have adopted at
+   * boot (default 10); the overflow honest-settles so a restart cannot
+   * stampede past the registry's per-owner concurrency limit.
+   */
+  maxResumedRunsPerOwner?: number
+  /**
+   * Milliseconds an honest-settled record whose owner session can be neither
+   * found live nor listed by persistence stays in the durable store before
+   * boot reconciliation evicts it (default 604800000 — 7 days). `0` evicts
+   * at the first boot that classifies the owner as orphaned.
+   */
+  orphanRetentionMs?: number
+}
+```
+
+Source: [`packages/jobs/run-supervisor/src/index.ts:94`](../packages/jobs/run-supervisor/src/index.ts)
 
 <a id="deepseek-aidsh-sandbox-local"></a>
 
@@ -3086,7 +3175,7 @@ Source: [`packages/web/tool-web/src/index.ts:37`](../packages/web/tool-web/src/i
 Requires: `tools` · `workflowEngine` · `systemPrompt`
 
 ```ts config-catalog
-/** Config: the model-facing tool name plus result and durable-progress caps. */
+/** Config: model-facing name, lifecycle ownership, and result/durable-progress caps. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
@@ -3096,10 +3185,12 @@ export interface Config {
   maxProgressEvents?: number
   /** Durable workflow narration ceiling per line, in characters (default 2000). */
   maxLogChars?: number
+  /** Run lifetime owner: the calling step or the background job supervisor (default `caller`). */
+  ownership?: 'caller' | 'supervisor'
 }
 ```
 
-Source: [`packages/workflow/tool-workflow/src/index.ts:32`](../packages/workflow/tool-workflow/src/index.ts)
+Source: [`packages/workflow/tool-workflow/src/index.ts:45`](../packages/workflow/tool-workflow/src/index.ts)
 
 <a id="deepseek-aidsh-tools"></a>
 

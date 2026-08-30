@@ -16,7 +16,7 @@ Status: implemented
 2. 按 `ownerSession` 分组并解析属主：存活 agent、可恢复会话（`sessionPersistence.prepare`，立即 dispose）、孤儿；若没有 persistence seam 则为*未知*——不会仅凭证据缺失就结算任何记录。
 3. 应用策略：`resumeOnBoot: false` 全部结算；孤儿属主的记录以 `'owner-unavailable'` 结算；每属主最旧的前 `maxResumedRunsPerOwner` 条保持可收养，超出部分以配额详情结算；熬过 `bootResumeTimeoutMs` 的以 `'reconcile-timeout'` 结算。这趟流程总会完成，进程总会启动。
 4. 通过注册表的 `registerResumer` 拒绝通道驱动结算——这是唯一能触及被恢复记录的、无围栏的公开通道。它保留 `reported`、维持 first-wins 终止语义，并把结算经 supervisor 自己的 `onJobDone` 监听器带回入账。由于该通道一次回放整个 kind，当 kind 仍有可收养记录待处理时，其结算目标会等到该 kind resolve或截止。
-5. 为一切记账：`run/resumed` 与 `run/abandoned`（声明合并、log-only、绝不 `ignorable`）经存活 append 或以日志下一 seq 的持久离线 append 写入属主会话；已携带该 job 事件的日志不会被重复写入，因此反复重启不会重复账目。未被报告的终止记录欠其存活属主恰好一条注入式完成通知（`reported` 持久为 true 时一条也不发），随后 supervisor 经 `jobs.wait` 把记录认领为 reported——绝不用 `read`，那会消耗流式任务的输出游标。`run/detached` 在此声明以使 `run/*` 词汇有唯一的家，但它由后续的 workflow 切片发出。
+5. 为一切记账：收养经注册表的 `onJobAdopted` 通告到达本趟流程——通告在重新盖章的记录提交之后投递；没有任何一趟流程观测到的收养——在 supervisor 挂载前就已触发的 resumer，或记账前就已消亡的进程——由持久的 `adoptedFromIncarnation` 标记作证，下一趟流程将其记为 `run/resumed`、以标记的 incarnation 命名，并且只有在 append 被确认已记录或发现已存在后才清除标记——任何通道都触及不到的属主会把标记留给之后的启动。`run/resumed` 与 `run/abandoned`（声明合并、log-only、绝不 `ignorable`）经存活 append 或以日志下一 seq 的持久离线 append 写入属主会话；已携带该 job 事件的日志不会被重复写入，因此反复重启不会重复账目。未被报告的终止记录欠其存活属主恰好一条注入式完成通知（`reported` 持久为 true 时一条也不发），随后 supervisor 经 `jobs.wait` 把记录认领为 reported——绝不用 `read`，那会消耗流式任务的输出游标。`run/detached` 在此声明以使 `run/*` 词汇有唯一的家，但它由后续的 workflow 切片发出。
 6. 当终止记录的属主既无法存活命中也无法被 persistence 列出时，超过 `orphanRetentionMs` 后将其从持久 store 驱逐——仅持久层驱逐；内存副本驻留并被围栏在已死会话里，对任何调用者不可见。
 
 每个限额都是经验证的 Config 字段（`resumeOnBoot`、以 `MAX_TIMER_DELAY_MS` 为上界的 `bootResumeTimeoutMs`、`maxResumedRunsPerOwner`、`orphanRetentionMs`）；配置错误在加载时即响亮失败。

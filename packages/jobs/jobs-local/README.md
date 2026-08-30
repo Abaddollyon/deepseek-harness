@@ -84,7 +84,7 @@ This section explains the design decisions behind the registry and points at the
 
 ### Scope layers
 
-`attachController`, `onJobDone`, and `onJobsChanged` register into the calling context's scope layer. The controller question (`servesOwner`) and listener delivery (`listenersFor`, `changedFor`) walk the same chain: global layer first, then each scoped layer along the owner's chain. Registrations are anonymous tokens so duplicate labels stay independently disposable.
+`attachController`, `onJobDone`, and `onJobsChanged` register into the calling context's scope layer. The controller question (`servesOwner`) and listener delivery (`listenersFor`, `changedFor`) walk the same chain: global layer first, then each scoped layer along the owner's chain. Registrations are anonymous tokens so duplicate labels stay independently disposable. `onJobAdopted` is the deliberate exception: adoption observers always file into the global layer, because the run supervisor's adoption accounting is host-wide. The marker put is required, not best-effort: a missing store or rejected put cancels the producer hooks into an honest local resume failure rather than running an unmarked job under this incarnation. That failure cannot mirror over the prior-incarnation durable record; a later store remount replaces the local failure with the durable record and retries it through the registered resumer. Each announcement follows the durable commit of the re-stamped record — this process incarnation plus the prior one as `adoptedFromIncarnation` — and every observer is awaited before the producer's completion wiring attaches, so the account lands before any settlement it must recognize.
 
 ### Admission and settlement
 
