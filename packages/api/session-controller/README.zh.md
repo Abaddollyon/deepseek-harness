@@ -43,6 +43,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
 
+冷列表行会立即可见。持久化标题通过有界的 `sessionQuery.readTitleSnapshots` 异步预热，并在后续轮询中出现；失败或取消的批次保持可重试，缓存条目仅保留当前可见的冷行，实时会话转换会使缓存标题失效。
+
 -----
 
 <a id="model-experience"></a>
