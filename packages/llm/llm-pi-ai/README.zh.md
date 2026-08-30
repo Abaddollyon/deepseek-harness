@@ -193,7 +193,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 
 #### Token 影响
 
-生成内容只在 loop 记录后才影响后续输入。提供方未单独报告推理 token 时，pi-ai 会把推理 token 并入输出用量，并原样保留其精确 `totalTokens` 值。
+生成内容只在 loop 记录后才影响后续输入。推理 token 始终留在输出用量内；提供方上报的推理拆分会作为 `reasoningTokens` 一并记录——它是 `outputTokens` 的子拆分，绝不是新增的桶——并原样保留 pi-ai 精确的 `totalTokens` 值。
 
 #### KV Cache 影响
 
