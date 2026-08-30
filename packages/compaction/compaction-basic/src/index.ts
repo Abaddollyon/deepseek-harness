@@ -28,7 +28,7 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
-import { summarizeWithLlm } from './summarizer.ts'
+import { createCompactionInstructionMessage, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
@@ -190,11 +190,10 @@ export class BasicCompactionEngine extends CompactionEngine {
       try {
         spec = resolveCompactSpec(policy, contextWindow)
       } catch (error: unknown) {
-        /* v8 ignore next -- resolveCompactSpec throws only TargetPressureConfigError for validated typed inputs. */
-        if (!(error instanceof TargetPressureConfigError)) throw error
-        if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
-        this.warnedPressureConfigTargets.add(error.targetKey)
-        ctx.logger.warn(`request preflight compaction skipped: ${error.message}`)
+        const configError = error as TargetPressureConfigError
+        if (this.warnedPressureConfigTargets.has(configError.targetKey)) return next()
+        this.warnedPressureConfigTargets.add(configError.targetKey)
+        ctx.logger.warn(`request preflight compaction skipped: ${configError.message}`)
         return next()
       }
       if (measurement.totalTokens < spec.thresholdTokens
@@ -312,6 +311,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     const replayBudget = summaryContext.contextWindow
       - policy.maxTokens
       - meter.estimateHeader(header)
+      - meter.estimateMessage(createCompactionInstructionMessage())
     const range = capRangeForReplayBudget(
       agent.session,
       measurement,
@@ -526,5 +526,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
   }
 }
+
+export { createCompactionInstructionMessage } from './summarizer.ts'
 
 export default BasicCompactionEngine
