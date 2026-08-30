@@ -30,6 +30,10 @@ import {
 } from './region.ts'
 import { createCompactionInstructionMessage, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
+function isAborted(signal: AbortSignal): boolean {
+  return signal.aborted
+}
+
 import type {
   BasicCompactionConfig,
   ModelCompactPolicyConfig,
@@ -216,7 +220,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       try {
         const result = await work
         signal.throwIfAborted()
-        if (agent.session.surface.replaceGeneration <= generation) return next()
+        if (agent.session.surface.replaceGeneration <= generation) return await next()
         if (result !== null) logResult(result, 'request preflight')
         return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
       } catch (error: unknown) {
@@ -227,7 +231,7 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
         }
         ctx.logger.warn(`request preflight compaction failed: ${message}; preserving the full request`)
-        return next()
+        return await next()
       } finally {
         const current = this.requestAdmissions.get(agent.session)
         if (current?.work === work) this.requestAdmissions.delete(agent.session)
@@ -255,7 +259,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (!isAborted(signal) && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `context-overflow compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -264,14 +268,14 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          `context-overflow compaction failed: ${message}; ${signal.aborted
+          `context-overflow compaction failed: ${message}; ${isAborted(signal)
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      if (signal.aborted
-        || agent.session.surface.replaceGeneration <= generation) return next()
+      if (isAborted(signal)
+        || agent.session.surface.replaceGeneration <= generation) return await next()
       if (result !== null) logResult(result, 'context overflow recovery')
       this.overflowRetries.set(agent, retries + 1)
       return { kind: 'retry' }
