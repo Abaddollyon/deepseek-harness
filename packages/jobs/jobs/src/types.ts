@@ -244,5 +244,10 @@ export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined
  */
 export type JobsChangedListener = (owner: Agent | undefined) => void
 
-/** Listener for one restored job adopted by a producer resumer. */
-export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void
+/**
+ * Listener for one restored job adopted by a producer resumer. A returned
+ * promise is awaited before the registry attaches the producer's completion
+ * wiring, so the observer's account lands before any settlement it must
+ * recognize.
+ */
+export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void | PromiseLike<void>

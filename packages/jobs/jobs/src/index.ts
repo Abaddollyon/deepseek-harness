@@ -171,7 +171,21 @@ export abstract class JobRegistry extends Service {
    */
   abstract onJobsChanged(listener: JobsChangedListener): () => void
 
-  /** Observe restored records adopted by producer resumers. */
+  /**
+   * Register an observer of durable adoptions. It fires once per restored
+   * record a producer resumer adopts, after the registry commits the
+   * re-stamped record — this process incarnation plus the prior one as the
+   * adoption marker — to the durable store, so an observer that crashes
+   * afterwards still finds the marker on the next boot. Delivery is global:
+   * every listener sees every adoption regardless of owner scope. A returned
+   * promise is awaited before the registry attaches the producer's
+   * completion wiring, so the observer's account lands before any settlement
+   * it must recognize; every listener runs, and failures are contained and
+   * logged only after all of them settle.
+   * @param listener - receives the adopted snapshot and the prior process
+   *   incarnation that wrote the record before the restart.
+   * @returns disposer that unregisters the listener.
+   */
   abstract onJobAdopted(listener: JobAdoptedListener): () => void
 
   /**

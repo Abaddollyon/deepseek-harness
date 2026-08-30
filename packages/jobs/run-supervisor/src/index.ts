@@ -166,6 +166,13 @@ interface TerminalView {
   readonly outputLimitBytes: number | undefined
 }
 
+/**
+ * Whether one run/* account append durably reached the owner session.
+ * `unavailable` names the deterministic no-lane case (the owner is neither
+ * live nor reachable through persistence), never a lane failure.
+ */
+type RunEventAppendOutcome = 'recorded' | 'already-present' | 'unavailable'
+
 /** One bounded reconciliation pass over the durable store. */
 interface ReconcilePass {
   /** The store that triggered this pass, captured from the inject binding. */
@@ -331,8 +338,8 @@ export class RunSupervisor {
   protected [Service.init](): void {
     this.ctx.effect(() => {
       const disposeDone = this.ctx.jobs.onJobDone((snapshot) => { this.onJobDone(snapshot) })
-      const disposeChanged = this.ctx.jobs.onJobAdopted((snapshot) => { this.onAdopted(snapshot) })
-      return () => { disposeDone(); disposeChanged() }
+      const disposeAdopted = this.ctx.jobs.onJobAdopted(snapshot => this.onAdopted(snapshot))
+      return () => { disposeDone(); disposeAdopted() }
     }, 'run-supervisor.observers')
     this.ctx.inject(['jobStore'], (storeCtx) => {
       // A reconciliation failure must never break the store's inject fiber.
@@ -412,22 +419,54 @@ export class RunSupervisor {
   }
 
   /**
-   * Resolve every candidate's owner and apply pass policy: disabled boot
-   * resume, orphan owners, and the per-owner adoption budget turn into
-   * settle decisions; the rest wait for a producer resumer.
+   * Account every adoption marker a previous pass left durable. The registry
+   * commits the re-stamped record — its own incarnation plus the prior one as
+   * `adoptedFromIncarnation` — before it announces the adoption, so a crash
+   * or a supervisor that mounted after the resumer can leave the adoption
+   * unaccounted; the marker is the proof that lets this pass append the
+   * `run/resumed` the owner never got. The account names the marker: the
+   * incarnation that wrote the record the missed adoption took over, exactly
+   * as the live {@link onAdopted} lane would have named it. The marker
+   * clears only after the append is confirmed recorded or found already
+   * present — a lane failure or an owner no lane can reach keeps it for a
+   * later boot. Terminal records keep their marker — the settlement already
+   * accounted the run — and a cleared marker cannot double-account a later
+   * boot.
    */
   private async accountAdoptionMarkers(pass: ReconcilePass): Promise<void> {
     for (const record of pass.store.list()) {
       if (record.adoptedFromIncarnation === undefined) continue
       if (record.status !== 'running' && record.status !== 'stopping') continue
-      const candidate: PendingCandidate = { record, membership: 'unowned', decision: 'adoptable', detail: '' }
+      const candidate: PendingCandidate = {
+        record: { ...record, incarnation: record.adoptedFromIncarnation },
+        membership: 'unowned',
+        decision: 'adoptable',
+        detail: '',
+      }
       const owner = record.ownerSession ?? undefined
-      if (owner !== undefined) this.track(pass, this.emitResumed(owner, candidate))
+      if (owner !== undefined) {
+        // The marker clears only once the account is durably recorded (or
+        // found already present); a lane failure or an unreachable owner
+        // retains it for a later boot.
+        let outcome: RunEventAppendOutcome
+        try {
+          outcome = await this.emitResumed(owner, candidate)
+        } catch (error: unknown) {
+          this.ctx.logger.warn(`run-supervisor: failed to record a reconciliation outcome: ${String(error)}`)
+          continue
+        }
+        if (outcome === 'unavailable') continue
+      }
       const { adoptedFromIncarnation: _marker, ...cleared } = record
       await pass.store.put(cleared)
     }
   }
 
+  /**
+   * Resolve every candidate's owner and apply pass policy: disabled boot
+   * resume, orphan owners, and the per-owner adoption budget turn into
+   * settle decisions; the rest wait for a producer resumer.
+   */
   private async resolveAndClassify(pass: ReconcilePass): Promise<void> {
     const groups = new Map<SessionId | undefined, PendingCandidate[]>()
     for (const candidate of pass.candidates.values()) {
@@ -621,8 +660,13 @@ export class RunSupervisor {
   /** Legacy change callback retained as a no-op compatibility lane. */
   private onJobsChanged(): void {}
 
-  /** Account for an adoption delivered by the registry after durable commit. */
-  private onAdopted(snapshot: JobSnapshot): void {
+  /**
+   * Account for an adoption delivered by the registry after durable commit.
+   * The registry awaits this account before it attaches the producer's
+   * completion wiring, so a settlement can never race ahead of the
+   * `run/resumed` that classifies it.
+   */
+  private async onAdopted(snapshot: JobSnapshot): Promise<void> {
     this.onJobsChanged()
     const pass = this.activePass
     if (pass === undefined) return
@@ -630,10 +674,10 @@ export class RunSupervisor {
     if (candidate === undefined) return
     pass.candidates.delete(snapshot.id)
     this.adopted.set(snapshot.id, candidate)
-    const owner = candidate.record.ownerSession ?? undefined
-    if (owner !== undefined) this.track(pass, this.emitResumed(owner, candidate))
     this.settleReadyKinds(pass)
     this.nudge(pass)
+    const owner = candidate.record.ownerSession ?? undefined
+    if (owner !== undefined) await this.emitResumed(owner, candidate)
   }
 
   /**
@@ -742,15 +786,17 @@ export class RunSupervisor {
   /**
    * Append `run/resumed` to the owner session when it is reachable. The
    * event is idempotent across boots: a log that already carries a run/*
-   * event for this job is left alone.
+   * event for this job is left alone. The outcome tells the marker lane
+   * whether the account is durable (`recorded`/`already-present`) or no lane
+   * could reach the session (`unavailable`).
    */
-  private async emitResumed(owner: SessionId, candidate: PendingCandidate): Promise<void> {
+  private async emitResumed(owner: SessionId, candidate: PendingCandidate): Promise<RunEventAppendOutcome> {
     const data: RunResumedData = {
       jobId: candidate.record.id,
       kind: candidate.record.kind,
       priorIncarnation: candidate.record.incarnation,
     }
-    await this.appendRunEvent(owner, { type: 'run/resumed', data })
+    return this.appendRunEvent(owner, { type: 'run/resumed', data })
   }
 
   /**
@@ -803,17 +849,19 @@ export class RunSupervisor {
    * offline append through persistence at the log's next seq. An offline
    * append that loses a race with a session coming live retries through the
    * live lane; a session that cannot be reached at all keeps its record's
-   * account in the job list and store.
+   * account in the job list and store, reported as `unavailable` so the
+   * adoption-marker lane retains its proof for a later boot. A lane failure
+   * (a load or append rejection no live session can absorb) still throws.
    */
   private async appendRunEvent(
     owner: SessionId,
     event:
       | { readonly type: 'run/resumed'; readonly data: RunResumedData }
       | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
-  ): Promise<void> {
+  ): Promise<RunEventAppendOutcome> {
     const live = this.ctx.get('agents')?.get(owner)
     if (live !== undefined) {
-      if (hasRunEvent(live.session.events, event.data.jobId)) return
+      if (hasRunEvent(live.session.events, event.data.jobId)) return 'already-present'
       if (event.type === 'run/resumed') {
         live.session.append('run/resumed', event.data)
       } else {
@@ -822,12 +870,12 @@ export class RunSupervisor {
         }
         live.session.append('run/abandoned', event.data)
       }
-      return
+      return 'recorded'
     }
     const persistence = this.ctx.get('sessionPersistence')
-    if (persistence === undefined) return
+    if (persistence === undefined) return 'unavailable'
     const loaded = await persistence.load(owner)
-    if (hasRunEvent(loaded.events, event.data.jobId)) return
+    if (hasRunEvent(loaded.events, event.data.jobId)) return 'already-present'
     const closers = event.type === 'run/abandoned'
       ? workflowClosers(loaded.events, event.data.jobId, event.data.kind)
       : []
@@ -836,11 +884,13 @@ export class RunSupervisor {
     }) as SessionEvent)
     try {
       await persistence.append(owner, batch)
+      return 'recorded'
     } catch (error: unknown) {
       // The session may have come live between resolution and append (its
       // next seq moved); retry through the live lane before giving up.
       const raced = this.ctx.get('agents')?.get(owner)
-      if (raced === undefined || hasRunEvent(raced.session.events, event.data.jobId)) throw error
+      if (raced === undefined) throw error
+      if (hasRunEvent(raced.session.events, event.data.jobId)) return 'already-present'
       if (event.type === 'run/resumed') {
         raced.session.append('run/resumed', event.data)
       } else {
@@ -849,6 +899,7 @@ export class RunSupervisor {
         }
         raced.session.append('run/abandoned', event.data)
       }
+      return 'recorded'
     }
   }
 }
