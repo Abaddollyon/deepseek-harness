@@ -35,9 +35,19 @@ import {
   type AgentUnderTest,
   type LaunchedAcpTestAgent,
 } from './launcher.ts'
+import { ISOLATED_PROJECT_ROOT_MARKER, isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import { captureWorkspaceSnapshot, type WorkspaceSnapshotEntry } from './workspace.ts'
 
 export type { AgentUnderTest } from './launcher.ts'
+
+/**
+ * Harness-owned immediate children of a scenario cwd that are not workspace
+ * state: runtime homes and readiness files, plus the project-root marker the
+ * harness plants to stop upward discovery. Committed `workspace.expected`
+ * trees cannot carry the marker (Git refuses the path), so captured state
+ * excludes it while the agent's own directory listings still show it.
+ */
+const HARNESS_OWNED_ROOT_ENTRIES = ['.agents', '.dsh', '.dsh-profile-patches', '.dsh-snapshot-stream-ready', ISOLATED_PROJECT_ROOT_MARKER] as const
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000
 const WAIT_POLL_INTERVAL_MS = 10
@@ -252,8 +262,9 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
       await cp(opts.workspaceDir, cwd, { recursive: true })
     }
     await opts.prepareWorkspace?.(cwd)
+    await isolateWorkspaceProjectRoot(cwd)
     const initialWorkspace = await captureWorkspaceSnapshot(cwd, {
-      ignoredRootEntries: ['.agents', '.dsh', '.dsh-profile-patches', '.dsh-snapshot-stream-ready'],
+      ignoredRootEntries: HARNESS_OWNED_ROOT_ENTRIES,
     })
     const env: NodeJS.ProcessEnv = {
       ...opts.env,
@@ -335,7 +346,7 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
     // generated dirs still exist, ordered primary-first.
     sessionLogs = await harvestSessionLogs(sessionsRoot)
     const finalWorkspace = await captureWorkspaceSnapshot(cwd, {
-      ignoredRootEntries: ['.agents', '.dsh', '.dsh-profile-patches', '.dsh-snapshot-stream-ready'],
+      ignoredRootEntries: HARNESS_OWNED_ROOT_ENTRIES,
     })
     return {
       rawStdout: launched.rawStdout(),
