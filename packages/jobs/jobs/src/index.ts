@@ -9,12 +9,13 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  JobDoneListener, JobId, JobKind, JobRead, JobResumer, JobSnapshot, JobStart, JobsChangedListener,
+  JobAdoptedListener, JobDoneListener, JobId, JobKind, JobRead, JobResumer, JobSnapshot, JobStart, JobsChangedListener,
 } from './types.ts'
 
 export { JobId } from './types.ts'
 export { PROCESS_INCARNATION } from './incarnation.ts'
 export type {
+  JobAdoptedListener,
   JobDoneListener,
   JobDurability,
   JobHooks,
@@ -169,6 +170,9 @@ export abstract class JobRegistry extends Service {
    * @returns disposer that unregisters the listener.
    */
   abstract onJobsChanged(listener: JobsChangedListener): () => void
+
+  /** Observe restored records adopted by producer resumers. */
+  abstract onJobAdopted(listener: JobAdoptedListener): () => void
 
   /**
    * Register a resume handler for one job kind. On boot the registry replays
