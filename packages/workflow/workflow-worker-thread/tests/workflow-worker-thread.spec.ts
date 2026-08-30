@@ -86,7 +86,9 @@ interface ControlledRun {
  * the request signal fires, like the real in-process backends.
  */
 class StubProvider implements SubagentProvider {
-  readonly capabilities: SubagentCapabilities = { outputSchema: true, depthLimit: true, toolFilter: true, persona: false }
+  readonly capabilities: SubagentCapabilities = {
+    outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: true,
+  }
   readonly inheritsParentContext = false
   readonly runs: ControlledRun[] = []
 
@@ -97,9 +99,11 @@ class StubProvider implements SubagentProvider {
     private readonly deferStart = false,
     private readonly onAbortString?: (reason: string | undefined, index: number) => void,
     private readonly onSignalAbort?: (reason: unknown, index: number) => void,
+    private readonly validate?: (request: SubagentStartRequest) => Promise<void>,
   ) {}
 
   async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
+    await this.validate?.(request)
     const startGate = Promise.withResolvers<undefined>()
     const terminal = Promise.withResolvers<SubagentResult>()
     terminal.promise.catch(() => { /* provider owns early settlement until publication */ })
@@ -182,6 +186,7 @@ async function setup(options?: SetupOptions) {
     options?.deferStart ?? false,
     options?.onChildAbortString,
     options?.onChildSignalAbort,
+    request => validateStubRequest(ctx, request),
   )
   ctx.subagents.registerProvider(provider)
   // A fixed concurrency ceiling: the auto-resolved default is machine-derived
@@ -189,6 +194,21 @@ async function setup(options?: SetupOptions) {
   // would wedge on small CI runners.
   const engineFiber = await ctx.plugin(WorkerThreadWorkflowEngine, { provider: 'stub', maxConcurrentAgents: 8, ...options?.config })
   return { ctx, provider, parent: fakeParent(), engineFiber }
+}
+
+async function validateStubRequest(ctx: Context, request: SubagentStartRequest): Promise<void> {
+  const effort = request.agentOptions?.reasoningEffort
+  if (effort === undefined) return
+  const llm = ctx.get('llm')
+  if (llm === undefined) throw new Error('composes no LLM capability to validate it against')
+  const provider = request.agentOptions?.provider ?? request.parent.options.provider
+  const model = request.agentOptions?.model ?? request.parent.options.model
+  if (provider === undefined || model === undefined) throw new Error(`agent() reasoningEffort "${effort}" needs a complete route`)
+  try {
+    await llm.resolveCallConfig({ provider, model, reasoningEffort: ReasoningEffortId(effort) })
+  } catch (error: unknown) {
+    throw new Error(`agent() reasoningEffort "${effort}" was refused by the selected route: ${String(error)}`)
+  }
 }
 
 /** The standard test meta plus a body, spread into a start request. */
