@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ComponentProps } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -730,5 +731,28 @@ describe('workspace browser rows', () => {
         onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} onTogglePinned={vi.fn()} drag={after} t={t} />,
     )
     expect(screen.getByRole('treeitem').className).toMatch(/dropAfter/)
+  })
+
+  it('benchmarks selection changes at O(1): only old and new selected rows invalidate', () => {
+    type SessionNodeItemProps = ComponentProps<typeof SessionNodeItem>
+    const compare = (SessionNodeItem as unknown as {
+      compare: (previous: SessionNodeItemProps, next: SessionNodeItemProps) => boolean
+    }).compare
+    const callbacks = {
+      now: 0, onOpen: vi.fn(), onRename: vi.fn(), onFork: vi.fn(), onArchive: vi.fn(), onTogglePinned: vi.fn(), t,
+    }
+    let invalidated = 0
+    for (let index = 0; index < 100_000; index++) {
+      const node: SessionNode = {
+        id: sid(`session-${index}`), title: `Session ${index}`, blank: false, running: false,
+        runningSubagentCount: 0, completed: false, updatedAt: 0,
+      }
+      const previous = { ...callbacks, node, currentId: sid('session-0') }
+      const next = { ...callbacks, node, currentId: sid('session-1') }
+      if (!compare(previous, next)) invalidated++
+    }
+    // A selection transition may repaint only its departing and arriving rows.
+    expect(invalidated).toBeLessThanOrEqual(2)
+    expect(invalidated).toBe(2)
   })
 })
