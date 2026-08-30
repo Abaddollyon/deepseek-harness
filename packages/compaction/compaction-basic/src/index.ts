@@ -190,12 +190,11 @@ export class BasicCompactionEngine extends CompactionEngine {
       try {
         spec = resolveCompactSpec(policy, contextWindow)
       } catch (error: unknown) {
-        if (error instanceof TargetPressureConfigError) {
-          if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
-          this.warnedPressureConfigTargets.add(error.targetKey)
-        }
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`request preflight compaction skipped: ${message}`)
+        /* v8 ignore next -- resolveCompactSpec throws only TargetPressureConfigError for validated typed inputs. */
+        if (!(error instanceof TargetPressureConfigError)) throw error
+        if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
+        this.warnedPressureConfigTargets.add(error.targetKey)
+        ctx.logger.warn(`request preflight compaction skipped: ${error.message}`)
         return next()
       }
       if (measurement.totalTokens < spec.thresholdTokens
