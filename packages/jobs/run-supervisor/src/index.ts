@@ -362,6 +362,7 @@ export class RunSupervisor {
     timer.unref()
     try {
       this.enumerate(pass)
+      await this.accountAdoptionMarkers(pass)
       await this.resolveAndClassify(pass)
       this.accountLaneSettlements(pass)
       await this.evictExpiredOrphans(pass)
@@ -415,6 +416,18 @@ export class RunSupervisor {
    * resume, orphan owners, and the per-owner adoption budget turn into
    * settle decisions; the rest wait for a producer resumer.
    */
+  private async accountAdoptionMarkers(pass: ReconcilePass): Promise<void> {
+    for (const record of pass.store.list()) {
+      if (record.adoptedFromIncarnation === undefined) continue
+      if (record.status !== 'running' && record.status !== 'stopping') continue
+      const candidate: PendingCandidate = { record, membership: 'unowned', decision: 'adoptable', detail: '' }
+      const owner = record.ownerSession ?? undefined
+      if (owner !== undefined) this.track(pass, this.emitResumed(owner, candidate))
+      const { adoptedFromIncarnation: _marker, ...cleared } = record
+      await pass.store.put(cleared)
+    }
+  }
+
   private async resolveAndClassify(pass: ReconcilePass): Promise<void> {
     const groups = new Map<SessionId | undefined, PendingCandidate[]>()
     for (const candidate of pass.candidates.values()) {

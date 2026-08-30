@@ -43,6 +43,7 @@ export const jobRecordSchema = z.object({
   outputLimitBytes: z.number().int().positive().nullable(),
   resumeSpec: z.json(),
   incarnation: z.string(),
+  adoptedFromIncarnation: z.string().optional(),
   schemaVersion: z.literal(1),
 })
 
