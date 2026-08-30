@@ -25,11 +25,11 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-A top-level workflow run through `dsh-tool-workflow` appears in the conversation as its own node: expand the run to see its phases, and expand a phase to see its members. Phase groups come only from members that started, and settlement changes status without removing or reordering members.
+A top-level workflow run through `dsh-tool-workflow` appears in the conversation as its own node: expand the run to see its phases, and expand a phase to see its members. Phase groups come only from members that started, and settlement changes status without removing or reordering members. A member opens its child Session whenever the child id is in the ordinary Session list with `origin: 'subagent'` and `parentId` equal to the current Session. Settlement does not revoke this: completed and interrupted members stay openable while their child row exists, because `sessions.open(id)` works on a finished child. Underlined member text is the only visible navigation affordance; keyboard focus draws a two-pixel business-primary ring around the name area, while the status copy remains the lifecycle word. The component calls only the injected ordinary `sessions.open(id)` action; rows whose child Session is absent from the ordinary list — remote, addressed-only, or wrong-parent — remain non-interactive.
 
 ### Navigating the node
 
-The run uses a 32-pixel row with persistent chevrons, an inline state dot, and status text; phases use disclosure rows with title and member count in the main area and a fixed aggregate-status tail; members use a 16-pixel dot slot, a truncating name area, and a fixed status column. Opening a member's child Session requires the member to be running, the child id to be in the ordinary Session list, the row to have `origin: 'subagent'`, its `parentId` to be the current Session, and the list row to still be running — remote, addressed-only, wrong-parent, or terminal rows remain non-interactive.
+The run uses a 32-pixel row with persistent chevrons, an inline state dot, and status text; phases use disclosure rows with title and member count in the main area and a fixed aggregate-status tail; members use a 16-pixel dot slot, a truncating name area, and a fixed status column. Opening a member's child Session requires the child id to be in the ordinary Session list, the row to have `origin: 'subagent'`, and its `parentId` to be the current Session — remote, addressed-only, wrong-parent, or absent rows remain non-interactive; settlement does not revoke navigation while the child row exists.
 
 ### State and completion
 
@@ -82,11 +82,10 @@ None; this package neither assembles nor sends a provider request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-
 These limits define which runs produce records and what the node exposes; they are current package constraints.
 
-- **Only top-level calls through `dsh-tool-workflow` produce these records** — nested PTC mode calls and direct `WorkflowEngine` consumers do not.
-- **Navigation is intentionally live-only** — terminal members remain visible for review but never expose a cold-session opener from this node.
+- **Only top-level calls through `dsh-tool-workflow` produce these records** — nested Code Mode calls and direct `WorkflowEngine` consumers do not.
+- **Navigation follows the ordinary Session list** — a member stays openable after settlement while its child row is listed, but a member whose child Session the list does not contain (for example a remote row) never exposes an opener from this node.
 - **The node shows run, phase, member identity, and status only** — scripts, outputs, errors, logs, usage, static topology, and controls remain outside this surface.
 
 <a id="dev-note"></a>
