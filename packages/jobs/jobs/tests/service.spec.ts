@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { JobId, JobRegistry, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type {
-  JobDoneListener, JobRead, JobSnapshot, JobStart, JobsChangedListener,
+  JobAdoptedListener, JobDoneListener, JobRead, JobSnapshot, JobStart, JobsChangedListener,
 } from '@deepseek-ai/dsh-jobs'
 
 /**
@@ -56,6 +56,10 @@ class StubJobRegistry extends JobRegistry {
   }
 
   onJobsChanged(_listener: JobsChangedListener): () => void {
+    return () => {}
+  }
+
+  onJobAdopted(_listener: JobAdoptedListener): () => void {
     return () => {}
   }
 
