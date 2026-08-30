@@ -819,14 +819,14 @@ describe('CodexAppServerWire', () => {
   it('groups representative string errors without changing stop reasons', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens'],
-      ['sessionBudgetExceeded', 'limit', 'error'],
+      ['sessionBudgetExceeded', 'limit', 'error', { code: 'QUOTA' }],
       ['cyberPolicy', 'access-policy', 'error'],
       ['misalignmentPolicyViolation', 'access-policy', 'error'],
       ['serverOverloaded', 'service', 'error'],
       ['badRequest', 'product-error', 'error'],
       ['sandboxError', 'access-policy', 'error'],
     ] as const
-    for (const [codexErrorInfo, category, stopReason] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason, failure] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -849,6 +849,7 @@ describe('CodexAppServerWire', () => {
       expect(wire.collectFailure()).toEqual({
         stage: 'turn',
         category,
+        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('SECRET_TOKEN')
       expect(JSON.stringify(wire.collectFailure())).not.toContain('/private/secret.txt')
@@ -859,11 +860,12 @@ describe('CodexAppServerWire', () => {
   it('groups object errors and retains only numeric HTTP status', async () => {
     const scenarios = [
       ['httpConnectionFailed', { httpStatusCode: 503 }, 'transport', 503],
+      ['httpConnectionFailed', { httpStatusCode: 429, retryAfterMs: 12_000 }, 'transport', 429, { code: 'RATE_LIMIT', retryAfterMs: 12_000 }],
       ['responseStreamDisconnected', {}, 'transport', undefined],
       ['responseTooManyFailedAttempts', { httpStatusCode: '503' }, 'transport', undefined],
       ['activeTurnNotSteerable', { turnKind: 'review' }, 'product-error', undefined],
     ] as const
-    for (const [codexErrorInfo, detail, category, httpStatus] of scenarios) {
+    for (const [codexErrorInfo, detail, category, httpStatus, failure] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -877,8 +879,37 @@ describe('CodexAppServerWire', () => {
         stage: 'turn',
         category,
         ...(httpStatus === undefined ? {} : { httpStatus }),
+        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('turnKind')
+      wire.close()
+    }
+  })
+
+  it('maps top-level HTTP fields when structured error info omits them', async () => {
+    const scenarios = [
+      [{ futureVariant: {} }, { statusCode: 503 }, { httpStatus: 503 }],
+      [null, { status: 429, retryAfterMs: 0 }, {
+        httpStatus: 429,
+        failure: { code: 'RATE_LIMIT' },
+      }],
+    ] as const
+    for (const [codexErrorInfo, fields, expected] of scenarios) {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'provider failure',
+        codexErrorInfo,
+        ...fields,
+      }))
+      await expect(result).rejects.toThrow('status failed: unknown')
+      expect(wire.collectFailure()).toEqual({
+        stage: 'turn',
+        category: 'unknown',
+        ...expected,
+      })
       wire.close()
     }
   })
@@ -1582,14 +1613,14 @@ describe('run lifecycle and quiescence', () => {
   it('preserves representative terminal categories, HTTP status, and mapping', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens', undefined],
-      ['sessionBudgetExceeded', 'limit', 'error', undefined],
+      ['sessionBudgetExceeded', 'limit', 'error', undefined, { code: 'QUOTA' }],
       ['unauthorized', 'access-policy', 'error', undefined],
       ['internalServerError', 'service', 'error', undefined],
       [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'transport', 'error', 503],
       [{ activeTurnNotSteerable: { turnKind: 'review' } }, 'product-error', 'error', undefined],
       ['futureError', 'unknown', 'error', undefined],
     ] as const
-    for (const [codexErrorInfo, category, stopReason, httpStatus] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason, httpStatus, failure] of scenarios) {
       const { child, run, turnStart } = await publishRun()
       child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
       child.peer.send(
@@ -1605,6 +1636,7 @@ describe('run lifecycle and quiescence', () => {
         diagnostic: expectedFailureDiagnostic('turn', category, {
           ...(httpStatus === undefined ? {} : { httpStatus }),
         }),
+        ...(failure === undefined ? {} : { failure }),
         stopReason,
       })
       expect(result.diagnostic).not.toContain('SECRET_TOKEN')
