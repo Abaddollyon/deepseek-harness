@@ -201,7 +201,7 @@ A terminal failure from the initial page, repair page, or follow enters the curr
 
 `session.control()` is a Host-wide snapshot stream. One browser can observe transient state for all current live Sessions without opening a journal for every transcript.
 
-Each generation emits a complete baseline first, followed by queue, jobs, and projection deltas. The baseline reads attached Agents and process-local registries without resuming cold Agents.
+Each generation emits a complete baseline first, followed by queue, jobs, and projection deltas. A projection delta still queued when a newer one for the same `(session, key)` arrives is superseded in place and never delivered ([control queue projection coalescing](2026-08-30-control-queue-projection-coalescing.md)); queue and jobs deltas always arrive in push order. The baseline reads attached Agents and process-local registries without resuming cold Agents.
 
 Queue and jobs use complete replacement values and apply last-wins. Agent attach, detach, Session disposal, and owner disposal can all clear a stale mirror through an empty value or a new baseline.
 
