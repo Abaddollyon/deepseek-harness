@@ -25,6 +25,7 @@ const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const PARENT_FIXTURE = join(REPO_ROOT, 'snapshots/session/workflow-run/session.jsonl')
 const CHILD_FIXTURE = join(REPO_ROOT, 'snapshots/session/workflow-run/session.1.jsonl')
 const CHILD_PROMPT = 'Reply with exactly the word WF_CHILD_OK and nothing else.'
+const CHILD_LABEL = 'Workflow child'
 
 describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () => {
   let scaffold: WebScaffold
@@ -88,7 +89,7 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     expect(await phaseDisclosure.getAttribute('aria-expanded')).toBe('true')
     expect(await runDisclosure.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     expect(await phaseDisclosure.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
-    const member = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
+    const member = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
     await member.waitFor({ timeout: 15_000 })
 
     await phaseDisclosure.click()
@@ -159,6 +160,10 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
 
     const sessions = page.getByRole('tree', { name: 'Sessions' })
+    // The ordinary Session summary projects the descriptor label into the
+    // named Session hierarchy after child navigation, before settlement.
+    const hierarchy = page.getByRole('navigation', { name: 'Session hierarchy' })
+    await hierarchy.getByRole('button', { name: `Switch subagent: ${CHILD_LABEL}` }).waitFor()
     await sessions.getByRole('treeitem', { name: /Use the workflow tool exactly/ }).click()
     await settled
     await expandTurnProcesses(page)
@@ -179,7 +184,7 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
     // Settlement keeps the member navigable: its child Session row is still in
     // the ordinary list, and sessions.open works on a finished child.
-    const settledMember = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
+    const settledMember = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
     await settledMember.waitFor({ timeout: 10_000 })
     await settledMember.click()
     await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
@@ -198,19 +203,22 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     const workflow = page.getByRole('button', { name: /^snapshot-flow/ })
     await workflow.waitFor({ timeout: 15_000 })
     expect(await workflow.getAttribute('aria-expanded')).toBe('false')
-    const snapshot = await captureStableAria(page, '[data-chat-flow]', scaffold.workspaceCwd)
-    await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
     await workflow.click()
     const phase = page.getByRole('button', { name: /^Run/ })
     await phase.waitFor()
     expect(await phase.getAttribute('aria-expanded')).toBe('false')
     await phase.click()
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
+    const snapshot = await captureStableAria(page, '[data-chat-flow]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
     // The rebuilt terminal member is still a navigation button: the child
     // Session row survives the reload in the ordinary list.
-    const reloadedMember = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
+    const reloadedMember = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
     await reloadedMember.waitFor()
     await reloadedMember.click()
+    // Navigating the member proves the persisted ordinary Session displayTitle.
+    const reloadedHierarchy = page.getByRole('navigation', { name: 'Session hierarchy' })
+    await reloadedHierarchy.getByRole('button', { name: `Switch subagent: ${CHILD_LABEL}` }).waitFor()
     await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
   }, 60_000)
 
