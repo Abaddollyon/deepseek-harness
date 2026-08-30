@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertServiceable, Config } from '../src/config.ts'
+import { assertServiceable, Config, MAX_AUTH_RECOVERY_RETRIES, resolveProfiles } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -82,6 +82,7 @@ describe('request image policy bounds', () => {
     ['requestImagePixelBudget', Number.MAX_SAFE_INTEGER + 1, /requestImagePixelBudget must be a positive safe integer/],
     ['requestImageMaxBytes', 0, /requestImageMaxBytes must be a positive safe integer/],
     ['requestImageMaxBytes', 1.5, /requestImageMaxBytes must be a positive safe integer/],
+    ['streamIdleTimeoutMs', 0.5, /streamIdleTimeoutMs must be a positive integer/],
   ] as const)('rejects %s=%s at service resolution', (field, value, message) => {
     const programmatic = {
       providers: {
@@ -96,5 +97,62 @@ describe('request image policy bounds', () => {
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
+  })
+})
+
+describe('auth recovery policy', () => {
+  it('resolves the enabled default and an explicit disable', () => {
+    const resolved = resolveProfiles({
+      'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }] },
+    })
+    expect(resolved.get('acme-gateway')?.authRecovery).toEqual({ retries: 1, delayMs: 1000 })
+    const off = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        models: [{ id: 'm' }],
+        authRecovery: { retries: 0 },
+      },
+    })
+    expect(off.get('acme-gateway')?.authRecovery).toEqual({ retries: 0, delayMs: 1000 })
+  })
+
+  it('accepts exact maximum and rejects invalid budgets in both paths', () => {
+    expect(routeWith({ authRecovery: { retries: MAX_AUTH_RECOVERY_RETRIES } })).not.toThrow()
+    const invalid = [-1, 1.5, Number.MAX_VALUE, MAX_AUTH_RECOVERY_RETRIES + 1]
+    for (const retries of invalid) {
+      expect(routeWith({ authRecovery: { retries } })).toThrow()
+      const providers = { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }], authRecovery: { retries } } }
+      expect(() => resolveProfiles(providers)).toThrow(/authRecovery.retries/)
+    }
+  })
+
+  it('rejects an invalid budget at the schema, and at resolution when bypassed', () => {
+    expect(routeWith({ authRecovery: { retries: -1 } })).toThrow()
+    expect(routeWith({ authRecovery: { delayMs: -1 } })).toThrow()
+    expect(() => {
+      assertServiceable({
+        providers: {
+          'acme-gateway': {
+            api: 'openai-completions',
+            baseURL: 'https://acme.test',
+            models: [{ id: 'm' }],
+            authRecovery: { retries: 1.5 },
+          },
+        },
+      })
+    }).toThrow(/authRecovery.retries must be a non-negative integer/)
+    expect(() => {
+      assertServiceable({
+        providers: {
+          'acme-gateway': {
+            api: 'openai-completions',
+            baseURL: 'https://acme.test',
+            models: [{ id: 'm' }],
+            authRecovery: { delayMs: -1 },
+          },
+        },
+      })
+    }).toThrow(/authRecovery.delayMs must be a non-negative finite number/)
   })
 })
