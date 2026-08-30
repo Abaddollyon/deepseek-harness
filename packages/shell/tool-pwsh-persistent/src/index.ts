@@ -23,7 +23,6 @@ const TIMEOUT_CODE = 'PERSISTENT_PWSH_TIMEOUT'
 // scrollback is assembled only when a command settles or needs partial output.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
-
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
 
 interface ResolvedConfig {
@@ -74,7 +73,7 @@ function markers(): CommandMarkers {
  * Backtick escapes keep every character literal: backtick first so the
  * escapes this function inserts are never re-escaped, `$` so no expansion
  * happens at wrapper construction, and `\r\n`/ESC so multi-line commands and
- * raw control bytes ride one physical input line without PSReadLine mangling.
+ * raw control bytes ride one submitted input line without PSReadLine mangling.
  * @param value - the model's PowerShell command text.
  * @returns the escaped double-quoted-string body.
  */
@@ -89,8 +88,6 @@ function quoteForPwsh(value: string): string {
 }
 
 function wrapCommand(command: string, marker: CommandMarkers): string {
-  // Keep the wrapper on one physical line: PSReadLine renders the echoed
-  // input, and a wrapped line would split the echo the extraction strips.
   // The echoed END nonce can never fabricate completion because the status
   // regex needs digits immediately after it and the echo continues with
   // quote characters.
@@ -106,23 +103,37 @@ function stripPrompt(text: string): string {
   return result.endsWith('\n') ? result.slice(0, -1) : result
 }
 
+function stripInputEcho(text: string, wrapper: string): string {
+  const projected: string[] = []
+  const rawOffsets: number[] = []
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === undefined || character === '\n') continue
+    projected.push(character)
+    rawOffsets.push(index)
+  }
+  const projectedStart = projected.join('').indexOf(wrapper)
+  if (projectedStart < 0) return text
+  const rawStart = rawOffsets[projectedStart]
+  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1]
+  if (rawStart === undefined || rawEnd === undefined) return text
+  // PowerShell's line editor inserts display-width line breaks into the echo;
+  // matching only the exact submitted source keeps command-output lines intact.
+  return text.slice(0, rawStart) + text.slice(rawEnd + 1)
+}
+
 function commandOutput(
   snapshot: RetainedOutput,
   marker: CommandMarkers,
   wrapper: string,
 ): CapturedOutput | undefined {
-  const text = snapshot.text
+  const text = stripInputEcho(snapshot.text, wrapper)
   const end = text.lastIndexOf(marker.end)
   const status = /^(\d+)\r?\n/.exec(text.slice(end + marker.end.length))?.[1]
   if (status === undefined) return undefined
   const startMarker = text.lastIndexOf(marker.start, end)
   const start = startMarker < 0 ? 0 : startMarker + marker.start.length
-  let captured = text.slice(start, end)
-  // The PSReadLine echo carries the wrapper source (including both marker
-  // nonces) before the real markers; anchor on the real markers excludes it,
-  // and stripping the wrapper covers the rare case where the real START
-  // scrolled out and extraction fell back to the echoed copy.
-  captured = captured.replaceAll(wrapper, '')
+  const captured = text.slice(start, end)
   return {
     text: captured.replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
     incomplete: startMarker < 0,
@@ -143,21 +154,23 @@ function partialOutput(
   fallback: string,
   fallbackTruncated = false,
 ): CapturedOutput {
-  const startMarker = snapshot.text.lastIndexOf(marker.start)
+  const text = stripInputEcho(snapshot.text, wrapper)
+  const startMarker = text.lastIndexOf(marker.start)
   if (startMarker >= 0) {
     return {
-      text: stripPrompt(snapshot.text.slice(startMarker + marker.start.length).replace(/^\r?\n/, '')),
+      text: stripPrompt(text.slice(startMarker + marker.start.length).replace(/^\r?\n/, '')),
       incomplete: false,
     }
   }
-  const fallbackStart = fallback.lastIndexOf(marker.start)
+  const fallbackText = stripInputEcho(fallback, wrapper)
+  const fallbackStart = fallbackText.lastIndexOf(marker.start)
   const afterStart = fallbackStart < 0
-    ? fallback
-    : fallback.slice(fallbackStart + marker.start.length).replace(/^\r?\n/, '')
+    ? fallbackText
+    : fallbackText.slice(fallbackStart + marker.start.length).replace(/^\r?\n/, '')
   const fallbackEnd = afterStart.lastIndexOf(marker.end)
   const beforeEnd = fallbackEnd < 0 ? afterStart : afterStart.slice(0, fallbackEnd)
   return {
-    text: stripPrompt(beforeEnd.replaceAll(SHELL_PROMPT, '').replaceAll(wrapper, '')),
+    text: stripPrompt(beforeEnd.replaceAll(SHELL_PROMPT, '')),
     incomplete: fallbackTruncated || fallbackStart < 0,
   }
 }
@@ -307,14 +320,24 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
             live.delete(owner)
           }, 'tool-pwsh-persistent owner cache cleanup')
         }
-        const setup = ctx.terminals.startSend(owner, spawned.sessionId, {
-          text: PWSH_PROMPT_SETUP,
-          submit: true,
-          signal: combinedSignal,
-        })
-        const result = await setup.done
-        if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
-          throw new Error('persistent pwsh shell did not accept initialization')
+        let first = true
+        for (;;) {
+          const setup = ctx.terminals.startSend(owner, spawned.sessionId, {
+            text: first ? PWSH_PROMPT_SETUP : '',
+            submit: first,
+            signal: combinedSignal,
+          })
+          first = false
+          const result = await setup.done
+          if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
+            throw new Error('persistent pwsh shell did not accept initialization')
+          }
+          const scrollback = ctx.terminals.read(owner, spawned.sessionId, {
+            offset: 0,
+            count: SCROLLBACK_PAGE_LINES,
+          }).text
+          if (promptCompleted(result) || scrollback.trimEnd().endsWith(SHELL_PROMPT.trimEnd())) break
+          await pause()
         }
         return spawned.sessionId
       } catch (error: unknown) {
@@ -345,6 +368,7 @@ async function executeCommand(
   const id = await shells.get(owner, commandDeadline.signal)
   const marker = markers()
   const wrapped = wrapCommand(command, marker)
+  const fallbackLimit = wrapped.length + config.maxOutputChars + SHELL_PROMPT.length
   let first = true
   let fallback = ''
   let fallbackTruncated = false
@@ -375,8 +399,9 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    fallback = incremental.delta.length > 0 ? fallback + incremental.delta : result.viewport
-    fallbackTruncated ||= incremental.truncated || result.truncated
+    const fallbackRemaining = Math.max(0, fallbackLimit - fallback.length)
+    fallback += incremental.delta.slice(0, fallbackRemaining)
+    fallbackTruncated ||= incremental.delta.length > fallbackRemaining || incremental.truncated || result.truncated
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {

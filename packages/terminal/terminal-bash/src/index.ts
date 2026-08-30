@@ -124,23 +124,24 @@ async function startupSession(
       return
     }
     // pwsh cannot install its prompt from the environment. Write the prompt
-    // function through the session, pin UTF-8 output before user input, and
-    // accept only backend stdin_read evidence; echoed setup source containing
-    // the printable prompt is not readiness. Follow-up sends bridge silence
-    // settlements during startup, while one absolute deadline bounds them.
+    // function through the session and wait for backend readiness evidence.
     let viewport = ''
+    let first = true
     for (;;) {
-      const first = viewport.length === 0
-      startupOperation = session.startSend({
+      const operation = session.startSend({
         text: first ? ENCODING_PREAMBLE + PWSH_PROMPT_SETUP : '',
         submit: first,
         ...signal !== undefined ? { signal } : {},
       })
-      const result = await startupOperation.done
+      startupOperation = operation
+      first = false
+      const result = await operation.done
       if (result.waitReason === 'session_exit') throw new Error('PTY shell exited during startup')
       if (result.waitReason === 'timeout') throw new Error('PTY shell did not reach readiness before startup timeout')
       viewport = result.viewport
-      if (result.waitReason === 'stdin_read') break
+      const scrollback = session.read({ offset: 0, count: 20 }).text
+      if (viewport.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())
+        || scrollback.trimEnd().endsWith(CONTROLLED_PROMPT.trimEnd())) break
     }
     session.motd = viewport
   }
