@@ -744,6 +744,45 @@ describe('pressure measurement and retention', () => {
     }, range!, Number.MAX_SAFE_INTEGER)).toThrow(/does not match/)
   })
 
+  it('rejects a replay-budget cap range that is not on the current surface', () => {
+    const ctx = createContext()
+    const session = conversation(2)
+    const priced = ctx.tokenMeter.measure(session)
+    expect(() => capRangeForReplayBudget(session, priced, {
+      start: 999_999,
+      end: session.surface.nodes[0]!,
+    }, Number.MAX_SAFE_INTEGER)).toThrow(/is not on the current surface/)
+  })
+
+  it('caps the replay end at a balanced tool boundary and declines an unbalanced head', () => {
+    const ctx = createContext()
+    const session = toolConversation()
+    const priced = ctx.tokenMeter.measure(session)
+    const nodes = session.surface.nodes
+    const tokensThrough = (endIndex: number): number =>
+      priced.nodes.slice(0, endIndex + 1).reduce((total, node) => total + node.tokens, 0)
+
+    // The budget exactly fits the leading user message plus its answering
+    // tool-call message, so the cap lands inside the open tool pair and the
+    // balance walk must shrink the end back to the balanced leading cut.
+    const capped = capRangeForReplayBudget(
+      session,
+      priced,
+      { start: nodes[0]!, end: nodes[nodes.length - 1]! },
+      tokensThrough(1),
+    )
+    expect(capped).toEqual({ start: nodes[0], end: nodes[0] })
+
+    // A range headed by a tool-call message can never end on a balanced cut:
+    // its only candidate head cut leaves the answering result outside.
+    expect(capRangeForReplayBudget(
+      session,
+      priced,
+      { start: nodes[1]!, end: nodes[nodes.length - 1]! },
+      priced.nodes[1]!.tokens,
+    )).toBeNull()
+  })
+
   it('declines when rounding a cut would consume the only tool pair', () => {
     const ctx = createContext()
     const session = Session.create(SessionId('one-tool-pair'))
@@ -1932,6 +1971,199 @@ describe('automatic listener and loader composition', () => {
     await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeUndefined()
     compact.error = undefined
     await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeDefined()
+  })
+
+  it('delegates a joined admission that finished without surface progress', async () => {
+    const ctx = createContext()
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 180,
+      maxTokens: 8_192,
+    })
+    const session = conversation(4)
+    const owner = agent(session, MODEL)
+    const before = [...session.surface.nodes]
+
+    // The summarizer replay budget cannot fit, so the shared admission work
+    // declines without a replacement; the joining dispatch must delegate too.
+    const results = await Promise.all([preflight(ctx, owner), preflight(ctx, owner)])
+    expect(results).toEqual([undefined, undefined])
+    expect(compact.calls).toHaveLength(0)
+    expect(session.surface.nodes).toEqual(before)
+  })
+
+  it('releases only its own admission when a newer canonical request supersedes it', async () => {
+    const ctx = createContext()
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+
+    class GatedEngine extends TestCompactionEngine {
+      gate: Promise<void> = Promise.resolve()
+
+      override async summarize(
+        input: SummarizationInput,
+        owner: Agent,
+        signal?: AbortSignal,
+      ): Promise<SummaryResult> {
+        const result = await super.summarize(input, owner, signal)
+        await this.gate
+        return result
+      }
+    }
+    const compact = new GatedEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
+    let releaseSummary!: () => void
+    compact.gate = new Promise<void>((resolve) => { releaseSummary = resolve })
+
+    const session = conversation(4)
+    const owner = agent(session, MODEL)
+    const baseline = session.requestHeader()
+    if (baseline === undefined) throw new Error('test session needs a canonical request header')
+
+    // The first admission owns the compaction bracket inside summarization
+    // while a second canonical request for the same session starts its own
+    // admission work and fails on the active bracket. The superseded first
+    // admission must leave the registry entry it no longer owns untouched.
+    const first = preflight(ctx, owner)
+    await vi.waitFor(() => { expect(compact.calls).toHaveLength(1) })
+
+    const second = agentEvents(ctx, owner).waterfall(
+      'agent/request-preflight',
+      {
+        turn: 1,
+        step: 1,
+        header: { ...baseline, config: { ...baseline.config, maxTokens: 128 } },
+        contextWindow: 1_000,
+        attempt: 1,
+        maxAttempts: 8,
+        signal: SIGNAL,
+      },
+      () => Promise.resolve<RequestPreflightAction>(undefined),
+    )
+    await expect(second).resolves.toBeUndefined()
+    expect(compact.calls).toHaveLength(1)
+
+    releaseSummary()
+    await expect(first).resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    expect(warnings).toContainEqual(expect.stringContaining('preserving the full request'))
+  })
+
+  it('retries admission from the pruned surface when pruning alone clears request pressure', async () => {
+    const ctx = createContext(1_000)
+    void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 50,
+      maxTokens: 64,
+    })
+    const session = oversizedToolResult()
+
+    // Pruning's durable replacement already brings the request back inside
+    // capacity, so no summary runs but admission must restart from it.
+    await expect(preflight(ctx, agent(session, MODEL)))
+      .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    expect(compact.calls).toHaveLength(0)
+    expect(session.surface.replaceGeneration).toBe(1)
+  })
+
+  it('summarizes the pruned surface when a changed request envelope stays over capacity', async () => {
+    const ctx = createContext(2_000)
+    void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 50,
+      maxTokens: 64,
+    })
+    const session = toolConversation()
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL, maxTokens: 32 } },
+      reason: 'change',
+    })
+    const generation = session.surface.replaceGeneration
+
+    const action = await preflight(ctx, agent(session, MODEL), SIGNAL, 2_000)
+    expect(session.surface.replaceGeneration).toBeGreaterThan(generation)
+    expect(action).toEqual({ kind: 'retry', surfaceGeneration: session.surface.replaceGeneration })
+    expect(compact.calls).toHaveLength(1)
+    expect(summarizedText(compact.calls[0]!.input)).toContain('tool result middle pruned')
+  })
+
+  it('retries admission from durable prune progress when summarization fails', async () => {
+    const ctx = createContext(2_000)
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+    void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 50,
+      maxTokens: 64,
+    })
+    compact.error = new Error('summary exploded')
+    const session = toolConversation()
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL, maxTokens: 32 } },
+      reason: 'change',
+    })
+    const generation = session.surface.replaceGeneration
+
+    const action = await preflight(ctx, agent(session, MODEL), SIGNAL, 2_000)
+    expect(session.surface.replaceGeneration).toBeGreaterThan(generation)
+    expect(action).toEqual({ kind: 'retry', surfaceGeneration: session.surface.replaceGeneration })
+    expect(warnings).toContainEqual(expect.stringContaining('failed after durable surface progress'))
+    expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
+  })
+
+  it('prices the summarizer replay against the configured summarization target capacity', async () => {
+    const ctx = createContext()
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 180,
+      maxTokens: 64,
+      summarizationProvider: 'actual',
+      summarizationModel: 'actual',
+    })
+    const session = conversation(4)
+
+    await expect(preflight(ctx, agent(session, MODEL)))
+      .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    expect(compact.calls).toHaveLength(1)
+  })
+
+  it('declines admission compaction when the summarization target advertises no capacity', async () => {
+    const ctx = createContext()
+    const resolveModelInfo = ctx.llm.resolveModelInfo.bind(ctx.llm)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model, signal) =>
+      provider === 'summary-only'
+        ? Promise.resolve({ provider, id: model, name: model })
+        : resolveModelInfo(provider, model, signal))
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 180,
+      maxTokens: 64,
+      summarizationProvider: 'summary-only',
+      summarizationModel: 'summary-model',
+    })
+    const session = conversation(4)
+    const before = [...session.surface.nodes]
+
+    await expect(preflight(ctx, agent(session, MODEL))).resolves.toBeUndefined()
+    expect(compact.calls).toHaveLength(0)
+    expect(session.surface.nodes).toEqual(before)
+  })
+
+  it('warns once per routed target when the resolved capacity is not a positive integer', async () => {
+    const ctx = createContext()
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+    void new TestCompactionEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
+    const session = conversation(4)
+
+    await preflight(ctx, agent(session, MODEL), SIGNAL, 0)
+    await preflight(ctx, agent(session, MODEL), SIGNAL, 0)
+
+    expect(warnings).toEqual([
+      expect.stringContaining('contextWindow (0) must be a positive integer'),
+    ])
+    expect(session.events.some(event => event.type === 'compaction/start')).toBe(false)
   })
 
   it('removes its automatic listener with the plugin fiber', async () => {
