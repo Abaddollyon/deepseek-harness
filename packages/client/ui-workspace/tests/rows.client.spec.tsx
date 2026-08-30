@@ -139,6 +139,15 @@ describe('workspace browser rows', () => {
     expect(onOpen).toHaveBeenCalledWith(result.id)
   })
 
+  it('renders the localized Ungrouped label when a search result has no workspace', () => {
+    const result: SearchResultNode = {
+      id: sid('loose-result'), title: 'Loose result', workspace: '',
+      running: false, runningSubagentCount: 0, completed: false,
+    }
+    render(<SearchResultItem result={result} currentId={undefined} onOpen={vi.fn()} t={t} />)
+    expect(screen.getByText('未分组')).toBeTruthy()
+  })
+
   it.each([
     ['approval', '等待审批'],
     ['plan-review', '计划待审'],

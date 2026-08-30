@@ -15,17 +15,17 @@ import {
   Button, IconCloseFill14, IconPersonalizationOutline16,
   IconProjectAddOutline16, IconSearchOutline16, Menu, Modal, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type {
-  SessionId, SessionListState, SessionSearchResultItem, WorkspaceId, WorkspaceView,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import type { WorkspaceBrowserProps } from './contract/slots.ts'
-import type { SessionNode, SessionOrderBy } from './tree.ts'
+import type { SessionListState, SessionSearchResultItem } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { WorkspaceBrowserProps } from '../contract/slots.ts'
+import type { PendingInteractionSnapshot, SessionNode, SessionOrderBy } from '../tree.ts'
 import {
   currentGroupKey, deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, UNGROUPED_KEY,
-} from './tree.ts'
-import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
-import { FLAT_SESSION_ORDER_KEY } from './stores.ts'
-import { WorkspacePickFlow } from './WorkspacePicker.tsx'
+} from '../tree.ts'
+import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+import { FLAT_SESSION_ORDER_KEY } from '../stores.ts'
+import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
 import css from './WorkspaceBrowser.module.css'
 
 /**
@@ -221,9 +221,11 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
-  'useSessions' | 'startSession' | 'open' | 'forkSession'
+  'useSessions' | 'startSession' | 'createLooseSession' | 'open' | 'forkSession'
   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
 > & {
+  /** Pending interaction state projected from the session UI domain. */
+  pendingInteractions: PendingInteractionSnapshot
   /** Host account home for POSIX hover-path abbreviation. */
   home?: string | undefined
   workspaces: readonly WorkspaceView[]
@@ -311,12 +313,12 @@ function PinnedSessionSection({ rows, currentId, now, onOpen, onRename, onFork, 
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
-  useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
+  useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds,
   pinnedSessionIds, togglePinnedSession,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
-  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
+  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, pendingInteractions, home, t,
 }: SessionTreeProps) {
   const list = useSessions(s => s)
   const current = list.current
@@ -390,12 +392,12 @@ function SessionTree({
         ? {}
         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
       pinnedSessionIds,
-    }),
-    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, pinnedSessionIds],
+    }, pendingInteractions),
+    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, pinnedSessionIds, pendingInteractions],
   )
   const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
-    [list, archivedSessionIds, pinnedSessionIds],
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, pendingInteractions),
+    [list, archivedSessionIds, pinnedSessionIds, pendingInteractions],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -543,6 +545,8 @@ function SessionTree({
                   if (group.workspaceId !== undefined) {
                     setGroupExpanded(group.key, true)
                     startSession(group.workspaceId)
+                  } else {
+                    if (createLooseSession !== undefined) createLooseSession()
                   }
                 }}
                 drag={workspaceDragProps}
@@ -655,7 +659,7 @@ function SessionTree({
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
-  pinnedSessionIds, togglePinnedSession,
+  pinnedSessionIds, togglePinnedSession, pendingInteractions,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
@@ -672,6 +676,7 @@ function FlatList({
   | 'sessionUpdatedAtByAccount'
   | 'syncSessionOrderAccount'
   | 'setSessionOrder'
+  | 'pendingInteractions'
   | 't'
 >) {
   const list = useSessions(s => s)
@@ -680,12 +685,12 @@ function FlatList({
   // manual position. Pinned rows are filtered only from the rendered list,
   // after the stored order has been reconciled.
   const baseRows = useMemo(
-    () => deriveFlat(list, archivedSessionIds),
-    [list, archivedSessionIds],
+    () => deriveFlat(list, archivedSessionIds, pendingInteractions),
+    [list, archivedSessionIds, pendingInteractions],
   )
   const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds),
-    [list, archivedSessionIds, pinnedSessionIds],
+    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, pendingInteractions),
+    [list, archivedSessionIds, pinnedSessionIds, pendingInteractions],
   )
   const pinnedSet = useMemo(() => new Set<string>(pinnedSessionIds), [pinnedSessionIds])
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
@@ -818,8 +823,9 @@ function SearchResults({
   query,
   remote,
   resultLimit,
+  pendingInteractions,
   t,
-}: Pick<SessionTreeProps, 'useSessions' | 'open' | 't'> & {
+}: Pick<SessionTreeProps, 'useSessions' | 'open' | 't' | 'pendingInteractions'> & {
   workspaces: readonly WorkspaceView[]
   archivedSessionIds: readonly SessionNode['id'][]
   query: string
@@ -831,7 +837,7 @@ function SearchResults({
     ? remote
     : { query, status: 'loading' as const, items: [], hasMore: false }
   const results = useMemo(
-    () => deriveSearchResults(list, workspaces, query, archivedSessionIds, currentRemote, resultLimit),
+    () => deriveSearchResults(list, workspaces, query, archivedSessionIds, currentRemote, resultLimit, pendingInteractions),
     [list, workspaces, query, archivedSessionIds, currentRemote, resultLimit],
   )
   const pending = currentRemote.status === 'loading'
@@ -923,6 +929,7 @@ export function WorkspaceBrowser({
   useStore,
   actions,
   startSession,
+  createLooseSession,
   open,
   renameSession,
   forkSession,
@@ -935,11 +942,13 @@ export function WorkspaceBrowser({
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
-  useHostDescription,
+  useConnectionGeneration,
+  useSessionPendingInteraction,
   renderSlot,
   t,
 }: WorkspaceBrowserProps) {
-  const home = useHostDescription(description => description?.home)
+  const home = useConnectionGeneration(generation => generation?.host.home)
+  const pendingInteractions = useSessionPendingInteraction(state => state)
   const workspaces = useWorkspaces(state => state.items)
   const workspacePhase = useWorkspaces(state => state.phase)
   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
@@ -1339,6 +1348,7 @@ export function WorkspaceBrowser({
               open={open}
               workspaces={workspaces}
               archivedSessionIds={archivedSessionIds}
+              pendingInteractions={pendingInteractions}
               query={normalizedQuery}
               remote={remoteSearch}
               resultLimit={searchResultLimit}
@@ -1351,6 +1361,7 @@ export function WorkspaceBrowser({
                 useSessions={useSessions} open={open} forkSession={forkSession}
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                 archivedSessionIds={archivedSessionIds}
+                pendingInteractions={pendingInteractions}
                 orderBy={orderBy}
                 pinnedSessionIds={pinnedSessionIds}
                 togglePinnedSession={actions.togglePinnedSession}
@@ -1368,6 +1379,7 @@ export function WorkspaceBrowser({
                 onSessionArchive={onSessionArchive}
                 forkSession={forkSession}
                 workspaces={workspaces}
+                pendingInteractions={pendingInteractions}
                 groupExpansion={groupExpansion}
                 setGroupExpanded={actions.setGroupExpanded}
                 sessionOrderByAccount={sessionOrderByAccount}
@@ -1378,6 +1390,7 @@ export function WorkspaceBrowser({
                 pinnedSessionIds={pinnedSessionIds}
                 togglePinnedSession={actions.togglePinnedSession}
                 startSession={startSession}
+                createLooseSession={createLooseSession}
                 open={open}
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 insertSessionBefore={insertSessionBefore}

@@ -2,15 +2,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
-import type {
-  SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceListState, WorkspaceView,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { WorkspaceSnapshot as WorkspaceListState, WorkspaceView, WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ConnectionGeneration } from '@deepseek-ai/dsh-client-connection/client'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { WorkspaceBrowserProps } from '../src/client/contract/slots.ts'
 import { createWorkspaceViewStore, FLAT_SESSION_ORDER_KEY } from '../src/client/stores.ts'
 import { UNGROUPED_KEY } from '../src/client/tree.ts'
-import { WorkspaceBrowser } from '../src/client/WorkspaceBrowser.tsx'
+import { WorkspaceBrowser } from '../src/client/rows/WorkspaceBrowser.tsx'
 import { zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -41,8 +42,7 @@ const workspace = (id: string, sessionIds: string[], title = id): WorkspaceView 
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 })
 const workspaceState = (items: readonly WorkspaceView[], archivedSessionIds: readonly SessionId[] = []): WorkspaceListState => ({
-  items, archivedSessionIds, state: 'idle', phase: 'ready', error: null, baselinesReady: true,
-  recentWorkspaceId: items[0]?.workspaceId,
+  items, archivedSessionIds, state: 'idle', phase: 'ready', error: null,
 })
 function hook<T>(snapshot: T) {
   return function select<S>(selector: (state: T) => S): S { return selector(snapshot) }
@@ -70,6 +70,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     useStore: bindSnapshotSelector(store),
     actions: store.actions,
     startSession: vi.fn(),
+    createLooseSession: vi.fn(),
     open: vi.fn(),
     searchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     searchResultLimit: 20,
@@ -82,7 +83,8 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     insertSessionBefore: vi.fn(async () => {}),
     createWorkspace: vi.fn(async () => workspace('created', [])),
     useDirectoryFlow: bindSnapshotSelector({ getSnapshot: () => true, subscribe: () => () => {} }),
-    useHostDescription: selector => selector(undefined),
+    useConnectionGeneration: hook<ConnectionGeneration | undefined>(undefined),
+    useSessionPendingInteraction: hook(new Map()),
     renderSlot: ((_name: string, owner: { open: boolean }) => (owner.open ? <div data-testid="directory-flow" /> : null)) as never,
     t,
     ...overrides,
@@ -114,9 +116,7 @@ describe('WorkspaceBrowser', () => {
           path: '/home/u/Documents/project',
           title: 'Project',
         }])),
-        useHostDescription: selector => selector({
-          version: '0', cwd: '/tmp', attachedSessions: 0, home: '/home/u', canOpenPath: false,
-        }),
+        useConnectionGeneration: selector => selector({ id: 0, host: { home: '/home/u' } }),
       })
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
       act(() => { vi.advanceTimersByTime(500) })
@@ -131,7 +131,6 @@ describe('WorkspaceBrowser', () => {
       ...workspaceState([]),
       phase: 'pending' as const,
       state: 'loading' as const,
-      baselinesReady: false,
     }
     const b = mount({ useWorkspaces: hook(pending) })
     act(() => {
@@ -504,13 +503,13 @@ describe('WorkspaceBrowser', () => {
       useSessions: hook(sessionState([summary('loose-a', 2), summary('loose-b', 1)])),
       useWorkspaces: hook(workspaceState([])),
     })
-    fireEvent.click(screen.getByText('未分组会话'))
+    fireEvent.click(screen.getByText('未分组'))
     act(() => { b.store.actions.togglePinnedSession('loose-a') })
     expect(screen.getAllByText('loose-a')).toHaveLength(1)
     expect(screen.getByText('loose-b')).toBeTruthy()
     // The pinned row renders above the bucket header, inside the section.
     const position = screen.getByText('loose-a')
-      .compareDocumentPosition(screen.getByText('未分组会话'))
+      .compareDocumentPosition(screen.getByText('未分组'))
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
@@ -634,7 +633,7 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByText('已置顶')).toBeTruthy()
     expect(screen.getAllByText('one')).toHaveLength(1)
     // The unpinned session is back in its (folded) bucket, not in the section.
-    fireEvent.click(screen.getByText('未分组会话'))
+    fireEvent.click(screen.getByText('未分组'))
     expect(screen.getByText('two')).toBeTruthy()
   })
 
@@ -700,20 +699,23 @@ describe('WorkspaceBrowser', () => {
     expect(startSession).toHaveBeenCalledWith(wid('alpha'))
   })
 
-  it('reveals the Ungrouped bucket holding a loose current session; its header has no menu and its ＋ is inert', async () => {
+  it('reveals Ungrouped and creates a workspace-less live session from its ＋', async () => {
     const startSession = vi.fn()
+    const createLooseSession = vi.fn()
     const b = mount({
       useSessions: hook(sessionState([summary('loose', 1)], { current: sid('loose') })),
       useWorkspaces: hook(workspaceState([workspace('alpha', [])])),
       startSession,
+      createLooseSession,
     })
     // The bucket is a group like any other: navigating into it opens it, and
     // the persisted fold bit records that.
     await waitFor(() => { expect(screen.getByText('loose')).toBeTruthy() })
     expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
-    expect(screen.queryByRole('button', { name: '工作区“未分组会话”的操作' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '在“未分组会话”中新建会话' }))
+    expect(screen.queryByRole('button', { name: '工作区“未分组”的操作' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '在“未分组”中新建会话' }))
     expect(startSession).not.toHaveBeenCalled()
+    expect(createLooseSession).toHaveBeenCalledOnce()
   })
 
   it('opens the current session\'s group on navigation and never re-opens it against a deliberate fold', async () => {

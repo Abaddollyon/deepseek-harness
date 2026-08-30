@@ -28,6 +28,7 @@ async function bench() {
   const binding = vi.fn(() => ({ session: { rename: renameSession } }))
   const fork = vi.fn(async () => 'forked' as never)
   const subscribe = () => () => {}
+  const createSession = vi.fn(async () => 'created-loose' as never)
   ctx.provide('workspaces', {
     list: {
       getSnapshot: () => ({
@@ -50,7 +51,7 @@ async function bench() {
       }),
       subscribe,
     },
-    create: vi.fn(async () => 'created' as never),
+    create: createSession,
     open,
     clear,
     search,
@@ -73,7 +74,7 @@ async function bench() {
   ctx.provide('locale', locale)
   return {
     ctx, slots: ctx.get('slots') as SlotRegistry, locale, create, rename,
-    insertSessionBefore, open, clear, search, renameSession, binding, fork, pickDirectory,
+    insertSessionBefore, open, clear, search, renameSession, binding, fork, pickDirectory, createSession,
   }
 }
 
@@ -122,6 +123,8 @@ describe('ui-workspace apply', () => {
     expect(startSession).toHaveBeenCalledWith('ws')
     browser.startSession()
     expect(startSession).toHaveBeenLastCalledWith(undefined)
+    browser.createLooseSession()
+    await vi.waitFor(() => { expect(b.createSession).toHaveBeenCalledWith({}) })
     browser.open('session' as never)
     expect(b.open).toHaveBeenCalledWith('session')
     const signal = new AbortController().signal

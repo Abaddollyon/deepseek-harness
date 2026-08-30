@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type {
-  SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceView,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import {
   deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel, relativeTime,
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
-import { en } from '../src/client/locales.ts'
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -46,12 +45,16 @@ describe('deriveGroups', () => {
     expect(groups[0]!.sessions.map(session => session.id)).toEqual([sid('older'), sid('newer')])
   })
 
-  it('projects pending-interaction state into grouped and flat rows', () => {
-    const awaiting = { ...summary('awaiting', 10), pendingInteraction: 'plan-review' as const, running: true }
-    const sessions = list(awaiting)
-    const grouped = deriveGroups(sessions, [workspace('project', ['awaiting'])], noArchive, view(['project']))
-    expect(grouped[0]!.sessions[0]).toMatchObject({ pendingInteraction: 'plan-review', running: true })
-    expect(deriveFlat(sessions, noArchive)[0]).toMatchObject({ pendingInteraction: 'plan-review', running: true })
+  it('projects approval, plan-review, question, and unknown pending statuses', () => {
+    const sessions = list(summary('approval', 4), summary('plan', 3), summary('question', 2), summary('unknown', 1))
+    const pending = new Map([
+      [sid('approval'), { kind: 'approval' }],
+      [sid('plan'), { kind: 'plan-review' }],
+      [sid('question'), { kind: 'question' }],
+      [sid('unknown'), { kind: 'other' }],
+    ])
+    const rows = deriveFlat(sessions, noArchive, pending)
+    expect(rows.map(row => row.pendingInteraction)).toEqual(['approval', 'plan-review', 'question', undefined])
   })
 
   it('puts only real unaccounted Sessions in the trailing Ungrouped group', () => {
@@ -89,7 +92,7 @@ describe('deriveGroups', () => {
     const blankNode = groups[0]!.sessions.find(session => session.id === currentBlank.id)!
     // The stored placeholder title stays canonical; the renderer swaps in
     // the localized New Session label via the blank flag.
-    expect(blankNode.title).toBe('New Session')
+    expect(blankNode.title).toBe('')
     expect(blankNode.blank).toBe(true)
     expect(groups[0]!.sessions.find(session => session.id === real.id)!.blank).toBe(false)
     expect(groups[0]!.sessionCount).toBe(2)
@@ -340,7 +343,7 @@ describe('deriveFlat', () => {
     }
     const rows = deriveFlat(sessions, noArchive)
     expect(rows.map(row => row.id)).toEqual([currentBlank.id, sid('real')])
-    expect(rows.map(row => row.title)).toEqual(['New Session', 'real'])
+    expect(rows.map(row => row.title)).toEqual(['', 'real'])
     expect(rows.map(row => row.blank)).toEqual([true, false])
   })
 
@@ -373,7 +376,6 @@ describe('deriveSearchResults', () => {
   it('merges local title/Workspace matches before ranked content hits and enriches duplicates', () => {
     const titleHit = summary('title-hit', 30, '/projects/a')
     titleHit.displayTitle = 'Needle title'
-    titleHit.pendingInteraction = 'plan-review'
     const workspaceHit = summary('workspace-hit', 20, '/projects/b')
     workspaceHit.displayTitle = 'Ordinary title'
     const contentHit = summary('content-hit', 10, '/projects/c')
@@ -407,7 +409,6 @@ describe('deriveSearchResults', () => {
           workspace: 'Alpha',
           running: false,
           runningSubagentCount: 0,
-          pendingInteraction: 'plan-review',
           completed: false,
           snippet: 'title session body excerpt',
         },
@@ -596,12 +597,6 @@ describe('createWorkspaceViewStore', () => {
 })
 
 describe('workspaceLabel', () => {
-  it('keeps UNGROUPED_LABEL verbatim-equal to the en dictionary entry', () => {
-    // The bucket row reads the dictionary while non-localized derivations read
-    // the constant; the two must never drift apart.
-    expect(UNGROUPED_LABEL).toBe(en['group.ungrouped'])
-  })
-
   it('uses the Ungrouped fallback and extracts POSIX and Windows basenames', () => {
     expect(workspaceLabel(undefined)).toBe(UNGROUPED_LABEL)
     expect(workspaceLabel('')).toBe(UNGROUPED_LABEL)
