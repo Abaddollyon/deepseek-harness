@@ -430,6 +430,16 @@ describe('tool-pwsh-persistent', () => {
     expect(result).not.toContain('Invoke-Expression')
   })
 
+  it('retains partial diagnostics with a long wrapped echo and tiny cap', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-prompt'
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('pwsh:')
+    expect(result).toContain('<response clipped>')
+  })
+
   it('preserves command output that equals the private shell prompt', async () => {
     const { ctx, owner, stub } = await setup({ backendType: 'stub' })
     await call(ctx, owner, 'warm up')

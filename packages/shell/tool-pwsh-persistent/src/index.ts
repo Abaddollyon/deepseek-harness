@@ -363,9 +363,11 @@ async function executeCommand(
   const id = await shells.get(owner, commandDeadline.signal)
   const marker = markers()
   const wrapped = wrapCommand(command, marker)
-  const fallbackLimit = wrapped.length + config.maxOutputChars + SHELL_PROMPT.length
+  const rawFallbackLimit = wrapped.length + config.maxOutputChars + SHELL_PROMPT.length
+  const normalizedFallbackLimit = config.maxOutputChars + SHELL_PROMPT.length
   let first = true
   let fallback = ''
+  let fallbackHasNormalizedEcho = false
   let fallbackTruncated = false
 
   while (true) {
@@ -394,9 +396,12 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    const fallbackRemaining = Math.max(0, fallbackLimit - fallback.length)
-    fallback += incremental.delta.slice(0, fallbackRemaining)
-    fallbackTruncated ||= incremental.delta.length > fallbackRemaining || incremental.truncated || result.truncated
+    const rawFallback = fallback + incremental.delta
+    const normalizedFallback = stripInputEcho(rawFallback, wrapped)
+    fallbackHasNormalizedEcho ||= normalizedFallback !== rawFallback
+    const fallbackLimit = fallbackHasNormalizedEcho ? normalizedFallbackLimit : rawFallbackLimit
+    fallback = normalizedFallback.slice(0, fallbackLimit)
+    fallbackTruncated ||= normalizedFallback.length > fallbackLimit || incremental.truncated || result.truncated
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {
