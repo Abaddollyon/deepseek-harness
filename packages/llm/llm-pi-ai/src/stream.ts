@@ -41,8 +41,11 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // `cause` chain before it reaches us. undici carries the actionable transport
 // detail on `cause` (e.g. `SocketError: other side closed`) but hands the fetch
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
-// If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
-// us capture the cause ourselves), classify on `code`/`cause` instead of text.
+// If pi-ai ever forwards the original Error, classify on `code`/`cause` instead
+// of text. pi-ai 0.84's StreamOptions.fetch hook was evaluated for capturing the
+// cause and rejected: attributing a wrapper-captured `cause` to the right
+// request needs per-request side state across concurrent streams and pi-ai's own
+// client retries (see the transport-truncation Agent Note).
 /** Harness failure code for a provider credential rejection (HTTP 401/403). */
 export const AUTH_FAILURE_CODE = 'AUTH'
 
@@ -63,6 +66,16 @@ function classifyPiAiError(message: string): string {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
+  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing application-level failures also
+  // carry, and `received from peer` alone appears in unrelated wording (TLS
+  // certificates, key material). Node renders the reset code as NGHTTP2_* and
+  // intermediaries name the RST_STREAM frame; those tokens appear only in
+  // HTTP/2 reset vocabulary. The peer reset one stream, not the connection,
+  // so resending the request can succeed.
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
