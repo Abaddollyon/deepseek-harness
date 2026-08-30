@@ -97,6 +97,31 @@ describe('agent loop', () => {
     expect(adapter.requests[0]?.reasoningEffort).toBe(effort)
   })
 
+  it('seeds an AgentOptions effort that differs from the adapter default into the first model request', async () => {
+    const option = ReasoningEffortId('low')
+    const adapter = new MockAdapter([textResponse('reasoned')], {
+      efforts: [
+        { id: ReasoningEffortId('high'), name: 'High' },
+        { id: option, name: 'Low' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    })
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(
+      SessionId('option-effort-over-adapter-default'),
+      { provider: 'mock', model: 'mock', reasoningEffort: option },
+    )
+
+    send(agent, 'use the option effort')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests[0]?.reasoningEffort).toBe(option)
+    const header = agent.session.events.find(event => event.type === 'request/header')
+    expect(header?.type === 'request/header' && header.data.header.config.reasoningEffort).toBe(option)
+    expect(header?.type === 'request/header' && header.data.header.adapterDefaults?.reasoningEffort)
+      .not.toBe(true)
+  })
+
   it('validates reasoning effort in declarative agent config', () => {
     const effort = ReasoningEffortId('high')
     expect(AgentLoop.Config({

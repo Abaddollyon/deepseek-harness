@@ -2472,16 +2472,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached deeply immutable pressure and surface measurement.',
       },
       {
-        signature: 'estimateMessage(message: Message): number',
-        description: 'Heuristically price one model-visible message (instance face of the pure `estimateMessage` export from `estimate.ts`).',
-        parameters: [{ name: 'message', description: 'message to price without mutation.' }],
-        returns: 'content and role-framing tokens under the fixed service heuristic.',
-      },
-      {
         signature: 'estimateHeader(header: EpochHeader | undefined): number',
         description: 'Heuristically price the non-surface request envelope — system prompt and tool schemas — under the same fixed heuristic `measure` applies (instance face of the pure `estimateHeader` export from `estimate.ts`).',
         parameters: [{ name: 'header', description: 'canonical envelope, or undefined before any request.' }],
         returns: 'heuristic system plus tool tokens; 0 for an absent envelope.',
+      },
+      {
+        signature: 'estimateMessage(message: Message): number',
+        description: 'Heuristically price one model-visible message (instance face of the pure `estimateMessage` export from `estimate.ts`).',
+        parameters: [{ name: 'message', description: 'message to price without mutation.' }],
+        returns: 'content and role-framing tokens under the fixed service heuristic.',
       },
     ],
   },

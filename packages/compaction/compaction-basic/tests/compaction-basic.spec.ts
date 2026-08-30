@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
+import BasicCompactionEngine, { createCompactionInstructionMessage } from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { capRangeForReplayBudget, selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
@@ -2066,7 +2066,7 @@ describe('automatic listener and loader composition', () => {
   })
 
   it('summarizes the pruned surface when a changed request envelope stays over capacity', async () => {
-    const ctx = createContext(2_000)
+    const ctx = createContext(3_000)
     void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
@@ -2080,7 +2080,7 @@ describe('automatic listener and loader composition', () => {
     })
     const generation = session.surface.replaceGeneration
 
-    const action = await preflight(ctx, agent(session, MODEL), SIGNAL, 2_000)
+    const action = await preflight(ctx, agent(session, MODEL), SIGNAL, 3_000)
     expect(session.surface.replaceGeneration).toBeGreaterThan(generation)
     expect(action).toEqual({ kind: 'retry', surfaceGeneration: session.surface.replaceGeneration })
     expect(compact.calls).toHaveLength(1)
@@ -2126,6 +2126,61 @@ describe('automatic listener and loader composition', () => {
     await expect(preflight(ctx, agent(session, MODEL)))
       .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
     expect(compact.calls).toHaveLength(1)
+  })
+
+  it.each([
+    { label: 'at', capacityDelta: 0, fullRangeFits: true },
+    { label: 'just below', capacityDelta: -1, fullRangeFits: false },
+  ])('keeps the auxiliary summarizer replay $label its context cap', async ({
+    capacityDelta,
+    fullRangeFits,
+  }) => {
+    const ctx = createContext()
+    const session = conversation(4)
+    const maxTokens = 64
+    const retainTokens = 180
+    const header = session.requestHeader()
+    if (header === undefined) throw new Error('test session needs a canonical request header')
+    const measurement = ctx.tokenMeter.measure(session)
+    const selected = selectCompactableRange(session, measurement, retainTokens)
+    if (selected === null) throw new Error('test session needs a compactable range')
+    const startIdx = measurement.nodes.findIndex(node => node.seq === selected.start)
+    const endIdx = measurement.nodes.findIndex(node => node.seq === selected.end)
+    const fullReplayTokens = measurement.nodes
+      .slice(startIdx, endIdx + 1)
+      .reduce((tokens, node) => tokens + node.tokens, 0)
+    const fixedTokens = maxTokens
+      + ctx.tokenMeter.estimateHeader(header)
+      + ctx.tokenMeter.estimateMessage(createCompactionInstructionMessage())
+    const summaryCapacity = fixedTokens + fullReplayTokens + capacityDelta
+    const resolveModelInfo = ctx.llm.resolveModelInfo.bind(ctx.llm)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model, signal) =>
+      provider === 'actual'
+        ? Promise.resolve({
+          provider,
+          id: model,
+          name: model,
+          context: { contextWindow: summaryCapacity },
+        })
+        : resolveModelInfo(provider, model, signal))
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens,
+      maxTokens,
+      summarizationProvider: 'actual',
+      summarizationModel: 'actual',
+    })
+
+    await expect(preflight(ctx, agent(session, MODEL)))
+      .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    const input = compact.calls[0]?.input
+    if (input === undefined) throw new Error('expected one summarizer replay')
+    const replayTokens = input.messages.reduce(
+      (tokens, message) => tokens + ctx.tokenMeter.estimateMessage(message),
+      0,
+    )
+    expect(replayTokens + fixedTokens).toBeLessThanOrEqual(summaryCapacity)
+    expect(replayTokens === fullReplayTokens).toBe(fullRangeFits)
   })
 
   it('declines admission compaction when the summarization target advertises no capacity', async () => {

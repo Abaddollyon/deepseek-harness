@@ -74,8 +74,12 @@ const handle = await ctx.agents.create({
 
 -----
 
+<<<<<<< HEAD
 <a id="understand-the-implementation"></a>
 ## 理解实现
+=======
+在 `agent/request` 返回提供方／模型调用配置后，循环会调用 `ctx.llm.prepareCall()`，在活跃轮次信号的控制下校验由适配器负责的字段，并填入配置的推理（reasoning）强度和输出 token 默认值。准备完成的调用会在这次异步解析、`request/header` 日志记录和最终分派期间保留同一项确切的适配器注册，因此 HMR（热模块替换）不会把某个适配器的能力解析结果与另一适配器的请求混用。请求 header 会记录生效配置以及哪些字段来自适配器。下一次 waterfall（瀑布式事件）前，循环会从提议中移除这些带标记字段，使当前精确路由重新填入自身默认值；未带标记的显式设置会跨步骤和路由变化保留。没有已注册适配器的路由会保留原定配置，使 `llm/stream` 监听器可以接管并短路该请求；最终分派仍会以 `NO_ADAPTER` 拒绝未得到处理的路由。新循环实例在恢复时会遵循同一套适配器默认值标记规则。随后，冻结的规范 header 与已解析容量在消息派生之前进入 `agent/request-preflight`。监听器只有在提交并标识更新的替换表层之后才能请求重新分派；仅写日志的活动会响亮失败。八次有效重新分派是循环的安全上限，此后未改变的持久历史会继续发往提供方，并仍有资格进入 `agent/request-error` 恢复。
+>>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 
 <details>
 <summary>实现细节——点击展开</summary>
@@ -176,7 +180,12 @@ const handle = await ctx.agents.create({
 
 仅追加；每个合成结果都位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
 
+<<<<<<< HEAD
 ## 已知限制与延期工作
+=======
+<a id="known-limitations-and-deferred-work"></a>
+## 已知限制与暂缓事项
+>>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 
 <a id="known-limitations-and-deferred-work"></a>
 
