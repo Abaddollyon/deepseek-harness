@@ -49,6 +49,7 @@ import {
   stabilizeFixtureMessageIds,
   type NormalizeContext,
 } from '@deepseek-ai/dsh-session-snapshot'
+import { ISOLATED_PROJECT_ROOT_MARKER, isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   assertEntriesLoaded,
   composeEntries,
@@ -113,6 +114,16 @@ export function webSnapshotMode(): WebSnapshotMode {
 }
 
 /**
+ * Scaffold-owned immediate children of the workspace root that are not session
+ * workspace state: the pinned harness homes and storage, plus the project-root
+ * marker planted to stop upward discovery. A session connected at the root
+ * rather than the conventional workspace/ subfolder captures all of them (the
+ * boot materializes a full profile tree under the home), and a committed
+ * workspace.expected oracle cannot carry the marker (Git refuses the path).
+ */
+const SCAFFOLD_OWNED_ROOT_ENTRIES = ['.agents-home', '.bundled-skills', '.dsh-home', '.dsh-storages', ISOLATED_PROJECT_ROOT_MARKER] as const
+
+/**
  * Compare a session-driven Web scenario's complete workspace with its committed independent expected state.
  * @param scenarioDir - Absolute recorded-session scenario directory.
  * @param workspaceRoot - Absolute cwd used by the controlled session.
@@ -122,7 +133,7 @@ export async function assertFinalWorkspaceSnapshot(scenarioDir: string, workspac
   const manifest = parseSnapshotManifest(await readFile(manifestPath, 'utf8'), manifestPath)
   expect(manifest.workspace?.final, `${manifest.scenario ?? scenarioDir}: mutating Web scenario declares workspace.final`)
     .toBe(true)
-  const actual = await captureWorkspaceSnapshot(workspaceRoot)
+  const actual = await captureWorkspaceSnapshot(workspaceRoot, { ignoredRootEntries: SCAFFOLD_OWNED_ROOT_ENTRIES })
   const expected = await captureExpectedWorkspaceSnapshot(join(scenarioDir, 'workspace.expected'))
   expect(actual, `${manifest.scenario ?? scenarioDir}: complete final workspace`).toEqual(expected)
 }
@@ -389,6 +400,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     }
   }
   const workspaceCwd = await realpath(await mkdtemp(join(tmpdir(), 'dsh-web-e2e-ws-')))
+  await isolateWorkspaceProjectRoot(workspaceCwd)
   // Isolated harness home: the settings/credentials rows resolve $DSH_HOME
   // paths at load, and an in-process boot must NEVER touch the developer's
   // real ~/.dsh document or credential file.
