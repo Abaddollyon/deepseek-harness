@@ -104,6 +104,8 @@ interface TrackedTask {
   incarnation: string
   /** Restored non-terminal record still awaiting a {@link JobResumer} decision. */
   pendingResume: boolean
+  /** Prior process incarnation when this record was adopted before reconciliation. */
+  adoptedFromIncarnation: string | undefined
   /** Set after a rejected store write; the record degrades to in-memory only. */
   persistDegraded: boolean
   /** Resolves once the terminal snapshot is recorded and listeners notified. */
@@ -290,6 +292,7 @@ export class LocalJobRegistry extends JobRegistry {
       resumeSpec,
       incarnation: PROCESS_INCARNATION,
       pendingResume: false,
+      adoptedFromIncarnation: undefined,
       persistDegraded: false,
       settled,
       markSettled,
@@ -733,6 +736,7 @@ export class LocalJobRegistry extends JobRegistry {
       outputLimitBytes: job.outputLimitBytes ?? null,
       resumeSpec: job.resumeSpec ?? null,
       incarnation: job.incarnation,
+      ...job.adoptedFromIncarnation === undefined ? {} : { adoptedFromIncarnation: job.adoptedFromIncarnation },
       schemaVersion: 1,
     }
   }
@@ -823,6 +827,7 @@ export class LocalJobRegistry extends JobRegistry {
       resumeSpec: record.resumeSpec ?? undefined,
       incarnation: record.incarnation,
       pendingResume: !isTerminal(record.status),
+      adoptedFromIncarnation: record.adoptedFromIncarnation,
       persistDegraded: false,
       settled,
       markSettled,
@@ -860,6 +865,7 @@ export class LocalJobRegistry extends JobRegistry {
       return
     }
     job.pendingResume = false
+    job.adoptedFromIncarnation = candidate.priorIncarnation
     job.incarnation = PROCESS_INCARNATION
     job.cancel = hooks.cancel.bind(hooks)
     job.readOutput = hooks.readOutput?.bind(hooks)
