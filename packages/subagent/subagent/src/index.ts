@@ -82,7 +82,6 @@ export * from './out-of-process.ts'
 export { subagentFailureFromLlmFailure } from './failure.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
-export { formatRetryAfter, settlementSummary } from './continuation.ts'
 export type {
   ContinuableCreateRequest,
   ContinuableCreateSpec,

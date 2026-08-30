@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import { subagentFailureFromLlmFailure, settlementSummary } from '../src/index.ts'
+import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { subagentFailureFromLlmFailure } from '../src/index.ts'
+import { settlementSummary } from '../src/continuation.ts'
 import { terminalDiagnostic } from '../src/lifecycle.ts'
 
 describe('subagentFailureFromLlmFailure', () => {
@@ -28,8 +29,18 @@ describe('subagentFailureFromLlmFailure', () => {
     const failure = Object.assign(new Error('quota detail'), { code: 'QUOTA' })
     expect(terminalDiagnostic(failure)).toEqual({ diagnostic: 'Error: quota detail', failure: { code: 'QUOTA' } })
     expect(terminalDiagnostic(Object.assign(new Error('x'.repeat(5_000)), { code: 'OTHER' })).diagnostic).toHaveLength(4096)
-    const nested = Object.assign(new Error('quota'), { code: 'QUOTA' })
-    expect(terminalDiagnostic(new Error('wrapper', { cause: nested })).failure).toEqual({ code: 'QUOTA' })
+    const nested = new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 12_000 })
+    expect(terminalDiagnostic(new Error('wrapper', { cause: nested })).failure).toEqual({
+      code: QUOTA_EXCEEDED_CODE,
+      retryAfterMs: 12_000,
+    })
+    const invalidOuter = Object.assign(new Error('wrapper', { cause: nested }), {
+      failure: { code: 'OTHER' },
+    })
+    expect(terminalDiagnostic(invalidOuter).failure).toEqual({
+      code: QUOTA_EXCEEDED_CODE,
+      retryAfterMs: 12_000,
+    })
     const multibyte = terminalDiagnostic('🙂'.repeat(2_000)).diagnostic!
     expect(Buffer.byteLength(multibyte, 'utf8')).toBe(4096)
     expect(multibyte).toBe('🙂'.repeat(1_024))

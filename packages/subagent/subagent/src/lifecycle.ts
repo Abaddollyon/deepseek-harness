@@ -92,6 +92,11 @@ function collectFailureCause(failure: unknown): SubagentFailure | undefined {
   const seen = new Set<unknown>()
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current)
+    const failure = (current as Error & { readonly failure?: unknown }).failure
+    if (failure !== undefined) {
+      const structured = subagentFailureFromLlmFailure(failure as LlmFailure)
+      if (structured !== undefined) return structured
+    }
     const structured = subagentFailureFromLlmFailure(current as unknown as LlmFailure)
     if (structured !== undefined) return structured
     current = current.cause
