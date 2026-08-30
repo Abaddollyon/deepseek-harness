@@ -742,6 +742,24 @@ describe('toStreamChunks', () => {
     })
   })
 
+  it('lets caller cancellation override retryable reset classification', async () => {
+    // An aborted caller turns any in-band terminal error into an aborted
+    // finish; the HTTP/2 reset wording must not route to TRANSPORT here.
+    const error = assistant({
+      stopReason: 'error',
+      errorMessage: 'stream error: stream ID 1; INTERNAL_ERROR; received from peer',
+    })
+    const chunks = await collect(toStreamChunks(
+      feed({ type: 'error', reason: 'error', error }),
+      undefined,
+      AbortSignal.abort('caller gone'),
+    ))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { code: 'ABORTED' } },
+    })
+  })
+
   it('rejects a stream that ends without done or error', async () => {
     await expect(collect(toStreamChunks(feed({ type: 'start', partial: assistant() }))))
       .rejects.toThrow(/without done\/error/)
@@ -905,16 +923,28 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(silent, 100)).toEqual({
       kind: 'error',
       failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"',
+        // The actionable fallback names the resolved capacity and the usage
+        // that tripped it, so the reader can act without reproducing the turn.
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"' +
+          ' at resolved context window 100 tokens (input 101, cache-read 0)',
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
 
+    // Boundary: usage exactly at the window is not an overflow (the detector
+    // trips strictly above it), so the stop stays successful.
+    const atWindow = assistant({ stopReason: 'stop', usage: usage(100, 0), content: [{ type: 'text', text: 'x' }] })
+    expect(mapStopReason(atWindow, 100)).toEqual({ kind: 'stop' })
+
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
-    expect(mapStopReason(truncated, 100)).toMatchObject({
+    expect(mapStopReason(truncated, 100)).toEqual({
       kind: 'error',
-      failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
+      failure: {
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"' +
+          ' at resolved context window 100 tokens (input 80, cache-read 19)',
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      },
     })
   })
 
