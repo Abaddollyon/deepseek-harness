@@ -40,6 +40,14 @@ export interface WorkerInit {
 export interface ChildStartRequest {
   /** The child's prompt text. */
   prompt: string
+  /**
+   * The script's explicit `label` option, when given. The host persists it
+   * with a session-backed child so the sidebar names the workflow member
+   * instead of falling back to the session id. Only the explicit option
+   * travels: the prompt-derived display label the observer narrates stays
+   * run-local, so an unlabelled `agent()` call keeps today's descriptor.
+   */
+  label?: string
   /** The structured-output schema, if the call passed one (already subset-checked). */
   schema?: ObjectJsonSchema
   /** The per-child provider override, if the call passed one. */
