@@ -953,7 +953,7 @@ describe('provider profile lifecycle', () => {
   it('validates profiles at the shared resolver boundary', () => {
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: 0 },
-    })).toThrow(/streamIdleTimeoutMs.*positive finite/)
+    })).toThrow(/streamIdleTimeoutMs.*positive integer/)
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
     })).toThrow(/streamIdleTimeoutMs.*no greater/)

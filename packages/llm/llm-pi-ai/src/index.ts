@@ -222,7 +222,7 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.info(
         refreshed
           ? `llm-pi-ai: auth recovery for route "${provider}" refreshed the stored OAuth credential; retrying the request`
-          : `llm-pi-ai: auth recovery for route "${provider}" found no stored OAuth credential to refresh; retrying the request`,
+          : `llm-pi-ai: auth recovery for route "${provider}" is proceeding without stored OAuth rotation; retrying current auth`,
       )
     },
   })
