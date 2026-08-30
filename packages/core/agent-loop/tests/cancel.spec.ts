@@ -77,10 +77,12 @@ describe('Agent.cancel()', () => {
     const ctx = await harness(adapter)
     const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
 
-    agent.followup(createUserMessage({
+    const prompt = createUserMessage({
       content: [{ type: 'text', text: 'preserved' }],
       source: { kind: 'user' },
-    }))
+    })
+    agent.followup(prompt)
+    agent.followup(prompt)
     // A waking send starts and claims synchronously; the abort lands before
     // the step starts, so the unstarted claim returns to the inbox rather
     // than vanishing with the aborted turn.
