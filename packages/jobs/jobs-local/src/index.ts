@@ -39,6 +39,9 @@ const DEFAULT_MAX_CONCURRENT_TASKS_PER_OWNER = 10
 /** Honest terminal detail for a persisted record no resumer could adopt. */
 const NOT_RESUMABLE_DETAIL = 'not resumable after host restart'
 
+/** Terminal detail naming a resume adoption the durable store refused to record. */
+const ADOPTION_NOT_DURABLE_DETAIL = 'resume adoption could not be recorded durably'
+
 /** Honest terminal detail for a producer that outlived the teardown grace. */
 const TEARDOWN_GRACE_DETAIL = 'producer did not release within teardownGraceMs; work may be orphaned'
 
@@ -304,7 +307,7 @@ export class LocalJobRegistry extends JobRegistry {
     this.wireDone(job, hooks)
     // Registration is complete and cannot fail from here, so the visible set
     // has genuinely changed.
-    this.persistRecord(job)
+    void this.persistRecord(job)
     this.notifyChanged(job.owner)
     return id
   }
@@ -343,7 +346,7 @@ export class LocalJobRegistry extends JobRegistry {
     job.cancel(reason)
     job.status = 'stopping'
     job.reported = true
-    this.persistRecord(job)
+    void this.persistRecord(job)
     this.notifyChanged(job.owner)
     return 'requested'
   }
@@ -416,7 +419,9 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   onJobAdopted(listener: JobAdoptedListener): () => void {
-    return this.ctx.effect(() => this.layers.global.adopted.append(listener), 'jobs.onJobAdopted()')
+    const dispose = this.ctx.effect(() => this.layers.global.adopted.append(listener), 'jobs.onJobAdopted()')
+    // oxlint-disable-next-line typescript/no-misused-promises -- exact synchronous disposer preserves Cordis effect identity
+    return dispose
   }
 
   registerResumer(kind: JobKind, resume: JobResumer): () => void {
@@ -572,7 +577,7 @@ export class LocalJobRegistry extends JobRegistry {
   private markReported(job: TrackedTask): void {
     if (!isTerminal(job.status) || job.reported) return
     job.reported = true
-    this.persistRecord(job)
+    void this.persistRecord(job)
     this.evictSettled(job.ownerSession)
   }
 
@@ -645,7 +650,7 @@ export class LocalJobRegistry extends JobRegistry {
     job.waitResolvers.clear()
     for (const resolveWait of waitResolvers) resolveWait()
     job.markSettled()
-    this.persistRecord(job)
+    void this.persistRecord(job)
     this.notifyChanged(job.owner)
     this.evictSettled(job.ownerSession)
     if (this.listenersClosed) return
@@ -760,7 +765,7 @@ export class LocalJobRegistry extends JobRegistry {
    */
   private adoptStore(store: JobStore): void {
     this.restoreRecords(store)
-    for (const job of this.store.values()) this.persistRecord(job)
+    for (const job of this.store.values()) void this.persistRecord(job)
   }
 
   /**
@@ -865,23 +870,94 @@ export class LocalJobRegistry extends JobRegistry {
       return
     }
     job.pendingResume = false
+    void this.adoptCandidate(job, candidate, hooks)
+  }
+
+  /**
+   * Adopt one restored record whose resumer returned hooks. The durable
+   * adoption marker commits first and is REQUIRED — unlike the fire-and-forget
+   * {@link persistRecord} mirror, a store that rejects the re-stamped record
+   * cancels the adoption into an honest resume failure, so no adopted job
+   * ever runs unmarked under this incarnation. Committed observers are
+   * announced and awaited before the producer's completion wiring attaches,
+   * so the supervisor's account lands before any settlement it must
+   * recognize, including a `done` that already resolved.
+   */
+  private async adoptCandidate(job: TrackedTask, candidate: JobResumeCandidate, hooks: JobHooks): Promise<void> {
     job.adoptedFromIncarnation = candidate.priorIncarnation
     job.incarnation = PROCESS_INCARNATION
+    if (!await this.commitAdoptionMarker(job)) {
+      job.adoptedFromIncarnation = undefined
+      job.incarnation = candidate.priorIncarnation
+      this.cancelHooksQuietly(job, hooks, 'resume adoption was not persisted')
+      this.settle(job, { status: 'failed', detail: ADOPTION_NOT_DURABLE_DETAIL })
+      return
+    }
+    await this.notifyAdopted(this.snapshot(job), candidate.priorIncarnation)
+    if (isTerminal(job.status)) {
+      // A kill landed while the marker committed and the observers ran; the
+      // adoption stands and was announced, but the producer's hooks must not
+      // re-arm a terminal record.
+      this.cancelHooksQuietly(job, hooks, 'killed while the resume adoption committed')
+      return
+    }
     job.cancel = hooks.cancel.bind(hooks)
     job.readOutput = hooks.readOutput?.bind(hooks)
     this.wireDone(job, hooks)
-    void this.persistRecord(job).then(() => {
-      this.notifyAdopted(this.snapshot(job), candidate.priorIncarnation)
-      this.notifyChanged(job.owner)
-    })
+    this.notifyChanged(job.owner)
   }
 
-  /** Notify global host observers while containing each observer failure. */
-  private notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): void {
+  /**
+   * Commit the re-stamped record carrying the adoption marker. The put is
+   * awaited and its failure reported, because the marker is the only proof a
+   * later boot can account the adoption from. When the store that carried
+   * the record is already gone the adoption proceeds unmarked — no lane is
+   * left to write through.
+   */
+  private async commitAdoptionMarker(job: TrackedTask): Promise<boolean> {
+    const store = this.storeRef()
+    if (store === undefined) return true
+    if (job.persistDegraded) return false
+    try {
+      await store.put(this.toRecord(job))
+      return true
+    } catch (error: unknown) {
+      this.selfCtx.logger.warn(`jobs: adoption of ${job.id} is rejected: the durable marker could not be committed: ${String(error)}`)
+      return false
+    }
+  }
+
+  /** Release a producer whose adoption did not stand, containing a throwing cancel. */
+  private cancelHooksQuietly(job: TrackedTask, hooks: JobHooks, reason: string): void {
+    try {
+      hooks.cancel(reason)
+    } catch (error: unknown) {
+      this.selfCtx.logger.warn(`jobs: cancel of rejected adoption ${job.id} threw: ${String(error)}`)
+    }
+  }
+
+  /**
+   * Announce one committed adoption to the global host observers, awaiting
+   * each returned promise so the supervisor's account lands before the
+   * producer's completion wiring attaches. Every observer runs; failures are
+   * contained and logged only after all of them settle.
+   */
+  private async notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): Promise<void> {
+    const failures: unknown[] = []
+    const pending: PromiseLike<void>[] = []
     for (const listener of this.layers.global.adopted.values()) {
-      try { listener(snapshot, priorIncarnation) } catch (error: unknown) {
-        this.selfCtx.logger.warn(`jobs: onJobAdopted listener threw: ${String(error)}`)
+      try {
+        const result = listener(snapshot, priorIncarnation)
+        if (result !== undefined) pending.push(result)
+      } catch (error: unknown) {
+        failures.push(error)
       }
+    }
+    for (const outcome of await Promise.allSettled(pending)) {
+      if (outcome.status === 'rejected') failures.push(outcome.reason)
+    }
+    for (const failure of failures) {
+      this.selfCtx.logger.warn(`jobs: onJobAdopted listener failed: ${String(failure)}`)
     }
   }
 
@@ -994,7 +1070,7 @@ export class LocalJobRegistry extends JobRegistry {
       try {
         job.cancel(reason)
         job.status = 'stopping'
-        this.persistRecord(job)
+        void this.persistRecord(job)
         // Teardown reaches settlement only after the producer releases, which a
         // slow stop can defer; announcing the transition here is what keeps an
         // observer from showing `running` for that whole window.
