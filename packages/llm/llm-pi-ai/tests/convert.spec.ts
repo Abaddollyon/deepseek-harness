@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestPolicy, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { toPiContext } from '../src/context.ts'
@@ -849,9 +849,41 @@ describe('mapStopReason / mapUsage', () => {
     'OpenAI Responses stream ended before a terminal response event',
     'openrouter stream ended without a terminal event',
     'Stream ended without finish_reason',
+    // HTTP/2 stream resets: nghttp2's `stream ID N; CODE; received from peer`
+    // wording, Node's NGHTTP2_* error-code rendering, and the RST_STREAM frame
+    // name. The peer reset one stream, not the connection, so a retry can succeed.
+    'stream error: stream ID 1; INTERNAL_ERROR; received from peer',
+    'Stream closed with error code NGHTTP2_REFUSED_STREAM',
+    'HTTP/2 stream 0 was reset with RST_STREAM',
   ])('maps pi-ai transport wording %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+  })
+
+  it('feeds HTTP/2 stream resets to the default retry policy as TRANSPORT', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'stream error: stream ID 3; REFUSED_STREAM; received from peer',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
+    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
+    expect(policy.retryableCodes).toContain('TRANSPORT')
+  })
+
+  it.each([
+    // A locally reset or otherwise truncated nghttp2 message without the
+    // peer-attribution half of the composite is not proven transient.
+    'stream error: stream ID 1; INTERNAL_ERROR',
+    // Application-level wording that happens to say `stream error`.
+    'gRPC call failed with stream error: payload decode failed',
+    // `received from peer` without `stream error` is not reset vocabulary.
+    'certificate received from peer failed validation',
+  ])('keeps non-reset wording %j out of the retry loop', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
+    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
+    expect(policy.retryableCodes).not.toContain('PI_AI_ERROR')
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {

@@ -219,6 +219,7 @@ These limits define where the adapter stops and future work begins. They are cur
 - **`GenerateOptions.stop` is unsupported** — pi-ai's common stream options cannot guarantee stop-sequence behavior across providers.
 - **In-history `system` messages use pi-ai's common context conversion** — provider-specific placement follows pi-ai rather than a harness-owned wire override.
 - **Provider HTTP status is unavailable** — pi-ai error events do not expose a stable HTTP status across providers.
+- **Transport classification is best-effort message matching** — pi-ai flattens provider errors before the adapter receives them, so original cause chains and structured reset codes are unavailable; retry classification therefore recognizes narrowly pinned transport wording and leaves ambiguous failures as `PI_AI_ERROR`.
 - **Retry policy is provider-owned, not an SDK retry** — pi-ai SDK retries stay disabled so durable agent steps and `llm/retry` events own every visible attempt, and direct `ctx.llm.stream()` calls remain single-attempt.
 
 <a id="dev-note"></a>
