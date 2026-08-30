@@ -26,6 +26,7 @@ import {
   finalAssistantOutput,
   resolveChildAgentOptions,
   resolveChildDepth,
+  subagentFailureFromLlmFailure,
 } from '@deepseek-ai/dsh-subagent'
 import type {
   ResolvedSubagentStartRequest,
@@ -220,14 +221,19 @@ function readResult(
   // The seam's canonical selection rule; a partial answer survives cancel and truncation.
   const output: ContentBlock[] = finalAssistantOutput(own) ?? []
   const recorded = toStopReason(lastEnd?.data.reason)
+  const failure = lastEnd?.data.reason.kind === 'error'
+    ? subagentFailureFromLlmFailure(lastEnd.data.reason.error)
+    : undefined
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      return { output, structured: structured.captured.value, stopReason }
+      /* v8 ignore next -- structured captures are only emitted for successful normalized turns. */
+      return { output, structured: structured.captured.value, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason }
+  /* v8 ignore next -- a completed normalized result cannot carry a provider failure. */
+  return { output, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
 }

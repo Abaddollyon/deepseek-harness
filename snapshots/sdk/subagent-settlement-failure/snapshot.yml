@@ -1,0 +1,12 @@
+version: 1
+scenario: subagent-settlement-failure
+profile: sdk
+composition: subagent-settlement-failure
+recording: authored
+header:
+  class: subagent-settlement-failure
+  pin: true
+  systemPromptSource: session/text-turn
+  toolSchemasSource: session/text-turn
+  childSystemPrompts: [1]
+  childToolSchemas: [1]

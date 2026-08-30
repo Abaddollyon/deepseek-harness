@@ -21,7 +21,7 @@ import {
   parentAgentOptionsForDelegation,
   settleRun,
 } from '@deepseek-ai/dsh-subagent'
-import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import {
@@ -185,6 +185,9 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const diagnostic = result.diagnostic === undefined
     ? ''
     : `\nDiagnostic: ${result.diagnostic}`
+  const failure = result.failure === undefined
+    ? ''
+    : `\nFailure code: ${result.failure.code}`
   const text = result.output
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
     .map(block => block.text)
@@ -192,7 +195,18 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const partial = text.length === 0
     ? ''
     : `\nPartial output before the run ended:\n${text}`
-  return `${error}${diagnostic}${partial}`
+  return `${error}${diagnostic}${failure}${partial}`
+}
+
+/** Preserve branchable provider facts when a tool run fails. */
+class SubagentToolFailure extends Error {
+  readonly failure: SubagentFailure | undefined
+
+  constructor(message: string, result: SubagentResult) {
+    super(message, result.failure === undefined ? undefined : { cause: result.failure })
+    this.name = 'SubagentToolFailure'
+    this.failure = result.failure
+  }
 }
 
 type ForegroundToolResult = {
@@ -212,7 +226,7 @@ async function settleForegroundRun(run: SubagentRun): Promise<ForegroundToolResu
       if (error !== undefined) {
         // The registry converts this throw to isError; partial output is not
         // success, but the preserved partial answer still reaches the parent.
-        throw new Error(withDiagnosticAndPartialText(error, result))
+        throw new SubagentToolFailure(withDiagnosticAndPartialText(error, result), result)
       }
       return {
         kind: 'foreground',

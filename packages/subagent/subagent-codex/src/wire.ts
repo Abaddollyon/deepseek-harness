@@ -9,7 +9,7 @@
 
 import type { Readable, Writable } from 'node:stream'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import type { CodexPermissionMode } from './run.ts'
 
@@ -27,6 +27,8 @@ export interface CodexWireFailureFacts {
     | 'invalid-result'
     | 'unknown'
   readonly httpStatus?: number | undefined
+  /** Structured provider-neutral routing facts when the wire can prove them. */
+  readonly failure?: SubagentFailure
 }
 
 const THREAD_PERMISSION_PARAMS: Readonly<Record<CodexPermissionMode, JsonObject>> = {

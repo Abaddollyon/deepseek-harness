@@ -426,6 +426,10 @@ export async function startCodexRun(
     },
     collectOutput,
     collectDiagnostic: () => diagnostic,
+    collectFailure: () => {
+      const facts = wire.collectFailure() as CodexWireFailureFacts | undefined
+      return facts === undefined ? undefined : facts.failure
+    },
     cancelled: () => runAbort.signal.aborted,
     onError: spec.onError,
     signal: request.signal,

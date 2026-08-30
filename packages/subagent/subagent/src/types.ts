@@ -11,7 +11,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailureCode } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
@@ -70,6 +70,8 @@ export interface SubagentRunEndInfo {
    * the child produced none.
    */
   readonly lastAssistantMessage?: ContentBlock[]
+  /** Typed provider failure facts when the child ended with an LLM error. */
+  readonly failure?: SubagentFailure
 }
 
 /**
@@ -222,6 +224,19 @@ export interface SubagentStopReasonMap {
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
 /**
+ * Machine-readable provider failure facts retained alongside diagnostic text.
+ *
+ * `code` is the LLM seam's merge-extensible failure code; consumers must use a
+ * documented default for unrecognised codes and treat them as non-retryable.
+ */
+export interface SubagentFailure {
+  /** Typed provider failure code used for routing and retry decisions. */
+  readonly code: LlmFailureCode
+  /** Provider-requested delay before another attempt, in milliseconds. */
+  readonly retryAfterMs?: number
+}
+
+/**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
 export interface SubagentResult {
@@ -245,9 +260,12 @@ export interface SubagentResult {
    * Provider-authored, non-assistant failure detail for a non-`completed`
    * result. Providers keep this text free of tool inputs, file contents,
    * environment values, credentials, and raw protocol payloads, and limit it
-   * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
+   * to 4096 UTF-8 bytes. This is human/model-readable context, not a branch key;
+   * use the optional {@link failure} companion for routing decisions.
    */
   readonly diagnostic?: string
+  /** Typed branchable cause accompanying `diagnostic`; absent means the cause is unknown. */
+  readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
 }

@@ -181,6 +181,14 @@ describe('dsh-tool-subagent', () => {
     )
   })
 
+  it('preserves branchable provider failure facts through the real tool pipeline', async () => {
+    const ctx = await setup({ provider: 'mock' }, { diagnostic: 'quota exhausted', failure: { code: 'QUOTA' }, stopReason: 'error' })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected foreground failure')
+    expect(text(result)).toContain('Failure code: QUOTA')
+  })
+
   it('registers under a configurable toolName so multiple providers can coexist', async () => {
     // The defining multi-provider use case: two loads, two distinct tool names,
     // each bound to a different provider — the tool registry rejects duplicate
