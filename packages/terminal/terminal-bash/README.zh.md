@@ -1,10 +1,33 @@
+---
+description: "持久 terminal-bash 后端，供选择、配置或排查 PTY shell 会话与就绪行为的使用者与维护者阅读。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-terminal-bash
 
 [English](README.md) | 中文
 
+## 概述
+
+`dsh-terminal-bash` 通过 `ctx.subprocess.spawnTerminal` 为 `ctx.terminals` 提供持久后端。它在共享沙箱策略下启动交互式 bash 或 pwsh 会话，保留有界逐行输出并检测就绪状态；进程管理提供方负责 PTY 分配、环境清理、前台进程组、信号发送和完整终端会话清理。
+
+## 目录
+
+- [使用本包](#use-this-package)
+- [理解实现](#understand-the-implementation)
+- [进一步探索](#further-exploration)
+- [模型体验](#model-experience)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="use-this-package"></a>
+## 使用本包
+
 这是一个基于 `ctx.subprocess.spawnTerminal`、为 `ctx.terminals` 提供的持久 shell 后端。它在共享 `ctx.sandboxPolicy` 下启动交互式 shell，保留有界的逐行输出并检测就绪状态；进程管理提供方则负责 PTY 分配、环境清理、前台进程组、信号发送和完整终端会话清理。因此，同一个 PTY 后端可以与本地或远程执行世界提供方组合。
 
-## 插件（`terminal-bash`）
+### 插件（`terminal-bash`）
 
 该插件注入 `pty`、`sandboxPolicy` 和 `subprocess`，然后注册所配置的后端类型（`shell`）。`danger-full-access` 无需沙箱提供方即可直接启动 shell；受限模式要求同一执行世界中存在 `ctx.sandbox`，并通过它包装确切的 shell argv，未挂载时会在 spawn 前失败。spawn 时，一次 `ctx.sandboxPolicy.resolve({ session })` 调用会同时给出实际模式与会话工作区根目录；调用方省略 cwd 时，同一根目录也是 shell 的默认 cwd。当某个所有者存在开放的 PTY 或正在进行 spawn 时，如果配置变更会得到不同的实际模式，系统会在对应 `sandbox/mode` 事件提交前拒绝该变更。该限制绑定到确切所有者，因此即使提供方重新加载并保留现有会话，它仍然有效。更改模式前，请等待创建完成并关闭会话，避免以更宽权限打开的终端在权限降级后继续存在。
 
@@ -14,6 +37,19 @@
 
 取消发送时，系统会先把排队输入标记为已取消，再要求终端句柄向当前前台进程组发送真正的 `SIGINT`；异步写入前检查即使随后结算，也无法执行该输入。如果提供方写入已在途，信号发送会等待其结算；写入被拒绝时不会发送信号。已取消的 send 会保留其位置，直到写入与前台信号发送都结算，因此后继 send 不会收到延迟字节或该信号。因此，永不结算的提供方写入或信号会无限期保留该位置；恢复手段是关闭会话（`terminal_close`）。取消等待期间，绝对 deadline 仍保持启用。信号发送失败是终端传输失败，会拒绝活跃 send。取消绝不会通过写入 `\x03` 模拟中断，因此，即使程序运行在 raw 模式下，也仍可取消。关闭操作会拒绝新的公开信号、停止就绪轮询，并等待由句柄提供方负责的完整会话终止，然后才把活跃 send 结算为 `session_exit`。
 
+<a id="understand-the-implementation"></a>
+## 理解实现
+
+本插件组合沙箱解析、方言引导、标记与静默就绪、有界读取、取消和提供方负责的清理；上方插件说明是操作实现参考。
+
+<a id="further-exploration"></a>
+## 进一步探索
+
+- [terminal 包映射](../README.zh.md)——持久 PTY 能力家族。
+- [持久 bash 工具](../../shell/tool-bash-persistent/README.zh.md)——使用此后端的模型侧消费方。
+- [持久 pwsh 工具](../../shell/tool-pwsh-persistent/README.zh.md)——PowerShell 消费方与回退输出约定。
+
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 当前文件策略与间接消费方
@@ -32,8 +68,20 @@
 
 ## 已知限制与暂缓事项
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - 输出按行规范化；不支持全屏备用缓冲区交互。
 - 精确 stdin 等待检测取决于已挂载的进程管理提供方；无法证明该状态的提供方使用提示符标记和静默／超时就绪机制。Windows 正是这样的提供方：shell pid 是伪前台进程组，没有精确的 stdin-wait 档，因此无标记的子进程按静默上限结算。
 - pwsh 引导（UTF-8 编码钉与 `prompt` 函数）通过 `[Console]::` 写入，Windows ACL 沙箱的只读模式（ConstrainedLanguage）可能拒绝它。shell 仍可通过受控可打印提示符和静默档结算，但无法使用 marker 就绪，非 ASCII 输出也可能沿用宿主代码页。
 - 清理保证以 `SubprocessTerminalHandle` 的保证为准；提供方特定的缺口属于该实现的约定，而非这个 PTY 消费方。
 - harness 进程退出后，会话无法继续存在。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者的工作上下文——点击展开</summary>
+
+无密钥 fixture 覆盖方言引导、就绪、取消、有界读取、沙箱模式限制与提供方清理。依赖 PowerShell 的组合覆盖由平台 CI 负责。
+
+</details>

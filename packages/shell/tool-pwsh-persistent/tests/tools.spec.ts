@@ -103,6 +103,7 @@ type StubMode =
   | 'with-wrapped-echo'
   | 'wrapped-echo-then-normal'
   | 'wrapped-echo-prompt'
+  | 'wrapped-echo-marker-partial'
   | 'exit-after-send'
   | 'prompt-collision'
 
@@ -129,6 +130,7 @@ class StubTerminalSession implements TerminalBackendSession {
   latestOutput = ''
   historyTruncated = false
   throwOnSend = false
+  partialBody = 'partial data'
 
   constructor(mode: StubMode) {
     this.mode = mode
@@ -203,6 +205,14 @@ class StubTerminalSession implements TerminalBackendSession {
       const output = `${wrapPhysicalLines(sent, 29)}\npwsh: syntax error\n${this.motd}`
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'wrapped-echo-marker-partial') {
+      // The incremental delta carries the wrapped echo, the real START marker,
+      // and partial output while the scrollback retains none of it: extraction
+      // must anchor on the fallback's real marker, whose framing has to
+      // survive the fallback cap.
+      const delta = `${wrapPhysicalLines(sent, 29)}\n${start ?? ''}\n${this.partialBody}\n${this.motd}`
+      return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')), delta)
     }
     if (this.mode === 'with-echo' || this.mode === 'with-wrapped-echo') {
       // The PSReadLine echo renders the submitted wrapper before the real
@@ -437,6 +447,35 @@ describe('tool-pwsh-persistent', () => {
     const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
     expect(result).toContain('pwsh:')
     expect(result).toContain('<response clipped>')
+  })
+
+  it('anchors fallback diagnostics on the real start marker behind a wrapped echo', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'wrapped-echo-marker-partial'
+    session.scrollback = ''
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('partial')
+    expect(result).toContain('<response clipped>')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START')
+    expect(result).not.toContain('beginning of this command output was dropped')
+  })
+
+  it('bounds the retained fallback diagnostic when partial output overflows the cap', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'wrapped-echo-marker-partial'
+    session.partialBody = 'y'.repeat(100_000)
+    session.scrollback = ''
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('yyyyyyyy')
+    expect(result).toContain('<response clipped>')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START')
+    expect(result.length).toBeLessThan(1_000)
   })
 
   it('preserves command output that equals the private shell prompt', async () => {

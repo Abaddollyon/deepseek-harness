@@ -1,10 +1,33 @@
+---
+description: "The persistent terminal-bash backend for users and maintainers choosing, configuring, or debugging PTY shell sessions and readiness behavior."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-terminal-bash
 
 English | [中文](README.zh.md)
 
+## Summary
+
+`dsh-terminal-bash` provides the persistent `ctx.terminals` backend over `ctx.subprocess.spawnTerminal`. It starts interactive bash or pwsh sessions under the shared sandbox policy, retains bounded line-oriented output, and detects readiness while the subprocess provider owns PTY allocation, environment scrubbing, foreground process groups, signalling, and complete terminal-session cleanup.
+
+## Table of Contents
+
+- [Use this package](#use-this-package)
+- [Understand the implementation](#understand-the-implementation)
+- [Further Exploration](#further-exploration)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="use-this-package"></a>
+## Use this package
+
 Persistent shell backend for `ctx.terminals` over `ctx.subprocess.spawnTerminal`. It starts an interactive shell under the shared `ctx.sandboxPolicy`, retains bounded line-oriented output, and detects readiness while the subprocess provider owns PTY allocation, environment scrubbing, foreground process groups, signalling, and complete terminal-session cleanup. The same PTY backend therefore composes with local or remote execution-world providers.
 
-## Plugin (`terminal-bash`)
+### Plugin (`terminal-bash`)
 
 The plugin injects `pty`, `sandboxPolicy`, and `subprocess`, then registers the configured backend type (`shell`). `danger-full-access` starts the shell directly without requiring a sandbox provider; confined modes require a same-world `ctx.sandbox` and wrap the exact shell argv through it, failing before spawn when none is mounted. At spawn, one `ctx.sandboxPolicy.resolve({ session })` call supplies both the effective mode and the session workspace root; the same root is the default shell cwd when the caller omits one. A change to a different effective mode is rejected before its `sandbox/mode` event commits while that owner has an open PTY or a spawn in progress; the fence is attached to the exact owner and therefore outlives a provider reload that retains existing sessions. Wait for creation to settle and close the sessions before changing modes, so a terminal opened with wider access cannot survive a downgrade.
 
@@ -14,6 +37,19 @@ Readiness combines a foreground-verified private bash prompt marker, provider-re
 
 Send cancellation marks queued input as canceled before asking the terminal handle to signal the current foreground process group with a real `SIGINT`; if asynchronous pre-write inspection later settles, it cannot execute that input. If a provider write is already in flight, signalling waits for it to settle; a rejected write sends no signal. The canceled send retains its slot until the write and foreground signalling settle, so a successor cannot receive either late bytes or that signal. A provider write or signal that never settles therefore retains the slot indefinitely; closing the session (`terminal_close`) is the recovery. The absolute deadline remains armed while cancellation waits. A signal failure is a terminal transport failure and rejects the active send. Cancellation never emulates interruption by writing `\x03`, so raw-mode programs remain cancellable. Close rejects new public signals, stops readiness polling, and awaits the handle's provider-owned complete-session termination before settling the active send as `session_exit`.
 
+<a id="understand-the-implementation"></a>
+## Understand the implementation
+
+The plugin combines sandbox resolution, dialect-specific bootstrap, marker and silence readiness, bounded reads, cancellation, and provider-owned cleanup. The plugin details above are the operational implementation reference.
+
+<a id="further-exploration"></a>
+## Further Exploration
+
+- [terminal package map](../README.md) — the persistent PTY capability family.
+- [persistent bash tool](../../shell/tool-bash-persistent/README.md) — a model-facing consumer of this backend.
+- [persistent pwsh tool](../../shell/tool-pwsh-persistent/README.md) — the PowerShell consumer and fallback-output contract.
+
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Current file policy and indirect consumer
@@ -32,8 +68,20 @@ A standing-policy change appends an owner-rendered superseding runtime-context s
 
 ## Known Limitations and Deferred Work
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - Line-oriented output is normalized; full-screen alternate-buffer interaction is unsupported.
 - Exact stdin-wait detection depends on the mounted subprocess provider; providers that cannot prove it use prompt-marker and silence/timeout readiness. Windows is such a provider: the shell pid is the pseudo foreground group and there is no exact stdin-wait tier, so a marker-less child settles on the silence bound.
 - The pwsh bootstrap writes through `[Console]::` (the UTF-8 encoding pin and the prompt function), which the Windows ACL sandbox's read-only mode (ConstrainedLanguage) may deny. The shell can still settle through the controlled printable prompt and silence tier, but marker readiness is unavailable and non-ASCII output may follow the host code page.
 - Cleanup guarantees are those of `SubprocessTerminalHandle`; provider-specific gaps belong to that implementation's contract rather than this PTY consumer.
 - Sessions do not survive harness process exit.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+Keyless fixtures cover dialect bootstrap, readiness, cancellation, bounded reads, sandbox mode fences, and provider cleanup. PowerShell-dependent composition coverage belongs to platform CI.
+
+</details>
