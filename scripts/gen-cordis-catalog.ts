@@ -498,6 +498,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   PromptSection: 'system-prompt.md',
   SystemPrompt: 'system-prompt.md',
   ToolProviderResult: 'system-prompt.md',
+  JobAdoptedListener: 'jobs.md',
   JobDoneListener: 'jobs.md',
   JobId: 'jobs.md',
   JobKind: 'jobs.md',

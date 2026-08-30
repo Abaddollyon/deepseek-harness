@@ -187,7 +187,7 @@ interface JobRead {
 
 ## Service behavior
 
-The abstract [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition specifies atomic `start`, caller-scoped `get` and `list`, `read`, `kill`, bounded `wait`, failure-isolated `onJobDone` and `onJobsChanged` listeners, and `attachController`; [`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) is the process-local Service Provider. Authorization compares owner sessions; owner cleanup and admission use the exact registered `Agent` instance. The local provider's positive-safe-integer `maxConcurrentJobsPerOwner` config defaults to `10` and counts `running` plus `stopping` records per exact owner, with one shared bucket for unowned jobs; terminal producer settlement releases capacity. See [`dsh-jobs`](../../packages/jobs/jobs/README.md) for the Service Definition contract, [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.md) for the registry lifecycle and admission policy, and [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.md) for the model-facing Consumer.
+The abstract [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition specifies atomic `start`, caller-scoped `get` and `list`, `read`, `kill`, bounded `wait`, failure-isolated `onJobDone` and `onJobsChanged` listeners, the host-wide `onJobAdopted` adoption observer, and `attachController`; [`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) is the process-local Service Provider. Authorization compares owner sessions; owner cleanup and admission use the exact registered `Agent` instance. The local provider's positive-safe-integer `maxConcurrentJobsPerOwner` config defaults to `10` and counts `running` plus `stopping` records per exact owner, with one shared bucket for unowned jobs; terminal producer settlement releases capacity. See [`dsh-jobs`](../../packages/jobs/jobs/README.md) for the Service Definition contract, [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.md) for the registry lifecycle and admission policy, and [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.md) for the model-facing Consumer.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -306,6 +306,23 @@ abstract onJobDone(listener: JobDoneListener): () => void
  * @returns disposer that unregisters the listener.
  */
 abstract onJobsChanged(listener: JobsChangedListener): () => void
+
+/**
+ * Register an observer of durable adoptions. It fires once per restored
+ * record a producer resumer adopts, after the registry commits the
+ * re-stamped record — this process incarnation plus the prior one as the
+ * adoption marker — to the durable store, so an observer that crashes
+ * afterwards still finds the marker on the next boot. Delivery is global:
+ * every listener sees every adoption regardless of owner scope. A returned
+ * promise is awaited before the registry attaches the producer's
+ * completion wiring, so the observer's account lands before any settlement
+ * it must recognize; every listener runs, and failures are contained and
+ * logged only after all of them settle.
+ * @param listener - receives the adopted snapshot and the prior process
+ *   incarnation that wrote the record before the restart.
+ * @returns disposer that unregisters the listener.
+ */
+abstract onJobAdopted(listener: JobAdoptedListener): () => void
 
 /**
  * Register a resume handler for one job kind. On boot the registry replays

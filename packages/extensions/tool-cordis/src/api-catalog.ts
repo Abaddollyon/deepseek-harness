@@ -1081,6 +1081,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'disposer that unregisters the listener.',
       },
       {
+        signature: 'abstract onJobAdopted(listener: JobAdoptedListener): () => void',
+        description: 'Register an observer of durable adoptions. It fires once per restored record a producer resumer adopts, after the registry commits the re-stamped record — this process incarnation plus the prior one as the adoption marker — to the durable store, so an observer that crashes afterwards still finds the marker on the next boot. Delivery is global: every listener sees every adoption regardless of owner scope. A returned promise is awaited before the registry attaches the producer\'s completion wiring, so the observer\'s account lands before any settlement it must recognize; every listener runs, and failures are contained and logged only after all of them settle.',
+        parameters: [{ name: 'listener', description: 'receives the adopted snapshot and the prior process incarnation that wrote the record before the restart.' }],
+        returns: 'disposer that unregisters the listener.',
+      },
+      {
         signature: 'abstract registerResumer(kind: JobKind, resume: JobResumer): () => void',
         description: 'Register a resume handler for one job kind. On boot the registry replays every non-terminal persisted record of this kind that a previous process incarnation wrote: a handler that returns hooks adopts the record under its original id; `undefined` settles it honestly as `failed` with detail `\'not resumable after host restart\'`. Registration is an effect scoped to the registering context; at most one resumer may serve a kind at a time, and a duplicate registration fails loudly.',
         parameters: [{ name: 'kind', description: 'producer kind whose persisted records the handler serves.' }, { name: 'resume', description: 'decides adoption per record; see {@link JobResumer}.' }],
@@ -4214,6 +4220,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'InvokeRemoteRequest',
     declaration: 'export interface InvokeRemoteRequest {\n    readonly namespace: string;\n    readonly method: string;\n    readonly args: Readonly<Record<string, unknown>>;\n    readonly signal?: AbortSignal;\n}',
+  },
+  {
+    name: 'JobAdoptedListener',
+    declaration: 'export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void | PromiseLike<void>;',
   },
   {
     name: 'JobDoneListener',

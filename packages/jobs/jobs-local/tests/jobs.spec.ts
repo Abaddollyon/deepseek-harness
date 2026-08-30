@@ -1405,10 +1405,9 @@ describe('LocalJobRegistry durable adoption requirement', () => {
     expect(cancels).toEqual(['resume adoption was not persisted'])
     expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'resume adoption could not be recorded durably' })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('the durable marker could not be committed'))
-    // The transiently failed settle put succeeded, so the durable record is
-    // the honest terminal one — never an unmarked adoption under this
-    // incarnation.
-    expect(state.records.get(stored.id)).toMatchObject({ status: 'failed', incarnation: 'prior-incarnation' })
+    // The local failure must not replace the prior incarnation's durable
+    // running record; a later store remount can restore and retry it.
+    expect(state.records.get(stored.id)).toMatchObject({ status: 'running', incarnation: 'prior-incarnation' })
     expect(state.records.get(stored.id)?.adoptedFromIncarnation).toBeUndefined()
   })
 
@@ -1434,14 +1433,14 @@ describe('LocalJobRegistry durable adoption requirement', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('the durable marker could not be committed'))
   })
 
-  it('rejects the adoption of an already-degraded record and contains a throwing cancel', async () => {
+  it('contains a throwing cancel after the marker put rejects', async () => {
     const records = new Map<string, JobRecord>()
     const stored = storedRecord({ resumeSpec: { arg: 7 } })
     records.set(stored.id, stored)
     const { store, state } = fakeStore({ records })
-    state.failNextPuts = 1 // the boot-time mirror put fails, degrading the record
     const ctx = await bootPersisted(store)
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    state.failNextPuts = 1
     const adopted = vi.fn()
     ctx.jobs.onJobAdopted(adopted)
 
@@ -1457,7 +1456,7 @@ describe('LocalJobRegistry durable adoption requirement', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('cancel boom'))
   })
 
-  it('adopts unmarked when the store is already gone, writing nothing', async () => {
+  it('cancels an unmarked adoption without announcing or wiring it, then retries when the store remounts', async () => {
     const records = new Map<string, JobRecord>()
     const stored = storedRecord({ resumeSpec: { arg: 1 } })
     records.set(stored.id, stored)
@@ -1472,16 +1471,45 @@ describe('LocalJobRegistry durable adoption requirement', () => {
     await tick()
     const adopted = vi.fn()
     ctx.jobs.onJobAdopted(adopted)
+    const first = Promise.withResolvers<JobOutcome>()
+    const second = Promise.withResolvers<JobOutcome>()
+    const cancels: (string | undefined)[] = []
+    const resume = vi.fn()
+      .mockReturnValueOnce({ cancel: (reason?: string) => { cancels.push(reason) }, done: first.promise })
+      .mockReturnValueOnce({ cancel: () => {}, done: second.promise })
 
     await storeFiber.dispose()
-    ctx.jobs.registerResumer('bash', () => ({ cancel: () => {}, done: new Promise<JobOutcome>(() => {}) }))
+    ctx.jobs.registerResumer('bash', resume)
     await tick()
 
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(adopted).not.toHaveBeenCalled()
+    expect(cancels).toEqual(['resume adoption was not persisted'])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', incarnation: 'prior-incarnation' })
+    expect(state.records.get(stored.id)).toBe(stored)
+    expect(state.puts).toEqual([])
+
+    first.resolve({ status: 'completed', detail: 'stale hooks completed' })
+    await tick()
+    expect(ctx.jobs.get(stored.id).status).toBe('failed')
+
+    await ctx.plugin((inner: Context) => {
+      inner.provide('jobStore', store)
+    })
+    await tick()
+
+    expect(resume).toHaveBeenCalledTimes(2)
     expect(adopted).toHaveBeenCalledTimes(1)
     expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'running', incarnation: PROCESS_INCARNATION })
-    const puts = state.puts.length
+    expect(state.records.get(stored.id)).toMatchObject({
+      status: 'running',
+      incarnation: PROCESS_INCARNATION,
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+
+    second.resolve({ status: 'completed', detail: 'retried hooks completed' })
     await tick()
-    expect(state.puts.length).toBe(puts)
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'completed', detail: 'retried hooks completed' })
   })
 
   it('a kill landing while the marker commits releases the producer without re-arming the record', async () => {
@@ -1657,6 +1685,26 @@ describe('LocalJobRegistry durable persistence', () => {
     ctx.provide('jobStore', store)
     await tick()
     expect(state.records.get(id)).toMatchObject({ id, status: 'running' })
+  })
+
+  it('does not mirror a pre-store local record over a durable record with the same id', async () => {
+    const stored = storedRecord({ resumeSpec: { retry: true } })
+    const records = new Map<string, JobRecord>([[stored.id, stored]])
+    const { store, state } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    const idHint = String(stored.id).slice('bash-'.length)
+    const id = ctx.jobs.start(producer({ idHint }).spec)
+    expect(id).toBe(stored.id)
+
+    ctx.provide('jobStore', store)
+    await tick()
+
+    expect(state.records.get(stored.id)).toBe(stored)
+    expect(state.puts).toEqual([])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'running', incarnation: PROCESS_INCARNATION })
   })
 
   it('stops writing when the store fiber disposes', async () => {
