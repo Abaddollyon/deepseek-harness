@@ -520,16 +520,16 @@ describe('compact configuration and defaults', () => {
       kind: 'invalid',
       error: {
         targetKey: `${MODEL}/${MODEL}`,
-        message: expect.stringMatching(/less than threshold/),
+        message: `BasicCompactionConfig: ${MODEL}/${MODEL} retainTokens (500) must be less than threshold tokens 500`,
       },
     })
     expect(resolveCompactSpec(invalidPressure, 1.5)).toMatchObject({
       kind: 'invalid',
-      error: { message: expect.stringMatching(/positive integer/) },
+      error: { message: 'BasicCompactionConfig: contextWindow (1.5) must be a positive integer' },
     })
     expect(resolveCompactSpec(invalidPressure, 0)).toMatchObject({
       kind: 'invalid',
-      error: { message: expect.stringMatching(/positive integer/) },
+      error: { message: 'BasicCompactionConfig: contextWindow (0) must be a positive integer' },
     })
   })
 
@@ -635,7 +635,7 @@ describe('pressure measurement and retention', () => {
     await expect(operation).rejects.toBeInstanceOf(TargetPressureConfigError)
     await expect(operation).rejects.toMatchObject({
       targetKey: `${MODEL}/${MODEL}`,
-      message: expect.stringMatching(/retainTokens \(500\) must be less than threshold tokens 500/),
+      message: `BasicCompactionConfig: ${MODEL}/${MODEL} retainTokens (500) must be less than threshold tokens 500`,
     })
   })
 
