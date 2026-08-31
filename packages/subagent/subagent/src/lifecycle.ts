@@ -51,12 +51,26 @@ export interface ActivationTerminal {
 const TERMINAL_DIAGNOSTIC_LIMIT = 4096
 
 /**
+ * Convert an unknown thrown value without letting its coercion hook throw.
+ * @param failure - value rejected by the teardown operation.
+ * @returns printable diagnostic text or a stable fallback.
+ */
+function thrownText(failure: unknown): string {
+  try {
+    return String(failure)
+  } catch {
+    // A rejection value may itself refuse string conversion.
+    return '[unprintable thrown value]'
+  }
+}
+
+/**
  * Render a teardown failure as bounded diagnostic text.
  * @param failure - the thrown value that ended the epoch.
  * @returns the diagnostic member, omitted when the failure carries no text.
  */
 export function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
-  const text = String(failure)
+  const text = thrownText(failure)
   if (text.length === 0) return {}
   const bounded = truncateDiagnostic(text)
   const structured = collectFailureCause(failure)

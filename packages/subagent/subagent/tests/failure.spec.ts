@@ -69,5 +69,10 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(multibyte).toBe('🙂'.repeat(1_024))
     expect(terminalDiagnostic('')).toEqual({})
     expect(terminalDiagnostic({})).toEqual({ diagnostic: '[object Object]' })
+    const unprintable = {
+      [Symbol.toPrimitive](): never { throw new Error('coercion failed') },
+      toString(): never { throw new Error('coercion failed') },
+    }
+    expect(terminalDiagnostic(unprintable)).toEqual({ diagnostic: '[unprintable thrown value]' })
   })
 })
