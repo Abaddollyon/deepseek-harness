@@ -87,7 +87,7 @@ function appendSummaryMeter(ctx: Context, session: Session, start: SessionSeq, e
     summary: [{ type: 'text', text: 'summary' }],
     shadowedRange: { start, end },
     shadowedSeqs: shadowed.map(node => node.seq),
-    shadowedTokenCount: shadowed.reduce((total, node) => total + node.tokens, 0),
+    shadowedTokenCount: shadowed.reduce((total, node) => total + node.heuristicTokens, 0),
     provider: 'mock',
     model: 'mock',
   })

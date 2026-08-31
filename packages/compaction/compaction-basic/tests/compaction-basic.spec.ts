@@ -18,6 +18,7 @@ import type {
   ContentBlock,
   GenerateOptions,
   LlmFailure,
+  LlmImageRequestPricing,
   LlmResolvedModelInfo,
   Message,
   StreamChunk,
@@ -50,6 +51,14 @@ class ContextAdapter extends LlmAdapter {
 
   override async * stream(): AsyncIterable<StreamChunk> {
     yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+class ImagePricedContextAdapter extends ContextAdapter {
+  override imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing {
+    return {
+      priceImages: images => images.map(() => ({ visualTokens: 100, text: "image handle" })),
+    }
   }
 }
 
@@ -107,11 +116,11 @@ class ObservableCompactionAdapter extends LlmAdapter {
   }
 }
 
-function createContext(contextWindow = 1_000): Context {
+function createContext(contextWindow = 1_000, adapter: ContextAdapter = new ContextAdapter(contextWindow)): Context {
   const ctx = new Context()
   void new LlmRuntime(ctx)
   void new TokenMeter(ctx)
-  ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], new ContextAdapter(contextWindow))
+  ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], adapter)
   return ctx
 }
 
@@ -1014,6 +1023,63 @@ describe('compaction region transaction', () => {
 
     const replay = Session.create(SessionId('replay'), [...session.events])
     expect(replay.deriveMessages()).toEqual(session.deriveMessages())
+  })
+
+  it('admits a framed summary between heuristic and route prices', async () => {
+    const ctx = createContext(1_000, new ImagePricedContextAdapter(1_000))
+    const compact = service({ auto: false }, ctx)
+    compact.summary = [{ type: 'text', text: 'x'.repeat(60) }]
+    const session = Session.create(SessionId('image-priced-compaction'))
+    session.append('turn/start', { turn: 1 })
+    const image = createUserMessage({
+      content: [
+        { type: 'text', text: 'inspect this image' },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: AttachmentId('sha256:image-regression'),
+            mediaType: 'image/png',
+            bytes: 2_048,
+            width: 800,
+            height: 800,
+            name: 'regression.png',
+          },
+        },
+      ],
+      source: { kind: 'user' },
+    })
+    session.append('user/message', image, { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'retain this tail' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL } },
+      reason: 'initial',
+    })
+
+    const before = ctx.tokenMeter.measure(session)
+    const imageNode = before.nodes[0]!
+    expect(imageNode.tokens).toBeGreaterThan(imageNode.heuristicTokens)
+    const result = await compact.compactRegion(
+      session.surface.nodes[0]!,
+      session.surface.nodes[0]!,
+      agent(session, MODEL),
+      SIGNAL,
+    )
+
+    expect(result.shadowedTokenCount).toBe(imageNode.heuristicTokens)
+    expect(result.shadowedTokenCount).not.toBe(imageNode.tokens)
+    const checkpoint = session.deriveMessages()[0]!
+    const framedTokens = ctx.tokenMeter.estimateMessage(checkpoint)
+    expect(framedTokens).toBeGreaterThan(imageNode.heuristicTokens)
+    expect(framedTokens).toBeLessThan(imageNode.tokens)
+    const summary = session.events.findLast(event => event.type === 'compaction/summary')
+    expect(summary?.type === 'compaction/summary' ? summary.data.shadowedTokenCount : -1)
+      .toBe(imageNode.heuristicTokens)
+    const after = ctx.tokenMeter.measure(session)
+    expect(after.totalTokens).toBeGreaterThanOrEqual(0)
+    expect(after.surfaceTokens).toBeGreaterThanOrEqual(0)
   })
 
   it('replays the latest routed header so the summarizer reuses the cache', async () => {
