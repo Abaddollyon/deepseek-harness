@@ -154,7 +154,6 @@ export interface CodexRunSpec {
 }
 
 function thrown(value: unknown): Error {
-  /* v8 ignore next -- typed subprocess/wire failures reject with Error. */
   return value instanceof Error ? value : new Error(String(value))
 }
 
@@ -196,7 +195,6 @@ export async function disposeCodexChild(
     let outcome: SubprocessOutcome | undefined
     void child.done.then(
       (value) => { outcome = value },
-      /* v8 ignore next -- a positive pid excludes spawn-level done rejection. */
       () => {},
     )
     try {

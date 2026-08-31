@@ -654,7 +654,6 @@ export function apply(ctx: Context, config: Config): void {
     return
   }
   const agents = ctx.get('agents')
-  /* v8 ignore next -- Agent and preset scopes are minted only by the Agent registry. */
   if (agents === undefined) throw new Error('tool-subagent: scoped model-selection settings require the Agent registry')
   const scopedInstalls = new WeakMap<Agent, ReturnType<Context['inject']>>()
   const installing = new WeakSet<Agent>()
@@ -680,7 +679,6 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = scopedInstalls.get(candidate)
     if (fiber === undefined) return
     scopedInstalls.delete(candidate)
-    /* v8 ignore next 3 -- Cordis Fiber disposal contains registration cleanup failures; this is the final diagnostic sink. */
     void fiber.dispose().catch((error: unknown) => {
       ctx.logger.warn(`tool-subagent: failed to remove recomposed Agent "${candidate.id}" definitions: ${String(error)}`)
     })

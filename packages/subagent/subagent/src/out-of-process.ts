@@ -157,7 +157,6 @@ function toError(value: unknown): Error {
   // The rejecting surfaces (wire clients, spawn failures) only throw
   // `Error`s; the `String(value)` arm is a defensive fallback for a non-Error
   // throw the typed surfaces cannot produce.
-  /* v8 ignore next */
   return value instanceof Error ? value : new Error(String(value))
 }
 
