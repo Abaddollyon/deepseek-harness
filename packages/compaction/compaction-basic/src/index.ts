@@ -55,6 +55,7 @@ export type {
 type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortSignal) => Promise<SummaryResult>
 
 type AdmissionWork = { key: string; generation: number; work: Promise<CompactionResult | null> }
+type AdmissionAttempt = { key: string; count: number }
 
 function canonicalRequestKey(session: Session, header: EpochHeader, generation: number): string {
   const series = session.events.filter(event => event.type === 'request/header'
@@ -138,6 +139,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
   private readonly requestAdmissions = new WeakMap<Session, AdmissionWork>()
+  private readonly requestAttempts = new WeakMap<Session, AdmissionAttempt>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -173,12 +175,11 @@ export class BasicCompactionEngine extends CompactionEngine {
     })
 
     ctx.on('agent/request-preflight', async (
-      { agent, header, contextWindow, attempt, signal },
+      { agent, header, contextWindow, signal },
       next,
     ): Promise<RequestPreflightAction> => {
       if (signal.aborted) return next()
       const policy = resolveTargetPolicy(this.config, header.config)
-      if (attempt > policy.maxOverflowRetries) return next()
       const targetKey = `${header.config.provider}/${header.config.model}`
       if (contextWindow === undefined) {
         if (!this.warnedPressureConfigTargets.has(targetKey)) {
@@ -194,10 +195,10 @@ export class BasicCompactionEngine extends CompactionEngine {
       try {
         spec = resolveCompactSpec(policy, contextWindow)
       } catch (error: unknown) {
-        const configError = error as TargetPressureConfigError
-        if (this.warnedPressureConfigTargets.has(configError.targetKey)) return next()
-        this.warnedPressureConfigTargets.add(configError.targetKey)
-        ctx.logger.warn(`request preflight compaction skipped: ${configError.message}`)
+        if (!(error instanceof TargetPressureConfigError)) throw error
+        if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
+        this.warnedPressureConfigTargets.add(error.targetKey)
+        ctx.logger.warn(`request preflight compaction skipped: ${error.message}`)
         return next()
       }
       if (measurement.totalTokens < spec.thresholdTokens
@@ -209,12 +210,21 @@ export class BasicCompactionEngine extends CompactionEngine {
       const key = canonicalRequestKey(agent.session, header, generation)
       const prior = this.requestAdmissions.get(agent.session)
       if (prior?.key === key) {
-        await prior.work
+        try {
+          await prior.work
+        } catch {
+          signal.throwIfAborted()
+          return await next()
+        }
         signal.throwIfAborted()
         return agent.session.surface.replaceGeneration > generation
           ? { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
           : next()
       }
+      const priorAttempt = this.requestAttempts.get(agent.session)
+      const admissionAttempt = priorAttempt?.key === key ? priorAttempt.count + 1 : 1
+      if (admissionAttempt > policy.maxOverflowRetries) return next()
+      this.requestAttempts.set(agent.session, { key, count: admissionAttempt })
       const work = this.compactForPreflight(agent, header, contextWindow, policy, signal)
       this.requestAdmissions.set(agent.session, { key, generation, work })
       try {

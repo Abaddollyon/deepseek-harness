@@ -1902,7 +1902,7 @@ describe('automatic listener and loader composition', () => {
     const generation = session.surface.replaceGeneration
 
     expect(await recover(ctx, agent(session, MODEL), overflow(), controller.signal)).toBe(false)
-    expect(session.surface.replaceGeneration).toBe(generation + 1)
+    expect(session.surface.replaceGeneration).toBe(generation)
   })
 
   it('maxOverflowRetries:0 disables preflight and overflow recovery', async () => {
