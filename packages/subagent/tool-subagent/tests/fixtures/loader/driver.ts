@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /** Test driver for one structured subagent failure through the real Loader tree. */
 
 import { writeFile } from 'node:fs/promises'

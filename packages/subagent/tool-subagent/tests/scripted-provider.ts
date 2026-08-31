@@ -107,17 +107,17 @@ class ScriptedSubagentProvider implements SubagentProvider {
 }
 
 /** Fixture plugin name. */
-export const name = 'scripted-subagent-provider'
+const name = 'scripted-subagent-provider'
 
 /** The scripted provider registers on the real subagent registry. */
-export const inject = ['subagents']
+const inject = ['subagents']
 
 /**
  * Register one scripted provider from Loader composition configuration.
  * @param ctx - context carrying the real subagent registry.
  * @param config - scripted provider identity and outcome.
  */
-export function apply(ctx: Context, config: Config): void {
+function apply(ctx: Context, config: Config): void {
   const provider = new ScriptedSubagentProvider(config.name, config)
   ctx.subagents.registerProvider(config.agentRouteDefaults === undefined
     ? provider
