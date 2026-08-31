@@ -24,7 +24,10 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { agentEvents, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 
 const SIGNAL = new AbortController().signal
@@ -65,6 +68,35 @@ class RoutedContextAdapter extends LlmAdapter {
   }
 
   override async * stream(): AsyncIterable<StreamChunk> {
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+class ObservableCompactionAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+
+  constructor(private readonly summaryContextWindow: () => number) {
+    super()
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: {
+        contextWindow: provider === 'summary-provider'
+          ? this.summaryContextWindow()
+          : 1_000,
+      },
+    })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    const text = options.purpose === 'compaction' ? 'boundary checkpoint' : 'continued answer'
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
@@ -2137,52 +2169,99 @@ describe('automatic listener and loader composition', () => {
     capacityDelta,
     fullRangeFits,
   }) => {
-    const ctx = createContext()
-    const session = conversation(4)
+    const ctx = new Context()
     const maxTokens = 64
     const retainTokens = 180
-    const header = session.requestHeader()
-    if (header === undefined) throw new Error('test session needs a canonical request header')
-    const measurement = ctx.tokenMeter.measure(session)
-    const selected = selectCompactableRange(session, measurement, retainTokens)
-    if (selected === null) throw new Error('test session needs a compactable range')
-    const startIdx = measurement.nodes.findIndex(node => node.seq === selected.start)
-    const endIdx = measurement.nodes.findIndex(node => node.seq === selected.end)
-    const fullReplayTokens = measurement.nodes
-      .slice(startIdx, endIdx + 1)
-      .reduce((tokens, node) => tokens + node.tokens, 0)
-    const fixedTokens = maxTokens
-      + ctx.tokenMeter.estimateHeader(header)
-      + ctx.tokenMeter.estimateMessage(createCompactionInstructionMessage())
-    const summaryCapacity = fixedTokens + fullReplayTokens + capacityDelta
-    const resolveModelInfo = ctx.llm.resolveModelInfo.bind(ctx.llm)
-    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model, signal) =>
-      provider === 'actual'
-        ? Promise.resolve({
-          provider,
-          id: model,
-          name: model,
-          context: { contextWindow: summaryCapacity },
-        })
-        : resolveModelInfo(provider, model, signal))
-    const compact = new TestCompactionEngine(ctx, {
+    let owner: Agent | undefined
+    let fullReplayTokens: number | undefined
+    let fixedTokens: number | undefined
+    let summaryCapacity: number | undefined
+
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const adapter = new ObservableCompactionAdapter(() => {
+      if (owner === undefined) throw new Error('summary capacity resolved before agent creation')
+      const header = owner.session.requestHeader()
+      if (header === undefined) throw new Error('real loop must log a canonical request header')
+      const measurement = ctx.tokenMeter.measure(owner.session)
+      const selected = selectCompactableRange(owner.session, measurement, retainTokens)
+      if (selected === null) throw new Error('seeded real agent needs a compactable range')
+      const startIdx = measurement.nodes.findIndex(node => node.seq === selected.start)
+      const endIdx = measurement.nodes.findIndex(node => node.seq === selected.end)
+      fullReplayTokens = measurement.nodes
+        .slice(startIdx, endIdx + 1)
+        .reduce((tokens, node) => tokens + node.tokens, 0)
+      fixedTokens = maxTokens
+        + ctx.tokenMeter.estimateHeader(header)
+        + ctx.tokenMeter.estimateMessage(createCompactionInstructionMessage())
+      summaryCapacity = fixedTokens + fullReplayTokens + capacityDelta
+      return summaryCapacity
+    })
+    ctx.llm.registerAdapter([MODEL, 'summary-provider'], adapter)
+    const attempts: number[] = []
+    ctx.on('agent/request-preflight', async ({ agent: subject, attempt }, next) => {
+      if (subject === owner) attempts.push(attempt)
+      return next()
+    })
+    await ctx.plugin(BasicCompactionEngine, {
       thresholdRatio: 0.5,
       retainTokens,
       maxTokens,
-      summarizationProvider: 'actual',
-      summarizationModel: 'actual',
+      summarizationProvider: 'summary-provider',
+      summarizationModel: 'summary-model',
     })
 
-    await expect(preflight(ctx, agent(session, MODEL)))
-      .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
-    const input = compact.calls[0]?.input
-    if (input === undefined) throw new Error('expected one summarizer replay')
-    const replayTokens = input.messages.reduce(
-      (tokens, message) => tokens + ctx.tokenMeter.estimateMessage(message),
-      0,
-    )
-    expect(replayTokens + fixedTokens).toBeLessThanOrEqual(summaryCapacity)
-    expect(replayTokens === fullReplayTokens).toBe(fullRangeFits)
+    try {
+      const seed = conversation(4).events.slice(0, -1)
+      const handle = await ctx.agentLoop.createAgent(ctx, {
+        sessionId: SessionId(`summary-boundary-${capacityDelta}`),
+        seed,
+        agentOptions: { provider: MODEL, model: MODEL },
+      })
+      owner = handle.agent
+      owner.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue after the seeded history' }],
+        source: { kind: 'user' },
+      }))
+      await owner.whenIdle()
+
+      const summaryRequests = adapter.requests.filter(request => request.purpose === 'compaction')
+      const conversationRequests = adapter.requests.filter(request => request.purpose === undefined)
+      expect(attempts).toEqual([1, 2])
+      expect(summaryRequests).toHaveLength(1)
+      expect(conversationRequests).toHaveLength(1)
+      expect(owner.session.surface.replaceGeneration).toBe(1)
+      expect(owner.session.events.some(event => event.type === 'compaction/summary')).toBe(true)
+
+      const summaryRequest = summaryRequests[0]!
+      const instruction = summaryRequest.messages.at(-1)
+      if (instruction === undefined) throw new Error('summary request needs its compaction instruction')
+      const instructionTokens = ctx.tokenMeter.estimateMessage(createCompactionInstructionMessage())
+      expect(ctx.tokenMeter.estimateMessage(instruction)).toBe(instructionTokens)
+      expect(summaryRequest.maxTokens).toBe(maxTokens)
+      expect(fullReplayTokens).toBeDefined()
+      expect(fixedTokens).toBeDefined()
+      expect(summaryCapacity).toBeDefined()
+
+      const replayTokens = summaryRequest.messages.slice(0, -1).reduce(
+        (tokens, message) => tokens + ctx.tokenMeter.estimateMessage(message),
+        0,
+      )
+      expect(replayTokens + fixedTokens!).toBeLessThanOrEqual(summaryCapacity!)
+      expect(replayTokens === fullReplayTokens).toBe(fullRangeFits)
+      if (fullRangeFits) expect(replayTokens + fixedTokens!).toBe(summaryCapacity)
+
+      const admitted = JSON.stringify(conversationRequests[0]!.messages)
+      expect(admitted).toContain('boundary checkpoint')
+      expect(admitted).not.toContain('user 1')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('declines admission compaction when the summarization target advertises no capacity', async () => {
