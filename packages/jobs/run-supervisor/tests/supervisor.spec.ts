@@ -719,7 +719,6 @@ describe('RunSupervisor durable adoption markers', () => {
       detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL,
       incarnation: 'rejecting-incarnation',
       adoptedFromIncarnation: 'prior-incarnation',
-      settledAt: Date.now(),
     })
     const first = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
     const firstAlice = first.agents.get('alice') as StubAgent
