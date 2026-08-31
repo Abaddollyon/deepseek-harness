@@ -10,7 +10,7 @@ A child result previously carried only bounded diagnostic text. A parent could r
 
 ## Decision
 
-SubagentResult.failure is an optional machine-readable companion to diagnostic. diagnostic remains bounded human/model-readable context; failure carries the LLM seam’s merge-extensible typed failure code and an optional provider-requested retry delay in milliseconds. A present failure always names a known code. An absent failure means the run did not fail or no cause was learned.
+SubagentResult.failure is an optional machine-readable companion to diagnostic. diagnostic remains bounded human/model-readable context; failure carries the LLM seam’s merge-extensible typed failure code and an optional provider-requested retry delay in milliseconds. A present failure names a known code such as `QUOTA` or `RATE_LIMIT`; an absent failure means no classified cause reached the seam. The Codex provider maps typed provider facts from its app-server wire and retains subprocess outcome facts in its bounded diagnostic; the generic dsh-sdk, ACP, and Claude Code transports do not currently produce `SubagentResult.failure`. `SubagentFinishedNotification` does not carry failure; neither the TypeScript nor Python SDK notification is extended.
 
 Unknown or unclassified errors do not synthesize a failure. Consumers must use a default branch and treat future unrecognised codes as non-retryable.
 
@@ -22,10 +22,10 @@ The subagent-level closed cause taxonomy was considered and rejected: the subage
 
 **Create a separate subagent cause union.** Rejected because the seam already depends on dsh-llm and its typed failure-code vocabulary is sufficient evidence-backed routing data; a second taxonomy would duplicate public choices.
 
-**Add an unknown member or synthesize a code.** Rejected because an absent optional failure already means no cause was learned. Guessing would make an orchestrator retry an error that cannot succeed.
+**Add an unknown member or synthesize a code.** Rejected because an absent optional failure already means no classified cause reached the seam. Guessing would make an orchestrator retry an error that cannot succeed.
 
 This note partially supersedes the deferred classification discussion in [background settlement diagnostics](../bug-fix/2026-08-25-background-settlement-diagnostic.md), which remains authoritative for bounded readable diagnostics.
 
 ## Consequences
 
-One-shot local results and background settlement notices now carry the signal. The parent-facing notice says the provider quota is exhausted or is temporarily rate-limiting the route, and includes retry-after seconds only when known; it never exposes transport vocabulary, credentials, or raw provider payloads. The existing teardown diagnostic remains unchanged and is still bounded.
+One-shot local results and applicable background settlement notices carry the signal. The parent-facing notice says the provider quota is exhausted or is temporarily rate-limiting the route, and includes retry-after seconds only when known; it never exposes transport vocabulary, credentials, or raw provider payloads. The existing teardown diagnostic remains unchanged and is still bounded. SDK `SubagentFinishedNotification` payloads do not carry failure; neither the TypeScript nor Python SDK notification is extended.

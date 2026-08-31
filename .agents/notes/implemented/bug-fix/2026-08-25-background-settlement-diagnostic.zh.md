@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-失败的后台子代理只会告诉父代理 `Background subagent <id> failed before it finished.`。原因本来存在，却被丢弃：`ActivationTerminal` 携带 `stopReason` 与 `output`，但没有承载失败信息的成员，因此 `lifecycle.ts` 中的 `terminal(failure)` 把每一次拆卸失败都映射为裸的 `{ stopReason: 'error' }`，抛出的值被直接丢掉。
+失败的后台子代理只会告诉父代理 `Background subagent <id> failed before it finished.`。原始拆卸诊断本来存在，却没有被转发：`ActivationTerminal` 携带 `stopReason` 与 `output`，但没有承载失败信息的成员，因此 `lifecycle.ts` 中的 `terminal(failure)` 把每一次拆卸失败都映射为裸的 `{ stopReason: 'error' }`，抛出的值被直接丢掉。已捕获的已知 LLM 错误会携带类型化的 `QUOTA` 或 `RATE_LIMIT` 事实；仍未分类的已捕获错误可能没有类型化 failure。
 
 一次性工具路径并不会丢失它——`stopReasonError` 会经由 `withDiagnosticAndPartialText` 与 `SubagentResult.diagnostic` 及子代理的部分文本拼接。只有后台投递路径是盲的，而这正是包约定所警告的不对称。
 
@@ -20,7 +20,7 @@ Status: implemented
 
 ## 备选方案
 
-**将失败分类为代码——配额、传输、崩溃。** 暂时否决：这些错误本就带有上下文文本（`SubagentError: subagent "<id>" activation handle disposal failed: ...`），而分类层需要为每个供应商维护一套分类法，同时丢弃任何枚举都无法承载的细节。当有消费者需要据此分支而非阅读时，再加代码才有价值。
+**将每次失败都分类为代码——配额、传输、崩溃。** 否决：只有已知 LLM 原因会被分类为 `QUOTA` 或 `RATE_LIMIT`；原始拆卸诊断仍以可读文本保留，未分类的已捕获错误可能没有类型化 failure。更宽泛的分类法需要供应商专属类别，还会让消费者基于猜测分支。
 
 **包含失败的调用栈。** 否决：父代理是一个决定重试还是改道的模型，调用栈对该决策属于传输层噪声，同时提高了把环境路径带入通知的风险。
 
@@ -28,8 +28,8 @@ Status: implemented
 
 ## 验证
 
-`packages/subagent/subagent/tests/continuation.spec.ts` —— 'withholds an outcome the harness could not durably release' 注入一次处置失败，现在断言父代理的通知携带 `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`。该用例此前把这一丢失固化为正确行为；它随其所描述的行为一同被修改。源自子代理自身回合的结束保持原有文本，周边用例仍在断言这一点。
+`packages/subagent/subagent/tests/continuation.spec.ts` —— 'withholds an outcome the harness could not durably release' 注入一次处置失败，并断言父代理的通知携带 `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`。周边用例断言源自子代理自身回合的结束保持原有文本。
 
 ## 影响
 
-编排后台子代理的父代理现在能够判断某个子代理为何结束并据此行动——停止向已耗尽的路由重复派发、改用其他供应商，或把配额问题呈报给人——而不必从沉默中推断原因。通知仅在失败这一边增加一句有上限的说明。
+编排后台子代理的父代理能够读取原始拆卸诊断，并在捕获到已知 LLM 原因时基于 `QUOTA` 或 `RATE_LIMIT` 分支——停止向已耗尽的路由重复派发、改用其他供应商，或把配额问题呈报给人。未分类的已捕获错误没有类型化 failure。通知仅在失败这一边增加一句有上限的说明。

@@ -154,9 +154,6 @@ export function resolveChildCwd(prefix: string, configured: string | undefined, 
 
 /** Normalize an unknown thrown value to an Error (the catch binding is `unknown`). */
 function toError(value: unknown): Error {
-  // The rejecting surfaces (wire clients, spawn failures) only throw
-  // `Error`s; the `String(value)` arm is a defensive fallback for a non-Error
-  // throw the typed surfaces cannot produce.
   return value instanceof Error ? value : new Error(String(value))
 }
 

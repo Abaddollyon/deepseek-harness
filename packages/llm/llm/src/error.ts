@@ -35,7 +35,6 @@ export interface LlmFailureCodeMap {
 /** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
 export type LlmFailureCode = keyof LlmFailureCodeMap extends never ? never : LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
 
-
 /**
  * Canonical provider-neutral code for a response that completed normally but
  * carried no content blocks at all. Providers occasionally emit a degenerate

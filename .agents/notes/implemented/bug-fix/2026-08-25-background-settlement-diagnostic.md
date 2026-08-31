@@ -6,7 +6,7 @@ English | [中文](2026-08-25-background-settlement-diagnostic.zh.md)
 
 ## Problem
 
-A background subagent that failed told its parent only `Background subagent <id> failed before it finished.` The reason existed and was discarded: `ActivationTerminal` carried `stopReason` and `output` but had no member for a failure, so `terminal(failure)` in `lifecycle.ts` mapped every teardown failure to a bare `{ stopReason: 'error' }` and dropped the thrown value on the floor.
+A background subagent that failed told its parent only `Background subagent <id> failed before it finished.` Raw teardown diagnostics existed but were not relayed: `ActivationTerminal` carried `stopReason` and `output` but had no member for a failure, so `terminal(failure)` in `lifecycle.ts` mapped every teardown failure to a bare `{ stopReason: 'error' }` and dropped the thrown value on the floor. Captured known LLM errors carry typed `QUOTA` or `RATE_LIMIT` facts; captured errors that remain unclassified may have no typed failure.
 
 The one-shot tool path does not lose it — `stopReasonError` is joined with `SubagentResult.diagnostic` and the child's partial text by `withDiagnosticAndPartialText`. Only the background delivery path was blind, which is the asymmetry the package conventions warn about.
 
@@ -20,7 +20,7 @@ The reason is attached only where the child cannot speak for itself. An epoch th
 
 ## Alternatives considered
 
-**Classify the failure into a code — quota, transport, crash.** Rejected for now: the errors already arrive with contextual text (`SubagentError: subagent "<id>" activation handle disposal failed: ...`), and a classification layer would need a taxonomy per provider while discarding detail no enum can carry. A code is worth adding when a consumer wants to branch on it rather than read it.
+**Classify every failure into a code — quota, transport, crash.** Rejected: only known LLM causes are classified as `QUOTA` or `RATE_LIMIT`; raw teardown diagnostics remain readable text, and unclassified captured errors may have no typed failure. A broader taxonomy would need provider-specific categories and would make consumers branch on guesses.
 
 **Include the failure's stack.** Rejected: the parent is a model deciding whether to retry or re-route, and a stack is transport-level noise for that decision while raising the chance of carrying environment paths into a notice.
 
@@ -28,8 +28,8 @@ The reason is attached only where the child cannot speak for itself. An epoch th
 
 ## Verification
 
-`packages/subagent/subagent/tests/continuation.spec.ts` — 'withholds an outcome the harness could not durably release' injects a disposal failure and now asserts the parent's notice carries `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`. That test previously pinned the loss as correct behaviour; it was changed with the behaviour it describes. Endings that come from the child's own turn keep their existing text, which the surrounding cases still assert.
+`packages/subagent/subagent/tests/continuation.spec.ts` — 'withholds an outcome the harness could not durably release' injects a disposal failure and asserts that the parent's notice carries `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`. Surrounding cases assert that endings from the child's own turn keep their existing text.
 
 ## Consequences
 
-A parent orchestrating background children can now tell why one ended and act on it — stop re-dispatching onto an exhausted route, fall back to another provider, or surface the quota to a human — instead of inferring a cause from silence. The notice grows by one bounded sentence, and only on the failure edge.
+A parent orchestrating background children can read raw teardown diagnostics and, when a captured LLM cause is known, branch on `QUOTA` or `RATE_LIMIT` — stopping re-dispatch onto an exhausted route, falling back to another provider, or surfacing the quota to a human. A captured error that is not classified has no typed failure. The notice grows by one bounded sentence, and only on the failure edge.

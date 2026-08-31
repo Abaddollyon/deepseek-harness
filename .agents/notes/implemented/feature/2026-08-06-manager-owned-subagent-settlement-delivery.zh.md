@@ -86,7 +86,7 @@ Status: implemented
 - `tool-subagent` 在其 schema 中承诺该通知，因为返回通道是服务行为，不是可选插件。
 - `Activation` 携带 `parentSession` 与 `announced`。前者存在是因为 child handle 在投递前已被 dispose；后者让被回滚的物化保持静默。
 - `foldConsumedWork()` 取代 `dsh-session` 的 `findLastMessageTurnEnd()`，并迁移到 `dsh-agent`——它拥有该 fold 所读取的 inbox 标记；一次性 in-process 路径折叠同一个答案，不会把被中途切断的一次性 child 归类为 `completed`。
-- 单元覆盖固定了无条件约定、每种终止原因、空闲与繁忙两种调度、批量语义、维护期回归、释放前顺序、父级已消失，以及一次不得让拆卸失败的发送被拒。
+- 单元覆盖固定了无条件约定、每种终止原因、空闲与繁忙两种调度、批量语义、维护期回归、释放前顺序、投递等待已打开的 dispose 事务后冷恢复、拆卸期间拒绝上报、父级已消失，以及一次不得让拆卸失败的发送被拒。
 - 三个 ACP 场景使用显式的结算围栏，`subagent-report` 固定默认的报告先于结算的 next-step 顺序。
 - 一个无密钥的 headless Loader 快照固定了「后台启动 → 管理器写入的结算通知 → 父级最终答案」路径，其中没有轮询，也没有 child `report` 调用。
 
@@ -94,9 +94,9 @@ Status: implemented
 
 通知只是被投递，而不是被确认。没有持久化 mailbox、回执或重试：不在线的父级会丢失它，child 的 Session 仍是唯一的持久记录。要补上这一点，需要一套带有自身寻址、授权与重放规则的离线 mailbox 协议。
 
-当父级紧接着被 dispose 时（每个拆卸调用方都会这么做），在拆卸期间被 inject 的通知不会被模型读到：dispose 的 cancel 会清除这条未被认领的消息，而日志保留 insert/cancel 这一对作为记录。要让拆卸期投递在 resume 之后仍可读，要么需要上面那套离线 mailbox，要么需要改变 dispose 对持久待处理工作的处理方式。dispose 会丢弃每一条未被认领的 inbox 项，用户输入也不例外，因此改变该行为是一个 core-agent 决策，而不是结算投递的细节。resume 后的父级可以发现 child，但不会收到结局：`list_agents` 只报告存在性与「在线/仅存储」状态——`SubagentListEntry.activity` 就是这么写的——要取回结局，必须通过 `send_message` 去问那个 child。
+拆卸期间注入的通知会留在父级 inbox 中，因为 dispose 路径使用 `keepInbox` 取消；flush barrier 会让已接受的通知跨越拆卸与 resume 得以保留。父级重新打开后即可读取通知；`list_agents` 仍只报告存在性与「在线/仅存储」状态——`SubagentListEntry.activity` 就是这么写的——而不会重放结局。
 
-终止原因的归因是对日志既有 splice 词汇的尽力而为，偏向永不高估成功。`Inbox.remove()` 与拆卸的 `clear()` 写出的取消 splice 完全相同，因此删除一条内容仍保留在别处的消息——`agent-instructions` 清理待处理的 instructions 刷新、或结算自身的 cancel 清掉一条仍在挂起的这类消息——可能被读作「工作被丢弃且从未运行」，把已完成的 child 报成被停下。区分二者需要 `dsh-agent` 提供更丰富的删除词汇；在该词汇可用前，这项误读的范围很窄，且错的方向是让父级复查一个已完成的 child，而永远不是信任一个未完成的 child。
+终止原因的归因是对日志既有 splice 词汇的尽力而为，偏向永不高估成功。`Inbox.remove()` 与拆卸的 `clear()` 写出的取消 splice 完全相同，因此删除一条内容仍保留在别处的消息——`agent-instructions` 清理待处理的 instructions 刷新、或显式拆卸清除普通待处理输入——可能被读作「工作被丢弃且从未运行」，把已完成的 child 报成被停下。区分二者需要 `dsh-agent` 提供更丰富的删除词汇；在该词汇可用前，这项误读的范围很窄，且错的方向是让父级复查一个已完成的 child，而永远不是信任一个未完成的 child。
 
 对于深或宽的树，轮次放大是真实存在的，而且按设计不可配置。step 边界的批量语义只能约束同时结算的情形，无法约束分散结算的 child。
 
