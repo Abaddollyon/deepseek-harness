@@ -220,7 +220,6 @@ export function observeRun(
         stopReason: result.stopReason,
         // Omit the field when no output exists, matching continuable epochs.
         ...result.output.length === 0 ? {} : { lastAssistantMessage: result.output },
-        /* v8 ignore next -- optional failure is a merge-extensible field. */
         ...result.failure === undefined ? {} : { failure: result.failure },
       }, parent)
     },
@@ -277,7 +276,6 @@ export function createActivationObserver(
       captured = {
         stopReason: epochStopReason(own),
         ...output === undefined ? {} : { output },
-        /* v8 ignore next -- optional failure is a merge-extensible field. */
         ...failure === undefined ? {} : { failure },
       }
     },
@@ -289,7 +287,6 @@ export function createActivationObserver(
         ...identity,
         stopReason,
         ...output === undefined ? {} : { lastAssistantMessage: output },
-        /* v8 ignore next -- optional teardown failure is exercised through provider runs. */
         ...terminalResult.failure === undefined ? {} : { failure: terminalResult.failure },
       }, parent)
     },

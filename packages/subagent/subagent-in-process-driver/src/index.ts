@@ -229,11 +229,9 @@ function readResult(
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      /* v8 ignore next -- structured captures are only emitted for successful normalized turns. */
       return { output, structured: structured.captured.value, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  /* v8 ignore next -- a completed normalized result cannot carry a provider failure. */
   return { output, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
 }
