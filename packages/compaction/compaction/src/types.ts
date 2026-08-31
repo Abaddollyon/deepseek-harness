@@ -36,6 +36,7 @@ declare module '@deepseek-ai/dsh-session/types' {
       summary: ContentBlock[]
       shadowedRange: { start: number; end: number }
       shadowedSeqs: number[]
+      /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
       shadowedTokenCount: number
       /** The provider route that wrote the summary. */
       provider: string
@@ -114,6 +115,6 @@ export interface CompactionResult {
   shadowedRange: { start: number; end: number }
   /** The seqs of all shadowed surface nodes, in surface order. */
   shadowedSeqs: number[]
-  /** Estimated token count of the shadowed content. */
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
 }

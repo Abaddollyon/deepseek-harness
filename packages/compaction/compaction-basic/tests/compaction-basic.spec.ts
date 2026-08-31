@@ -1025,9 +1025,10 @@ describe('compaction region transaction', () => {
     expect(replay.deriveMessages()).toEqual(session.deriveMessages())
   })
 
-  it('persists heuristic shadow tokens for an image-priced route', async () => {
+  it('admits a framed summary between heuristic and route prices', async () => {
     const ctx = createContext(1_000, new ImagePricedContextAdapter(1_000))
     const compact = service({ auto: false }, ctx)
+    compact.summary = [{ type: 'text', text: 'x'.repeat(60) }]
     const session = Session.create(SessionId('image-priced-compaction'))
     session.append('turn/start', { turn: 1 })
     const image = createUserMessage({
@@ -1069,6 +1070,10 @@ describe('compaction region transaction', () => {
 
     expect(result.shadowedTokenCount).toBe(imageNode.heuristicTokens)
     expect(result.shadowedTokenCount).not.toBe(imageNode.tokens)
+    const checkpoint = session.deriveMessages()[0]!
+    const framedTokens = ctx.tokenMeter.estimateMessage(checkpoint)
+    expect(framedTokens).toBeGreaterThan(imageNode.heuristicTokens)
+    expect(framedTokens).toBeLessThan(imageNode.tokens)
     const summary = session.events.findLast(event => event.type === 'compaction/summary')
     expect(summary?.type === 'compaction/summary' ? summary.data.shadowedTokenCount : -1)
       .toBe(imageNode.heuristicTokens)
