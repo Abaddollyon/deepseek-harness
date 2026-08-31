@@ -485,8 +485,7 @@ export class LocalJobRegistry extends JobRegistry {
 
   onJobAdopted(listener: JobAdoptedListener): () => void {
     const dispose = this.ctx.effect(() => this.layers.global.adopted.append(listener), 'jobs.onJobAdopted()')
-    // oxlint-disable-next-line typescript/no-misused-promises -- exact synchronous disposer preserves Cordis effect identity
-    return dispose
+    return () => { void dispose() }
   }
 
   registerResumer(kind: JobKind, resume: JobResumer): () => void {
@@ -878,6 +877,10 @@ export class LocalJobRegistry extends JobRegistry {
         continue
       }
       if (job.incarnation === PROCESS_INCARNATION) continue
+      if (job.status === 'stopping') {
+        this.settle(job, { status: 'killed', detail: 'cancelled before host restart' })
+        continue
+      }
       if (job.resumeSpec === undefined) {
         this.settle(job, { status: 'failed', detail: NOT_RESUMABLE_DETAIL })
         continue

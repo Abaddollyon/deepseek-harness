@@ -30,10 +30,10 @@ kind: "package-reference"
 
 每次 store 激活执行一趟，全程受 `bootResumeTimeoutMs` 约束：
 
-1. 枚举 store 中 `incarnation` 不同于 `PROCESS_INCARNATION` 的非终止记录。同 incarnation 的记录是进程内的活工作——HMR 重载绝不能把它们误认为孤儿——而终止态记录无需驱动。
+1. 枚举 store 中 `incarnation` 不同于 `PROCESS_INCARNATION` 的 running 记录，以及从 stopping 终态化为 killed 的恢复工作流记录。同 incarnation 的记录是进程内的活工作——HMR 重载绝不能把它们误认为孤儿——恢复的 stopping 记录只记为 abandoned，不会重启或发送通知。
 2. 按 `ownerSession` 分组并解析每个属主：存活 agent（`ctx.agents.get`）；否则走真实恢复路径可恢复的会话（`ctx.sessionPersistence.prepare)，立即 dispose——可恢复性这个事实才是目的，而非会话对象）；否则是孤儿。没有 persistence seam 时属主是*未知*而非孤儿：不会仅凭证据缺失就结算或驱逐任何记录。
 3. 策略决定每条待处理记录的命运。`resumeOnBoot: false` 全部结算。孤儿属主的记录以 `'owner-unavailable'` 结算。每个属主最旧的前 `maxResumedRunsPerOwner` 条保持*可收养*，等待其 kind 的生产方 resumer；超出的部分以配额详情结算，使重启不会冲破注册表的每属主并发上限。
-4. 收养本身属于生产方：返回 hooks 的 `registerResumer` 处理器以原 id 重新收养记录，注册表在重新盖章的记录提交后通过 `onJobAdopted` 通告——并等待记账完成才接上生产方的完成接线——supervisor 据此记为 `run/resumed`。标记写入是必需的：store 拒绝该写入时续跑会诚实地失败，而不是让收养无标记运行。没有任何一趟流程观测到的收养——在 supervisor 挂载前就已触发的 resumer，或记账前就已消亡的进程——会在记录上留下持久的 `adoptedFromIncarnation` 标记；下一趟流程将其记为 `run/resumed`，以该前 incarnation 命名，并且只有在 append 被确认已记录或发现已存在后才清除标记——任何通道都触及不到的属主会把标记留给之后的启动。拒绝或抛错的 resumer 记为 `reason: 'resume-failed'` 的 `run/abandoned`。
+4. 收养本身属于生产方：返回 hooks 的 `registerResumer` 处理器以原 id 重新收养记录，注册表在重新盖章的记录提交后通过 `onJobAdopted` 通告——并等待记账完成才接上生产方的完成接线——supervisor 据此记为 `run/resumed`。标记写入是必需的：store 拒绝该写入时续跑会诚实地失败，而不是让收养无标记运行。没有任何一趟流程观测到的收养——在 supervisor 挂载前就已触发的 resumer，或记账前就已消亡的进程——会在记录上留下持久的 `adoptedFromIncarnation` 标记；下一趟流程通常将其记为 `run/resumed`，但终态 killed 工作流会记为 `run/abandoned` 并补齐 workflow closer。只有 account 及所需 workflow closure 确认写入或已存在后才清除标记；任何通道都触及不到的属主或 append 失败会把标记留给之后的启动。拒绝或抛错的 resumer 记为 `reason: 'resume-failed'` 的 `run/abandoned`。
 5. 截止时仍待处理的记录以 `'reconcile-timeout'` 结算——这趟流程总会完成，进程总会启动。
 
 supervisor 驱动的结算走注册表的 `registerResumer` 拒绝通道：terminal 记录 first-wins、`reported` 保留、完成监听器照常通知。该通道一次回放整个 kind，因此当某 kind 仍有可收养记录待处理时，其结算目标会等到它们resolve或截止。
@@ -47,7 +47,7 @@ supervisor 驱动的结算走注册表的 `registerResumer` 拒绝通道：termi
 - `run/abandoned`——一个 run 被诚实结算，携带 `reason`（`'not-resumable' | 'owner-unavailable' | 'reconcile-timeout' | 'resume-failed'`）和人类可读的 `detail`。
 - `run/detached`——在此声明以便 `run/*` 词汇有唯一的家，但它由后续的 workflow 切片发出（`ownership: 'supervisor'` 下的 `dsh-tool-workflow`），本插件从不发出它。
 
-事件经由可达的通道进入属主会话：agent 已注册时走存活会话 append，否则经 `sessionPersistence` 以日志的下一个 seq 做持久离线 append（若会话在 append 期间转为存活，则重试存活通道）。已经携带该 job 的 run/* 事件的日志不会被重复写入，因此反复重启不会重复账目。
+事件经由可达的通道进入属主会话：agent 已注册时走存活会话 append，否则经 `sessionPersistence` 以日志的下一个 seq 做持久离线 append（若会话在 append 期间转为存活，则重试存活通道）。同一 job incarnation 的账目是非对称的：已有的 `run/abandoned` 可以满足后续 `run/resumed` 重试，但 `run/resumed` 永远不会阻止后续的 `run/abandoned` 结算。已存在的同类型事件不会重复写入，因此反复重启不会重复任一账目。
 
 未被报告的终止记录还欠属主恰好一条完成通知——若持久的 `reported` 标志表明模型已收讫，则一条也不发。通知只投递给存活属主（注入式，形状与 `dsh-tool-jobs` 的完成通知一致，但来源标记为 `plugin: 'run-supervisor'`），随后 supervisor 经注册表把该记录认领为 reported，使后续启动不会重复投递。对可恢复但未存活的属主，持久的 `run/abandoned` 事件本身就是账目：会话下次恢复时，模型会在自己的历史里遇见它。
 

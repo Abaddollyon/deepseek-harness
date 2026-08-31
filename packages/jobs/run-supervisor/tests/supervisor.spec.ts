@@ -8,6 +8,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JobHooks, JobOutcome, JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import { JobId, JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
+import { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
 import RunSupervisor, {
   DETAIL_NOT_RESUMABLE,
@@ -30,15 +31,19 @@ async function flush(rounds = 200): Promise<void> {
 const resumePlan = (start: () => JobHooks) => ({ start })
 
 /** In-memory JobStore double shared across "reboots" through its record map. */
-function fakeStore(records: Map<string, JobRecord> = new Map()) {
+function fakeStore(records: Map<string, JobRecord> = new Map(), putWait?: (record: JobRecord) => Promise<void> | undefined) {
   const state = { records, deletes: [] as string[], failDeletes: false }
   const store = {
     incarnation: PROCESS_INCARNATION,
     list: () => [...records.values()],
     get: (id: string) => records.get(id),
     put: (record: JobRecord): Promise<void> => {
-      records.set(record.id, record)
-      return Promise.resolve()
+      const wait = putWait?.(record)
+      if (wait === undefined) {
+        records.set(record.id, record)
+        return Promise.resolve()
+      }
+      return wait.then(() => { records.set(record.id, record) })
     },
     delete: (id: string): Promise<boolean> => {
       if (state.failDeletes) return Promise.reject(new Error('injected delete failure'))
@@ -283,7 +288,7 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
     const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
     const alice = agents.get('alice') as StubAgent
 
-    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'failed' })
+    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'killed' })
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
     expect(alice.injected).toHaveLength(0)
   })
@@ -659,15 +664,50 @@ describe('RunSupervisor pending-record reconciliation', () => {
     expect(ctx.jobs.get(record.id).status).toBe('completed')
   })
 
-  it('settles a stopping resumable record like a running one', async () => {
-    vi.useFakeTimers()
-    const record = storedRecord({ status: 'stopping', resumeSpec: { cmd: 'rerun' } })
-    const { ctx, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+  it('accounts a restored stopping workflow without consuming the adoption budget', async () => {
+    const runId = WorkflowRunId('stopped-run')
+    const stopped = storedRecord({
+      id: JobId(`workflow-${runId}`), kind: 'workflow', status: 'stopping',
+      detail: 'cancelling', reported: false, resumeSpec: { runId }, startedAt: 100,
+      adoptedFromIncarnation: 'pre-supervisor-adoption',
+    })
+    const running = storedRecord({ id: JobId('bash-after-stop'), resumeSpec: { cmd: 'rerun' }, startedAt: 200 })
+    const putGate = Promise.withResolvers<undefined>()
+    const store = fakeStore(
+      new Map([[stopped.id, stopped], [running.id, running]]),
+      record => record.id === stopped.id ? putGate.promise : undefined,
+    )
+    const { ctx, state, agents } = tracked(await boot({
+      store, liveAgents: ['alice'],
+      liveEvents: { alice: [
+        { type: 'tool-workflow/agent-start', seq: 0, time: 1, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+        { type: 'run/detached', seq: 1, time: 2, data: {
+          jobId: stopped.id, kind: 'workflow', label: stopped.label, runId, resumable: true,
+        } },
+      ] as SessionEvent[] },
+      config: { maxResumedRunsPerOwner: 1 },
+    }))
     const alice = agents.get('alice') as StubAgent
-    await vi.advanceTimersByTimeAsync(30_000)
+    const done = Promise.withResolvers<JobOutcome>()
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
     await flush()
-    expect(ctx.jobs.get(record.id, alice.agent).status).toBe('failed')
+
+    expect(ctx.jobs.get(stopped.id, alice.agent)).toMatchObject({
+      status: 'killed', detail: 'cancelled before host restart',
+    })
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/agent-end')).toBe(true)
+    expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/run-end')).toBe(true)
+    expect(alice.injected).toHaveLength(0)
+    expect(ctx.jobs.get(running.id, alice.agent)).toMatchObject({
+      status: 'running', incarnation: PROCESS_INCARNATION,
+    })
+    done.resolve({ status: 'completed' })
+    putGate.resolve(undefined)
+    await flush()
+    expect(state.records.get(stopped.id)).toMatchObject({
+      status: 'killed', detail: 'cancelled before host restart',
+    })
   })
 })
 
@@ -711,6 +751,60 @@ describe('RunSupervisor durable adoption markers', () => {
     expect('adoptedFromIncarnation' in cleared).toBe(false)
     await flush()
     expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+  })
+
+  it('reports completion when a running adoption marker settles after supervisor mount', async () => {
+    const done = Promise.withResolvers<JobOutcome>()
+    const record = storedRecord({ resumeSpec: { cmd: 'rerun' } })
+    const shared = fakeStore(new Map([[String(record.id), record]]))
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', shared.store)
+    await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    await flush()
+    const alice = stubAgent(ctx, 'alice')
+    ctx.agents.register(alice.agent)
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
+    await flush()
+    await ctx.plugin(RunSupervisor, {})
+    await flush()
+    shared.state.records.set(String(record.id), {
+      ...shared.state.records.get(String(record.id)) as JobRecord,
+      adoptedFromIncarnation: 'newer-adoption',
+    })
+
+    done.resolve({ status: 'completed', output: 'finished' })
+    await flush()
+    expect(alice.injected).toHaveLength(1)
+    expect(shared.state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: true })
+  })
+
+  it('reports an already-terminal adoption marker before clearing its proof', async () => {
+    const record = storedRecord({
+      status: 'completed', finishedAt: 200, reported: false,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+    const alice = agents.get('alice') as StubAgent
+    await flush()
+    expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+    expect(alice.injected).toHaveLength(1)
+    expect(state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: true })
+    expect('adoptedFromIncarnation' in (state.records.get(String(record.id)) as JobRecord)).toBe(false)
+  })
+
+  it('keeps an accounted terminal marker completion pending when owner is offline', async () => {
+    const record = storedRecord({
+      status: 'completed', finishedAt: 200, reported: false,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', []]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    const { state } = tracked(await boot({ records: [record], persistence: persistence as unknown as never }))
+    await flush()
+    expect(state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: false })
   })
 
   it('clears a rejected adoption marker without claiming the producer resumed', async () => {
@@ -765,19 +859,129 @@ describe('RunSupervisor durable adoption markers', () => {
     expect(accounts[1]?.data).toMatchObject({ jobId: record.id, priorIncarnation: 'adopting-incarnation' })
   })
 
-  it('clears a stopping unowned record\'s marker without session events', async () => {
+  it('accounts a same-incarnation stopping workflow marker without settling live work', async () => {
     const record = storedRecord({
-      ownerSession: null,
-      status: 'stopping',
-      resumeSpec: { cmd: 'rerun' },
-      incarnation: PROCESS_INCARNATION,
+      id: JobId('workflow-hmr-stopping'), kind: 'workflow', status: 'stopping',
+      resumeSpec: { runId: 'hmr-stopping' }, incarnation: PROCESS_INCARNATION,
       adoptedFromIncarnation: 'prior-incarnation',
     })
-    const { state } = tracked(await boot({ records: [record] }))
+    const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+    const alice = agents.get('alice') as StubAgent
 
     const cleared = state.records.get(String(record.id)) as JobRecord
     expect(cleared).toMatchObject({ status: 'stopping', incarnation: PROCESS_INCARNATION })
     expect('adoptedFromIncarnation' in cleared).toBe(false)
+    expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
+    expect(alice.injected).toHaveLength(0)
+  })
+
+  it('closes a killed workflow from a terminal adoption marker before clearing it', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', detail: null, finishedAt: 200, reported: true,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const unowned = storedRecord({ kind: 'workflow', status: 'killed', detail: null, finishedAt: 200, reported: true, ownerSession: null, incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation' })
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'run/detached', seq: 0, time: 1, data: { jobId: record.id, kind: 'workflow', runId: 'run-1' } } as SessionEvent,
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId: 'run-1', seq: 4 } } as SessionEvent,
+    ]]])
+    const { state } = tracked(await boot({ records: [record, unowned], persistence: fakePersistence({ logs, appended: [] }) }))
+    const accounted = logs.get('alice') ?? []
+    expect(accounted.filter(event => event.type === 'run/resumed')).toHaveLength(0)
+    expect(accounted.filter(event => event.type === 'run/abandoned')).toHaveLength(1)
+    expect(accounted.some(event => event.type === 'tool-workflow/agent-end')).toBe(true)
+    expect(accounted.some(event => event.type === 'tool-workflow/run-end')).toBe(true)
+    expect('adoptedFromIncarnation' in (state.records.get(String(record.id)) as JobRecord)).toBe(false)
+  })
+
+  it('repairs missing workflow closers when abandonment is already recorded offline', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', finishedAt: 200, reported: true,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const runId = 'offline-preaccounted'
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'tool-workflow/agent-start', seq: 0, time: 1, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 1, time: 2, data: { jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: true } },
+      { type: 'run/abandoned', seq: 2, time: 3, data: {
+        jobId: record.id, kind: 'workflow', priorIncarnation: 'prior-incarnation',
+        reason: 'resume-failed', detail: '',
+      } },
+    ] as SessionEvent[]]])
+    const { state } = tracked(await boot({
+      records: [record], persistence: fakePersistence({ logs, appended: [] }),
+    }))
+    expect(logs.get('alice')?.map(event => event.type)).toEqual([
+      'tool-workflow/agent-start', 'run/detached', 'run/abandoned',
+      'tool-workflow/agent-end', 'tool-workflow/run-end',
+    ])
+    expect('adoptedFromIncarnation' in (state.records.get(record.id) as JobRecord)).toBe(false)
+  })
+
+  it('repairs missing workflow closers when abandonment is already recorded live', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', finishedAt: 200, reported: true,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const runId = 'live-preaccounted'
+    const { state, agents } = tracked(await boot({
+      records: [record], liveAgents: ['alice'], liveEvents: { alice: [
+        { type: 'tool-workflow/agent-start', seq: 0, time: 1, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+        { type: 'run/detached', seq: 1, time: 2, data: { jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: true } },
+        { type: 'run/abandoned', seq: 2, time: 3, data: {
+          jobId: record.id, kind: 'workflow', priorIncarnation: 'prior-incarnation',
+          reason: 'resume-failed', detail: '',
+        } },
+      ] as SessionEvent[] },
+    }))
+    expect(agents.get('alice')?.agent.session.events.map(event => event.type)).toEqual([
+      'tool-workflow/agent-start', 'run/detached', 'run/abandoned',
+      'tool-workflow/agent-end', 'tool-workflow/run-end',
+    ])
+    expect('adoptedFromIncarnation' in (state.records.get(record.id) as JobRecord)).toBe(false)
+  })
+
+  it('keeps a killed workflow marker when its owner has no append lane', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', finishedAt: Date.now(),
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const { state } = tracked(await boot({ records: [record] }))
+    expect(state.records.get(String(record.id))).toMatchObject({
+      status: 'killed', adoptedFromIncarnation: 'prior-incarnation',
+    })
+  })
+
+  it('keeps a killed workflow marker when its closure append rejects', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', finishedAt: Date.now(),
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', []]])
+    const persistence = fakePersistence({ logs, appended: [], appendError: new Error('disk unavailable') })
+    const { state } = tracked(await boot({ records: [record], persistence }))
+    expect(state.records.get(String(record.id))).toMatchObject({
+      status: 'killed', adoptedFromIncarnation: 'prior-incarnation',
+    })
+  })
+
+  it('treats an abandoned account as satisfying a resumed retry', async () => {
+    const record = storedRecord({
+      resumeSpec: { cmd: 'rerun' }, incarnation: PROCESS_INCARNATION,
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const abandoned = {
+      type: 'run/abandoned', seq: 0, time: 1,
+      data: {
+        jobId: record.id, kind: record.kind, label: record.label,
+        priorIncarnation: 'prior-incarnation', reason: 'resume-failed', detail: '',
+      },
+    } as SessionEvent
+    const logs = new Map<string, SessionEvent[]>([['alice', [abandoned]]])
+    const { state } = tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
+    expect(logs.get('alice')?.filter(event => event.type === 'run/resumed')).toHaveLength(0)
+    expect('adoptedFromIncarnation' in (state.records.get(String(record.id)) as JobRecord)).toBe(false)
   })
 
   it('accounts and clears a terminal record adoption marker', async () => {
@@ -1041,6 +1245,24 @@ describe('RunSupervisor orphan retention', () => {
   })
 })
 
+describe('RunSupervisor offline owner append ordering', () => {
+  it('assigns unique sequential records to concurrent same-owner accounts', async () => {
+    vi.useFakeTimers()
+    const logs = new Map<string, SessionEvent[]>([['alice', [seedEvent()]]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    const records = [
+      storedRecord({ ownerSession: SessionId('alice'), resumeSpec: { cmd: 'one' } }),
+      storedRecord({ ownerSession: SessionId('alice'), resumeSpec: { cmd: 'two' } }),
+    ]
+    const { state } = tracked(await boot({ records, persistence }))
+    await vi.advanceTimersByTimeAsync(30_000)
+    await flush()
+    expect(records.map(record => jobView({} as Context, state, record).status)).toEqual(['failed', 'failed'])
+    expect(logs.get('alice')?.slice(1).map(event => event.seq)).toEqual([1, 2])
+    expect(new Set(logs.get('alice')?.slice(1).map(event => (event.data as { jobId: JobId }).jobId))).toEqual(new Set(records.map(record => record.id)))
+  })
+})
+
 describe('RunSupervisor store/registry mismatch', () => {
   it('warns once about records the registry never restored and leaves them alone', async () => {
     const record = storedRecord({ resumeSpec: { cmd: 'rerun' } })
@@ -1137,6 +1359,18 @@ describe('RunSupervisor workflow honest settlement', () => {
     ])
   })
 
+  it('closes reported workflow settlement without delivering a notice', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, reported: true, ownerSession: SessionId('alice') })
+    const runId = 'reported-workflow'
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId, name: 'audit' } },
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 2, time: 3, data: { jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false } },
+    ] as SessionEvent[]]])
+    tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
+    expect(logs.get('alice')?.slice(3).map(event => event.type)).toEqual(['tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned'])
+  })
+
   it('does not synthesize workflow closers without a matching detached run', async () => {
     const record = storedRecord({ kind: 'workflow', resumeSpec: null, ownerSession: SessionId('alice') })
     const logs = new Map<string, SessionEvent[]>([['alice', [seedEvent()]]])
@@ -1217,6 +1451,35 @@ describe('RunSupervisor pending records with unreachable owners', () => {
     })
     settle({ status: 'completed' })
     await flush()
+  })
+
+  it('closes and reports a real adopted workflow kill exactly once', async () => {
+    const done = Promise.withResolvers<JobOutcome>()
+    const runId = WorkflowRunId('run-1')
+    const record = storedRecord({
+      id: JobId(`workflow-${runId}`), kind: 'workflow', resumeSpec: { runId },
+    })
+    const { ctx, state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+    const alice = agents.get('alice') as StubAgent
+    alice.agent.session.append('run/detached', {
+      jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: true,
+    })
+    ;(alice.agent.session.append as unknown as (type: string, data: unknown) => void)(
+      'tool-workflow/agent-start', { runId, seq: 4 },
+    )
+
+    ctx.jobs.registerResumer('workflow', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
+    await flush()
+    expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+
+    done.resolve({ status: 'killed', detail: 'cancelled after adoption' })
+    await flush()
+
+    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    expect(alice.agent.session.events.filter(event => event.type === 'tool-workflow/agent-end')).toHaveLength(1)
+    expect(alice.agent.session.events.filter(event => event.type === 'tool-workflow/run-end')).toHaveLength(1)
+    expect(alice.injected).toHaveLength(1)
+    expect(state.records.get(String(record.id))).toMatchObject({ status: 'killed', reported: true })
   })
 
   it('retries an offline run/resumed through the live lane when the session comes live mid-append', async () => {
@@ -1304,9 +1567,10 @@ describe('RunSupervisor internals (defensive lanes)', () => {
       accountAdoptionMarkers(pass: FakePass): Promise<void>
       onJobDone(snapshot: unknown): void
       waitForCandidates(pass: FakePass): Promise<void>
-      emitAbandoned(pass: FakePass, owner: SessionId, view: unknown, reason: string, priorIncarnation: string): Promise<void>
+      emitAbandoned(pass: FakePass, owner: SessionId, view: unknown, reason: string, priorIncarnation: string): Promise<'recorded' | 'already-present' | 'unavailable'>
       deliverNoticeWhenLive(pass: FakePass, owner: SessionId, view: unknown): void
       activePass: FakePass | undefined
+      clearAdoptionMarker(candidate: { record: JobRecord }): Promise<void>
     }
 
     internals.passRunning = true
@@ -1329,6 +1593,10 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     } as unknown as JobStore
     await internals.runPass(firstStore)
     expect(followList).toHaveBeenCalled()
+    await internals.clearAdoptionMarker({ record: storedRecord({ adoptedFromIncarnation: 'missing' }) })
+    const mismatch = storedRecord({ adoptedFromIncarnation: 'other' })
+    state.records.set(String(mismatch.id), mismatch)
+    await internals.clearAdoptionMarker({ record: { ...mismatch, adoptedFromIncarnation: 'expected' } })
 
     // A pass whose store rejects enumeration fails the pass (and the inject
     // lane would contain it), leaving the serializer clean for the next one.
@@ -1594,6 +1862,58 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
     // The notice is still owed exactly once (reported was false) and then claimed.
     expect(stub.injected).toHaveLength(1)
     expect(ctx.jobs.get(record.id, stub.agent).reported).toBe(true)
+  })
+
+  it('closes a killed adopted workflow even when its report is already claimed', async () => {
+    const record = storedRecord({ id: JobId('workflow-killed'), kind: 'workflow', ownerSession: SessionId('alice'), adoptedFromIncarnation: 'prior-incarnation' })
+    const shared = fakeStore(new Map([[String(record.id), record]]))
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', shared.store)
+    await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    const alice = stubAgent(ctx, 'alice')
+    for (const event of [
+      { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId: 'killed-run', name: 'audit' } },
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId: 'killed-run', seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 2, time: 3, data: { jobId: record.id, kind: 'workflow', label: record.label, runId: 'killed-run', resumable: true } },
+    ] as SessionEvent[]) (alice.agent.session.append as unknown as (type: string, data: unknown) => void)(event.type, event.data)
+    ctx.agents.register(alice.agent)
+    const instance = new RunSupervisor(ctx, {
+      resumeOnBoot: true, bootResumeTimeoutMs: 1000, maxResumedRunsPerOwner: 1, orphanRetentionMs: 0,
+    })
+    const internals = instance as unknown as {
+      adopted: Map<JobId, { record: JobRecord; membership: 'owned' | 'unowned'; decision: 'adoptable'; detail: string }>
+      onJobDone(snapshot: JobSnapshot): void
+    }
+    internals.adopted = new Map([[record.id, { record: { ...record, incarnation: 'prior-incarnation' }, membership: 'owned', decision: 'adoptable', detail: '' }]])
+    internals.onJobDone({
+      id: record.id, ordinal: 1, kind: 'workflow', label: record.label,
+      status: 'killed', resumable: true, incarnation: 'current-incarnation',
+      detail: 'cancelled', startedAt: 0, finishedAt: 1, reported: true,
+    })
+    await flush()
+    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    expect(runEvents(alice.agent.session, 'tool-workflow/run-end')).toHaveLength(1)
+    const unowned = { ...record, id: JobId('workflow-unowned'), ownerSession: null }
+    internals.adopted = new Map([[unowned.id, { record: { ...unowned, incarnation: 'prior-incarnation' }, membership: 'unowned', decision: 'adoptable', detail: '' }]])
+    internals.onJobDone({
+      id: unowned.id, ordinal: 2, kind: 'workflow', label: unowned.label,
+      status: 'killed', resumable: true, incarnation: 'current-incarnation',
+      detail: 'cancelled', startedAt: 0, finishedAt: 1, reported: true,
+    })
+
+    const unreachable = { ...record, id: JobId('workflow-unreachable'), ownerSession: SessionId('missing') }
+    shared.state.records.set(unreachable.id, unreachable)
+    internals.adopted = new Map([[unreachable.id, { record: { ...unreachable, incarnation: 'prior-incarnation' }, membership: 'owned', decision: 'adoptable', detail: '' }]])
+    internals.onJobDone({
+      id: unreachable.id, ordinal: 3, kind: 'workflow', label: unreachable.label,
+      status: 'killed', resumable: true, incarnation: 'current-incarnation',
+      detail: 'cancelled', startedAt: 0, finishedAt: 1, reported: true,
+    })
+    await flush()
+    expect(shared.state.records.get(unreachable.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
   })
 
   it('init-hook wiring tolerates a store that never appears', async () => {

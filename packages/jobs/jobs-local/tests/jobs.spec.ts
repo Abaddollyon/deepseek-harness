@@ -1925,6 +1925,27 @@ describe('LocalJobRegistry restore and resume', () => {
     expect(state.records.get(unreported.id)).toMatchObject({ reported: true })
   })
 
+  it('honest-settles a killed stopping record without invoking its resumer', async () => {
+    const stopping = storedRecord({ id: JobId('bash-stopping'), status: 'stopping', reported: true, detail: 'cancelling' })
+    const records = new Map([[String(stopping.id), stopping]])
+    const { store, state } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const resumer = vi.fn(() => resumePlan(() => ({ cancel: () => {}, done: new Promise<JobOutcome>(() => {}) })))
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.registerResumer('bash', resumer)
+    ctx.provide('jobStore', store)
+    await tick()
+    const listed = ctx.jobs.list()[0]
+    const waited = await ctx.jobs.wait(stopping.id, 1)
+    expect(resumer).not.toHaveBeenCalled()
+    expect(listed).toMatchObject({ status: 'killed', detail: 'cancelled before host restart', reported: true })
+    expect(waited).toMatchObject({ status: 'killed', detail: 'cancelled before host restart', reported: true })
+    expect(state.records.get(String(stopping.id))).toMatchObject({
+      status: 'killed', detail: 'cancelled before host restart', reported: true, incarnation: 'prior-incarnation',
+    })
+  })
+
   it('honest-settles a non-resumable record from a previous incarnation at restore', async () => {
     const records = new Map<string, JobRecord>()
     const orphan = storedRecord()
@@ -1945,7 +1966,12 @@ describe('LocalJobRegistry restore and resume', () => {
   it('leaves a non-terminal record from this incarnation untouched (in-process reload guard)', async () => {
     const records = new Map<string, JobRecord>()
     const live = storedRecord({ incarnation: PROCESS_INCARNATION, resumeSpec: { keep: true } })
+    const stopping = storedRecord({
+      id: JobId('bash-same-incarnation-stopping'), incarnation: PROCESS_INCARNATION,
+      status: 'stopping', detail: 'cancelling', resumeSpec: { keep: true },
+    })
     records.set(live.id, live)
+    records.set(stopping.id, stopping)
     const { store } = fakeStore({ records })
     const ctx = await bootPersisted(store)
 
@@ -1953,6 +1979,7 @@ describe('LocalJobRegistry restore and resume', () => {
     ctx.jobs.registerResumer('bash', resumer)
     expect(resumer).not.toHaveBeenCalled()
     expect(ctx.jobs.get(live.id).status).toBe('running')
+    expect(ctx.jobs.get(stopping.id)).toMatchObject({ status: 'stopping', detail: 'cancelling' })
   })
 
   it('replays a resumable record when its kind registers a resumer, adopting under the original id', async () => {

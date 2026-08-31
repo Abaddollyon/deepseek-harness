@@ -1094,7 +1094,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'abstract registerResumer(kind: JobKind, resume: JobResumer): () => void',
-        description: 'Register a resume handler for one job kind. On boot the registry replays every non-terminal persisted record of this kind that a previous process incarnation wrote: a handler that returns hooks adopts the record under its original id; `undefined` settles it honestly as `failed` with detail `\'not resumable after host restart\'`. Registration is an effect scoped to the registering context; at most one resumer may serve a kind at a time, and a duplicate registration fails loudly.',
+        description: 'Register a resume handler for one job kind. On boot the registry replays every persisted `running` record of this kind that a previous process incarnation wrote; restored `stopping` records terminalize as killed and never enter a resumer. A handler that returns hooks adopts the record under its original id; `undefined` settles it honestly as `failed` with detail `\'not resumable after host restart\'`. Registration is an effect scoped to the registering context; at most one resumer may serve a kind at a time, and a duplicate registration fails loudly.',
         parameters: [{ name: 'kind', description: 'producer kind whose persisted records the handler serves.' }, { name: 'resume', description: 'decides adoption per record; see {@link JobResumer}.' }],
         returns: 'disposer that unregisters the handler.',
       },

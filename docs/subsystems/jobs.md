@@ -336,8 +336,9 @@ abstract onJobAdopted(listener: JobAdoptedListener): () => void
 
 /**
  * Register a resume handler for one job kind. On boot the registry replays
- * every non-terminal persisted record of this kind that a previous process
- * incarnation wrote: a handler that returns hooks adopts the record under
+ * every persisted `running` record of this kind that a previous process
+ * incarnation wrote; restored `stopping` records terminalize as killed and
+ * never enter a resumer. A handler that returns hooks adopts the record under
  * its original id; `undefined` settles it honestly as `failed` with detail
  * `'not resumable after host restart'`. Registration is an effect scoped to
  * the registering context; at most one resumer may serve a kind at a time,
