@@ -283,7 +283,7 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
     const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
     const alice = agents.get('alice') as StubAgent
 
-    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'failed' })
+    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'stopping' })
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
     expect(alice.injected).toHaveLength(0)
   })
@@ -666,8 +666,8 @@ describe('RunSupervisor pending-record reconciliation', () => {
     const alice = agents.get('alice') as StubAgent
     await vi.advanceTimersByTimeAsync(30_000)
     await flush()
-    expect(ctx.jobs.get(record.id, alice.agent).status).toBe('failed')
-    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    expect(ctx.jobs.get(record.id, alice.agent).status).toBe('stopping')
+    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
   })
 })
 
@@ -1095,6 +1095,24 @@ describe('RunSupervisor orphan retention', () => {
   })
 })
 
+describe('RunSupervisor offline owner append ordering', () => {
+  it('assigns unique sequential records to concurrent same-owner accounts', async () => {
+    vi.useFakeTimers()
+    const logs = new Map<string, SessionEvent[]>([['alice', [seedEvent()]]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    const records = [
+      storedRecord({ ownerSession: SessionId('alice'), resumeSpec: { cmd: 'one' } }),
+      storedRecord({ ownerSession: SessionId('alice'), resumeSpec: { cmd: 'two' } }),
+    ]
+    const { state } = tracked(await boot({ records, persistence }))
+    await vi.advanceTimersByTimeAsync(30_000)
+    await flush()
+    expect(records.map(record => jobView({} as Context, state, record).status)).toEqual(['failed', 'failed'])
+    expect(logs.get('alice')?.slice(1).map(event => event.seq)).toEqual([1, 2])
+    expect(new Set(logs.get('alice')?.slice(1).map(event => (event.data as { jobId: JobId }).jobId))).toEqual(new Set(records.map(record => record.id)))
+  })
+})
+
 describe('RunSupervisor store/registry mismatch', () => {
   it('warns once about records the registry never restored and leaves them alone', async () => {
     const record = storedRecord({ resumeSpec: { cmd: 'rerun' } })
@@ -1189,6 +1207,18 @@ describe('RunSupervisor workflow honest settlement', () => {
     expect(logs.get('alice')?.map(event => event.type)).toEqual([
       'run/detached', 'tool-workflow/run-end', 'run/abandoned',
     ])
+  })
+
+  it('closes reported workflow settlement without delivering a notice', async () => {
+    const record = storedRecord({ kind: 'workflow', resumeSpec: null, reported: true, ownerSession: SessionId('alice') })
+    const runId = 'reported-workflow'
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId, name: 'audit' } },
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 2, time: 3, data: { jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: false } },
+    ] as SessionEvent[]]])
+    tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
+    expect(logs.get('alice')?.slice(3).map(event => event.type)).toEqual(['tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned'])
   })
 
   it('does not synthesize workflow closers without a matching detached run', async () => {
@@ -1653,6 +1683,40 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
     // The notice is still owed exactly once (reported was false) and then claimed.
     expect(stub.injected).toHaveLength(1)
     expect(ctx.jobs.get(record.id, stub.agent).reported).toBe(true)
+  })
+
+  it('closes a killed adopted workflow even when its report is already claimed', async () => {
+    const record = storedRecord({ id: JobId('workflow-killed'), kind: 'workflow', ownerSession: SessionId('alice'), adoptedFromIncarnation: 'prior-incarnation' })
+    const shared = fakeStore(new Map([[String(record.id), record]]))
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', shared.store)
+    await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    const alice = stubAgent(ctx, 'alice')
+    for (const event of [
+      { type: 'tool-workflow/run-start', seq: 0, time: 1, data: { runId: 'killed-run', name: 'audit' } },
+      { type: 'tool-workflow/agent-start', seq: 1, time: 2, data: { runId: 'killed-run', seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 2, time: 3, data: { jobId: record.id, kind: 'workflow', label: record.label, runId: 'killed-run', resumable: true } },
+    ] as SessionEvent[]) (alice.agent.session.append as unknown as (type: string, data: unknown) => void)(event.type, event.data)
+    ctx.agents.register(alice.agent)
+    const instance = new RunSupervisor(ctx, {
+      resumeOnBoot: true, bootResumeTimeoutMs: 1000, maxResumedRunsPerOwner: 1, orphanRetentionMs: 0,
+    })
+    const internals = instance as unknown as {
+      adopted: Map<JobId, { record: JobRecord; membership: 'owned' | 'unowned'; decision: 'adoptable'; detail: string }>
+      onJobDone(snapshot: JobSnapshot): void
+    }
+    internals.adopted = new Map([[record.id, { record: { ...record, incarnation: 'prior-incarnation' }, membership: 'owned', decision: 'adoptable', detail: '' }]])
+    internals.onJobDone({ id: record.id, kind: 'workflow', label: record.label, status: 'killed', detail: 'cancelled', reported: true, outputLimitBytes: undefined } as JobSnapshot)
+    await flush()
+    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    expect(runEvents(alice.agent.session, 'tool-workflow/run-end')).toHaveLength(1)
+    const unowned = { ...record, id: JobId('workflow-unowned'), ownerSession: null }
+    internals.adopted = new Map([[unowned.id, { record: { ...unowned, incarnation: 'prior-incarnation' }, membership: 'unowned', decision: 'adoptable', detail: '' }]])
+    internals.onJobDone({ id: unowned.id, kind: 'workflow', label: unowned.label, status: 'killed', detail: 'cancelled', reported: true, outputLimitBytes: undefined } as JobSnapshot)
+    await flush()
   })
 
   it('init-hook wiring tolerates a store that never appears', async () => {

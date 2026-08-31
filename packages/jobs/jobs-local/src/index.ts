@@ -873,7 +873,7 @@ export class LocalJobRegistry extends JobRegistry {
     for (const record of records) {
       const job = this.restoredTask(record)
       this.insertRecord(job)
-      if (isTerminal(job.status)) {
+      if (isTerminal(job.status) || job.status === 'stopping') {
         job.markSettled()
         continue
       }

@@ -332,6 +332,8 @@ export class RunSupervisor {
   private activePass: ReconcilePass | undefined
   /** Adopted records whose completion notices this process still owes, keyed by id. */
   private readonly adopted = new Map<JobId, PendingCandidate>()
+  /** Serializes offline session appends so each owner log keeps one next seq. */
+  private readonly appendQueues = new Map<SessionId, Promise<unknown>>()
   /** Serializes passes while retaining the newest replacement store for a follow-up pass. */
   private passRunning = false
   private pendingStore: JobStore | undefined
@@ -415,7 +417,7 @@ export class RunSupervisor {
     let unrestored = 0
     for (const record of pass.store.list()) {
       if (record.incarnation === PROCESS_INCARNATION) continue
-      if (record.status !== 'running' && record.status !== 'stopping') continue
+      if (record.status !== 'running') continue
       // The registry fences owned records to their session, so membership
       // is probed by which error get() throws: 'unknown job' means this
       // registry never restored the record (persist disabled or a degraded
@@ -577,7 +579,7 @@ export class RunSupervisor {
       if (record.incarnation === PROCESS_INCARNATION) continue
       if (record.status === 'running' || record.status === 'stopping') continue
       const settlement = laneSettlement(record)
-      if (settlement === undefined || record.reported) continue
+      if (settlement === undefined) continue
       const owner = record.ownerSession ?? undefined
       if (owner === undefined) continue
       const view: TerminalView = {
@@ -774,7 +776,7 @@ export class RunSupervisor {
       const candidate = pass.candidates.get(snapshot.id)
       if (candidate !== undefined) {
         pass.candidates.delete(snapshot.id)
-        if (snapshot.status !== 'killed') {
+        if (snapshot.status !== 'killed' || candidate.record.kind === 'workflow') {
           const owner = candidate.record.ownerSession ?? undefined
           if (owner !== undefined) {
             // Supervisor-driven settlements carry the pass's own reason; a
@@ -811,6 +813,17 @@ export class RunSupervisor {
     if (adopted !== undefined) {
       this.adopted.delete(snapshot.id)
       this.track(pass, this.clearAdoptionMarker(adopted))
+      if (snapshot.status === 'killed' && adopted.record.kind === 'workflow') {
+        const owner = adopted.record.ownerSession ?? undefined
+        if (owner !== undefined) {
+          const view: TerminalView = {
+            id: snapshot.id, kind: snapshot.kind, label: snapshot.label,
+            status: snapshot.status, detail: snapshot.detail,
+            reported: snapshot.reported, outputLimitBytes: snapshot.outputLimitBytes,
+          }
+          this.track(pass, this.emitAbandoned(pass, owner, view, 'resume-failed', adopted.record.incarnation))
+        }
+      }
       if (!snapshot.reported) {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
@@ -957,6 +970,23 @@ export class RunSupervisor {
    * (a load or append rejection no live session can absorb) still throws.
    */
   private async appendRunEvent(
+    owner: SessionId,
+    event:
+      | { readonly type: 'run/resumed'; readonly data: RunResumedData }
+      | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
+  ): Promise<RunEventAppendOutcome> {
+    const previous = this.appendQueues.get(owner) ?? Promise.resolve()
+    const current = previous.then(() => this.appendRunEventNow(owner, event))
+    const queued = current.then(() => {}, () => {})
+    this.appendQueues.set(owner, queued)
+    try {
+      return await current
+    } finally {
+      if (this.appendQueues.get(owner) === queued) this.appendQueues.delete(owner)
+    }
+  }
+
+  private async appendRunEventNow(
     owner: SessionId,
     event:
       | { readonly type: 'run/resumed'; readonly data: RunResumedData }

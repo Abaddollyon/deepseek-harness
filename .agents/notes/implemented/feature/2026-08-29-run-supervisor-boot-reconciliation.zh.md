@@ -12,7 +12,7 @@ Status: implemented
 
 新增 Consumer 包 `@deepseek-ai/dsh-run-supervisor`，挂载在 host 组合的 `jobs-local` 与 `jobs-store-domain` 之后。它注入 `['jobs']`，并把 `jobStore`、`agents`、`sessionPersistence` 视为可选。当 store 服务激活时（其 inject fiber 在注册表更早注册的收养 fiber 之后触发），运行一趟有界流程：
 
-1. 枚举 `incarnation` 不同于 `PROCESS_INCARNATION` 的非终止记录——同 incarnation 检查保证进程内重载不会把活工作诚实结算。注册表成员资格通过 `get()` 的围栏错误探测：`'unknown job'` 表示注册表从未恢复该记录（persist 未启用），记录一次日志并原样保留。
+1. 枚举 `incarnation` 不同于 `PROCESS_INCARNATION` 的 running 记录——同 incarnation 检查保证进程内重载不会把活工作诚实结算；持久的 `stopping` 记录是取消状态，绝不会重新进入恢复。注册表成员资格通过 `get()` 的围栏错误探测：`'unknown job'` 表示注册表从未恢复该记录（persist 未启用），记录一次日志并原样保留。
 2. 按 `ownerSession` 分组并解析属主：存活 agent、可恢复会话（`sessionPersistence.prepare`，立即 dispose）、孤儿；若没有 persistence seam 则为*未知*——不会仅凭证据缺失就结算任何记录。
 3. 应用策略：`resumeOnBoot: false` 全部结算；孤儿属主的记录以 `'owner-unavailable'` 结算；每属主最旧的前 `maxResumedRunsPerOwner` 条保持可收养，超出部分以配额详情结算；熬过 `bootResumeTimeoutMs` 的以 `'reconcile-timeout'` 结算。这趟流程总会完成，进程总会启动。
 4. 通过注册表的 `registerResumer` 拒绝通道驱动结算——这是唯一能触及被恢复记录的、无围栏的公开通道。它保留 `reported`、维持 first-wins 终止语义，并把结算经 supervisor 自己的 `onJobDone` 监听器带回入账。由于该通道一次回放整个 kind，当 kind 仍有可收养记录待处理时，其结算目标会等到该 kind resolve或截止。

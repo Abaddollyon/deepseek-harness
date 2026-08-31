@@ -30,7 +30,7 @@ kind: "package-reference"
 
 每次 store 激活执行一趟，全程受 `bootResumeTimeoutMs` 约束：
 
-1. 枚举 store 中 `incarnation` 不同于 `PROCESS_INCARNATION` 的非终止记录。同 incarnation 的记录是进程内的活工作——HMR 重载绝不能把它们误认为孤儿——而终止态记录无需驱动。
+1. 枚举 store 中 `incarnation` 不同于 `PROCESS_INCARNATION` 的 running 记录。同 incarnation 的记录是进程内的活工作——HMR 重载绝不能把它们误认为孤儿——而 stopping 记录是持久的取消状态，绝不会重新进入恢复。
 2. 按 `ownerSession` 分组并解析每个属主：存活 agent（`ctx.agents.get`）；否则走真实恢复路径可恢复的会话（`ctx.sessionPersistence.prepare)，立即 dispose——可恢复性这个事实才是目的，而非会话对象）；否则是孤儿。没有 persistence seam 时属主是*未知*而非孤儿：不会仅凭证据缺失就结算或驱逐任何记录。
 3. 策略决定每条待处理记录的命运。`resumeOnBoot: false` 全部结算。孤儿属主的记录以 `'owner-unavailable'` 结算。每个属主最旧的前 `maxResumedRunsPerOwner` 条保持*可收养*，等待其 kind 的生产方 resumer；超出的部分以配额详情结算，使重启不会冲破注册表的每属主并发上限。
 4. 收养本身属于生产方：返回 hooks 的 `registerResumer` 处理器以原 id 重新收养记录，注册表在重新盖章的记录提交后通过 `onJobAdopted` 通告——并等待记账完成才接上生产方的完成接线——supervisor 据此记为 `run/resumed`。标记写入是必需的：store 拒绝该写入时续跑会诚实地失败，而不是让收养无标记运行。没有任何一趟流程观测到的收养——在 supervisor 挂载前就已触发的 resumer，或记账前就已消亡的进程——会在记录上留下持久的 `adoptedFromIncarnation` 标记；下一趟流程将其记为 `run/resumed`，以该前 incarnation 命名，并且只有在 append 被确认已记录或发现已存在后才清除标记——任何通道都触及不到的属主会把标记留给之后的启动。拒绝或抛错的 resumer 记为 `reason: 'resume-failed'` 的 `run/abandoned`。
