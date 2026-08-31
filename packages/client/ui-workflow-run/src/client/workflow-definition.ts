@@ -3,6 +3,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type {} from '@deepseek-ai/dsh-run-supervisor/types'
 import type {
   ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowLogData,
   ToolWorkflowPhaseData,
@@ -51,6 +52,7 @@ interface WorkflowMemberState extends Omit<ToolWorkflowAgentStartData, 'runId'> 
 interface WorkflowState {
   readonly name: string
   readonly stopReason?: WorkflowStopReason
+  readonly detached?: boolean
   readonly members: readonly WorkflowMemberState[]
   readonly phaseTitles?: readonly string[]
   readonly narration?: readonly Omit<ToolWorkflowLogData, 'runId'>[]
@@ -98,6 +100,7 @@ function projectWorkflow(
 ): WorkflowRunChatData {
   const state = context.state as WorkflowState
   const interrupted = state.stopReason === undefined
+    && state.detached !== true
     && locationClosed(location)
   const phases = new Map<string, { phase: string | null; members: WorkflowRunMemberData[] }>()
   for (const title of state.phaseTitles ?? []) {
@@ -174,6 +177,9 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
   target: 'chat',
   match: (event) => {
     if (event.type === 'tool-workflow/run-start') return { id: String(event.data.runId), role: 'start' }
+    if (event.type === 'run/detached' && event.data.kind === 'workflow' && event.data.runId !== undefined) {
+      return { id: String(event.data.runId), role: 'update' }
+    }
     if (event.type === 'tool-workflow/phase'
       || event.type === 'tool-workflow/log'
       || event.type === 'tool-workflow/agent-start'
@@ -190,6 +196,9 @@ export const workflowRunDefinition: ConversationNodeDefinition<WorkflowState> = 
     return { name: match.event.data.name, members: [] }
   },
   update: (context, match) => {
+    if (match.event.type === 'run/detached') {
+      return { ...context.state, detached: true }
+    }
     if (match.event.type === 'tool-workflow/phase') {
       return updatePhase(context.state, match.event.data)
     }

@@ -335,6 +335,8 @@
       "@deepseek-ai/dsh-jobs/invariant": ["./packages/jobs/jobs/src/invariant.ts"],
       "@deepseek-ai/dsh-jobs-local": ["./packages/jobs/jobs-local/src"],
       "@deepseek-ai/dsh-jobs-local/invariant": ["./packages/jobs/jobs-local/src/invariant.ts"],
+      "@deepseek-ai/dsh-jobs-store-domain": ["./packages/jobs/jobs-store-domain/src"],
+      "@deepseek-ai/dsh-jobs-store-domain/invariant": ["./packages/jobs/jobs-store-domain/src/invariant.ts"],
       "@deepseek-ai/dsh-launch-environment": ["./packages/util/launch-environment/src"],
       "@deepseek-ai/dsh-launch-environment/invariant": ["./packages/util/launch-environment/src/invariant.ts"],
       "@deepseek-ai/dsh-llm": ["./packages/llm/llm/src"],

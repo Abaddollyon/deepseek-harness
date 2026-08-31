@@ -2,10 +2,11 @@
 
 const UUID_FRAGMENT_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 const LEGACY_TOKEN_RE = /^\{\{(?:sessionId|messageId)\}\}$/
-const CANONICAL_TOKEN_RE = /^\{\{(session|message|approval|workflow|command|rpc|retry|id):([1-9]\d*)\}\}$/
+const CANONICAL_TOKEN_RE = /^\{\{(session|message|approval|workflow|job|command|rpc|retry|id):([1-9]\d*)\}\}$/
+const JOB_ID_RE = new RegExp(`\\b(?:bash|subagent|workflow|ralph)-${UUID_FRAGMENT_RE.source}\\b`, 'gi')
 const ID_KEY_RE = /(?:^id$|Id$|Ids$)/
 
-type IdentityKind = 'session' | 'message' | 'approval' | 'workflow' | 'command' | 'rpc' | 'retry' | 'id'
+type IdentityKind = 'session' | 'message' | 'approval' | 'workflow' | 'job' | 'command' | 'rpc' | 'retry' | 'id'
 
 interface ParsedLog {
   readonly records: Record<string, unknown>[]
@@ -73,6 +74,7 @@ export function redactSessionSnapshotIds(logs: readonly string[]): string[] {
     if (typeof value === 'string') {
       for (const match of value.matchAll(/\bas message ([0-9a-f-]{36})\b/gi)) claim(match[1], 'message')
       for (const match of value.matchAll(/\bAnonymous user: ([0-9a-f-]{36})\b/gi)) claim(match[1], 'id')
+      for (const match of value.matchAll(JOB_ID_RE)) claim(match[0], 'job')
       return
     }
     if (Array.isArray(value)) {

@@ -217,11 +217,18 @@ function statusText(view: TerminalView): string {
     : `[status: ${view.status}]`
 }
 
-/** True when the session log already records a run/* reconciliation event for this job. */
-function hasRunEvent(events: readonly SessionEvent[], jobId: JobId): boolean {
+/** True when the session log already accounts this job incarnation. */
+function hasRunEvent(
+  events: readonly SessionEvent[],
+  expected:
+    | { readonly type: 'run/resumed'; readonly data: RunResumedData }
+    | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
+): boolean {
   return events.some(event => (event.type === 'run/resumed' || event.type === 'run/abandoned')
-    && event.data.jobId === jobId)
+    && event.data.jobId === expected.data.jobId
+    && event.data.priorIncarnation === expected.data.priorIncarnation)
 }
+
 
 interface WorkflowCloser {
   readonly type: 'tool-workflow/agent-end' | 'tool-workflow/run-end'
@@ -237,7 +244,14 @@ function workflowClosers(events: readonly SessionEvent[], jobId: JobId, kind: st
   const detached = loose.find(event => event.type === 'run/detached'
     && event.data.jobId === jobId
     && event.data.kind === 'workflow')
-  const runIdValue = detached?.data.runId
+  const allocatedRunId = String(jobId).startsWith('workflow-')
+    ? String(jobId).slice('workflow-'.length)
+    : undefined
+  const anchored = allocatedRunId === undefined
+    ? undefined
+    : loose.find(event => event.type === 'tool-workflow/run-start'
+      && event.data.runId === allocatedRunId)
+  const runIdValue = detached?.data.runId ?? anchored?.data.runId
   if (typeof runIdValue !== 'string') return []
   const runId = runIdValue as WorkflowRunId
   if (loose.some(event => event.type === 'tool-workflow/run-end' && event.data.runId === runId)) return []
@@ -317,8 +331,9 @@ export class RunSupervisor {
   private activePass: ReconcilePass | undefined
   /** Adopted records whose completion notices this process still owes, keyed by id. */
   private readonly adopted = new Map<JobId, PendingCandidate>()
-  /** Serializes passes: a store replacement during a pass does not start a second one. */
+  /** Serializes passes while retaining the newest replacement store for a follow-up pass. */
   private passRunning = false
+  private pendingStore: JobStore | undefined
 
   constructor(private readonly ctx: Context, config: Config) {
     // Schemastery validates and fills the defaults before constructing the plugin.
@@ -338,7 +353,7 @@ export class RunSupervisor {
   protected [Service.init](): void {
     this.ctx.effect(() => {
       const disposeDone = this.ctx.jobs.onJobDone((snapshot) => { this.onJobDone(snapshot) })
-      const disposeAdopted = this.ctx.jobs.onJobAdopted(snapshot => this.onAdopted(snapshot))
+      const disposeAdopted = this.ctx.jobs.onJobAdopted((snapshot, priorIncarnation) => this.onAdopted(snapshot, priorIncarnation))
       return () => { disposeDone(); disposeAdopted() }
     }, 'run-supervisor.observers')
     this.ctx.inject(['jobStore'], (storeCtx) => {
@@ -350,12 +365,14 @@ export class RunSupervisor {
   }
 
   /**
-   * Run one bounded reconciliation pass. Concurrent triggers (a store
-   * replacement mid-pass) collapse into the already running pass, whose
-   * observation lanes follow every change the replacement commits.
+   * Run one bounded reconciliation pass. A store replacement during an active
+   * pass is retained and reconciled immediately after that pass finishes.
    */
   private async runPass(store: JobStore): Promise<void> {
-    if (this.passRunning) return
+    if (this.passRunning) {
+      this.pendingStore = store
+      return
+    }
     this.passRunning = true
     const pass: ReconcilePass = {
       store,
@@ -370,6 +387,7 @@ export class RunSupervisor {
     try {
       this.enumerate(pass)
       await this.accountAdoptionMarkers(pass)
+      this.deliverPersistedCompletions(pass)
       await this.resolveAndClassify(pass)
       this.accountLaneSettlements(pass)
       await this.evictExpiredOrphans(pass)
@@ -381,6 +399,9 @@ export class RunSupervisor {
       clearTimeout(timer)
       this.activePass = undefined
       this.passRunning = false
+      const pending = this.pendingStore
+      this.pendingStore = undefined
+      if (pending !== undefined) await this.runPass(pending)
     }
   }
 
@@ -429,14 +450,13 @@ export class RunSupervisor {
    * as the live {@link onAdopted} lane would have named it. The marker
    * clears only after the append is confirmed recorded or found already
    * present — a lane failure or an owner no lane can reach keeps it for a
-   * later boot. Terminal records keep their marker — the settlement already
-   * accounted the run — and a cleared marker cannot double-account a later
-   * boot.
+   * later boot. Terminal records use the same marker account before their
+   * unread completion is delivered, and a cleared marker cannot double-account
+   * a later boot.
    */
   private async accountAdoptionMarkers(pass: ReconcilePass): Promise<void> {
     for (const record of pass.store.list()) {
       if (record.adoptedFromIncarnation === undefined) continue
-      if (record.status !== 'running' && record.status !== 'stopping') continue
       const candidate: PendingCandidate = {
         record: { ...record, incarnation: record.adoptedFromIncarnation },
         membership: 'unowned',
@@ -457,8 +477,35 @@ export class RunSupervisor {
         }
         if (outcome === 'unavailable') continue
       }
-      const { adoptedFromIncarnation: _marker, ...cleared } = record
-      await pass.store.put(cleared)
+      const current = pass.store.get(record.id)
+      if (current === undefined
+        || current.adoptedFromIncarnation !== record.adoptedFromIncarnation) continue
+      const { adoptedFromIncarnation: _marker, ...cleared } = current
+      try {
+        await pass.store.put(cleared)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`run-supervisor: failed to clear adoption marker ${record.id}: ${String(error)}`)
+      }
+    }
+  }
+
+  /** Deliver unread terminal records restored from an earlier incarnation. */
+  private deliverPersistedCompletions(pass: ReconcilePass): void {
+    for (const record of pass.store.list()) {
+      if (record.incarnation === PROCESS_INCARNATION || record.reported) continue
+      if (record.status === 'running' || record.status === 'stopping') continue
+      if (laneSettlement(record) !== undefined) continue
+      const owner = record.ownerSession ?? undefined
+      if (owner === undefined) continue
+      this.deliverNoticeWhenLive(pass, owner, {
+        id: record.id,
+        kind: record.kind,
+        label: record.label,
+        status: record.status,
+        detail: record.detail ?? undefined,
+        reported: record.reported,
+        outputLimitBytes: record.outputLimitBytes ?? undefined,
+      })
     }
   }
 
@@ -531,7 +578,7 @@ export class RunSupervisor {
         reported: record.reported,
         outputLimitBytes: record.outputLimitBytes ?? undefined,
       }
-      this.track(pass, this.emitAbandoned(pass, owner, view, settlement.reason))
+      this.track(pass, this.emitAbandoned(pass, owner, view, settlement.reason, record.incarnation))
     }
   }
 
@@ -543,16 +590,26 @@ export class RunSupervisor {
    * long the orphan stays listable across boots.
    */
   private async evictExpiredOrphans(pass: ReconcilePass): Promise<void> {
-    const expired: JobRecord[] = []
+    const expiredOwned: JobRecord[] = []
+    const expiredUnowned: JobRecord[] = []
     const now = Date.now()
     for (const record of pass.store.list()) {
       if (record.incarnation === PROCESS_INCARNATION) continue
       if (record.status === 'running' || record.status === 'stopping') continue
-      if (record.ownerSession === null || record.finishedAt === null) continue
+      if (record.finishedAt === null) continue
       if (record.finishedAt + this.orphanRetentionMs > now) continue
-      expired.push(record)
+      if (record.ownerSession === null) expiredUnowned.push(record)
+      else expiredOwned.push(record)
     }
-    if (expired.length === 0) return
+    const remove = async (record: JobRecord): Promise<void> => {
+      try {
+        await pass.store.delete(record.id)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`run-supervisor: failed to evict expired orphan record ${record.id}: ${String(error)}`)
+      }
+    }
+    for (const record of expiredUnowned) await remove(record)
+    if (expiredOwned.length === 0) return
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return
     let listed: Set<SessionId>
@@ -566,14 +623,10 @@ export class RunSupervisor {
       return
     }
     const agents = this.ctx.get('agents')
-    for (const record of expired) {
+    for (const record of expiredOwned) {
       const session = record.ownerSession as SessionId
       if (listed.has(session) || agents?.get(session) !== undefined) continue
-      try {
-        await pass.store.delete(record.id)
-      } catch (error: unknown) {
-        this.ctx.logger.warn(`run-supervisor: failed to evict expired orphan record ${record.id}: ${String(error)}`)
-      }
+      await remove(record)
     }
   }
 
@@ -656,28 +709,46 @@ export class RunSupervisor {
     }
   }
 
-
-  /** Legacy change callback retained as a no-op compatibility lane. */
-  private onJobsChanged(): void {}
-
   /**
    * Account for an adoption delivered by the registry after durable commit.
    * The registry awaits this account before it attaches the producer's
    * completion wiring, so a settlement can never race ahead of the
    * `run/resumed` that classifies it.
    */
-  private async onAdopted(snapshot: JobSnapshot): Promise<void> {
-    this.onJobsChanged()
+  private async onAdopted(snapshot: JobSnapshot, priorIncarnation: string): Promise<boolean> {
     const pass = this.activePass
-    if (pass === undefined) return
-    const candidate = pass.candidates.get(snapshot.id)
-    if (candidate === undefined) return
-    pass.candidates.delete(snapshot.id)
-    this.adopted.set(snapshot.id, candidate)
-    this.settleReadyKinds(pass)
-    this.nudge(pass)
+    let candidate = pass?.candidates.get(snapshot.id)
+    if (candidate === undefined) {
+      const record = this.ctx.get('jobStore')?.get(snapshot.id)
+      if (record === undefined || record.adoptedFromIncarnation !== priorIncarnation) {
+        this.ctx.logger.warn(`run-supervisor: durable adoption marker missing for ${snapshot.id}`)
+        return false
+      }
+      candidate = {
+        record: { ...record, incarnation: priorIncarnation },
+        membership: record.ownerSession === null ? 'unowned' : 'owned',
+        decision: 'adoptable',
+        detail: '',
+      }
+    }
     const owner = candidate.record.ownerSession ?? undefined
-    if (owner !== undefined) await this.emitResumed(owner, candidate)
+    if (owner !== undefined) {
+      let outcome: RunEventAppendOutcome
+      try {
+        outcome = await this.emitResumed(owner, candidate)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`run-supervisor: failed to account adoption ${snapshot.id}: ${String(error)}`)
+        return false
+      }
+      if (outcome === 'unavailable') return false
+    }
+    if (pass?.candidates.get(snapshot.id) === candidate) {
+      pass.candidates.delete(snapshot.id)
+      this.settleReadyKinds(pass)
+      this.nudge(pass)
+    }
+    this.adopted.set(snapshot.id, candidate)
+    return true
   }
 
   /**
@@ -716,6 +787,7 @@ export class RunSupervisor {
               owner,
               view,
               supervisorDriven ? candidate.decision as RunAbandonReason : 'resume-failed',
+              candidate.record.incarnation,
             ))
           }
         }
@@ -808,10 +880,12 @@ export class RunSupervisor {
     owner: SessionId,
     view: TerminalView,
     reason: RunAbandonReason,
+    priorIncarnation: string,
   ): Promise<void> {
     const data: RunAbandonedData = {
       jobId: view.id,
       kind: view.kind,
+      priorIncarnation,
       reason,
       detail: view.detail ?? '',
     }
@@ -861,7 +935,7 @@ export class RunSupervisor {
   ): Promise<RunEventAppendOutcome> {
     const live = this.ctx.get('agents')?.get(owner)
     if (live !== undefined) {
-      if (hasRunEvent(live.session.events, event.data.jobId)) return 'already-present'
+      if (hasRunEvent(live.session.events, event)) return 'already-present'
       if (event.type === 'run/resumed') {
         live.session.append('run/resumed', event.data)
       } else {
@@ -875,7 +949,7 @@ export class RunSupervisor {
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return 'unavailable'
     const loaded = await persistence.load(owner)
-    if (hasRunEvent(loaded.events, event.data.jobId)) return 'already-present'
+    if (hasRunEvent(loaded.events, event)) return 'already-present'
     const closers = event.type === 'run/abandoned'
       ? workflowClosers(loaded.events, event.data.jobId, event.data.kind)
       : []
@@ -890,7 +964,7 @@ export class RunSupervisor {
       // next seq moved); retry through the live lane before giving up.
       const raced = this.ctx.get('agents')?.get(owner)
       if (raced === undefined) throw error
-      if (hasRunEvent(raced.session.events, event.data.jobId)) return 'already-present'
+      if (hasRunEvent(raced.session.events, event)) return 'already-present'
       if (event.type === 'run/resumed') {
         raced.session.append('run/resumed', event.data)
       } else {

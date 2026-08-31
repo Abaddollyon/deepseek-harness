@@ -325,7 +325,7 @@ export class WorkerRun implements WorkflowRun {
     // emit `exit`. The first death signal is the host's logical delivery
     // barrier: nothing arriving afterward may create a child, narrate after
     // workflow/end, or compete with the chosen outcome.
-    if (this.workerDeathObserved) return
+    if (this.workerDeathObserved || this.terminalClaimed) return
     switch (message.type) {
       case WorkerToHostType.Ready:
         this.post(HostToWorkerType.Go, {})
@@ -546,9 +546,8 @@ export class WorkerRun implements WorkflowRun {
   }
 
   private onResult(result: WorkflowResult): void {
-    // The owned worker session sends one Result. Keep a late duplicate or a
-    // Result queued behind another terminal source completely side-effect-free.
-    if (this.terminalClaimed) return
+    // The message admission barrier excludes a late duplicate or a Result
+    // queued behind another terminal source before this handler runs.
     // First-wins is decided when the Result message reaches the host. If no
     // external cancellation was already in flight, this result won. Reaping a
     // stray child below may synchronously reenter cancel() through provider

@@ -31,6 +31,10 @@ class StubJobRegistry extends JobRegistry {
     return JobId(`${spec.kind}-1`)
   }
 
+  async startDurable(spec: JobStart): Promise<JobId> {
+    return this.start(spec)
+  }
+
   list(): JobSnapshot[] {
     return [this.snapshotOf(JobId('bash-1'))]
   }

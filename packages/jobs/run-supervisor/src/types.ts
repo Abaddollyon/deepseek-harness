@@ -41,6 +41,8 @@ export interface RunAbandonedData {
   readonly jobId: JobId
   /** Producer kind the record was registered with. */
   readonly kind: string
+  /** Incarnation that wrote the record this settlement accounted. */
+  readonly priorIncarnation: string
   /**
    * Why the run was not resumed: it carried no resume payload
    * (`'not-resumable'`), its owning session could not be restored
