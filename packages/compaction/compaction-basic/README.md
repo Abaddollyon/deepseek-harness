@@ -123,7 +123,7 @@ With `auto: true`, a serial `agent/pre-step` listener checks pressure before req
 With `auto: true`, a serial `agent/request-preflight` listener admits each exact request after its canonical header is logged and before its messages are derived: it prices that request's durable routed envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a priced recent tail, reserving the configured output cap, priced envelope, and final compaction-instruction message against the actual summarizer model capacity so the complete auxiliary request always fits — when no balanced span fits, admission makes no summarization call and preserves the full request for provider handling. A committed replacement redispatches admission from the new surface, bounded by the loop's fixed redispatch ceiling. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
 >>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 
-Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target and continues with full history.
+Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route, or a capacity that makes the target's retention budget invalid, makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target, delegates admission, and continues with full history. Operational pruning, metering, resolution, and summarization failures reject preflight instead of being converted into admission.
 
 ### Summarization mechanics
 
@@ -135,7 +135,7 @@ The transaction validates the surface span and the durable lock, appends `compac
 
 ### Config resolution
 
-`resolveConfig` validates and detaches the defaults, `resolveTargetPolicy` merges an exact provider/model override over them, and `resolveCompactSpec` scales the merged policy into concrete token budgets using the adapter-owned context capacity. Model discovery (`listModels()`) is never consulted for policy; only the durable route's capacity matters.
+`resolveConfig` validates and detaches the defaults, `resolveTargetPolicy` merges an exact provider/model override over them, and `resolveCompactSpec` scales the merged policy using adapter-owned context capacity into an explicit `{ kind: 'resolved', spec }` or `{ kind: 'invalid', error }` result. Automatic preflight delegates the `invalid` case after its target-scoped warning; explicit pressure compaction throws the returned error. Model discovery (`listModels()`) is never consulted for policy; only the durable route's capacity matters.
 
 ### Source map
 

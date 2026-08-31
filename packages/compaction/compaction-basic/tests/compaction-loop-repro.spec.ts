@@ -28,7 +28,7 @@ import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deeps
 class ReproCompactionEngine extends BasicCompactionEngine {
   override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
     return {
-      summary: [{ type: 'text', text: 'CHECKPOINT SUMMARY' }],
+      summary: [{ type: 'text', text: 'S' }],
       provider: 'mock',
       model: 'stub',
     }
