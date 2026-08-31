@@ -6,7 +6,7 @@
 
 ## ID 与状态
 
-`JobId` 是按 `<kind>-N` 生成的[品牌化 id](core.zh.md#branded-ids)。访问控制依赖拥有者授权，而非 id 的保密性。`JobKind` 派生自可合并扩展的 map；注册表将各个 kind 视为不透明的 id 命名空间。
+`JobId` 是按 `<kind>-<uuid>` 生成的[品牌化 id](core.zh.md#branded-ids)——生产方提供稳定片段时为 `<kind>-<idHint>`——因此持久化的 id 绝不会被重新铸造给别的工作。访问控制依赖拥有者授权，而非 id 的保密性。`JobKind` 派生自可合并扩展的 map；注册表将各个 kind 视为不透明的 id 命名空间。快照还携带每所有者从 1 起的展示序号 `ordinal`，作为持久 id 之外面向模型的简短句柄。
 
 ```ts type-equiv
 /**
@@ -48,6 +48,19 @@ interface JobStart {
    * open to any caller until service disposal.
    */
   owner?: Agent
+  /**
+   * Durable resume policy for this producer's work. Only consulted when the
+   * registry persists records; omission means a persisted record is not
+   * resumable and is settled honestly after a host restart.
+   */
+  durability?: JobDurability
+  /**
+   * Producer-supplied stable id fragment: the job registers as
+   * `<kind>-<idHint>` instead of the minted `<kind>-<uuid>`. Must be
+   * non-empty and must not collide with a registered or persisted id — a
+   * collision fails the registration loudly before {@link run} is invoked.
+   */
+  idHint?: string
   /**
    * Start the work after preflight and synchronously return its hooks. Called
    * once; a throw leaves nothing registered, and the producer must clean up any
@@ -105,8 +118,16 @@ interface JobOutcome {
  * a fresh object per call, never live registry state.
  */
 interface JobSnapshot {
-  /** The registry-issued id (`<kind>-N`). */
+  /** The registry-issued id (`<kind>-<uuid>`, or `<kind>-<idHint>`). */
   id: JobId
+  /**
+   * 1-based display ordinal within the owner's bucket (registration order),
+   * kept for model-facing lists so the model never has to repeat a 36-char
+   * uuid to tell jobs apart. Process-local presentation state: restored
+   * records are re-numbered in startedAt order on boot, so the ordinal is not
+   * stable across restarts — the id is.
+   */
+  ordinal: number
   /** The producer kind the job was registered with. */
   kind: JobKind
   /** The producer-supplied one-line label. */
@@ -121,6 +142,18 @@ interface JobSnapshot {
   ownerSession?: SessionId
   /** Current lifecycle state. */
   status: JobStatus
+  /**
+   * Whether a persisted record of this job could be re-adopted after a host
+   * restart: true exactly when the producer supplied a non-null
+   * {@link JobDurability.resumeSpec}.
+   */
+  resumable: boolean
+  /**
+   * The process incarnation that owns the record. Matches the current
+   * process's `PROCESS_INCARNATION` for work started (or adopted) here, and
+   * names the writing process for a restored record still awaiting a resumer.
+   */
+  incarnation: string
   /** Kind-specific status detail, present once the producer supplied one (usually terminal). */
   detail?: string
   /** Epoch ms when the job was registered. */
@@ -154,7 +187,7 @@ interface JobRead {
 
 ## 服务行为
 
-抽象的 [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition 规定原子 `start`、限定调用方作用域的 `get` 和 `list`、`read`、`kill`、有界 `wait`、故障隔离的 `onJobDone` 与 `onJobsChanged` 监听器，以及 `attachController`；[`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) 是其进程局部 Service Provider。授权会比较拥有者会话；拥有者清理与准入会使用确切的已注册 `Agent` 实例。本地 Service Provider 的 `maxConcurrentJobsPerOwner` 配置必须是正的安全整数，默认值为 `10`；它按确切 owner 统计 `running` 与 `stopping` 记录，所有无 owner 任务共享一个服务级桶，并在生产方终止结算后释放容量。Service Definition 约定见 [`dsh-jobs`](../../packages/jobs/jobs/README.zh.md)，注册表生命周期与准入策略见 [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.zh.md)，面向模型的 Consumer 见 [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.zh.md)。
+抽象的 [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition 规定原子 `start`、限定调用方作用域的 `get` 和 `list`、`read`、`kill`、有界 `wait`、故障隔离的 `onJobDone` 与 `onJobsChanged` 监听器、全宿主范围的 `onJobAdopted` 收养观察者，以及 `attachController`；[`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) 是其进程局部 Service Provider。授权会比较拥有者会话；拥有者清理与准入会使用确切的已注册 `Agent` 实例。本地 Service Provider 的 `maxConcurrentJobsPerOwner` 配置必须是正的安全整数，默认值为 `10`；它按确切 owner 统计 `running` 与 `stopping` 记录，所有无 owner 任务共享一个服务级桶，并在生产方终止结算后释放容量。Service Definition 约定见 [`dsh-jobs`](../../packages/jobs/jobs/README.zh.md)，注册表生命周期与准入策略见 [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.zh.md)，面向模型的 Consumer 见 [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.zh.md)。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -185,9 +218,19 @@ Implementations must honor these semantics:
  * leaves nothing registered; after it returns, registration cannot fail.
  * Settlement records the outcome, notifies listeners, and releases waiters.
  * @param spec - job identity, owner, and synchronous starter.
- * @returns the registry-issued `<kind>-N` id.
+ * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
  */
 abstract start(spec: JobStart): JobId
+
+/**
+ * Register durable work only after its initial record reaches the mounted
+ * `ctx.jobStore`; the producer's {@link JobStart.run} is not invoked
+ * before that commit. A missing or rejecting store fails without starting
+ * producer work.
+ * @param spec - producer declaration; the implementation requires durable persistence.
+ * @returns the registered id after the initial record is durable and work has started.
+ */
+abstract startDurable(spec: JobStart): Promise<JobId>
 
 /**
  * List caller-owned and unowned jobs in registration order without exposing
@@ -275,6 +318,37 @@ abstract onJobDone(listener: JobDoneListener): () => void
 abstract onJobsChanged(listener: JobsChangedListener): () => void
 
 /**
+ * Register an observer of durable adoptions. It fires once per restored
+ * record a producer resumer adopts, after the registry commits the
+ * re-stamped record — this process incarnation plus the prior one as the
+ * adoption marker — to the durable store, so an observer that crashes
+ * afterwards still finds the marker on the next boot. Delivery is global:
+ * every listener sees every adoption regardless of owner scope. A returned
+ * promise is awaited before the registry attaches the producer's
+ * completion wiring, so the observer's account lands before any settlement
+ * it must recognize; every listener runs, and failures are contained and
+ * logged only after all of them settle.
+ * @param listener - receives the adopted snapshot and the prior process
+ *   incarnation that wrote the record before the restart.
+ * @returns disposer that unregisters the listener.
+ */
+abstract onJobAdopted(listener: JobAdoptedListener): () => void
+
+/**
+ * Register a resume handler for one job kind. On boot the registry replays
+ * every non-terminal persisted record of this kind that a previous process
+ * incarnation wrote: a handler that returns hooks adopts the record under
+ * its original id; `undefined` settles it honestly as `failed` with detail
+ * `'not resumable after host restart'`. Registration is an effect scoped to
+ * the registering context; at most one resumer may serve a kind at a time,
+ * and a duplicate registration fails loudly.
+ * @param kind - producer kind whose persisted records the handler serves.
+ * @param resume - decides adoption per record; see {@link JobResumer}.
+ * @returns disposer that unregisters the handler.
+ */
+abstract registerResumer(kind: JobKind, resume: JobResumer): () => void
+
+/**
  * Attach an effect-scoped controller that can read and stop jobs. It serves the
  * owners its registering context's scope covers, and {@link start} refuses an
  * owner no attached controller serves.
@@ -287,4 +361,52 @@ abstract attachController(name: string): () => void
 Types: [Agent](core.zh.md)
 
 Source: [`packages/jobs/jobs/src/index.ts`](../../packages/jobs/jobs/src/index.ts)
+
+<a id="ctxjobstore--jobstore-abstract-seam"></a>
+
+### `ctx.jobStore` — `JobStore` (abstract seam)
+
+Abstract durable job store. Subclass, implement the abstract members, and load the subclass as a plugin — it registers as `ctx.jobStore` (one implementation per context; loading a second throws, cordis' standard duplicate-service behavior).
+
+Contract highlights for implementations:
+
+- Reads are synchronous over authoritative in-memory state and reflect writes that are still queued (read-your-writes).
+- put replaces the whole record (job records are monotone lifecycle snapshots, so last-write-wins per id is correct) and its returned promise settles with the durability of the latest queued value.
+- A rejected write must reject the caller's promise; the caller — not the store — owns the degrade decision.
+
+```ts cordis-catalog
+/**
+ * Snapshot every persisted record, including values still queued to write.
+ * @returns fresh array of stored records in medium order with queued
+ * overlays applied.
+ */
+abstract list(): JobRecord[]
+
+/**
+ * Read one record, including a value still queued to write.
+ * @param id - record key.
+ * @returns the record, or `undefined` when absent.
+ */
+abstract get(id: JobId): JobRecord | undefined
+
+/**
+ * Insert or replace one record durably. Writes may be coalesced per id;
+ * the promise settles with the durability of the latest value queued for
+ * that id and rejects when the medium refuses it.
+ * @param record - the full new record (no partial merge).
+ * @returns resolution after the write (or its coalesced successor) lands.
+ */
+abstract put(record: JobRecord): Promise<void>
+
+/**
+ * Delete one record durably, discarding any queued write for the same id
+ * (the queued writers' promises resolve — their record was superseded by a
+ * deliberate removal, not lost).
+ * @param id - record key.
+ * @returns `true` when a stored or queued record existed.
+ */
+abstract delete(id: JobId): Promise<boolean>
+```
+
+Source: [`packages/jobs/jobs-store-domain/src/index.ts`](../../packages/jobs/jobs-store-domain/src/index.ts)
 <!-- END GENERATED cordis-surface -->

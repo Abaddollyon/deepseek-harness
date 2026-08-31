@@ -574,6 +574,53 @@ Source: [`packages/core/session/src/types.ts:301`](../packages/core/session/src/
 
 Source: [`packages/core/session/src/types.ts:291`](../packages/core/session/src/types.ts)
 
+### `run/*`
+
+<a id="runabandoned--log-only"></a>
+
+#### `run/abandoned` — log-only
+
+```ts persistence-catalog
+/**
+ * Boot reconciliation could not resume a run and settled it honestly.
+ * @param data - durable id, kind, the structured reason, and its detail.
+ */
+'run/abandoned': RunAbandonedData
+```
+
+Source: [`packages/jobs/run-supervisor/src/types.ts:77`](../packages/jobs/run-supervisor/src/types.ts)
+
+<a id="rundetached--log-only"></a>
+
+#### `run/detached` — log-only
+
+```ts persistence-catalog
+/**
+ * A durable run was handed from its starting tool to the supervisor.
+ * Declared here so the run/* vocabulary has one home; EMITTED by the
+ * later workflow slice (`@deepseek-ai/dsh-tool-workflow` under
+ * `ownership: 'supervisor'`), never by the run supervisor itself.
+ * @param data - stable run identity and resume policy.
+ */
+'run/detached': RunDetachedData
+```
+
+Source: [`packages/jobs/run-supervisor/src/types.ts:67`](../packages/jobs/run-supervisor/src/types.ts)
+
+<a id="runresumed--log-only"></a>
+
+#### `run/resumed` — log-only
+
+```ts persistence-catalog
+/**
+ * Boot reconciliation re-adopted a run that outlived its host process.
+ * @param data - durable id, kind, and the incarnation that wrote the record.
+ */
+'run/resumed': RunResumedData
+```
+
+Source: [`packages/jobs/run-supervisor/src/types.ts:72`](../packages/jobs/run-supervisor/src/types.ts)
+
 ### `sandbox/*`
 
 <a id="sandboxmode--log-only"></a>
@@ -940,7 +987,7 @@ Source: [`packages/core/session/src/types.ts:280`](../packages/core/session/src/
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:86`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -954,7 +1001,35 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:81`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowlog--log-only"></a>
+
+#### `tool-workflow/log` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow narration line.
+ * @param data - run identity, narration, progress ordinal, and clipping marker.
+ */
+'tool-workflow/log': ToolWorkflowLogData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:76`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowphase--log-only"></a>
+
+#### `tool-workflow/phase` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one durable workflow phase announcement.
+ * @param data - run identity, phase title, and progress ordinal.
+ */
+'tool-workflow/phase': ToolWorkflowPhaseData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:71`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -968,7 +1043,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:91`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -976,13 +1051,13 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow
 
 ```ts persistence-catalog
 /**
- * Opens one top-level workflow record.
- * @param data - stable run identity and display name.
+ * Opens one workflow record.
+ * @param data - stable run identity, display name, and optional enclosing call.
  */
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:66`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

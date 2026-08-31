@@ -24,10 +24,19 @@
       "path": "../../core/scope"
     },
     {
+      "path": "../../core/session"
+    },
+    {
+      "path": "../../util/output-retention"
+    },
+    {
       "path": "../../util/timeout"
     },
     {
       "path": "../jobs"
+    },
+    {
+      "path": "../jobs-store-domain"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

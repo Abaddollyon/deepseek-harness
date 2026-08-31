@@ -17,6 +17,8 @@ import type {
  * `agent()` spawned by the script is attributed to that live Agent.
  */
 export interface WorkflowStartRequest {
+  /** Optional caller-allocated id used to link a durable owner before startup. */
+  id?: WorkflowRunId
   /** The plain-JS script body (top-level await allowed; ends with `return <json-value>`). */
   script: string
   /** The workflow's identity block, as plain JSON data (shape-validated by the engine). */

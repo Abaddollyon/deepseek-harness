@@ -229,9 +229,12 @@
       name: '@deepseek-ai/dsh-workflow-worker-thread'
       config:
         provider: spawn
+        maxRunWallMs: 3600000
 
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
+      config:
+        ownership: supervisor
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'

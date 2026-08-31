@@ -1,0 +1,51 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../vendor/cosmokit"
+    },
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../../vendor/schemastery"
+    },
+    {
+      "path": "../../core/session"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
+      "path": "../../session/session-persistence"
+    },
+    {
+      "path": "../../llm/llm"
+    },
+    {
+      "path": "../../util/timeout"
+    },
+    {
+      "path": "../../util/output-retention"
+    },
+    {
+      "path": "../../workflow/workflow"
+    },
+    {
+      "path": "../jobs"
+    },
+    {
+      "path": "../jobs-store-domain"
+    },
+    {
+      "path": "../../runtime-diagnostics/invariants"
+    }
+  ]
+}

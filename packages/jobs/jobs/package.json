@@ -26,6 +26,10 @@
       "types": "./lib/types/brand.d.ts",
       "default": "./lib/types/brand.js"
     },
+    "./incarnation": {
+      "types": "./lib/types/incarnation.d.ts",
+      "default": "./lib/types/incarnation.js"
+    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },

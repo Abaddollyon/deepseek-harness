@@ -186,6 +186,29 @@ describe('workflow-run Conversation Definition', () => {
     })
   })
 
+  it('keeps a detached workflow running after its starting step closes', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'tool-workflow/run-start', { runId: 'detached', name: 'detached' }),
+      at(4, 'tool-workflow/agent-start', {
+        runId: 'detached', seq: 1, label: 'worker', childId: 'child-1',
+      }),
+      at(5, 'run/detached', {
+        jobId: 'workflow-detached', kind: 'workflow', label: 'workflow: detached',
+        runId: 'detached', resumable: false,
+      }),
+      at(6, 'step/end', { turn: 1, step: 1 }),
+    ])
+    expect(workflowData(value)).toMatchObject({
+      status: 'running', phases: [{ members: [{ status: 'running' }] }],
+    })
+    value.append(at(7, 'tool-workflow/agent-end', { runId: 'detached', seq: 1, outcome: 'completed' }))
+    value.append(at(8, 'tool-workflow/run-end', { runId: 'detached', stopReason: 'completed' }))
+    value.flush()
+    expect(workflowData(value)?.status).toBe('completed')
+  })
+
   it('retains a zero-member run as its own completed node', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
@@ -195,6 +218,29 @@ describe('workflow-run Conversation Definition', () => {
     ])
     expect(workflowData(value)).toEqual({
       name: 'empty', status: 'completed', phases: [],
+    })
+  })
+
+  it('folds phase announcements and narration into the card model', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'tool-workflow/run-start', { runId: 'progress', name: 'progress' }),
+      at(3, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 1 }),
+      at(4, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 2 }),
+      at(5, 'tool-workflow/log', {
+        runId: 'progress', message: 'searching', ordinal: 3, truncated: true,
+      }),
+      at(6, 'tool-workflow/log', { runId: 'progress', message: 'done', ordinal: 4 }),
+      at(7, 'tool-workflow/run-end', { runId: 'progress', stopReason: 'completed' }),
+    ])
+    expect(workflowData(value)).toEqual({
+      name: 'progress',
+      status: 'completed',
+      phases: [{ key: 'value:8:Research', phase: 'Research', members: [] }],
+      narration: [
+        { message: 'searching', ordinal: 3, truncated: true },
+        { message: 'done', ordinal: 4 },
+      ],
     })
   })
 

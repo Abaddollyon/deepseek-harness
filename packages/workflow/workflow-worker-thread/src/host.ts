@@ -157,6 +157,7 @@ export class WorkerRun implements WorkflowRun {
   private workerDeathObserved = false
   private cancelReason: string | undefined
   private graceTimer: NodeJS.Timeout | undefined
+  private wallTimer: NodeJS.Timeout | undefined
   private readonly worker: Worker
   /** Set on `exit`: the thread is gone, so posting has nowhere to go. */
   private workerGone = false
@@ -185,6 +186,7 @@ export class WorkerRun implements WorkflowRun {
     init: WorkerInit,
     private readonly provider: string,
     private readonly disposeGraceMs: number,
+    maxRunWallMs: number,
     private readonly observer: ExecutionObserver,
     signal: AbortSignal | undefined,
   ) {
@@ -212,6 +214,12 @@ export class WorkerRun implements WorkflowRun {
       this.inputSignal = signal
       this.inputSignalAbort = onAbort
       signal.addEventListener('abort', onAbort, { once: true })
+    }
+    if (maxRunWallMs > 0) {
+      this.wallTimer = setTimeout(() => {
+        this.cancel(`workflow run exceeded maxRunWallMs (${maxRunWallMs}ms)`)
+      }, maxRunWallMs)
+      this.wallTimer.unref()
     }
   }
 
@@ -317,7 +325,7 @@ export class WorkerRun implements WorkflowRun {
     // emit `exit`. The first death signal is the host's logical delivery
     // barrier: nothing arriving afterward may create a child, narrate after
     // workflow/end, or compete with the chosen outcome.
-    if (this.workerDeathObserved) return
+    if (this.workerDeathObserved || this.terminalClaimed) return
     switch (message.type) {
       case WorkerToHostType.Ready:
         this.post(HostToWorkerType.Go, {})
@@ -538,9 +546,8 @@ export class WorkerRun implements WorkflowRun {
   }
 
   private onResult(result: WorkflowResult): void {
-    // The owned worker session sends one Result. Keep a late duplicate or a
-    // Result queued behind another terminal source completely side-effect-free.
-    if (this.terminalClaimed) return
+    // The message admission barrier excludes a late duplicate or a Result
+    // queued behind another terminal source before this handler runs.
     // First-wins is decided when the Result message reaches the host. If no
     // external cancellation was already in flight, this result won. Reaping a
     // stray child below may synchronously reenter cancel() through provider
@@ -653,7 +660,7 @@ export class WorkerRun implements WorkflowRun {
     signal.removeEventListener('abort', onAbort)
   }
 
-  /** First settle wins; disarms the grace timer and releases the caller signal. */
+  /** First settle wins; disarms run timers and releases the caller signal. */
   private settleResult(result: WorkflowResult): void {
     // Every current terminal source claims ownership before calling here; keep
     // the fallback local so a future caller cannot resolve twice.
@@ -663,6 +670,7 @@ export class WorkerRun implements WorkflowRun {
     this.settled = true
     this.detachInputSignal()
     clearTimeout(this.graceTimer)
+    clearTimeout(this.wallTimer)
     this.settleResolve(result)
   }
 }

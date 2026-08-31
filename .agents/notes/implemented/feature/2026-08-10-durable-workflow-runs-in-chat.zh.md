@@ -12,23 +12,25 @@ Web Client 已经能够从持久 Session 事件组装由业务拥有的 Conversa
 
 ## 决策
 
-`dsh-tool-workflow` 把每个已接受的顶层运行投影到调用 Agent 的 Session。`tool-workflow/run-start` 记录稳定 `runId` 与已校验名称；匹配的工作流成员事件记录成员序号、精确标签、可选精确阶段、子 Session id 与结果；只有在结果已取得且 `run.dispose()` 完全停稳后，`tool-workflow/run-end` 才记录停止原因。嵌套 transport 执行照常运行，但不会写工作流记录，因为它不拥有独立 Chat 行。
+`dsh-tool-workflow` 把每个已接受运行投影到调用 Agent 的 Session。`tool-workflow/run-start` 记录稳定 `runId`、已校验名称与可选的所属模型 `parentCallId`；因此嵌套 Code Mode transport 执行拥有独立 Chat 记录，不再消失。匹配的 `workflow/phase` 与 `workflow/log` 观察成为持久的正数单调进度事件，并受可配置的每运行事件数与每行字符数限制。匹配的工作流成员事件记录成员序号、精确标签、可选精确阶段、子 Session id 与结果；只有在结果已取得且 `run.dispose()` 完全停稳后，`tool-workflow/run-end` 才记录停止原因。
 
-记录只供观察。任一次 Session append 首次失败后，本运行会停止所有后续写入、只记录一次告警，并且绝不改变取消、结果映射或 dispose。每种失败位置都留下空记录或合法连续前缀：已开始运行可以缺少后续成员或运行终点，已开始成员也可以缺少成员终点。包 invariant 会在冷加载与实时 append 时拒绝重复运行 start、无效或复用的正成员序号、无配对或重复成员 end、仍有开放成员时结束运行，以及运行结束后的任何更新。
+记录只供观察。任一次 Session append 首次失败后，本运行会停止所有后续写入、只记录一次告警，并且绝不改变取消、结果映射或 dispose。每种失败位置都留下空记录或合法连续前缀：已开始运行可以缺少后续成员或运行终点，已开始成员也可以缺少成员终点。包 invariant 会在冷加载与实时 append 时拒绝重复运行 start、无效或非单调的正进度 ordinal、无效或复用的正成员序号、无配对或重复成员 end、仍有开放成员时结束运行，以及运行结束后的任何更新。
 
-workflow 包通过 `@deepseek-ai/dsh-workflow/types` 提供浏览器安全的运行与观察词汇；包含活跃 `Agent` 的请求和控制句柄继续只属于 Host。`@deepseek-ai/dsh-tool-workflow/types` 拥有四类 Session 事件。Client 只导入这些类型 face，因此 Host 与 Client TypeScript 程序共享持久合同，而不会合并 Host Cordis Context。
+workflow 包通过 `@deepseek-ai/dsh-workflow/types` 提供浏览器安全的运行与观察词汇；包含活跃 `Agent` 的请求和控制句柄继续只属于 Host。`@deepseek-ai/dsh-tool-workflow/types` 拥有六类 Session 事件。Client 只导入这些类型 face，因此 Host 与 Client TypeScript 程序共享持久合同，而不会合并 Host Cordis Context。
 
 `ui-workflow-run` 注册一个 `workflow-run` Conversation Definition 和一个 keyed Chat renderer。每条事件都能独立给出同一 `runId`；run-start 初始化 State，后续事件按日志顺序更新；只有 update 的历史尾页会保持 pending，直到 prepend 补入唯一 start。最终节点保留引擎拥有的 key，并以 run-start 锚定在原工具调用之后，从运行中到终态始终保留同一个 React 父级。
 
-renderer 为每一层分配不同视觉职责。运行使用 32 像素 module-platform 背景行，常驻向右／向下 chevron，并以内联状态点加状态文字表达结局，不使用胶囊。阶段使用 32 像素 disclosure 行，在可伸缩主区显示标题与成员数，在固定尾部精确显示聚合状态且不重复状态点。成员使用 16 像素状态点槽、可省略名称区和固定 64 像素状态列。阶段只在成员真正开始时出现，并按精确阶段字符串分组；字段缺省与空字符串保留不同身份和本地化名称。成员结算只改变状态，不删除或重排成员。所属 Turn 或 Step 关闭时，缺少运行或成员终点会显示为已中断；存在持久终点时仍以它为权威。[状态驱动的工作流 disclosure](2026-08-11-workflow-run-status-driven-disclosure.zh.md)拥有这些事实变化时运行与阶段内容的可见性。
+renderer 为每一层分配不同视觉职责。运行使用 32 像素 module-platform 背景行，常驻向右／向下 chevron，并以内联状态点加状态文字表达结局，不使用胶囊。阶段使用 32 像素 disclosure 行，在可伸缩主区显示标题与成员数，在固定尾部精确显示聚合状态且不重复状态点。成员使用 16 像素状态点槽、可省略名称区和固定 64 像素状态列。阶段在运行时 `phase()` 公告或成员开始时出现，并按精确阶段字符串分组；叙述行在卡片模型中保持可选，因此旧记录保留逐字节相同的渲染；字段缺省与空字符串保留不同身份和本地化名称。成员结算只改变状态，不删除或重排成员。所属 Turn 或 Step 关闭时，缺少运行或成员终点会显示为已中断；存在持久终点时仍以它为权威。[状态驱动的工作流 disclosure](2026-08-11-workflow-run-status-driven-disclosure.zh.md)拥有这些事实变化时运行与阶段内容的可见性。
 
-导航从两个当前权威派生，不写入持久记录。只要当前普通 Session 列表包含同一 id、行为 `origin: 'subagent'` 且 `parentId` 等于所展示的父级，成员行即可交互；成员自身的持久状态不再参与，因此已结算成员在其子行存在期间保持可打开（见[工作流终态成员保持可导航](../bug-fix/2026-08-25-workflow-terminal-member-navigation.zh.md)，它部分取代了本笔记最初记录的门槛）。带下划线的成员文字是唯一可见提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，固定状态列继续只表达生命周期，而不写动作说明。renderer 只调用注入的普通 `sessions.open(id)` 回调。仅地址化、远程或父级不符的成员继续可见，但保持静态。
+导航从两个当前权威派生，不写入持久记录。只要当前普通 Session 列表包含同一 id、行为 `origin: 'subagent'` 且 `parentId` 等于所展示的父级，成员行即可交互；成员自身的持久状态不再参与，因此已结算成员在其子行存在期间保持可打开。带下划线的成员文字是唯一可见提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，固定状态列继续只表达生命周期，而不写动作说明。renderer 只调用注入的普通 `sessions.open(id)` 回调。仅地址化、远程或父级不符的成员继续可见，但保持静态。
+
+worker-thread 引擎还提供 `maxRunWallMs`：`0` 表示不设上限，非零值会启动一个不阻止进程退出的运行定时器。到期时以精确原因调用普通取消路径，保留子信号级联、宽限到期、强制终止 worker 与悬空成员合成。超过 Node 最大定时器延迟的值会在插件加载时失败，而不是被钳制为立即超时。
 
 [七状态 Figma 参考](https://www.figma.com/design/tguwzZRmHCjbq58mfsqT0M?node-id=5-2)固定运行展开／收起、完成历史／展开、失败与取消、恢复后中断以及暗色窄列的信息层级。仓库的 `DisclosureRow`、`StateDot`、图标、语义 token 和 keyed-node 行为仍是实现权威；参考稿不引入运行时字段或状态 owner。
 
 ## 验证
 
-包测试覆盖顶层与嵌套准入、零成员与并发运行、先 dispose 后写终点的顺序、四个 append 失败前缀，以及冷／实时 invariant 拒绝。Conversation 测试比较完整 replace、只有 update 的 prepend 和实时 append，并覆盖精确阶段身份、终态与中断状态、disclosure 状态、列表事实导航、HMR 移除与重新注册。shipped Web replay 复用现有工作流父／子模型 fixture，驱动真实 worker、spawn provider、Session 持久化、浏览器 bundle、运行中子级导航、终态保留、原工具行并存、暗色窄列 token 与刷新重建。
+包测试覆盖根调用与嵌套调用记录、有界进度、零成员与并发运行、先 dispose 后写终点的顺序、每个 append 失败前缀，以及冷／实时 invariant 拒绝。fake-timer worker 测试固定无上限与到期墙钟定时器以及加载时范围拒绝。Conversation 测试比较完整 replace、只有 update 的 prepend 和实时 append，并覆盖精确阶段身份、终态与中断状态、disclosure 状态、列表事实导航、HMR 移除与重新注册。shipped Web replay 复用现有工作流父／子模型 fixture，驱动真实 worker、spawn provider、Session 持久化、浏览器 bundle、运行中子级导航、终态保留、原工具行并存、暗色窄列 token 与刷新重建。
 
 ## 曾考虑的替代方案
 
@@ -36,10 +38,10 @@ renderer 为每一层分配不同视觉职责。运行使用 32 像素 module-pl
 
 **持久化服务端 projection 或新增 workflow wire 通道。** 拒绝，因为 Session 事件已经提供持久化、实时传输、分页和 gap repair。另一个 service、cache 或 transport 会复制同一事实并建立第二个生命周期 owner。
 
-**展示声明阶段，或从脚本文本推断静态工作流图。** 拒绝，因为只有成员 start 事件能证明工作真正发生。`meta.phases`、`phase()` 叙述、分支和脚本语法都不是一次运行的权威拓扑。
+**从声明或脚本文本推断静态工作流图。** 拒绝，因为 `meta.phases`、分支和脚本语法都不是一次运行的权威拓扑。运行时 `phase()` 调用作为观察保留，但不会被解释为静态图。
 
-**保留终态子级导航。** 当时拒绝，因为工作流记录证明历史身份而非当前可访问性，且冷 Session 或远程 Session 的打开需要独立目录与授权合同。[工作流终态成员保持可导航](../bug-fix/2026-08-25-workflow-terminal-member-navigation.zh.md) 后来推翻了这一判断：可访问性由普通列表而非记录回答，因此已结算成员在其子行被列入期间可打开子级；冷 Session 与跨远程的异议依然成立，这些行保持静态。
+**保留终态子级导航。** 当时拒绝，因为工作流记录证明历史身份而非当前可访问性，且冷 Session 或远程 Session 的打开需要独立目录与授权合同。当前可访问性由普通列表而非记录回答，因此已结算成员在其子行被列入期间可打开子级；冷 Session 与跨远程的异议依然成立，这些行保持静态。
 
 ## 后果
 
-工作流进度与父对话保存在同一日志中，能跨刷新与进程恢复；执行所有权仍属于工作流 run holder，原工具卡保持不变。持久协议增加四类小事件和一个包所有的 invariant；首次写入失败会刻意牺牲后续观察，而不是牺牲工作流正确性。浏览器 State 按已加载窗口派生，状态驱动的 disclosure 生命周期把复盘选择留在本地，导航会随列表事实消失。设计只展示真实运行成员与状态，并放弃静态图、输出、日志和控制操作。
+工作流进度与父对话保存在同一日志中，能跨刷新与进程恢复，原工具卡保持不变。[受监督的工作流所有权](2026-08-29-supervised-workflow-ownership.zh.md)通过增加到 Jobs 的显式可选移交，部分取代了本说明原有的执行所有权结论。持久协议增加六类小事件和一个包所有的 invariant；首次写入失败会刻意牺牲后续观察，而不是牺牲工作流正确性。浏览器 State 按已加载窗口派生，状态驱动的 disclosure 生命周期把复盘选择留在本地，导航会随列表事实消失。设计保留运行时阶段与叙述观察以及真实成员状态，同时放弃静态图推断、输出和控制操作。

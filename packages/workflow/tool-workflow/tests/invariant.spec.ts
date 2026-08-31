@@ -24,6 +24,8 @@ describe('durable workflow-record invariants', () => {
     const second = WorkflowRunId('second')
     const third = WorkflowRunId('third')
     session.append('tool-workflow/run-start', { runId: first, name: 'first' })
+    session.append('tool-workflow/phase', { runId: first, title: 'scan', ordinal: 1 })
+    session.append('tool-workflow/log', { runId: first, message: 'working', ordinal: 2, truncated: true })
     session.append('tool-workflow/run-start', { runId: second, name: 'second' })
     session.append('tool-workflow/agent-start', {
       runId: second, seq: 1, label: '', phase: '', childId: SessionId('child'),
@@ -92,6 +94,9 @@ describe('durable workflow-record invariants', () => {
     ['non-string run name', (session) => {
       session.append('tool-workflow/run-start', { runId: WorkflowRunId('bad-name'), name: 1 as never })
     }, /name must be a non-empty string/],
+    ['empty parent call id', (session) => {
+      appendRaw(session, 'tool-workflow/run-start', { runId: 'nested', name: 'nested', parentCallId: '' })
+    }, /parentCallId must be a non-empty string/],
     ['duplicate run', (session, runId) => {
       session.append('tool-workflow/run-start', { runId, name: 'again' })
     }, /repeats run/],
@@ -100,6 +105,28 @@ describe('durable workflow-record invariants', () => {
         runId: WorkflowRunId('missing'), seq: 1, label: 'bad', childId: SessionId('child'),
       })
     }, /no matching tool-workflow\/run-start/],
+    ['progress without a run', (session) => {
+      appendRaw(session, 'tool-workflow/phase', { runId: 'missing', title: 'late', ordinal: 1 })
+    }, /no matching tool-workflow\/run-start/],
+    ['non-positive progress ordinal', (session, runId) => {
+      appendRaw(session, 'tool-workflow/phase', { runId, title: 'scan', ordinal: 0 })
+    }, /progress ordinal must be a positive safe integer/],
+    ['non-integer progress ordinal', (session, runId) => {
+      appendRaw(session, 'tool-workflow/log', { runId, message: 'x', ordinal: 1.5 })
+    }, /progress ordinal must be a positive safe integer/],
+    ['non-monotone progress ordinal', (session, runId) => {
+      session.append('tool-workflow/phase', { runId, title: 'scan', ordinal: 1 })
+      session.append('tool-workflow/log', { runId, message: 'late', ordinal: 1 })
+    }, /ordinal 1 is not greater than 1/],
+    ['non-string phase title', (session, runId) => {
+      appendRaw(session, 'tool-workflow/phase', { runId, title: 1, ordinal: 1 })
+    }, /phase title must be a string/],
+    ['non-string log message', (session, runId) => {
+      appendRaw(session, 'tool-workflow/log', { runId, message: 1, ordinal: 1 })
+    }, /log message must be a string/],
+    ['invalid log truncated marker', (session, runId) => {
+      appendRaw(session, 'tool-workflow/log', { runId, message: 'x', ordinal: 1, truncated: false })
+    }, /truncated must be true/],
     ['non-positive member seq', (session, runId) => {
       session.append('tool-workflow/agent-start', {
         runId, seq: 0, label: 'bad', childId: SessionId('child'),
@@ -155,11 +182,15 @@ describe('durable workflow-record invariants', () => {
     ['invalid run stop reason', (session, runId) => {
       session.append('tool-workflow/run-end', { runId, stopReason: 'unknown' as never })
     }, /stopReason unknown is invalid/],
-    ['event after run end', (session, runId) => {
+    ['member event after run end', (session, runId) => {
       session.append('tool-workflow/run-end', { runId, stopReason: 'completed' })
       session.append('tool-workflow/agent-start', {
         runId, seq: 1, label: 'late', childId: SessionId('child'),
       })
+    }, /appears after/],
+    ['progress event after run end', (session, runId) => {
+      session.append('tool-workflow/run-end', { runId, stopReason: 'completed' })
+      session.append('tool-workflow/log', { runId, message: 'late', ordinal: 1 })
     }, /appears after/],
     ['unknown workflow event', (session, runId) => {
       appendRaw(session, 'tool-workflow/unknown', { runId })
