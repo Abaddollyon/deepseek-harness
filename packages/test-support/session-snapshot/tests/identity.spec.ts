@@ -83,7 +83,7 @@ describe('session snapshot identity redaction', () => {
   })
 
   it('redacts typed durable job ids without touching unrelated UUID prose', () => {
-    const jobId = 'subagent-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const jobId = 'pty-send-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const source = [
       JSON.stringify({
         type: 'tool/result',

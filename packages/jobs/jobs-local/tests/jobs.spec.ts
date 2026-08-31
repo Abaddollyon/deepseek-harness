@@ -2155,6 +2155,7 @@ describe('LocalJobRegistry settled retention', () => {
     await tick()
     state.throwOnDelete = true
     ctx.jobs.read(id2)
+    await tick()
     expect(() => ctx.jobs.get(id2)).toThrow('unknown job')
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(`failed to evict durable record ${id2}`))
   })

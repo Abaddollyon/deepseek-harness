@@ -192,6 +192,8 @@ export class LocalJobRegistry extends JobRegistry {
   /** Byte cap for persisted final output. */
   private readonly maxPersistedOutputBytes: number
   private store = new Map<JobId, TrackedTask>()
+  /** Durable deletions for evicted records that teardown can no longer find in {@link store}. */
+  private readonly retiredPersistences = new Set<Promise<void>>()
   /**
    * Session-keyed owner index over {@link store}: every record files under
    * its `ownerSession` (or the shared `undefined` bucket), in registration
@@ -783,19 +785,21 @@ export class LocalJobRegistry extends JobRegistry {
     }
   }
 
-  /** Remove one record's durable mirror, fire-and-forget with contained failure. */
+  /** Queue durable deletion after every earlier mirror and retain it through teardown. */
   private deletePersisted(job: TrackedTask): void {
     if (!this.persist || job.persistDegraded) return
     const store = this.storeRef()
     if (store === undefined) return
-    const contain = (error: unknown): void => {
-      this.selfCtx.logger.warn(`jobs: failed to evict durable record ${job.id}: ${String(error)}`)
-    }
-    try {
-      store.delete(job.id).catch(contain)
-    } catch (error: unknown) {
-      contain(error)
-    }
+    const deletion = job.persisted.then(async () => {
+      try {
+        await store.delete(job.id)
+      } catch (error: unknown) {
+        this.selfCtx.logger.warn(`jobs: failed to evict durable record ${job.id}: ${String(error)}`)
+      }
+    })
+    job.persisted = deletion
+    this.retiredPersistences.add(deletion)
+    void deletion.then(() => this.retiredPersistences.delete(deletion))
   }
 
   /** Project one mutable record onto the durable-store shape. */
@@ -1152,7 +1156,10 @@ export class LocalJobRegistry extends JobRegistry {
       timer = setTimeout(() => { resolve('grace') }, this.teardownGraceMs)
       timer.unref()
     })
-    const persisted = Promise.all(jobs.map(job => job.persisted))
+    const persisted = Promise.all([
+      ...jobs.map(job => job.persisted),
+      ...this.retiredPersistences,
+    ])
     const raced = await Promise.race([persisted.then(() => 'persisted' as const), grace])
     clearTimeout(timer)
     if (raced === 'grace') {
