@@ -713,6 +713,60 @@ describe('RunSupervisor durable adoption markers', () => {
     expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
   })
 
+  it('reports completion when a running adoption marker settles after supervisor mount', async () => {
+    const done = Promise.withResolvers<JobOutcome>()
+    const record = storedRecord({ resumeSpec: { cmd: 'rerun' } })
+    const shared = fakeStore(new Map([[String(record.id), record]]))
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', shared.store)
+    await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    await flush()
+    const alice = stubAgent(ctx, 'alice')
+    ctx.agents.register(alice.agent)
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
+    await flush()
+    await ctx.plugin(RunSupervisor, {})
+    await flush()
+    shared.state.records.set(String(record.id), {
+      ...shared.state.records.get(String(record.id)) as JobRecord,
+      adoptedFromIncarnation: 'newer-adoption',
+    })
+
+    done.resolve({ status: 'completed', output: 'finished' })
+    await flush()
+    expect(alice.injected).toHaveLength(1)
+    expect(shared.state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: true })
+  })
+
+  it('reports an already-terminal adoption marker before clearing its proof', async () => {
+    const record = storedRecord({
+      status: 'completed', finishedAt: 200, reported: false,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+    const alice = agents.get('alice') as StubAgent
+    await flush()
+    expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+    expect(alice.injected).toHaveLength(1)
+    expect(state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: true })
+    expect('adoptedFromIncarnation' in (state.records.get(String(record.id)) as JobRecord)).toBe(false)
+  })
+
+  it('keeps an accounted terminal marker completion pending when owner is offline', async () => {
+    const record = storedRecord({
+      status: 'completed', finishedAt: 200, reported: false,
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', []]])
+    const persistence = fakePersistence({ logs, appended: [] })
+    const { state } = tracked(await boot({ records: [record], persistence: persistence as unknown as never }))
+    await flush()
+    expect(state.records.get(String(record.id))).toMatchObject({ status: 'completed', reported: false })
+  })
+
   it('clears a rejected adoption marker without claiming the producer resumed', async () => {
     const record = storedRecord({
       status: 'failed',
@@ -1307,6 +1361,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
       emitAbandoned(pass: FakePass, owner: SessionId, view: unknown, reason: string, priorIncarnation: string): Promise<void>
       deliverNoticeWhenLive(pass: FakePass, owner: SessionId, view: unknown): void
       activePass: FakePass | undefined
+      clearAdoptionMarker(candidate: { record: JobRecord }): Promise<void>
     }
 
     internals.passRunning = true
@@ -1329,6 +1384,10 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     } as unknown as JobStore
     await internals.runPass(firstStore)
     expect(followList).toHaveBeenCalled()
+    await internals.clearAdoptionMarker({ record: storedRecord({ adoptedFromIncarnation: 'missing' }) })
+    const mismatch = storedRecord({ adoptedFromIncarnation: 'other' })
+    state.records.set(String(mismatch.id), mismatch)
+    await internals.clearAdoptionMarker({ record: { ...mismatch, adoptedFromIncarnation: 'expected' } })
 
     // A pass whose store rejects enumeration fails the pass (and the inject
     // lane would contain it), leaving the serializer clean for the next one.
