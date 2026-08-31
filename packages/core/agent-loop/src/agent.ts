@@ -269,6 +269,8 @@ export class ReactLoopAgent implements Agent {
   private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
     const restore = (messages: readonly UserMessage[], target: InboxTarget): void => {
       for (const message of messages.toReversed()) {
+        if (this.inbox.nextStep.some(candidate => candidate.id === message.id)
+          || this.inbox.nextTurn.some(candidate => candidate.id === message.id)) continue
         this.inbox.prepend(target, message)
       }
     }

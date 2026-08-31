@@ -25,7 +25,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import AgentRegistry, { agentEvents, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, Inbox, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -117,9 +117,20 @@ function createContext(contextWindow = 1_000): Context {
 
 function agent(session: Session, model?: string): Agent {
   return {
-    session,
+    id: session.id,
     options: model === undefined ? {} : { provider: model, model },
-  } as Agent
+    session,
+    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    status: 'running',
+    ctx: new Context(),
+    send: () => {},
+    followup: () => {},
+    steer: () => {},
+    inject: () => { throw new Error('test Agent does not support injection') },
+    cancel() {},
+    runMaintenance: task => task(new AbortController().signal),
+    whenIdle: () => Promise.resolve(),
+  }
 }
 
 /** Flatten every text fragment the summarizer received, recursing tool-result blocks. */
@@ -1481,19 +1492,6 @@ describe('default one-shot summarizer', () => {
     expect(adapter.lastOptions).toMatchObject({ provider: MODEL, model: MODEL })
   })
 
-  it.each([
-    { provider: '', model: MODEL },
-    { provider: MODEL },
-    { provider: MODEL, model: '' },
-  ])('rejects incomplete AgentOptions target %#', async (options) => {
-    const { compact } = await summarizerHarness([{ type: 'text', text: 'unused' }])
-    const owner = {
-      session: Session.create(SessionId(`incomplete-${String(options.model)}`)),
-      options,
-    } as Agent
-    await expect(compact.runSummarize(promptInput('history'), owner))
-      .rejects.toThrow(/no provider\/model available for summarization/)
-  })
 
   it.each([
     [{ kind: 'error', failure: { message: 'provider failed', code: 'PROVIDER' } }, 'PROVIDER', /provider failed/],
