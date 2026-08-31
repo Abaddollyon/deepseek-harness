@@ -1968,7 +1968,9 @@ describe('automatic listener and loader composition', () => {
     expect(compact.calls).toHaveLength(2)
 
     compact.error = new Error('retryable failure')
-    await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeUndefined()
+    const failedSession = conversation(4)
+    const failedOwner = agent(failedSession, MODEL)
+    await expect(Promise.all([preflight(ctx, failedOwner), preflight(ctx, failedOwner)])).resolves.toEqual([undefined, undefined])
     compact.error = undefined
     await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeDefined()
   })
