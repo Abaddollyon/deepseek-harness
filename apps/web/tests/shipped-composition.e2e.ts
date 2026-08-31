@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { JobId } from '@deepseek-ai/dsh-jobs'
 import { canonicalPath, writableRoots } from '@deepseek-ai/dsh-sandbox'
 import { SessionId } from '@deepseek-ai/dsh-session'
 // These imports carry the tools/sandboxPolicy/approval Context merges.
@@ -78,9 +79,7 @@ afterEach(async () => {
 it('assembles the shipped Web transport, catalog, guidance, and defaults', async () => {
   scaffold = await launchWebScaffold({ deepSeekMissingCredential: true })
   const ctx = scaffold.ctx
-  const index = await fetch(`http://127.0.0.1:${String(ctx.webServer.port)}`, {
-    headers: { 'accept-encoding': 'gzip' },
-  })
+  const index = await scaffold.hostFetch('/', { headers: { 'accept-encoding': 'gzip' } })
   expect(index.headers.get('content-encoding')).toBe('gzip')
   expect(index.headers.get('vary')).toContain('Accept-Encoding')
   await index.body?.cancel()
@@ -236,16 +235,12 @@ it('lets a preset producer reach the background-job registry', async () => {
     // Durable registry ids are '<kind>-<uuid>': pin the exact report shape
     // (one text block, UUID-shaped id) and read the id the producer minted
     // instead of asserting a counter-minted literal.
-    expect({ isError: started.isError, content: started.content }).toEqual({
-      isError: false,
-      content: [{
-        type: 'text',
-        text: expect.stringMatching(
-          /^started background job bash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-        ) as unknown as string,
-      }],
-    })
+    expect(started.isError).toBe(false)
+    expect(started.content).toHaveLength(1)
     const startedText = started.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(startedText).toMatch(
+      /^started background job bash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    )
     const jobId = /^started background job (bash-[0-9a-f-]{36})$/.exec(startedText)?.[1]
     if (jobId === undefined) throw new Error('background bash reported no job id: ' + startedText)
 
@@ -283,6 +278,45 @@ it('lets a preset producer reach the background-job registry', async () => {
     expect(collected.content).toEqual([
       { type: 'text', text: expect.stringContaining('SHIPPED_BACKGROUND_OK') as unknown as string },
     ])
+  } finally {
+    await handle.dispose()
+  }
+}, 120_000)
+
+it('runs the shipped workflow tool under supervisor ownership', async () => {
+  scaffold = await launchWebScaffold({ deepSeekMissingCredential: true })
+  const ctx = scaffold.ctx
+  const handle = await ctx.agents.create({
+    sessionId: SessionId('shipped-supervised-workflow'),
+    setup: agentCtx => ctx.agentPresets.mount(agentCtx).then(() => undefined),
+  })
+  try {
+    const schema = ctx.tools.schemas(handle.agent).find(candidate => candidate.name === 'workflow')
+    expect(schema?.description).toContain('supervised background job')
+    const started = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: ToolCallId('shipped-supervised-workflow'),
+      name: 'workflow',
+      arguments: {
+        script: "return { observed: 'SHIPPED_SUPERVISED_OK' }",
+        meta: { name: 'shipped-supervised', description: 'real shipped composition proof' },
+      },
+      agent: handle.agent,
+    })
+    expect(started.isError).toBe(false)
+    const value = started.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('supervised workflow returned no job envelope')
+    }
+    const jobIdValue = value.jobId
+    const runIdValue = value.runId
+    if (typeof jobIdValue !== 'string' || typeof runIdValue !== 'string') {
+      throw new Error('supervised workflow returned invalid run/job ids')
+    }
+    expect(jobIdValue).toBe(`workflow-${runIdValue}`)
+    const jobId = JobId(jobIdValue)
+    await expect(ctx.jobs.wait(jobId, 20_000, handle.agent)).resolves.toMatchObject({ status: 'completed' })
+    expect(ctx.jobs.read(jobId, handle.agent).text).toContain('SHIPPED_SUPERVISED_OK')
   } finally {
     await handle.dispose()
   }

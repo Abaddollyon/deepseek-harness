@@ -600,7 +600,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'run/abandoned': RunAbandonedData
 ```
 
-来源：[`packages/jobs/run-supervisor/src/types.ts:75`](../packages/jobs/run-supervisor/src/types.ts)
+来源：[`packages/jobs/run-supervisor/src/types.ts:77`](../packages/jobs/run-supervisor/src/types.ts)
 
 <a id="rundetached--log-only"></a>
 
@@ -617,7 +617,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'run/detached': RunDetachedData
 ```
 
-来源：[`packages/jobs/run-supervisor/src/types.ts:65`](../packages/jobs/run-supervisor/src/types.ts)
+来源：[`packages/jobs/run-supervisor/src/types.ts:67`](../packages/jobs/run-supervisor/src/types.ts)
 
 <a id="runresumed--log-only"></a>
 
@@ -631,7 +631,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'run/resumed': RunResumedData
 ```
 
-来源：[`packages/jobs/run-supervisor/src/types.ts:70`](../packages/jobs/run-supervisor/src/types.ts)
+来源：[`packages/jobs/run-supervisor/src/types.ts:72`](../packages/jobs/run-supervisor/src/types.ts)
 
 ### `sandbox/*`
 

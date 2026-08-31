@@ -1045,6 +1045,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.',
       },
       {
+        signature: 'abstract startDurable(spec: JobStart): Promise<JobId>',
+        description: 'Register durable work only after its initial record reaches the mounted `ctx.jobStore`; the producer\'s JobStart.run is not invoked before that commit. A missing or rejecting store fails without starting producer work.',
+        parameters: [{ name: 'spec', description: 'producer declaration; the implementation requires durable persistence.' }],
+        returns: 'the registered id after the initial record is durable and work has started.',
+      },
+      {
         signature: 'abstract list(caller?: Agent): JobSnapshot[]',
         description: 'List caller-owned and unowned jobs in registration order without exposing another session\'s labels.',
         parameters: [{ name: 'caller', description: 'reading agent; a non-agent caller sees only unowned jobs.' }],
@@ -4245,7 +4251,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'JobAdoptedListener',
-    declaration: 'export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void | PromiseLike<void>;',
+    declaration: 'export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void | boolean | PromiseLike<void | boolean>;',
   },
   {
     name: 'JobDoneListener',
@@ -4288,8 +4294,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface JobResumeCandidate {\n    readonly id: JobId;\n    readonly kind: JobKind;\n    readonly label: string;\n    readonly ownerSession?: SessionId;\n    readonly resumeSpec: JsonValue;\n    readonly startedAt: number;\n    readonly priorIncarnation: string;\n}',
   },
   {
+    name: 'JobResumePlan',
+    declaration: 'export interface JobResumePlan {\n    start(): JobHooks;\n}',
+  },
+  {
     name: 'JobResumer',
-    declaration: 'export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined;',
+    declaration: 'export type JobResumer = (candidate: JobResumeCandidate) => JobResumePlan | undefined;',
   },
   {
     name: 'JobsChangedListener',
@@ -6193,7 +6203,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowStartRequest',
-    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
+    declaration: 'export interface WorkflowStartRequest {\n    id?: WorkflowRunId;\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
   },
   {
     name: 'WorkflowStopReason',

@@ -8,7 +8,7 @@ import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { ResolvedSubagentStartRequest, SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { ResolvedSubagentStartRequest, SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowMeta, WorkflowResult, WorkflowResultInfo, WorkflowRun, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow'
 import * as workerEngineModule from '../src/index.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -936,6 +936,24 @@ describe('dsh-workflow-worker-thread', () => {
       // The grace force-settle fires workflow/end exactly like an ordinary
       // settlement — a terminated script's death still reaches observers.
       expect(runEnds).toEqual([{ stopReason: 'cancelled', error: result.error, agentsStarted: 0 }])
+      await handle.dispose()
+    })
+
+    it('drops queued worker messages after terminal settlement claims admission', async () => {
+      const { ctx, parent } = await setup()
+      const phases: string[] = []
+      ctx.on('workflow/phase', (_info, title) => { phases.push(title) })
+      const handle = ctx.workflowEngine.start({ ...scripted("return 'done'"), parent })
+      await handle.result
+      const internals = handle as unknown as {
+        terminalClaimed: boolean
+        workerDeathObserved: boolean
+        onMessage(message: { type: WorkerToHostType.Phase; title: string }): void
+      }
+      expect(internals.terminalClaimed).toBe(true)
+      internals.workerDeathObserved = false
+      internals.onMessage({ type: WorkerToHostType.Phase, title: 'after terminal' })
+      expect(phases).toEqual([])
       await handle.dispose()
     })
 

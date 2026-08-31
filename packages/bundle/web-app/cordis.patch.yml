@@ -61,12 +61,6 @@
       config:
         path: !!js dshHomePath('storages/domains.sqlite')
 
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
-        routes: !!js "JSON.parse(Number(process.versions.node.split('.')[0]) < 24 ? '{}' : '{\"jobs\":\"sqlite\"}')"
-
     # Durable job records (domain 'jobs') + boot reconciliation: resume what a
     # restart left resumable, settle the rest honestly, exactly one notice per
     # unreported completion.
@@ -373,6 +367,11 @@
 
 # Durable background jobs: mirror registry records into the domain store so the
 # run supervisor can reconcile them after a service restart.
+- id: storage-domain
+  config:
+    backend: json
+    routes: !!js "JSON.parse(Number(process.versions.node.split('.')[0]) < 24 ? '{}' : '{\"jobs\":\"sqlite\"}')"
+
 - id: jobs
   config:
     persist: true

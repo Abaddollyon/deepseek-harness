@@ -24,6 +24,7 @@ export type {
   JobOutcome,
   JobRead,
   JobResumeCandidate,
+  JobResumePlan,
   JobResumer,
   JobSnapshot,
   JobStart,
@@ -85,6 +86,16 @@ export abstract class JobRegistry extends Service {
    * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
    */
   abstract start(spec: JobStart): JobId
+
+  /**
+   * Register durable work only after its initial record reaches the mounted
+   * `ctx.jobStore`; the producer's {@link JobStart.run} is not invoked
+   * before that commit. A missing or rejecting store fails without starting
+   * producer work.
+   * @param spec - producer declaration; the implementation requires durable persistence.
+   * @returns the registered id after the initial record is durable and work has started.
+   */
+  abstract startDurable(spec: JobStart): Promise<JobId>
 
   /**
    * List caller-owned and unowned jobs in registration order without exposing

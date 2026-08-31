@@ -598,7 +598,7 @@ Source: [`packages/core/session/src/types.ts:329`](../packages/core/session/src/
 'run/abandoned': RunAbandonedData
 ```
 
-Source: [`packages/jobs/run-supervisor/src/types.ts:75`](../packages/jobs/run-supervisor/src/types.ts)
+Source: [`packages/jobs/run-supervisor/src/types.ts:77`](../packages/jobs/run-supervisor/src/types.ts)
 
 <a id="rundetached--log-only"></a>
 
@@ -615,7 +615,7 @@ Source: [`packages/jobs/run-supervisor/src/types.ts:75`](../packages/jobs/run-su
 'run/detached': RunDetachedData
 ```
 
-Source: [`packages/jobs/run-supervisor/src/types.ts:65`](../packages/jobs/run-supervisor/src/types.ts)
+Source: [`packages/jobs/run-supervisor/src/types.ts:67`](../packages/jobs/run-supervisor/src/types.ts)
 
 <a id="runresumed--log-only"></a>
 
@@ -629,7 +629,7 @@ Source: [`packages/jobs/run-supervisor/src/types.ts:65`](../packages/jobs/run-su
 'run/resumed': RunResumedData
 ```
 
-Source: [`packages/jobs/run-supervisor/src/types.ts:70`](../packages/jobs/run-supervisor/src/types.ts)
+Source: [`packages/jobs/run-supervisor/src/types.ts:72`](../packages/jobs/run-supervisor/src/types.ts)
 
 ### `sandbox/*`
 

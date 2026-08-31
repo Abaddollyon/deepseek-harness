@@ -225,13 +225,25 @@ export interface JobResumeCandidate {
 }
 
 /**
- * Resume handler for one job kind. Returning {@link JobHooks} adopts the
- * persisted record under its original id; returning `undefined` declines, and
- * the registry settles the record honestly as `failed` with detail
- * `'not resumable after host restart'`. A throw is contained the same way,
- * with the thrown reason in the detail.
+ * Deferred producer for a restored record. The registry durably records the
+ * adoption and awaits its account observers before invoking {@link start}.
  */
-export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined
+export interface JobResumePlan {
+  /**
+   * Start the producer and return its hooks. Called at most once after adoption
+   * commit; a throw settles the record as a failed resume.
+   * @returns hooks for the newly started producer.
+   */
+  start(): JobHooks
+}
+
+/**
+ * Resume handler for one job kind. Returning a deferred {@link JobResumePlan}
+ * accepts the persisted record under its original id; returning `undefined`
+ * declines it. The handler may inspect the candidate but must not start work.
+ * A throw or decline settles the record honestly as `failed`.
+ */
+export type JobResumer = (candidate: JobResumeCandidate) => JobResumePlan | undefined
 
 /**
  * Observation callback for a change to what one owner's {@link JobRegistry.list}
@@ -245,9 +257,12 @@ export type JobResumer = (candidate: JobResumeCandidate) => JobHooks | undefined
 export type JobsChangedListener = (owner: Agent | undefined) => void
 
 /**
- * Listener for one restored job adopted by a producer resumer. A returned
- * promise is awaited before the registry attaches the producer's completion
- * wiring, so the observer's account lands before any settlement it must
- * recognize.
+ * Listener for one restored job accepted by a producer resumer. Returned
+ * promises settle before producer work starts. Returning `false` rejects the
+ * ownership transfer; throws are contained so observational listeners cannot
+ * accidentally veto it.
  */
-export type JobAdoptedListener = (snapshot: JobSnapshot, priorIncarnation: string) => void | PromiseLike<void>
+export type JobAdoptedListener = (
+  snapshot: JobSnapshot,
+  priorIncarnation: string,
+) => void | boolean | PromiseLike<void | boolean>

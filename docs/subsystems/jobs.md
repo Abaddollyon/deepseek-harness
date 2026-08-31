@@ -223,6 +223,16 @@ Implementations must honor these semantics:
 abstract start(spec: JobStart): JobId
 
 /**
+ * Register durable work only after its initial record reaches the mounted
+ * `ctx.jobStore`; the producer's {@link JobStart.run} is not invoked
+ * before that commit. A missing or rejecting store fails without starting
+ * producer work.
+ * @param spec - producer declaration; the implementation requires durable persistence.
+ * @returns the registered id after the initial record is durable and work has started.
+ */
+abstract startDurable(spec: JobStart): Promise<JobId>
+
+/**
  * List caller-owned and unowned jobs in registration order without exposing
  * another session's labels.
  * @param caller - reading agent; a non-agent caller sees only unowned jobs.

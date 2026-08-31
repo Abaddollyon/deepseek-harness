@@ -157,7 +157,7 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
     assertBodyParses(request.script, meta.name)
     const subagentProvider = resolveSubagentProvider(this.ctx, this.config.provider, request.subagentProvider)
     const maxTotalAgents = resolveMaxTotalAgents(request.maxTotalAgents, this.config.maxTotalAgents)
-    const id = WorkflowRunId(randomUUID())
+    const id = request.id ?? WorkflowRunId(randomUUID())
     const info: WorkflowRunInfo = { id, meta }
     const limits: WorkerLimits = {
       maxConcurrentAgents: this.config.maxConcurrentAgents === 0
