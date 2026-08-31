@@ -189,4 +189,15 @@ describe('isolateWorkspaceProjectRoot', () => {
       await rm(cwd, { recursive: true, force: true })
     }
   })
+
+  it('propagates a non-ENOENT marker lookup failure', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    const cwd = join(parent, 'not-a-directory')
+    try {
+      await writeFile(cwd, 'file')
+      await expect(isolateWorkspaceProjectRoot(cwd)).rejects.toMatchObject({ code: 'ENOTDIR' })
+    } finally {
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
 })

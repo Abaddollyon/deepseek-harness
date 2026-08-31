@@ -40,7 +40,6 @@ export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
 export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
   const marker = join(cwd, ISOLATED_PROJECT_ROOT_MARKER)
   const existing = await lstat(marker).catch((error: unknown): undefined => {
-    /* v8 ignore next 1 -- the harness owns cwd and its parents, so lstat fails only with ENOENT */
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     return undefined
   })
