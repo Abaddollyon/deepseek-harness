@@ -1,6 +1,21 @@
+---
+description: "JSONL 持久会话存储后端。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-session-persistence-jsonl
 
 [English](README.md) | 中文
+
+## 概述
+
+JSONL 后端使用可配置压缩与有界并发列表保存仅追加的会话日志。
+
+## 目录
+
+- [配置](#config)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
 JSONL 持久会话存储后端：`SessionPersistence` 的一个具体实现（`dsh-session-persistence` seam）。每个会话有一个仅追加的逻辑 JSONL 日志，默认存储为 `.jsonl.zstd`；禁用压缩时使用原始 `.jsonl`。
 
@@ -19,6 +34,7 @@ JSONL 持久会话存储后端：`SessionPersistence` 的一个具体实现（`d
 - 项目目录保留规范化 cwd 的可读形式，便于导航，并限制在文件系统组件上限内。分隔符替换和截断刻意有损，因此规范化相同的 cwd 字符串共享项目目录；会话 id 仍选择不同会话目录。在不区分大小写的文件系统上，只有文件系统规范化将两种写法解析到同一 transcript（文本记录）时，身份验证才接受备选路径写法。配置根仍由部署控制：可以是项目本地、共享、临时或集中式。[项目会话目录决策](../../../.agents/notes/implemented/architecture/2026-07-24-project-session-directories.zh.md) 记录这项取舍。
 - 会话 id 是未验证的带品牌类型的字符串，因此在使用前单射转义为一个安全路径段（无遍历、无冲突）。结果目录保留给其他会话自有产物；发现只读取固定 transcript 文件名。
 
+<a id="config"></a>
 ## 配置
 
 | 键 | 类型 | 说明 |
@@ -52,6 +68,7 @@ JSONL 持久会话存储后端：`SessionPersistence` 的一个具体实现（`d
 
 插件将冻结的会话事件复制到每个活动会话各自的 controller。第一个待处理事件会开启配置的固定批处理窗口，后续事件会加入但不会重置截止时间。窗口到期后会启动一次持久化追加；该次写入期间接纳的事件会形成另一个独立有界的后续批次。`session/flush` 会取消等待并排空当前与待处理批次。每会话游标防止恢复后的会话重新 append 已存储事件，插件加载时会为活动会话设置初始状态。所属后端实例串行化单会话操作；dispose（资源释放）会在拆卸前排空每个保留的 controller。每个逻辑事件都会保留：批处理只让单个压缩帧或一次原始 JSONL fsync 承载更多记录。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 恢复的对话历史
@@ -68,7 +85,10 @@ JSONL 存储不会向当前请求提供提示词或 schema。加载会恢复已�
 
 JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope 和模型路由匹配时，恢复 loop 才能重用提供方缓存；崩溃修复结果仅追加。
 
+<a id="known-limitations-and-deferred-work"></a>
 ## 已知限制与暂缓事项
+
+<a id="known-limitations-and-deferred-work"></a>
 
 - **只加载已配置编码和当前 `SESSION_FORMAT_VERSION`（v0）**：更改压缩需要独立/全新根，或选择遗留原始 mode；预发布格式没有迁移。
 - **平铺文件存储布局不加载**：加载前使用独立根，或将预发布产物移入项目/会话目录布局。
@@ -76,3 +96,8 @@ JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope �
 - **不删除会话文件**：日志在 `root` 下累积，直到外部移除（seam 无删除接口）。
 - **每会话一个活动 writer**：append 和修复只在所属后端实例内协调。在所有者完成完全停稳的 dispose 前，其他后端实例或进程不得写入同一会话；初始同 id 发布仍通过 POSIX 无覆盖硬链接或 Windows 无替换 write-through rename 保持冲突安全。
 - **POSIX 实体化需要硬链接支持**：第一次 append 使用 `link()`，使同 id 竞态失败，而不覆盖已提交日志；Windows 使用无替换 write-through rename。
+
+<a id="dev-note"></a>
+### 开发备注
+
+列表变更需要确定性顺序、有界并发和最早错误测试。

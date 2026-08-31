@@ -37,7 +37,8 @@ describe('pi-ai credential store over harness records', () => {
     const store = credentialStoreFrom(ctx)
 
     await store.modify('cloudflare', () =>
-      Promise.resolve({ type: 'api_key', key: 'sk-live', env: { ACCOUNT_ID: 'acct-1' } }))
+      Promise.resolve({ type: 'api_key', key: 'sk-live', env: { ACCOUNT_ID: 'acct-1' } }),
+    { signal: new AbortController().signal })
 
     await expect(store.read('cloudflare'))
       .resolves.toEqual({ type: 'api_key', key: 'sk-live', env: { ACCOUNT_ID: 'acct-1' } })
@@ -62,6 +63,51 @@ describe('pi-ai credential store over harness records', () => {
 
     await expect(store.read('openai-codex')).resolves.toEqual(granted)
     await expect(ctx.credentials.readRecord(CODEX)).resolves.toEqual({ kind: 'grant', payload: granted })
+  })
+
+  it('stores the JSON image of a grant, dropping explicitly-undefined members', async () => {
+    const ctx = await stored()
+    const store = credentialStoreFrom(ctx)
+    // The github.com Copilot shape: pi-ai sets optional members to explicit
+    // undefined, which the strict record validator refuses verbatim.
+    const granted = {
+      type: 'oauth' as const,
+      access: 'at',
+      refresh: 'rt',
+      expires: 42,
+      enterpriseUrl: undefined,
+      nested: { keep: 'x', drop: undefined },
+      list: ['a', undefined, 'b'],
+    }
+
+    await store.modify('github-copilot', () => Promise.resolve(granted))
+
+    await expect(ctx.credentials.readRecord(recordKeyFor('github-copilot'))).resolves.toEqual({
+      kind: 'grant',
+      payload: {
+        type: 'oauth',
+        access: 'at',
+        refresh: 'rt',
+        expires: 42,
+        nested: { keep: 'x' },
+        list: ['a', null, 'b'],
+      },
+    })
+  })
+
+  it('passes a genuinely unstorable grant value through to the store\'s loud refusal', async () => {
+    const ctx = await stored()
+    const store = credentialStoreFrom(ctx)
+    // A foreign-prototype member is not the undefined idiom: the image leaves
+    // it untouched and the record validator still refuses the write.
+    const granted = { type: 'oauth' as const, access: 'at', refresh: 'rt', expires: 42, issued: new Date(0) }
+
+    await expect(store.modify(
+      'github-copilot',
+      () => Promise.resolve(granted),
+      { signal: new AbortController().signal },
+    ))
+      .rejects.toThrow(/JSON cannot represent/)
   })
 
   it('shows the mutation the current credential and leaves it alone when declined', async () => {
@@ -115,6 +161,41 @@ describe('pi-ai credential store over harness records', () => {
     await expect(store.modify('openai-codex', () => Promise.resolve({ type: 'api_key', key: 'k' })))
       .rejects.toThrow(/mounts no credentials service/)
     await expect(store.delete('openai-codex')).rejects.toThrow(/mounts no credentials service/)
+  })
+
+  it('abandons an in-flight durable mutation on cancellation without committing it', async () => {
+    const ctx = await stored()
+    const store = credentialStoreFrom(ctx)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const mutationReturned = Promise.withResolvers<undefined>()
+    const controller = new AbortController()
+    const pending = store.modify('openai-codex', async () => {
+      entered.resolve(undefined)
+      await release.promise
+      mutationReturned.resolve(undefined)
+      return { type: 'api_key', key: 'too-late' }
+    }, { signal: controller.signal })
+    await entered.promise
+
+    controller.abort('credential deadline')
+    await expect(pending).rejects.toThrow('credential deadline')
+    release.resolve(undefined)
+    await mutationReturned.promise
+    await Promise.resolve()
+
+    await expect(store.read('openai-codex')).resolves.toBeUndefined()
+  })
+
+  it('rejects an already-aborted durable mutation before entering the store', async () => {
+    const store = credentialStoreFrom(await stored())
+    const controller = new AbortController()
+    controller.abort(new Error('already stopped'))
+    const mutate = vi.fn(() => Promise.resolve({ type: 'api_key' as const, key: 'never' }))
+
+    await expect(store.modify('openai-codex', mutate, { signal: controller.signal }))
+      .rejects.toThrow('already stopped')
+    expect(mutate).not.toHaveBeenCalled()
   })
 
   it('treats a provider id outside the record grammar as holding nothing', async () => {

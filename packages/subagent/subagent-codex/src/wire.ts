@@ -1,5 +1,5 @@
 /**
- * Minimal Codex app-server 0.147.0 protocol adapter. The shared JSON-RPC
+ * Minimal Codex app-server 0.149.1 protocol adapter. The shared JSON-RPC
  * transport owns framing and request correlation; this module owns only the
  * product methods, current thread/turn association, unattended approval
  * responses, and terminal-answer selection.
@@ -8,18 +8,29 @@
  */
 
 import type { Readable, Writable } from 'node:stream'
+import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import type { CodexPermissionMode } from './run.ts'
+import { thrown } from './error.ts'
 
 type JsonObject = Record<string, unknown>
 
 /** Product facts owned by the Codex wire after publication. */
 export interface CodexWireFailureFacts {
   readonly stage: 'turn-start' | 'turn'
-  readonly category: string
+  readonly category:
+    | 'limit'
+    | 'access-policy'
+    | 'service'
+    | 'transport'
+    | 'product-error'
+    | 'invalid-result'
+    | 'unknown'
   readonly httpStatus?: number | undefined
+  /** Structured provider-neutral routing facts when the wire can prove them. */
+  readonly failure?: SubagentFailure
 }
 
 const THREAD_PERMISSION_PARAMS: Readonly<Record<CodexPermissionMode, JsonObject>> = {
@@ -33,40 +44,6 @@ const THREAD_PERMISSION_PARAMS: Readonly<Record<CodexPermissionMode, JsonObject>
     approvalPolicy: 'never',
     sandbox: 'danger-full-access',
   },
-}
-
-const STDERR_PERMISSION_SIGNATURES = [
-  {
-    text: 'approval policy is Never; reject command',
-    request: 'command execution',
-    decision: 'denied',
-    reason: 'Codex rejected an escalation because the selected policy never asks for approval',
-  },
-  {
-    text: 'recorded sandbox violation:',
-    request: 'sandbox execution',
-    decision: 'failed',
-    reason: 'Codex reported a sandbox violation',
-  },
-] as const
-
-const STDERR_SIGNATURE_TAIL_CHARS = Math.max(
-  ...STDERR_PERMISSION_SIGNATURES.map(signature => signature.text.length),
-) - 1
-
-function stderrSignatureTail(value: string): string {
-  for (
-    let length = Math.min(STDERR_SIGNATURE_TAIL_CHARS, value.length)
-    ; length > 0
-    ; length -= 1
-  ) {
-    const tail = value.slice(-length)
-    if (STDERR_PERMISSION_SIGNATURES.some(signature =>
-      tail.length < signature.text.length && signature.text.startsWith(tail))) {
-      return tail
-    }
-  }
-  return ''
 }
 
 function object(value: unknown, label: string): JsonObject {
@@ -102,10 +79,28 @@ function numericHttpStatus(value: unknown): number | undefined {
     : undefined
 }
 
-function objectFailureInfo(value: JsonObject): {
-  readonly category: string
+interface ParsedFailureInfo {
+  readonly category: CodexWireFailureFacts['category']
   readonly httpStatus?: number | undefined
-} {
+  readonly maxTokens?: true
+  readonly sandboxFailure?: true
+  readonly failure?: SubagentFailure
+}
+
+function retryAfterMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function httpFailure(fields: JsonObject, status: number | undefined): SubagentFailure | undefined {
+  if (status !== 429) return undefined
+  const delay = retryAfterMs(fields.retryAfterMs)
+  return {
+    code: 'RATE_LIMIT',
+    ...delay === undefined ? {} : { retryAfterMs: delay },
+  }
+}
+
+function objectFailureInfo(value: JsonObject): ParsedFailureInfo {
   const keys = Object.keys(value)
   const category = keys[0]
   if (keys.length !== 1 || category === undefined) {
@@ -123,21 +118,23 @@ function objectFailureInfo(value: JsonObject): {
     case 'responseTooManyFailedAttempts':
     {
       const httpStatus = numericHttpStatus(fields.httpStatusCode)
+      const failure = httpFailure(fields, httpStatus)
       return httpStatus === undefined
-        ? { category }
-        : { category, httpStatus }
+        ? { category: 'transport' }
+        : {
+          category: 'transport',
+          httpStatus,
+          ...failure === undefined ? {} : { failure },
+        }
     }
     case 'activeTurnNotSteerable':
-      return { category }
+      return { category: 'product-error' }
     default:
       return { category: 'unknown' }
   }
 }
 
-function failureInfo(turn: JsonObject): {
-  readonly category: string
-  readonly httpStatus?: number | undefined
-} {
+function failureInfo(turn: JsonObject): ParsedFailureInfo {
   if (turn.status !== 'failed') return { category: 'unknown' }
   const error = turn.error
   if (error === null || typeof error !== 'object' || Array.isArray(error)) {
@@ -147,24 +144,49 @@ function failureInfo(turn: JsonObject): {
   if (typeof info === 'string') {
     switch (info) {
       case 'contextWindowExceeded':
+        return { category: 'limit', maxTokens: true }
       case 'sessionBudgetExceeded':
+        return { category: 'limit' }
       case 'usageLimitExceeded':
+        return { category: 'limit', failure: { code: QUOTA_EXCEEDED_CODE } }
       case 'serverOverloaded':
-      case 'cyberPolicy':
       case 'internalServerError':
+        return { category: 'service' }
+      case 'cyberPolicy':
+      case 'misalignmentPolicyViolation':
       case 'unauthorized':
+        return { category: 'access-policy' }
       case 'badRequest':
       case 'threadRollbackFailed':
-      case 'sandboxError':
       case 'other':
-        return { category: info }
+        return { category: 'product-error' }
+      case 'sandboxError':
+        return { category: 'access-policy', sandboxFailure: true }
       default:
         return { category: 'unknown' }
     }
   }
-  return info !== null && typeof info === 'object' && !Array.isArray(info)
-    ? objectFailureInfo(info as JsonObject)
-    : { category: 'unknown' }
+  if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+    const parsed = objectFailureInfo(info as JsonObject)
+    const fields = error as JsonObject
+    const status = parsed.httpStatus ?? numericHttpStatus(fields.httpStatusCode)
+      ?? numericHttpStatus(fields.statusCode) ?? numericHttpStatus(fields.status)
+    const failure = parsed.failure ?? httpFailure(fields, status)
+    return {
+      ...parsed,
+      ...status !== undefined && parsed.httpStatus === undefined ? { httpStatus: status } : {},
+      ...failure === undefined ? {} : { failure },
+    }
+  }
+  const fields = error as JsonObject
+  const status = numericHttpStatus(fields.httpStatusCode)
+    ?? numericHttpStatus(fields.statusCode) ?? numericHttpStatus(fields.status)
+  const failure = httpFailure(fields, status)
+  return {
+    category: 'unknown',
+    ...status === undefined ? {} : { httpStatus: status },
+    ...failure === undefined ? {} : { failure },
+  }
 }
 
 function unattendedDiagnostic(
@@ -174,11 +196,6 @@ function unattendedDiagnostic(
   reason: string,
 ): string {
   return `Codex unattended decision (mode: ${mode}; request: ${request}; decision: ${decision}): ${reason}`
-}
-
-function thrown(value: unknown): Error {
-  /* v8 ignore next -- typed protocol and stream failures reject with Error. */
-  return value instanceof Error ? value : new Error(String(value))
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -236,7 +253,6 @@ export class CodexAppServerWire {
     readonly decision: Parameters<typeof unattendedDiagnostic>[2]
     readonly reason: string
   } | undefined
-  private stderrTail = ''
   private inputEnded = false
   private terminalObserved = false
   private closed = false
@@ -245,6 +261,7 @@ export class CodexAppServerWire {
     private readonly input: Readable,
     output: Writable,
     private readonly permissionMode: CodexPermissionMode,
+    private readonly model?: string,
   ) {
     this.transport = new JsonRpcLineTransport(input, output)
     // Fatal protocol state can arrive after the current guarded operation has
@@ -309,6 +326,7 @@ export class CodexAppServerWire {
     const response = object(await this.guarded(this.transport.request('thread/start', {
       cwd,
       ephemeral: true,
+      ...this.model === undefined ? {} : { model: this.model },
       ...THREAD_PERMISSION_PARAMS[this.permissionMode],
     }, signal), signal), 'thread/start response')
     const thread = object(response.thread, 'thread/start thread')
@@ -363,14 +381,13 @@ export class CodexAppServerWire {
     const status = terminal.status
     if (status !== 'completed') {
       const parsed = failureInfo(terminal)
-      this.recordFailure(parsed.httpStatus === undefined
-        ? { stage: 'turn', category: parsed.category }
-        : {
-          stage: 'turn',
-          category: parsed.category,
-          httpStatus: parsed.httpStatus,
-        })
-      if (parsed.category === 'sandboxError') {
+      this.recordFailure({
+        stage: 'turn',
+        category: parsed.category,
+        ...parsed.httpStatus === undefined ? {} : { httpStatus: parsed.httpStatus },
+        ...parsed.failure === undefined ? {} : { failure: parsed.failure },
+      })
+      if (parsed.sandboxFailure) {
         this.recordDiagnostic(
           'sandbox execution',
           'failed',
@@ -378,7 +395,7 @@ export class CodexAppServerWire {
           completed.order,
         )
       }
-      if (parsed.category === 'contextWindowExceeded') {
+      if (parsed.maxTokens) {
         return { output: this.collectOutput(), stopReason: 'max-tokens' }
       }
       const detail = status === 'failed' ? `: ${parsed.category}` : ''
@@ -386,7 +403,7 @@ export class CodexAppServerWire {
     }
     const output = this.collectOutput()
     if (output.length === 0) {
-      this.recordFailure({ stage: 'turn', category: 'unknown' })
+      this.recordFailure({ stage: 'turn', category: 'invalid-result' })
       throw new Error('subagent-codex: Codex completed without a final answer')
     }
     return { output, stopReason: 'completed' }
@@ -426,32 +443,10 @@ export class CodexAppServerWire {
   /**
    * The structured failure fact observed for this published turn.
    * Call only after a non-completed return or rejection from {@link runTurn}.
-   * @returns the fixed stage/category pair and optional HTTP status.
+   * @returns the fixed stage/category pair and optional HTTP status, when a failure was observed.
    */
-  collectFailure(): CodexWireFailureFacts {
-    return this.failure as CodexWireFailureFacts
-  }
-
-  /**
-   * Observe product stderr while retaining only enough tail to recognize fixed
-   * permission signatures. The raw text is never copied into the diagnostic.
-   * @param chunk - one decoded stderr chunk already forwarded to the host.
-   */
-  observeStderr(chunk: string): void {
-    const observed = `${this.stderrTail}${chunk}`
-    let latestIndex = -1
-    let latest: (typeof STDERR_PERMISSION_SIGNATURES)[number] | undefined
-    for (const signature of STDERR_PERMISSION_SIGNATURES) {
-      const index = observed.lastIndexOf(signature.text)
-      if (index > latestIndex) {
-        latestIndex = index
-        latest = signature
-      }
-    }
-    if (latest !== undefined) {
-      this.recordDiagnostic(latest.request, latest.decision, latest.reason)
-    }
-    this.stderrTail = stderrSignatureTail(observed)
+  collectFailure(): CodexWireFailureFacts | undefined {
+    return this.failure
   }
 
   /** Detach JSON-RPC listeners and reject outstanding requests. Idempotent. */

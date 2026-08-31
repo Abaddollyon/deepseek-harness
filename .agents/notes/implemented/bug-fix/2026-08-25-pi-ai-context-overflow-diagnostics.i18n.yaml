@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-pi-ai-context-overflow-diagnostics.md
-2026-08-25-pi-ai-context-overflow-diagnostics.md: 2ae8afdf3d9c465ae0c715ccf95c7cf326e107a1
-2026-08-25-pi-ai-context-overflow-diagnostics.zh.md: 558e45d0359aeb05319d59fcae73066aace2f430
+2026-08-25-pi-ai-context-overflow-diagnostics.md: 94c43c6f72bb3e37c15c51361c7c786aea566f81
+2026-08-25-pi-ai-context-overflow-diagnostics.zh.md: d9de1b9637bde97bb73255c2ad8c383c53c81c29

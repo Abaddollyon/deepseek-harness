@@ -6,7 +6,7 @@ English | [中文](2026-08-25-ungrouped-loose-chats.zh.md)
 
 ## Problem
 
-The retired compiled-bundle patch `apply-rc6-ungrouped-sessions` made the sidebar's Ungrouped bucket a first-class home for loose chats. When compiled patching was retired in the 0.1.1-rc.2 upgrade the behavior was silently lost, and a first repair restored only the bucket label ([the label note](2026-08-24-ungrouped-bucket-loose-chats.md), still current and unaffected here). Two defects remained in source:
+The retired compiled-bundle patch `apply-rc6-ungrouped-sessions` made the sidebar's Ungrouped bucket a first-class home for loose chats. When compiled patching was retired in the 0.1.1-rc.2 upgrade the behavior was silently lost, and a first repair restored only the bucket label; that behavior remains current and unaffected here. Two defects remained in source:
 
 1. **The bucket's ＋ was inert.** `WorkspaceBrowser`'s group `onCreate` callback did nothing when the group had no `workspaceId`, because the only start path was the workspace-scoped `ctx.workspaces.startSession`. The bucket already rendered as a first-class group (`tree.ts`); only the action was missing.
 2. **A workspace-less session was unusable.** `ConversationRoot` computed `inert` as `sessionId === undefined || (hero && chipTitle === undefined)`. A real blank session no Workspace accounts for has no chip title, so a loose chat rendered the workspace chooser over a disabled composer — defeating the ＋ that had just created it.

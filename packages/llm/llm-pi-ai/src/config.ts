@@ -54,7 +54,7 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
 /** Default total-pixel budget preserves the complete 2048px normalized attachment. */
 export const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
-/** Default raw encoded-byte cap before inline base64 expansion. */
+/** Default raw encoded-byte target before inline base64 expansion; the smallest quality-ladder output is used when no quality fits. */
 export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
@@ -62,6 +62,9 @@ export const DEFAULT_CONTEXT_WINDOW = 262_144
 
 /** Default extra attempts after a provider's pre-content auth rejection. */
 export const DEFAULT_AUTH_RECOVERY_RETRIES = 1
+
+/** Maximum extra attempts permitted by one auth-recovery policy. */
+export const MAX_AUTH_RECOVERY_RETRIES = 8
 
 /** Default delay before an auth-recovery attempt, in milliseconds. */
 export const DEFAULT_AUTH_RECOVERY_DELAY_MS = 1_000
@@ -175,7 +178,10 @@ export interface PiAiProviderProfile {
   maxRequestImageBytes?: number
   /** Total-pixel budget for each deterministic inline request version. */
   requestImagePixelBudget?: number
-  /** Raw encoded-byte cap for each deterministic inline request version. */
+  /**
+   * Raw encoded-byte target for each deterministic inline request version;
+   * the smallest quality-ladder output is used when no quality fits.
+   */
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
@@ -221,7 +227,7 @@ export interface ResolvedPiAiProviderProfile
   maxRequestImageBytes: number
   /** Positive total-pixel request-version budget after defaulting. */
   requestImagePixelBudget: number
-  /** Positive raw request-version byte cap after defaulting. */
+  /** Positive raw request-version byte target after defaulting; the smallest quality-ladder output is used when no quality fits. */
   requestImageMaxBytes: number
   /** Immutable retry policy captured with this provider route. */
   retryPolicy: ResolvedRetryPolicy
@@ -260,9 +266,10 @@ const thinkingBudgets = z.object({
 })
 
 /**
- * One `chat_template_kwargs` value. The `$var` member is pi-ai's placeholder
- * for a value dispatch fills from the request's thinking state, which is what
- * makes a chat-template gateway configurable without restating its template.
+ * One `chat_template_kwargs` or `chat_template_args` value. The `$var` member
+ * is pi-ai's placeholder for a value dispatch fills from the request's
+ * thinking state, which makes a template-driven gateway configurable without
+ * restating its template.
  */
 const chatTemplateKwarg: z<ChatTemplateKwargValue> = z.union([
   z.string(),
@@ -280,6 +287,7 @@ const compatProfile: z<PiAiCompatProfile> = z.object({
   supportsDeveloperRole: z.boolean(),
   supportsReasoningEffort: z.boolean(),
   supportsUsageInStreaming: z.boolean(),
+  supportsFinishReason: z.boolean(),
   maxTokensField: z.union(MAX_TOKENS_FIELDS),
   requiresToolResultName: z.boolean(),
   requiresAssistantAfterToolResult: z.boolean(),
@@ -287,6 +295,8 @@ const compatProfile: z<PiAiCompatProfile> = z.object({
   requiresReasoningContentOnAssistantMessages: z.boolean(),
   thinkingFormat: z.union(SUPPORTED_THINKING_FORMATS),
   chatTemplateKwargs: z.dict(chatTemplateKwarg),
+  chatTemplateArgs: z.dict(chatTemplateKwarg),
+  supportsThinkingTokenBudget: z.boolean(),
   supportsStrictMode: z.boolean(),
   cacheControlFormat: z.union(CACHE_CONTROL_FORMATS),
   supportsLongCacheRetention: z.boolean(),
@@ -314,7 +324,7 @@ const reasoningEfforts = z.dict(
 ) as unknown as z<PiAiReasoningEfforts>
 
 const authRecovery: z<PiAiAuthRecovery> = z.object({
-  retries: z.number().step(1).min(0).default(DEFAULT_AUTH_RECOVERY_RETRIES),
+  retries: z.number().step(1).min(0).max(MAX_AUTH_RECOVERY_RETRIES).default(DEFAULT_AUTH_RECOVERY_RETRIES),
   delayMs: z.number().min(0).max(MAX_TIMER_DELAY_MS).default(DEFAULT_AUTH_RECOVERY_DELAY_MS),
 })
 
@@ -360,7 +370,7 @@ const profile = z.object({
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
-  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  streamIdleTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   maxRequestImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
   requestImagePixelBudget: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_MAX_BYTES),
@@ -433,11 +443,11 @@ export function resolveProfiles(
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
-    if (!Number.isFinite(streamIdleTimeoutMs)
+    if (!Number.isInteger(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
       || streamIdleTimeoutMs > MAX_TIMER_DELAY_MS) {
       throw new Error(
-        `llm-pi-ai: provider "${provider}" streamIdleTimeoutMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`,
+        `llm-pi-ai: provider "${provider}" streamIdleTimeoutMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}`,
       )
     }
     const maxRequestImageBytes = source.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES
@@ -456,7 +466,7 @@ export function resolveProfiles(
       retries: source.authRecovery?.retries ?? DEFAULT_AUTH_RECOVERY_RETRIES,
       delayMs: source.authRecovery?.delayMs ?? DEFAULT_AUTH_RECOVERY_DELAY_MS,
     }
-    if (!Number.isInteger(authRecovery.retries) || authRecovery.retries < 0) {
+    if (!Number.isSafeInteger(authRecovery.retries) || authRecovery.retries < 0 || authRecovery.retries > MAX_AUTH_RECOVERY_RETRIES) {
       throw new Error(`llm-pi-ai: provider "${provider}" authRecovery.retries must be a non-negative integer`)
     }
     if (!Number.isFinite(authRecovery.delayMs) || authRecovery.delayMs < 0 || authRecovery.delayMs > MAX_TIMER_DELAY_MS) {

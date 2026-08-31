@@ -53,7 +53,7 @@ type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }
 
 type PreparedStep =
   | { kind: 'reject' }
-  | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly }
+  | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly; startsRequestSeries?: true }
 
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
@@ -79,6 +79,7 @@ export class ReactLoopAgent implements Agent {
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
+  private requestSurfaceGeneration: number | undefined
   private readonly runtimeContext: RuntimeContextProjection
 
   constructor(
@@ -319,7 +320,7 @@ export class ReactLoopAgent implements Agent {
           }
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.
-          const stepEnd = await this.step(decision.assembly)
+          const stepEnd = await this.step(decision.assembly, decision.startsRequestSeries === true)
           // max-tokens stays sticky: a later completed step must not
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
@@ -364,7 +365,7 @@ export class ReactLoopAgent implements Agent {
     return true
   }
 
-  private async step(assembly: PromptAssembly): Promise<StepEndReason | null> {
+  private async step(assembly: PromptAssembly, startsRequestSeries: boolean): Promise<StepEndReason | null> {
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)
     const { turn, step, abort: { signal } } = this.phase
@@ -372,9 +373,11 @@ export class ReactLoopAgent implements Agent {
     const system = renderPrompt(assembly)
 
     while (true) {
+      const surfaceGeneration = this.session.surface.replaceGeneration
       const { request, preparedCall } = await this.buildRequest(
-        turn, step, assembly.tools, system, signal,
+        turn, step, assembly.tools, system, startsRequestSeries, surfaceGeneration, signal,
       )
+      startsRequestSeries = false
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
       try {
@@ -463,20 +466,24 @@ export class ReactLoopAgent implements Agent {
     step: number,
     tools: GenerateOptions['tools'] & object,
     system: string,
+    startsRequestSeries: boolean,
+    surfaceGeneration: number,
     signal: AbortSignal,
   ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
-    // A loop instance starts from its declared route, restoring only an explicit
-    // effort owned by that exact model. Later steps re-resolve marked defaults.
+    // AgentOptions seeds this loop instance's first proposal and wins over a
+    // resumed effort. Omission restores only a same-route explicit value;
+    // later proposals re-resolve values marked as adapter defaults.
     const persistedHeader = session.requestHeader()
     const persistedConfig = persistedHeader?.config
     const route = { provider: this.options.provider ?? '', model: this.options.model ?? '' }
-    const reasoningEffort = persistedConfig?.provider === route.provider
+    const persistedReasoningEffort = persistedConfig?.provider === route.provider
       && persistedConfig.model === route.model
       && persistedHeader?.adapterDefaults?.reasoningEffort !== true
       ? persistedConfig.reasoningEffort
       : undefined
+    const reasoningEffort = this.options.reasoningEffort ?? persistedReasoningEffort
     const maxTokens = this.options.maxTokens
     const seedConfig = deepFreeze(structuredClone(
       this.requestHeaderLogged
@@ -515,12 +522,16 @@ export class ReactLoopAgent implements Agent {
       ...tools.length > 0 ? { tools } : {},
     })))
     const baseline = this.session.requestHeader()
+    const startsSeries = startsRequestSeries || this.requestSurfaceGeneration !== surfaceGeneration
     if (!this.requestHeaderLogged) {
       this.session.append('request/header', { header, reason: baseline === undefined ? 'initial' : 'resume' })
       this.requestHeaderLogged = true
     } else if (baseline === undefined || !headerEquals(baseline, header)) {
-      this.session.append('request/header', { header, reason: 'change' })
+      this.session.append('request/header', { header, reason: 'change', ...startsSeries ? { startsSeries: true } : {} })
+    } else if (startsSeries) {
+      this.session.append('request/header', { header, reason: 'series', startsSeries: true })
     }
+    this.requestSurfaceGeneration = surfaceGeneration
 
     const contextWindow = preparedCall?.context?.contextWindow
     const requestContext: RequestContext = {

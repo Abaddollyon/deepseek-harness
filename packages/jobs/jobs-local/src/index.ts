@@ -2,9 +2,9 @@
  * Process-local provider for the background-job capability seam
  * (`ctx.jobs`). It keeps every record in memory and hands out fresh
  * snapshots, never live state. With `persist: true` and a mounted
- * `ctx.jobStore`, records are additionally mirrored to the durable store
- * fire-and-forget; without a store, behavior is identical to the pure
- * in-memory registry.
+ * `ctx.jobStore`, ordinary records are mirrored in order and durable starts
+ * await their initial write before producer work begins; without a store,
+ * ordinary jobs behave like the pure in-memory registry.
  *
  * Registrations outlive producer and controller fibers. Agent or service
  * disposal cancels live work and awaits compliant producers; a throwing
@@ -23,9 +23,9 @@ import { AnonymousEntries, ScopedLayers, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeLayer } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
-import { JobRegistry, JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
+import { JobRegistry, JobId, JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type {
-  JobDoneListener, JobHooks, JobKind, JobOutcome, JobRead, JobResumeCandidate, JobResumer,
+  JobAdoptedListener, JobDoneListener, JobHooks, JobKind, JobOutcome, JobRead, JobResumeCandidate, JobResumePlan, JobResumer,
   JobSnapshot, JobStart, JobStatus, JobsChangedListener,
 } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
@@ -38,6 +38,11 @@ const DEFAULT_MAX_CONCURRENT_TASKS_PER_OWNER = 10
 
 /** Honest terminal detail for a persisted record no resumer could adopt. */
 const NOT_RESUMABLE_DETAIL = 'not resumable after host restart'
+
+/** Terminal detail naming a resume adoption the durable store refused to record. */
+const ADOPTION_NOT_DURABLE_DETAIL = 'resume adoption could not be recorded durably'
+
+/** Terminal detail for an adoption whose durable session account was unavailable. */
 
 /** Honest terminal detail for a producer that outlived the teardown grace. */
 const TEARDOWN_GRACE_DETAIL = 'producer did not release within teardownGraceMs; work may be orphaned'
@@ -104,8 +109,16 @@ interface TrackedTask {
   incarnation: string
   /** Restored non-terminal record still awaiting a {@link JobResumer} decision. */
   pendingResume: boolean
+  /** Prior process incarnation when this record was adopted before reconciliation. */
+  adoptedFromIncarnation: string | undefined
+  /** Whether the first durable mirror has started. */
+  persistenceStarted: boolean
+  /** Serialized durable mirror writes, drained during service teardown. */
+  persisted: Promise<void>
   /** Set after a rejected store write; the record degrades to in-memory only. */
   persistDegraded: boolean
+  /** A durable prior-incarnation record owns this id and replaces this local failure on remount. */
+  restoreOnStoreAdoption: boolean
   /** Resolves once the terminal snapshot is recorded and listeners notified. */
   settled: Promise<void>
   /** Resolver for {@link settled}, called by the first effective settlement. */
@@ -131,9 +144,10 @@ class JobLayer implements ScopeLayer {
   readonly controllers = new AnonymousEntries<symbol>()
   readonly listeners = new AnonymousEntries<JobDoneListener>()
   readonly changed = new AnonymousEntries<JobsChangedListener>()
+  readonly adopted = new AnonymousEntries<JobAdoptedListener>()
 
   isEmpty(): boolean {
-    return this.controllers.isEmpty() && this.listeners.isEmpty() && this.changed.isEmpty()
+    return this.controllers.isEmpty() && this.listeners.isEmpty() && this.changed.isEmpty() && this.adopted.isEmpty()
   }
 }
 
@@ -178,6 +192,8 @@ export class LocalJobRegistry extends JobRegistry {
   /** Byte cap for persisted final output. */
   private readonly maxPersistedOutputBytes: number
   private store = new Map<JobId, TrackedTask>()
+  /** Durable deletions for evicted records that teardown can no longer find in {@link store}. */
+  private readonly retiredPersistences = new Set<Promise<void>>()
   /**
    * Session-keyed owner index over {@link store}: every record files under
    * its `ownerSession` (or the shared `undefined` bucket), in registration
@@ -231,6 +247,10 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   start(spec: JobStart): JobId {
+    return this.startLocal(spec, true)
+  }
+
+  private startLocal(spec: JobStart, mirrorInitialRecord: boolean): JobId {
     if (!this.servesOwner(spec.owner)) {
       throw new Error('background jobs unavailable: no job controller serves this agent (load @deepseek-ai/dsh-tool-jobs in its composition)')
     }
@@ -289,7 +309,11 @@ export class LocalJobRegistry extends JobRegistry {
       resumeSpec,
       incarnation: PROCESS_INCARNATION,
       pendingResume: false,
+      adoptedFromIncarnation: undefined,
+      persistenceStarted: false,
+      persisted: Promise.resolve(),
       persistDegraded: false,
+      restoreOnStoreAdoption: false,
       settled,
       markSettled,
       waiters: 0,
@@ -300,8 +324,56 @@ export class LocalJobRegistry extends JobRegistry {
     this.wireDone(job, hooks)
     // Registration is complete and cannot fail from here, so the visible set
     // has genuinely changed.
-    this.persistRecord(job)
+    if (mirrorInitialRecord) this.mirrorRecord(job)
     this.notifyChanged(job.owner)
+    return id
+  }
+
+  async startDurable(spec: JobStart): Promise<JobId> {
+    if (!this.persist) {
+      throw new Error('durable background jobs unavailable: jobs-local persist is disabled')
+    }
+    const durableStore = this.storeRef()
+    if (durableStore === undefined) {
+      throw new Error('durable background jobs unavailable: no ctx.jobStore is mounted')
+    }
+    if (spec.idHint !== undefined) {
+      const stableId = JobId(`${spec.kind}-${spec.idHint}`)
+      if (durableStore.get(stableId) !== undefined) {
+        throw new Error(`job id ${stableId} is already persisted (idHint collision)`)
+      }
+    }
+
+    const terminal = Promise.withResolvers<JobOutcome>()
+    let producer: JobHooks | undefined
+    const id = this.startLocal({
+      ...spec,
+      run: () => ({
+        cancel: (): void => { terminal.resolve({ status: 'killed' }) },
+        done: terminal.promise,
+      }),
+    }, false)
+    const job = this.expect(id)
+    try {
+      job.persistenceStarted = true
+      job.persisted = durableStore.put(this.toRecord(job))
+      await job.persisted
+    } catch (error: unknown) {
+      job.persisted = Promise.resolve()
+      this.settle(job, { status: 'failed', detail: `durable registration failed: ${String(error)}` })
+      throw new Error(`durable background job registration failed: ${String(error)}`, { cause: error })
+    }
+    if (isTerminal(job.status)) return id
+
+    try {
+      producer = spec.run()
+      job.cancel = producer.cancel.bind(producer)
+      job.readOutput = producer.readOutput?.bind(producer)
+      producer.done.then(terminal.resolve, terminal.reject)
+    } catch (error: unknown) {
+      terminal.resolve({ status: 'failed', detail: `producer start failed: ${String(error)}` })
+      throw error
+    }
     return id
   }
 
@@ -339,7 +411,7 @@ export class LocalJobRegistry extends JobRegistry {
     job.cancel(reason)
     job.status = 'stopping'
     job.reported = true
-    this.persistRecord(job)
+    this.mirrorRecord(job)
     this.notifyChanged(job.owner)
     return 'requested'
   }
@@ -409,6 +481,11 @@ export class LocalJobRegistry extends JobRegistry {
       layer => layer.changed.append(listener),
       { label: 'jobs.onJobsChanged()' },
     )
+  }
+
+  onJobAdopted(listener: JobAdoptedListener): () => void {
+    const dispose = this.ctx.effect(() => this.layers.global.adopted.append(listener), 'jobs.onJobAdopted()')
+    return () => { void dispose() }
   }
 
   registerResumer(kind: JobKind, resume: JobResumer): () => void {
@@ -564,7 +641,7 @@ export class LocalJobRegistry extends JobRegistry {
   private markReported(job: TrackedTask): void {
     if (!isTerminal(job.status) || job.reported) return
     job.reported = true
-    this.persistRecord(job)
+    this.mirrorRecord(job)
     this.evictSettled(job.ownerSession)
   }
 
@@ -637,7 +714,7 @@ export class LocalJobRegistry extends JobRegistry {
     job.waitResolvers.clear()
     for (const resolveWait of waitResolvers) resolveWait()
     job.markSettled()
-    this.persistRecord(job)
+    this.mirrorRecord(job)
     this.notifyChanged(job.owner)
     this.evictSettled(job.ownerSession)
     if (this.listenersClosed) return
@@ -682,7 +759,17 @@ export class LocalJobRegistry extends JobRegistry {
    * same containment shape tool-workflow's recorder uses for a failing
    * session append.
    */
-  private persistRecord(job: TrackedTask): void {
+  /** Queue one record mirror after every earlier write for the same job. */
+  private mirrorRecord(job: TrackedTask): void {
+    if (!job.persistenceStarted) {
+      job.persistenceStarted = true
+      job.persisted = this.persistRecord(job)
+      return
+    }
+    job.persisted = job.persisted.then(() => this.persistRecord(job))
+  }
+
+  private async persistRecord(job: TrackedTask): Promise<void> {
     if (!this.persist || job.persistDegraded) return
     const store = this.storeRef()
     if (store === undefined) return
@@ -691,25 +778,27 @@ export class LocalJobRegistry extends JobRegistry {
       this.selfCtx.logger.warn(`jobs: disabled durable record for ${job.id} after store write failed: ${String(error)}`)
     }
     try {
-      store.put(this.toRecord(job)).catch(degrade)
+      await store.put(this.toRecord(job))
     } catch (error: unknown) {
       degrade(error)
     }
   }
 
-  /** Remove one record's durable mirror, fire-and-forget with contained failure. */
+  /** Queue durable deletion after every earlier mirror and retain it through teardown. */
   private deletePersisted(job: TrackedTask): void {
     if (!this.persist || job.persistDegraded) return
     const store = this.storeRef()
     if (store === undefined) return
-    const contain = (error: unknown): void => {
-      this.selfCtx.logger.warn(`jobs: failed to evict durable record ${job.id}: ${String(error)}`)
-    }
-    try {
-      store.delete(job.id).catch(contain)
-    } catch (error: unknown) {
-      contain(error)
-    }
+    const deletion = job.persisted.then(async () => {
+      try {
+        await store.delete(job.id)
+      } catch (error: unknown) {
+        this.selfCtx.logger.warn(`jobs: failed to evict durable record ${job.id}: ${String(error)}`)
+      }
+    })
+    job.persisted = deletion
+    this.retiredPersistences.add(deletion)
+    void deletion.then(() => this.retiredPersistences.delete(deletion))
   }
 
   /** Project one mutable record onto the durable-store shape. */
@@ -728,6 +817,7 @@ export class LocalJobRegistry extends JobRegistry {
       outputLimitBytes: job.outputLimitBytes ?? null,
       resumeSpec: job.resumeSpec ?? null,
       incarnation: job.incarnation,
+      ...job.adoptedFromIncarnation === undefined ? {} : { adoptedFromIncarnation: job.adoptedFromIncarnation },
       schemaVersion: 1,
     }
   }
@@ -750,8 +840,10 @@ export class LocalJobRegistry extends JobRegistry {
    * for those were skipped because there was nothing to write to).
    */
   private adoptStore(store: JobStore): void {
-    this.restoreRecords(store)
-    for (const job of this.store.values()) this.persistRecord(job)
+    const durableIds = this.restoreRecords(store)
+    for (const job of this.store.values()) {
+      if (!durableIds.has(job.id)) this.mirrorRecord(job)
+    }
   }
 
   /**
@@ -764,11 +856,19 @@ export class LocalJobRegistry extends JobRegistry {
    * not mistake live work for orphans. Restored records carry their session
    * fence but no live `Agent`, so changes announce through the global lane.
    */
-  private restoreRecords(store: JobStore): void {
-    const records = store.list()
-      .filter(record => !this.store.has(record.id))
+  private restoreRecords(store: JobStore): Set<JobId> {
+    const stored = store.list()
+    const durableIds = new Set(stored.map(record => record.id))
+    const records = stored
+      .filter((record) => {
+        const existing = this.store.get(record.id)
+        if (existing === undefined) return true
+        if (!existing.restoreOnStoreAdoption) return false
+        this.removeRecord(existing)
+        return true
+      })
       .sort((left, right) => left.startedAt - right.startedAt || String(left.id).localeCompare(String(right.id)))
-    if (records.length === 0) return
+    if (records.length === 0) return durableIds
     for (const record of records) {
       const job = this.restoredTask(record)
       this.insertRecord(job)
@@ -777,6 +877,10 @@ export class LocalJobRegistry extends JobRegistry {
         continue
       }
       if (job.incarnation === PROCESS_INCARNATION) continue
+      if (job.status === 'stopping') {
+        this.settle(job, { status: 'killed', detail: 'cancelled before host restart' })
+        continue
+      }
       if (job.resumeSpec === undefined) {
         this.settle(job, { status: 'failed', detail: NOT_RESUMABLE_DETAIL })
         continue
@@ -785,6 +889,7 @@ export class LocalJobRegistry extends JobRegistry {
       if (resume !== undefined) this.tryResume(job, resume)
     }
     this.notifyChanged(undefined)
+    return durableIds
   }
 
   /** Build the in-memory task for one persisted record. */
@@ -818,7 +923,11 @@ export class LocalJobRegistry extends JobRegistry {
       resumeSpec: record.resumeSpec ?? undefined,
       incarnation: record.incarnation,
       pendingResume: !isTerminal(record.status),
+      adoptedFromIncarnation: record.adoptedFromIncarnation,
+      persistenceStarted: false,
+      persisted: Promise.resolve(),
       persistDegraded: false,
+      restoreOnStoreAdoption: false,
       settled,
       markSettled,
       waiters: 0,
@@ -828,9 +937,8 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   /**
-   * Offer one restored record to its kind's resumer. Hooks adopt the record
-   * under its original id and this process's incarnation; `undefined` — or a
-   * throwing handler — settles it honestly as failed.
+   * Offer one restored record to its kind's resumer. A deferred producer plan
+   * accepts the record; `undefined` or a throwing handler settles it as failed.
    */
   private tryResume(job: TrackedTask, resume: JobResumer): void {
     const candidate: JobResumeCandidate = {
@@ -842,25 +950,123 @@ export class LocalJobRegistry extends JobRegistry {
       startedAt: job.startedAt,
       priorIncarnation: job.incarnation,
     }
-    let hooks: JobHooks | undefined
+    let plan: JobResumePlan | undefined
     try {
-      hooks = resume(candidate)
+      plan = resume(candidate)
     } catch (error: unknown) {
       this.selfCtx.logger.warn(`jobs: resumer for kind "${job.kind}" threw for ${job.id}: ${String(error)}`)
       this.settle(job, { status: 'failed', detail: `resume handler threw: ${String(error)}` })
       return
     }
-    if (hooks === undefined) {
+    if (plan === undefined) {
       this.settle(job, { status: 'failed', detail: NOT_RESUMABLE_DETAIL })
       return
     }
     job.pendingResume = false
+    void this.adoptCandidate(job, candidate, plan)
+  }
+
+  /**
+   * Adopt one restored record whose resumer returned a deferred producer. The
+   * adoption marker and observer account commit before producer work starts.
+   * The durable marker is required — unlike the fire-and-forget
+   * {@link persistRecord} mirror, a store that rejects the re-stamped record
+   * cancels the adoption into an honest resume failure, so no adopted job
+   * ever runs unmarked under this incarnation.
+   */
+  private async adoptCandidate(job: TrackedTask, candidate: JobResumeCandidate, plan: JobResumePlan): Promise<void> {
+    const priorMarker = job.adoptedFromIncarnation
+    const accountIncarnation = priorMarker ?? candidate.priorIncarnation
+    job.adoptedFromIncarnation = accountIncarnation
     job.incarnation = PROCESS_INCARNATION
+    if (!await this.commitAdoptionMarker(job)) {
+      job.adoptedFromIncarnation = priorMarker
+      job.incarnation = candidate.priorIncarnation
+      // The prior durable record remains authoritative. Keep this local failure
+      // from overwriting it, then replace the failure if that store remounts.
+      job.persistDegraded = true
+      job.restoreOnStoreAdoption = true
+      this.settle(job, { status: 'failed', detail: ADOPTION_NOT_DURABLE_DETAIL })
+      return
+    }
+    let adoptionAccounted: boolean
+    try {
+      adoptionAccounted = await this.notifyAdopted(this.snapshot(job), accountIncarnation)
+    } catch {
+      this.settle(job, { status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL })
+      return
+    }
+    // An explicit account acknowledgment transfers the marker's durable proof.
+    if (adoptionAccounted) job.adoptedFromIncarnation = undefined
+    if (isTerminal(job.status)) {
+      // A kill landed while the marker and its account committed; producer
+      // work has not started and must remain unstarted.
+      return
+    }
+    let hooks: JobHooks
+    try {
+      hooks = plan.start()
+    } catch (error: unknown) {
+      this.selfCtx.logger.warn(`jobs: resume producer for kind "${job.kind}" threw for ${job.id}: ${String(error)}`)
+      this.settle(job, { status: 'failed', detail: `resume producer threw: ${String(error)}` })
+      return
+    }
     job.cancel = hooks.cancel.bind(hooks)
     job.readOutput = hooks.readOutput?.bind(hooks)
     this.wireDone(job, hooks)
-    this.persistRecord(job)
     this.notifyChanged(job.owner)
+  }
+
+  /**
+   * Commit the re-stamped record carrying the adoption marker. The put is
+   * awaited and its failure reported, because the marker is the only proof a
+   * later boot can account the adoption from. There are no unmarked
+   * adoptions: a store that is already gone rejects the adoption exactly like
+   * a failing put.
+   */
+  private async commitAdoptionMarker(job: TrackedTask): Promise<boolean> {
+    const store = this.storeRef()
+    if (store === undefined) return false
+    try {
+      await store.put(this.toRecord(job))
+      return true
+    } catch (error: unknown) {
+      this.selfCtx.logger.warn(`jobs: adoption of ${job.id} is rejected: the durable marker could not be committed: ${String(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Announce one committed adoption to the global host observers, awaiting
+   * each returned promise so the supervisor's account lands before the
+   * producer starts. Every observer runs; throws are logged after all settle,
+   * while an explicit `false` rejects the adoption account.
+   */
+  private async notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): Promise<boolean> {
+    const failures: unknown[] = []
+    const pending: PromiseLike<void | boolean>[] = []
+    let accounted = false
+    let rejected = false
+    for (const listener of this.layers.global.adopted.values()) {
+      try {
+        const result = listener(snapshot, priorIncarnation)
+        if (result === false) rejected = true
+        else if (result === true) accounted = true
+        else if (result !== undefined) pending.push(result)
+      } catch (error: unknown) {
+        failures.push(error)
+      }
+    }
+    for (const outcome of await Promise.allSettled(pending)) {
+      if (outcome.status === 'rejected') failures.push(outcome.reason)
+      else if (outcome.value === false) rejected = true
+      else if (outcome.value === true) accounted = true
+    }
+    for (const failure of failures) {
+      this.selfCtx.logger.warn(`jobs: onJobAdopted listener failed: ${String(failure)}`)
+    }
+    if (rejected) throw new Error('job adoption observer rejected ownership')
+    return accounted
   }
 
   /**
@@ -912,6 +1118,7 @@ export class LocalJobRegistry extends JobRegistry {
     const all = [...this.store.values()]
     this.cancelForTeardown(all, 'jobs service disposed')
     await this.settleWithinGrace(all)
+    await this.persistWithinGrace(all)
     // Distinct owners whose records just disappeared. A change observer files
     // into the layer of the context that registered it, so a consumer mounted
     // outside this service — the api-proxy carrier registers from the mux
@@ -952,6 +1159,24 @@ export class LocalJobRegistry extends JobRegistry {
     await settledAll
   }
 
+  /** Await queued durable mirrors without allowing a store to wedge teardown. */
+  private async persistWithinGrace(jobs: TrackedTask[]): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const grace = new Promise<'grace'>((resolve) => {
+      timer = setTimeout(() => { resolve('grace') }, this.teardownGraceMs)
+      timer.unref()
+    })
+    const persisted = Promise.all([
+      ...jobs.map(job => job.persisted),
+      ...this.retiredPersistences,
+    ])
+    const raced = await Promise.race([persisted.then(() => 'persisted' as const), grace])
+    clearTimeout(timer)
+    if (raced === 'grace') {
+      this.selfCtx.logger.warn(`jobs: durable mirrors did not settle within teardownGraceMs (${this.teardownGraceMs}ms); persisted state may require boot reconciliation`)
+    }
+  }
+
   /**
    * Cancel jobs during teardown with per-job containment. A throwing cancel
    * force-fails the record and reports a possible orphan; a cancel that returns
@@ -972,7 +1197,7 @@ export class LocalJobRegistry extends JobRegistry {
       try {
         job.cancel(reason)
         job.status = 'stopping'
-        this.persistRecord(job)
+        this.mirrorRecord(job)
         // Teardown reaches settlement only after the producer releases, which a
         // slow stop can defer; announcing the transition here is what keeps an
         // observer from showing `running` for that whole window.

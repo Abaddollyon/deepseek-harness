@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { AttachmentId, AttachmentStore, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type {
   ImageAttachmentLimits,
@@ -30,6 +30,18 @@ const IMAGE_REF: ImageAttachmentRef = {
   bytes: 1,
   width: 1,
   height: 1,
+}
+const HOST_IMAGE_PATH = '/host/.dsh/attachments/objects/aa/object'
+const MODEL_IMAGE_PATH = '/model/.dsh/attachments/objects/aa/object'
+
+class MappedFileSystem extends Service {
+  constructor(ctx: Context) {
+    super(ctx, 'fs')
+  }
+
+  processPathFromHostPath(hostPath: string): string | undefined {
+    return hostPath === HOST_IMAGE_PATH ? MODEL_IMAGE_PATH : undefined
+  }
 }
 
 async function harness(baseURL: string, overrides: Record<string, unknown> = {}): Promise<Context> {
@@ -74,7 +86,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(result.finish).toEqual({ kind: 'stop' })
     // OpenAI-completions usage always carries the reasoning split (0 here).
-    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, reasoningTokens: 0 })
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4, reasoningTokens: 0 })
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
@@ -133,10 +145,12 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.requests[0]).toMatchObject({
       model: 'deepseek-v4-flash',
       temperature: 0.2,
-      max_completion_tokens: 77,
+      max_tokens: 77,
       thinking: { type: 'enabled' },
       reasoning_effort: 'max',
     })
+    expect(server.requests[0]).not.toHaveProperty('dsh_session_log')
+    expect(server.requests[0]).not.toHaveProperty('dsh_plugin_packages')
   })
 
   it('uses a dynamic request effort and reports unsupported efforts before network I/O', async () => {
@@ -229,7 +243,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
   })
 
-  it('resolves an attachment service mounted after the adapter when dispatching an image', async () => {
+  it('resolves attachment and filesystem services mounted after the adapter when dispatching an image', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const attachmentId = AttachmentId(`sha256:${'a'.repeat(64)}`)
     const ref: ImageAttachmentRef = {
@@ -282,6 +296,10 @@ describe('PiAiAdapter provider routing', () => {
         return readImage(value)
       }
 
+      override imageHostPath(_ref: ImageAttachmentRef): string {
+        return HOST_IMAGE_PATH
+      }
+
       override readImageRequest(
         value: ImageAttachmentRef,
         policy: ImageRequestPolicy,
@@ -297,6 +315,7 @@ describe('PiAiAdapter provider routing', () => {
       providers: { openai: { apiKeyEnv: 'PI_TEST_KEY', baseURL: `${server.url}/v1` } },
     })
     await ctx.plugin(LateAttachmentStore)
+    await ctx.plugin(MappedFileSystem)
 
     const result = await assemble(ctx, {
       provider: 'openai',
@@ -312,6 +331,7 @@ describe('PiAiAdapter provider routing', () => {
       maxPixels: 2048 * 2048,
       maxBytes: 1024 * 1024,
     }, expect.any(AbortSignal))
+    expect(JSON.stringify(server.requests[0])).toContain(MODEL_IMAGE_PATH)
     // One auth-recovery retry re-dispatches the image-bearing request.
     expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
   })
@@ -492,6 +512,7 @@ describe('provider profile lifecycle', () => {
         reasoning: {
           efforts: [
             { id: ReasoningEffortId('off'), name: 'Off' },
+            { id: ReasoningEffortId('low'), name: 'Low' },
             { id: ReasoningEffortId('high'), name: 'High' },
             { id: ReasoningEffortId('max'), name: 'Max' },
           ],
@@ -926,7 +947,7 @@ describe('provider profile lifecycle', () => {
   it('validates profiles at the shared resolver boundary', () => {
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: 0 },
-    })).toThrow(/streamIdleTimeoutMs.*positive finite/)
+    })).toThrow(/streamIdleTimeoutMs.*positive integer/)
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
     })).toThrow(/streamIdleTimeoutMs.*no greater/)
@@ -984,7 +1005,10 @@ describe('abort wiring', () => {
       messages: [],
       signal: controller.signal,
     })) chunks.push(chunk)
-    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'aborted' } })
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { code: 'ABORTED' } },
+    })
   })
 
   it('honors a pre-aborted caller signal', async () => {

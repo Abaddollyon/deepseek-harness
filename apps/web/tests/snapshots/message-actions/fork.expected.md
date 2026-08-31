@@ -1,7 +1,0 @@
-- tree "Sessions":
-  - treeitem "Ungrouped chats" [expanded]:
-    - img
-    - text: Ungrouped chats
-  - treeitem "Use the read tool twice (2) now" [selected]
-  - treeitem "Use the read tool twice (1) now"
-  - treeitem "Use the read tool twice 1min"

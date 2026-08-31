@@ -17,19 +17,21 @@
  * seam and passes it as the request's `apiKey` option, which pi-ai treats as
  * the highest-priority auth override — that is what keeps the fail-loud
  * reference semantics. Everything that override does not cover reaches pi-ai
- * through the collection's own auth: the credential store holds the records a
- * login wrote and a refresh rotates, and the auth context answers the ambient
- * questions a provider asks while resolving. Both are stable across snapshots,
- * so a configuration change rebuilds the collection without forgetting who is
- * signed in.
+ * through an attempt-local collection whose credential-store proxy records the
+ * exact grant lazy auth supplies. The proxy still delegates every operation to
+ * the durable store, while the frozen profile supplies the same provider object
+ * as the operation snapshot. A retry can therefore compare the rejected grant
+ * under serialized modification without mixing concurrent request identities.
  *
  * @module dsh-llm-pi-ai/adapter
  */
 
+import { isDeepStrictEqual } from 'node:util'
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
   Api,
   AuthContext,
+  Credential,
   CredentialStore,
   Model,
   Models,
@@ -48,6 +50,7 @@ import {
 import { catalogProvider } from './catalog.ts'
 import type {
   GenerateOptions,
+  ImageAttachmentAccess,
   LlmFailure,
   LlmModelInfo,
   LlmProviderInfo,
@@ -57,13 +60,39 @@ import type {
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
 import { AUTH_FAILURE_CODE, toStreamChunks } from './stream.ts'
 
 /** One resolution's frozen view: the profiles and the collection built from them. */
+interface AttemptCredentialCapture {
+  credential: Credential | undefined
+}
+
+/** Capture the exact stored credential pi-ai resolves for one lazy request attempt. */
+function capturingCredentialStore(
+  source: CredentialStore,
+  provider: string,
+  capture: AttemptCredentialCapture,
+): CredentialStore {
+  return {
+    read: (_id, options) => source.read(provider, options).then((credential) => {
+      capture.credential = credential
+      return credential
+    }),
+    list: options => source.list(options),
+    modify: (_id, mutate, options) => source.modify(provider, mutate, options).then((credential) => {
+      capture.credential = credential
+      return credential
+    }),
+    delete: (_id, options) => source.delete(provider, options).then(() => {
+      capture.credential = undefined
+    }),
+  }
+}
+
 interface PiAiSnapshot {
   /** The resolved profiles this collection was built from, used as its identity. */
   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
@@ -100,6 +129,8 @@ export interface PiAiAdapterOptions {
   onAuthRecovery?: (detail: { provider: string; refreshed: boolean; error?: string }) => void
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
+  /** Bridge one attachment reference into the current model-tool execution world. */
+  resolveImageAccess?: (attachments: AttachmentStore, ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined
   /**
    * Observe one assistant history message degrading to provider-neutral
    * conversion because its stored replay state is unusable by this build.
@@ -381,8 +412,10 @@ export class PiAiAdapter extends LlmAdapter {
       let authFailure: LlmFailure | undefined
       // Thrown setup failures (aborts, idle timeouts, local credential-store
       // errors) keep their own classification and propagate; pi-ai delivers
-      // provider rejections as terminal error events, never as throws.
-      for await (const chunk of this.streamAttempt(options, snapshot, profile, model, reasoning, apiKey)) {
+      // provider rejections as terminal error events, never as throws. The
+      // attempt-local store records the credential lazy auth actually supplied.
+      const attemptCredential: AttemptCredentialCapture = { credential: undefined }
+      for await (const chunk of this.streamAttempt(options, profile, model, reasoning, apiKey, attemptCredential)) {
         // The terminal `usage` chunk is held back one step: on a
         // pre-content auth rejection it belongs to the abandoned attempt;
         // on success or exhausted failure it still precedes `finish`.
@@ -407,15 +440,27 @@ export class PiAiAdapter extends LlmAdapter {
       }
       if (authFailure === undefined) return
       if (retriesLeft === 0) {
-        /* v8 ignore next -- toStreamChunks emits the terminal usage chunk before every error finish */
-        if (heldUsage !== undefined) yield heldUsage
+        yield heldUsage as Extract<StreamChunk, { readonly type: 'usage' }>
         yield { type: 'finish', reason: { kind: 'error', failure: authFailure } }
         return
       }
       retriesLeft--
       if (!refreshAttempted) {
         refreshAttempted = true
-        const recovery = await this.refreshStoredAuth(options.provider, options.signal)
+        let recovery: { refreshed: boolean; error?: string } = { refreshed: false }
+        if (apiKey === undefined) {
+          const timeout = AbortSignal.timeout(profile.streamIdleTimeoutMs)
+          const signal = options.signal === undefined
+            ? timeout
+            : AbortSignal.any([options.signal, timeout])
+          recovery = await this.refreshStoredAuth(options.provider, attemptCredential.credential, signal)
+          if (options.signal?.aborted) {
+            throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
+          }
+          if (timeout.aborted) {
+            throw new LlmError(`pi-ai auth recovery idle timeout after ${profile.streamIdleTimeoutMs}ms`, 'TIMEOUT')
+          }
+        }
         this.config.onAuthRecovery?.({ provider: options.provider, ...recovery })
       }
       if (!await authRecoveryDelay(profile.authRecovery.delayMs, options.signal)) {
@@ -433,14 +478,16 @@ export class PiAiAdapter extends LlmAdapter {
    * refresh while the store's `modify` exclusion still serializes it against
    * pi-ai's own.
    * @param provider - the route whose catalog OAuth handler performs the refresh.
-   * @param signal - the caller's cancellation, forwarded to the token endpoint.
+   * @param failedCredential - exact stored credential supplied to the rejected request.
+   * @param signal - combined caller and idle-timeout cancellation for lock acquisition and refresh.
    * @returns the refresh outcome; never throws, because a token-endpoint
    *   failure says nothing about whether the resource endpoint still rejects
    *   the stored credential — the retried request answers that definitively.
    */
   private async refreshStoredAuth(
     provider: string,
-    signal: AbortSignal | undefined,
+    failedCredential: Credential | undefined,
+    signal: AbortSignal,
   ): Promise<{ refreshed: boolean; error?: string }> {
     const oauth = catalogProvider(provider)?.auth.oauth
     if (oauth === undefined) return { refreshed: false }
@@ -449,12 +496,14 @@ export class PiAiAdapter extends LlmAdapter {
       // the mutator itself records whether a rotation actually happened.
       let refreshed = false
       await this.config.auth.credentials.modify(provider, (current) => {
-        if (current?.type !== 'oauth') return Promise.resolve(undefined)
+        if (current?.type !== 'oauth' || !isDeepStrictEqual(current, failedCredential)) {
+          return Promise.resolve(undefined)
+        }
         return oauth.refresh(current, signal).then((rotated) => {
           refreshed = true
           return rotated
         })
-      })
+      }, { signal })
       return { refreshed }
     } catch (refreshError) {
       return {
@@ -466,11 +515,11 @@ export class PiAiAdapter extends LlmAdapter {
 
   private async * streamAttempt(
     options: GenerateOptions,
-    snapshot: PiAiSnapshot,
     profile: ResolvedPiAiProviderProfile,
     model: Model<Api>,
     reasoning: ModelThinkingLevel | undefined,
     apiKey: string | undefined,
+    attemptCredential: AttemptCredentialCapture,
   ): AsyncGenerator<StreamChunk> {
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -493,11 +542,21 @@ export class PiAiAdapter extends LlmAdapter {
       }
       const context = attachments === undefined
         ? toPiContext(options, undefined, onReplayDegrade)
-        : await toPiContext({ ...options, signal: watchdog.signal }, attachments, onReplayDegrade, profile.maxRequestImageBytes, {
-          maxPixels: profile.requestImagePixelBudget,
-          maxBytes: profile.requestImageMaxBytes,
-        })
-      const events = snapshot.models.streamSimple(model, context, {
+        : await toPiContext({ ...options, signal: watchdog.signal }, {
+          attachments,
+          resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
+          maxRequestImageBytes: profile.maxRequestImageBytes,
+          requestImagePolicy: {
+            maxPixels: profile.requestImagePixelBudget,
+            maxBytes: profile.requestImageMaxBytes,
+          },
+        }, onReplayDegrade)
+      const attemptModels = createModels({
+        credentials: capturingCredentialStore(this.config.auth.credentials, options.provider, attemptCredential),
+        authContext: this.config.auth.authContext,
+      })
+      attemptModels.setProvider(profile.piProvider)
+      const events = attemptModels.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
@@ -507,7 +566,7 @@ export class PiAiAdapter extends LlmAdapter {
         // Harness-owned and therefore win collisions.
         headers: requestHeaders(profile.headers),
       })
-      const iterator = toStreamChunks(events, model.contextWindow)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(events, model.contextWindow, options.signal)[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

@@ -19,11 +19,17 @@ const LOST_PREFIX_MESSAGE = '<response clipped><NOTE>The beginning of this comma
 const SHELL_RESET_MESSAGE = 'The persistent pwsh shell was reset; the next pwsh call starts from the workspace with a fresh current directory and environment.'
 const SHELL_PROMPT = '__DSH_PERSISTENT_PWSH_PROMPT__ '
 const TIMEOUT_CODE = 'PERSISTENT_PWSH_TIMEOUT'
+// Fallback retention framing: the prompt function emits one OSC 133;D sequence
+// (ESC ] 133;D; <status> BEL) before the printable prompt, and a polling delta
+// can carry that emission on either side of the wrapped command. The status is
+// a 32-bit integer; the slack covers the line breaks between the framed lines.
+const STATUS_CODE_MAX_CHARS = 11
+const PROMPT_EMISSION_MAX_CHARS = '\x1b]133;D;\x07'.length + STATUS_CODE_MAX_CHARS + SHELL_PROMPT.length
+const FALLBACK_FRAMING_SLACK = 16
 // One page is enough to find a just-emitted completion marker; the full
 // scrollback is assembled only when a command settles or needs partial output.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
-
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
 
 interface ResolvedConfig {
@@ -108,14 +114,13 @@ function stripInputEcho(text: string, wrapper: string): string {
   const projected: string[] = []
   const rawOffsets: number[] = []
   for (let index = 0; index < text.length; index += 1) {
-    const character = text[index] as string
+    const character = text[index]
     if (character === '\n' || character === '\r') continue
-    projected.push(character)
+    projected.push(character as string)
     rawOffsets.push(index)
   }
   const projectedStart = projected.join('').indexOf(wrapper)
   if (projectedStart < 0) return text
-  // Projection characters and offsets are appended in lockstep.
   const rawStart = rawOffsets[projectedStart] as number
   const rawEnd = rawOffsets[projectedStart + wrapper.length - 1] as number
   // PowerShell's line editor inserts display-width line breaks into the echo;
@@ -153,7 +158,6 @@ function partialOutput(
   marker: CommandMarkers,
   wrapper: string,
   fallback: string,
-  fallbackTruncated = false,
 ): CapturedOutput {
   const text = stripInputEcho(snapshot.text, wrapper)
   const startMarker = text.lastIndexOf(marker.start)
@@ -172,7 +176,7 @@ function partialOutput(
   const beforeEnd = fallbackEnd < 0 ? afterStart : afterStart.slice(0, fallbackEnd)
   return {
     text: stripPrompt(beforeEnd.replaceAll(SHELL_PROMPT, '')),
-    incomplete: fallbackTruncated || fallbackStart < 0,
+    incomplete: fallbackStart < 0,
   }
 }
 
@@ -251,14 +255,13 @@ async function respondToSessionExit(
   marker: CommandMarkers,
   wrapped: string,
   fallback: string,
-  fallbackTruncated: boolean,
   config: ResolvedConfig,
 ): Promise<string> {
   const snapshot = retainedScrollback(ctx, owner, id)
   await shells.reset(owner, 'persistent pwsh shell exited')
   return [
     renderShellExitStatus(
-      renderCaptured(partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated), config.maxOutputChars),
+      renderCaptured(partialOutput(snapshot, marker, wrapped, fallback), config.maxOutputChars),
       status.exitCode,
       status.signal,
     ),
@@ -333,11 +336,7 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
           if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
             throw new Error('persistent pwsh shell did not accept initialization')
           }
-          const scrollback = ctx.terminals.read(owner, spawned.sessionId, {
-            offset: 0,
-            count: SCROLLBACK_PAGE_LINES,
-          }).text
-          if (promptCompleted(result) || scrollback.trimEnd().endsWith(SHELL_PROMPT.trimEnd())) break
+          if (result.waitReason === 'stdin_read') break
           await pause()
         }
         return spawned.sessionId
@@ -369,10 +368,20 @@ async function executeCommand(
   const id = await shells.get(owner, commandDeadline.signal)
   const marker = markers()
   const wrapped = wrapCommand(command, marker)
-  const fallbackLimit = wrapped.length + config.maxOutputChars + SHELL_PROMPT.length
+  // The normalized budget retains the complete marker framing around the
+  // output budget — both prompt emissions a delta can carry, the real START
+  // marker, the END marker, and its status digits — so size capping cannot cut
+  // the real START marker before partialOutput, and an in-budget command keeps
+  // its full framing instead of reading as truncated. The raw budget adds the
+  // echoed wrapper, which a degenerate one-column terminal doubles with
+  // physical line breaks.
+  const normalizedFallbackLimit = 2 * PROMPT_EMISSION_MAX_CHARS
+    + marker.start.length + config.maxOutputChars + marker.end.length
+    + STATUS_CODE_MAX_CHARS + FALLBACK_FRAMING_SLACK
+  const rawFallbackLimit = 2 * wrapped.length + normalizedFallbackLimit
   let first = true
   let fallback = ''
-  let fallbackTruncated = false
+  let fallbackHasNormalizedEcho = false
 
   while (true) {
     // The shell may flip to exited between iterations (a fast `exit` can
@@ -382,7 +391,7 @@ async function executeCommand(
     const status = ctx.terminals.list(owner).find(session => session.sessionId === id)?.status
     if (status?.kind === 'exited') {
       return await respondToSessionExit(
-        ctx, shells, owner, id, status, marker, wrapped, fallback, fallbackTruncated, config,
+        ctx, shells, owner, id, status, marker, wrapped, fallback, config,
       )
     }
     let operation
@@ -400,15 +409,23 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    const fallbackRemaining = Math.max(0, fallbackLimit - fallback.length)
-    fallback += incremental.delta.slice(0, fallbackRemaining)
-    fallbackTruncated ||= incremental.delta.length > fallbackRemaining || incremental.truncated || result.truncated
+    const rawFallback = fallback + incremental.delta
+    const normalizedFallback = stripInputEcho(rawFallback, wrapped)
+    fallbackHasNormalizedEcho ||= normalizedFallback !== rawFallback
+    const fallbackLimit = fallbackHasNormalizedEcho ? normalizedFallbackLimit : rawFallbackLimit
+    const start = normalizedFallback.lastIndexOf(marker.start)
+    // Once the real marker arrives, retain it as the structural anchor and
+    // bound only the command data that follows it. Before that, retain the
+    // stream head so a marker split across polling deltas can still arrive.
+    fallback = start >= 0
+      ? normalizedFallback.slice(start, start + fallbackLimit)
+      : normalizedFallback.slice(0, fallbackLimit)
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
       const partial = renderCaptured(
-        partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated),
+        partialOutput(snapshot, marker, wrapped, fallback),
         config.maxOutputChars,
       )
       await shells.reset(owner, 'persistent pwsh command timed out')
@@ -429,12 +446,12 @@ async function executeCommand(
     }
     if (result.sessionStatus.kind === 'exited') {
       return await respondToSessionExit(
-        ctx, shells, owner, id, result.sessionStatus, marker, wrapped, fallback, fallbackTruncated, config,
+        ctx, shells, owner, id, result.sessionStatus, marker, wrapped, fallback, config,
       )
     }
     if (promptCompleted(result)) {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
-      const captured = partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated)
+      const captured = partialOutput(snapshot, marker, wrapped, fallback)
       // An idle prompt proves the PTY is waiting, which is equally true before a
       // freshly started shell has echoed anything. Reporting that as a result
       // renders nothing as clipped output, telling the model its result was

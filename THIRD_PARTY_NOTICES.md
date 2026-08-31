@@ -38,7 +38,13 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi) | MIT |
 | [`@joplin/turndown-plugin-gfm`](https://github.com/laurent22/joplin-turndown-plugin-gfm) | MIT |
 | [`@jridgewell/gen-mapping`](https://github.com/jridgewell/sourcemaps) | MIT |
+| [`@lexical/history`](https://github.com/facebook/lexical) | MIT |
+| [`@lexical/plain-text`](https://github.com/facebook/lexical) | MIT |
+| [`@lexical/text`](https://github.com/facebook/lexical) | MIT |
+| [`@lexical/utils`](https://github.com/facebook/lexical) | MIT |
 | [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) | MIT |
+| [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) | MIT |
+| [`@octokit/webhooks`](https://github.com/octokit/webhooks.js) | MIT |
 | [`@openai/codex`](https://github.com/openai/codex) | Apache-2.0 |
 | [`@opentelemetry/api`](https://github.com/open-telemetry/opentelemetry-js) | Apache-2.0 |
 | [`@opentelemetry/api-logs`](https://github.com/open-telemetry/opentelemetry-js) | Apache-2.0 |
@@ -51,7 +57,11 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`@tanstack/react-virtual`](https://github.com/TanStack/virtual) | MIT |
 | [`@types/mdast`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@vscode/ripgrep`](https://github.com/microsoft/vscode-ripgrep) | MIT |
+| [`@xterm/headless`](https://github.com/xtermjs/xterm.js) | MIT |
+| [`@yarnpkg/parsers`](https://github.com/yarnpkg/berry) | BSD-2-Clause |
+| [`acorn`](https://github.com/acornjs/acorn) | MIT |
 | [`anser`](https://github.com/IonicaBizau/anser) | MIT |
+| [`buffer`](https://github.com/feross/buffer) | MIT |
 | [`chokidar`](https://github.com/paulmillr/chokidar) | MIT |
 | [`clsx`](https://github.com/lukeed/clsx) | MIT |
 | [`commander`](https://github.com/tj/commander.js) | MIT |
@@ -60,9 +70,11 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) | MIT |
 | [`fflate`](https://github.com/101arrowz/fflate) | MIT |
 | [`immer`](https://github.com/immerjs/immer) | MIT |
+| [`ipaddr.js`](https://github.com/whitequark/ipaddr.js) | MIT |
 | [`js-yaml`](https://github.com/nodeca/js-yaml) | MIT |
 | [`katex`](https://github.com/KaTeX/KaTeX) | MIT |
 | [`koffi`](https://github.com/Koromix/koffi) | MIT |
+| [`lexical`](https://github.com/facebook/lexical) | MIT |
 | [`mdast-util-from-markdown`](https://github.com/syntax-tree/mdast-util-from-markdown) | MIT |
 | [`mdast-util-gfm`](https://github.com/syntax-tree/mdast-util-gfm) | MIT |
 | [`mdast-util-math`](https://github.com/syntax-tree/mdast-util-math) | MIT |
@@ -81,12 +93,15 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`picomatch`](https://github.com/micromatch/picomatch) | MIT |
 | [`react`](https://github.com/facebook/react) | MIT |
 | [`react-dom`](https://github.com/facebook/react) | MIT |
+| [`readable-stream`](https://github.com/nodejs/readable-stream) | MIT |
+| [`resolve.exports`](https://github.com/lukeed/resolve.exports) | MIT |
 | [`sharp`](https://github.com/lovell/sharp) | Apache-2.0 |
 | [`shiki`](https://github.com/shikijs/shiki) | MIT |
 | [`supports-color`](https://github.com/chalk/supports-color) | MIT |
 | [`tsx`](https://github.com/privatenumber/tsx) | MIT |
 | [`turndown`](https://github.com/mixmark-io/turndown) | MIT |
 | [`typescript`](https://github.com/microsoft/TypeScript) | Apache-2.0 |
+| [`undici`](https://github.com/nodejs/undici) | MIT |
 | [`use-sync-external-store`](https://github.com/facebook/react) | MIT |
 | [`ws`](https://github.com/websockets/ws) | MIT |
 | [`yaml`](https://github.com/eemeli/yaml) | ISC |
@@ -101,18 +116,18 @@ pnpm applies local patches to the following packages at install time, so shipped
 
 The project owner authorizes distribution of every version of the official `@anthropic-ai/claude-agent-sdk` package and the official Claude Code CLI/platform payloads that each version declares through `optionalDependencies`. This identity-scoped authorization does not classify their declared terms as permissive and does not cover any unrelated runtime package; version, declared-license, and payload-set changes still require the ordinary dependency, lockfile, compatibility, terms, and notices review.
 
-The installed SDK 0.3.220 declares the following optional platform packages. Each carries the official Claude Code 2.1.220 executable; the package identities and versions come from the SDK manifest, while the declared license field is verified against the platform payload installed for the current host.
+The installed SDK 0.3.241 declares the following optional platform packages. Each carries the official Claude Code 2.1.241 executable; the package identities and versions come from the SDK manifest, while the declared license field is verified against the platform payload installed for the current host.
 
 | Optional platform package | Version | Declared license |
 | --- | --- | --- |
-| [`@anthropic-ai/claude-agent-sdk-darwin-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-darwin-arm64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-darwin-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-darwin-x64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-linux-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-arm64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-linux-arm64-musl`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-arm64-musl) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-linux-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-x64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-linux-x64-musl`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-x64-musl) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-win32-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-arm64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
-| [`@anthropic-ai/claude-agent-sdk-win32-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-x64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-darwin-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-darwin-arm64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-darwin-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-darwin-x64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-linux-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-arm64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-linux-arm64-musl`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-arm64-musl) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-linux-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-x64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-linux-x64-musl`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-linux-x64-musl) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-win32-arm64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-arm64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
+| [`@anthropic-ai/claude-agent-sdk-win32-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-x64) | 0.3.241 | SEE LICENSE IN LICENSE.md |
 
 
 ## Development-only npm dependencies
@@ -122,6 +137,7 @@ External packages **directly declared** only by repository tooling, test infrast
 | Package | License |
 | --- | --- |
 | [`@braintree/sanitize-url`](https://github.com/braintree/sanitize-url) | MIT |
+| [`@lexical/headless`](https://github.com/facebook/lexical) | MIT |
 | [`@modelcontextprotocol/server-everything`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@modelcontextprotocol/server-filesystem`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@stylistic/eslint-plugin`](https://github.com/eslint-stylistic/eslint-stylistic) | MIT |
@@ -134,8 +150,10 @@ External packages **directly declared** only by repository tooling, test infrast
 | [`@types/picomatch`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/react`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/react-dom`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
+| [`@types/readable-stream`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/spdx-expression-parse`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/turndown`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
+| [`@types/use-sync-external-store`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/ws`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@vitejs/plugin-react`](https://github.com/vitejs/vite-plugin-react) | MIT |
 | [`@vitest/coverage-v8`](https://github.com/vitest-dev/vitest) | MIT |
@@ -148,6 +166,7 @@ External packages **directly declared** only by repository tooling, test infrast
 | [`eslint-plugin-sonarjs`](https://github.com/SonarSource/SonarJS) | LGPL-3.0-only |
 | [`execa`](https://github.com/sindresorhus/execa) | MIT |
 | [`fast-check`](https://github.com/dubzzz/fast-check) | MIT |
+| [`http-server`](https://github.com/http-party/http-server) | MIT |
 | [`istanbul-lib-report`](https://github.com/istanbuljs/istanbuljs) | BSD-3-Clause |
 | [`jscpd`](https://github.com/kucherenko/jscpd) | MIT |
 | [`jsdom`](https://github.com/jsdom/jsdom) | MIT |

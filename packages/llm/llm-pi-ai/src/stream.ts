@@ -8,7 +8,7 @@
  * @module dsh-llm-pi-ai/stream
  */
 
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -19,13 +19,15 @@ import { toPiReplayState } from './replay.ts'
  * reports the split it surfaces it as usage.reasoning, a sub-breakdown of
  * output that must not be accumulated as a fifth bucket.
  * @param usage - cumulative usage from the terminal pi-ai event.
- * @returns harness counts; cache fields appear only when non-zero (pi-ai
- *   reports zeros, not absence), reasoningTokens only when the provider reports the split.
+ * @returns harness counts with pi-ai's exact total; cache fields appear only
+ *   when non-zero (pi-ai reports zeros, not absence), reasoningTokens only
+ *   when the provider reports the split.
  */
 export function mapUsage(usage: PiUsage): TokenUsage {
   return {
     inputTokens: usage.input,
     outputTokens: usage.output,
+    totalTokens: usage.totalTokens,
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
     ...usage.reasoning !== undefined ? { reasoningTokens: usage.reasoning } : {},
@@ -38,8 +40,11 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // `cause` chain before it reaches us. undici carries the actionable transport
 // detail on `cause` (e.g. `SocketError: other side closed`) but hands the fetch
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
-// If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
-// us capture the cause ourselves), classify on `code`/`cause` instead of text.
+// If pi-ai ever forwards the original Error, classify on `code`/`cause` instead
+// of text. pi-ai 0.84's StreamOptions.fetch hook was evaluated for capturing the
+// cause and rejected: attributing a wrapper-captured `cause` to the right
+// request needs per-request side state across concurrent streams and pi-ai's own
+// client retries (see the transport-truncation Agent Note).
 /** Harness failure code for a provider credential rejection (HTTP 401/403). */
 export const AUTH_FAILURE_CODE = 'AUTH'
 
@@ -61,13 +66,15 @@ function classifyPiAiError(message: string): string {
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
   // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
-  // stream ID N; <CODE>; received from peer`, Node renders the code as
-  // NGHTTP2_*, and intermediaries name the RST_STREAM frame. The peer reset one
-  // stream, not the connection, so resending the request can succeed.
-  // `received from peer`, `RST_STREAM`, and `NGHTTP2_` appear only in HTTP/2 reset vocabulary;
-  // bare `stream error` would also match the generic no-detail fallback,
-  // which mapStopReason therefore classifies explicitly instead of routing here.
-  if (/\bstream error\b|received from peer|RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing application-level failures also
+  // carry, and `received from peer` alone appears in unrelated wording (TLS
+  // certificates, key material). Node renders the reset code as NGHTTP2_* and
+  // intermediaries name the RST_STREAM frame; those tokens appear only in
+  // HTTP/2 reset vocabulary. The peer reset one stream, not the connection,
+  // so resending the request can succeed.
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
@@ -86,7 +93,8 @@ function classifyPiAiError(message: string): string {
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
- *   `EMPTY_RESPONSE` error.
+ *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
+ *   to non-retryable `PI_AI_ERROR` failures.
  */
 export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
@@ -124,18 +132,21 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       return { kind: 'stop' }
     case 'length': return { kind: 'max-tokens' }
     case 'toolUse': return { kind: 'tool-calls' }
+    case 'pending': return {
+      kind: 'error',
+      failure: { message: `pi-ai stream for model "${message.model}" ended pending`, code: 'PI_AI_ERROR' },
+    }
+    case 'deferred': return {
+      kind: 'error',
+      failure: { message: `pi-ai deferred response for model "${message.model}" is not supported`, code: 'PI_AI_ERROR' },
+    }
     case 'aborted': return {
       kind: 'aborted',
       failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' },
     }
     case 'error': {
-      // A failure without detail stays unclassified: the `stream error` reset
-      // signature above would otherwise route this unknown-cause fallback into
-      // the retry loop.
-      if (message.errorMessage === undefined) {
-        return { kind: 'error', failure: { message: 'pi-ai stream error', code: 'PI_AI_ERROR' } }
-      }
-      return { kind: 'error', failure: { message: message.errorMessage, code: classifyPiAiError(message.errorMessage) } }
+      const text = message.errorMessage ?? 'pi-ai stream error'
+      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
     }
   }
 }
@@ -146,12 +157,15 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  * `finish` chunks (the harness protocol's other error-delivery style).
  * @param events - one assistant turn's pi-ai event stream.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param callerSignal - caller cancellation state; an aborted caller makes any
+ *   in-band terminal error an aborted finish.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
 export async function* toStreamChunks(
   events: AsyncIterable<AssistantMessageEvent>,
   contextWindow?: number,
+  callerSignal?: AbortSignal,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -193,7 +207,7 @@ export async function* toStreamChunks(
         yield {
           type: 'tool-call-delta',
           index: event.contentIndex,
-          id: CallId(known?.id ?? ''),
+          id: ToolCallId(known?.id ?? ''),
           ...known?.name !== undefined && known.name.length > 0 ? { name: known.name } : {},
           argumentsDelta: event.delta,
         }
@@ -205,7 +219,7 @@ export async function* toStreamChunks(
           index: event.contentIndex,
           block: {
             type: 'tool-call',
-            id: CallId(event.toolCall.id),
+            id: ToolCallId(event.toolCall.id),
             name: event.toolCall.name,
             // pi-ai hands back the PARSED arguments; the harness vocabulary
             // keeps the raw string.
@@ -225,7 +239,13 @@ export async function* toStreamChunks(
         // In-stream error delivery (pi-ai's style) → error finish chunk
         // (the harness's other sanctioned error path besides throwing).
         yield { type: 'usage', usage: mapUsage(event.error.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.error, contextWindow) }
+        yield {
+          type: 'finish',
+          reason: mapStopReason(
+            callerSignal?.aborted ? { ...event.error, stopReason: 'aborted' } : event.error,
+            contextWindow,
+          ),
+        }
         return
       // no default: AssistantMessageEvent is pi-ai's closed union; a new
       // event type should fail compilation here via tsc's exhaustiveness

@@ -35,4 +35,3 @@ Codex／Claude Code 风格的置顶会话——把某个 Session 固定到侧边
 ## Related
 
 - [Workspace sidebar order and folding](2026-08-11-workspace-sidebar-order-and-folding.zh.md) —— 拥有本功能不得混淆的折叠组进行中保留行。
-- [Current-session group navigation reveal](2026-08-19-current-session-group-navigation-reveal.zh.md) —— 经测试不会与已置顶当前会话重复渲染的揭示路径。

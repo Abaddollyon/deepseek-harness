@@ -17,11 +17,13 @@ import { randomBytes } from 'node:crypto'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator, SessionFormatUnsupportedError,
+  type BorrowedSessionSource,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
-  type SessionInspection, type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
+  type SessionInspection,
+  type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
   type StoredPrefix,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
   encodeSegment, eventLines, logPath, logSuffix, parseHeaderMeta, projectDir, scanLog, sessionDir,
   SessionLogScanner, toHeaderLine,
@@ -126,33 +128,36 @@ function isENOENT(error: unknown): boolean {
 
 /**
  * Map with bounded concurrency, preserving input order. Workers run every
- * item even after a failure — a listing error must not strand half-probed
- * state — and the failure thrown is the earliest one in input order, the
- * same one a sequential walk would have reached first.
+ * item after ordinary failures so the earliest failure in input order matches
+ * a sequential walk. Cancellation stops workers from claiming new items.
  */
 async function mapConcurrent<T, R>(
   items: readonly T[],
   concurrency: number,
   fn: (item: T) => Promise<R>,
+  signal?: AbortSignal,
 ): Promise<R[]> {
   const results = new Array<R>(items.length)
   const failures: Array<{ index: number; error: unknown }> = []
   let next = 0
   const worker = async (): Promise<void> => {
     while (next < items.length) {
+      signal?.throwIfAborted()
       const index = next
       next += 1
       try {
         results[index] = await fn(items[index] as T)
       } catch (error) {
+        signal?.throwIfAborted()
         failures.push({ index, error })
       }
     }
   }
-  await Promise.all(Array.from(
+  await Promise.allSettled(Array.from(
     { length: Math.min(concurrency, items.length) },
     () => worker(),
   ))
+  signal?.throwIfAborted()
   if (failures.length > 0) {
     throw failures.reduce((first, failure) => failure.index < first.index ? failure : first).error
   }
@@ -191,7 +196,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private packChunks: boolean
   private compression: JsonlCompression
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
-  private rootEncodingCheck: Promise<void> | undefined
+  private rootEncodingChecked = false
   private readonly listConcurrency: number
 
   constructor(ctx: Context, public config: Config) {
@@ -227,6 +232,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.create(meta)
   }
 
+  override ensureMaterialized(session: Session): Promise<void> {
+    return this.coordinator.ensureMaterialized(session)
+  }
+
   append(id: SessionId, events: readonly SessionEvent[]): Promise<void> {
     return this.coordinator.append(id, events)
   }
@@ -241,6 +250,10 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection> {
     return this.coordinator.inspect(id, signal)
+  }
+
+  override borrowSession(id: SessionId, signal?: AbortSignal): Promise<BorrowedSessionSource> {
+    return this.coordinator.borrowSession(id, signal)
   }
 
   // JSONL is sequential media: no loadStoredFrom hook, so the coordinator
@@ -258,7 +271,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   /** Read a stored prefix by id across all project directories when cwd is unknown. */
   async loadStored(id: SessionId, signal?: AbortSignal): Promise<StoredPrefix<JsonlTornMarker> | undefined> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding()
+    await this.ensureRootEncoding(signal)
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
@@ -271,7 +284,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    */
   async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding()
+    await this.ensureRootEncoding(signal)
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
@@ -301,7 +314,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    */
   override async readRaw(id: SessionId, signal?: AbortSignal): Promise<SessionRawArtifact | undefined> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding()
+    await this.ensureRootEncoding(signal)
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
@@ -478,6 +491,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     }
   }
 
+  /** Materialize a header-only JSONL artifact for an explicitly durable empty session. */
+  async materializeHeader(meta: SessionHeader): Promise<void> {
+    await this.materialize(meta, [])
+  }
+
   /**
    * Make a crash repair durable: truncate a torn tail, restore complete events
    * decoded from it, then append synthetic closers. Two fsync'd steps — the seam
@@ -491,6 +509,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     if (tornMarker !== undefined) await this.repair(meta, tornMarker.truncateTo)
     const repairedEvents = [...(tornMarker?.recoveredEvents ?? []), ...closers]
     if (repairedEvents.length > 0) await this.appendLines(meta, repairedEvents)
+    if (tornMarker !== undefined) this.ctx.logger.warn(`${this.name}: session "${meta.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
   }
 
   /** List valid unique stored sessions' metadata (header line only — no full-log parse). */
@@ -521,7 +540,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding()
+    await this.ensureRootEncoding(signal)
     signal?.throwIfAborted()
     // Directory walks and per-session header probes are independent reads;
     // fanning them out under the configured bound keeps listing 1k logs at a
@@ -531,6 +550,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       await this.listProjectDirs(signal),
       this.listConcurrency,
       project => this.listSessionDirs(project, signal),
+      signal,
     )
     const sessionName = `session${logSuffix(this.compression)}`
     const oppositeName = `session${logSuffix(this.oppositeCompression())}`
@@ -561,6 +581,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         signal?.throwIfAborted()
         return { header: meta, path }
       },
+      signal,
     )
     const artifacts = discovered.filter(artifact => artifact !== undefined)
     const ids = new Set<SessionId>()
@@ -625,7 +646,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     // parent directory's metadata is synced.
     await this.syncDirPosix(dir)
     // Best-effort temp cleanup: the log is already published and durable, so a
-    // failure to remove the (now-redundant) temp hard link must NOT reject the
+    // failure to remove the redundant temp hard link must NOT reject the
     // append. Swallow only the rm failure; nothing else of consequence runs here.
     try {
       await rm(tmp, { force: true })
@@ -684,6 +705,9 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   /** Encode the header and first batch without combining their frame boundaries. */
   private async encodeMaterialization(meta: SessionHeader, events: readonly SessionEvent[]): Promise<Buffer | string> {
     const header = JSON.stringify(toHeaderLine(meta)) + '\n'
+    if (events.length === 0) {
+      return this.compression === 'none' ? header : compressZstdFrame(header)
+    }
     const body = eventLines(events, this.packChunks) + '\n'
     if (this.compression === 'none') return header + body
     const headerFrame = await compressZstdFrame(header)
@@ -919,7 +943,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       signal?.throwIfAborted()
       const entries = await readdir(this.root, { withFileTypes: true })
       signal?.throwIfAborted()
-      return entries.filter(e => e.isDirectory()).map(e => join(this.root, e.name))
+      return entries.filter(e => e.isDirectory()).map(e => join(this.root, e.name)).sort()
     } catch (error) {
       // Only an absent root means no sessions; rethrow every other I/O failure.
       if (isENOENT(error)) return []
@@ -935,22 +959,31 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const legacy = entries.find(entry =>
       entry.isFile() && (entry.name.endsWith('.jsonl') || entry.name.endsWith('.jsonl.zstd')))
     if (legacy !== undefined) throw this.legacyLayout(join(project, legacy.name))
-    return entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name))
+    return entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name)).sort()
   }
 
   /** Reject a root that already belongs to the other physical encoding. */
-  private ensureRootEncoding(): Promise<void> {
-    this.rootEncodingCheck ??= this.checkRootEncoding()
-    return this.rootEncodingCheck
+  private async ensureRootEncoding(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
+    if (this.rootEncodingChecked) return
+    await this.checkRootEncoding(signal)
+    this.rootEncodingChecked = true
   }
 
-  private async checkRootEncoding(): Promise<void> {
-    for (const project of await this.listProjectDirs()) {
-      for (const dir of await this.listSessionDirs(project)) {
-        const incompatible = join(dir, `session${logSuffix(this.oppositeCompression())}`)
-        if (await this.exists(incompatible)) throw this.encodingMismatch(incompatible)
-      }
-    }
+  private async checkRootEncoding(signal?: AbortSignal): Promise<void> {
+    const sessionsByProject = await mapConcurrent(
+      await this.listProjectDirs(signal),
+      this.listConcurrency,
+      project => this.listSessionDirs(project, signal),
+      signal,
+    )
+    await mapConcurrent(sessionsByProject.flat(), this.listConcurrency, async (dir) => {
+      signal?.throwIfAborted()
+      const incompatible = join(dir, `session${logSuffix(this.oppositeCompression())}`)
+      const incompatibleExists = await this.exists(incompatible)
+      signal?.throwIfAborted()
+      if (incompatibleExists) throw this.encodingMismatch(incompatible)
+    }, signal)
   }
 
   private async rejectLegacyFlatArtifact(

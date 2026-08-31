@@ -1,6 +1,21 @@
+---
+description: "The JSONL durable session persistence backend."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-session-persistence-jsonl
 
 English | [中文](README.zh.md)
+
+## Summary
+
+The JSONL backend stores append-only session logs with configurable compression and bounded listing concurrency.
+
+## Table of Contents
+
+- [Config](#config)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
 
 The JSONL durable session-persistence backend — a concrete `SessionPersistence` (the `dsh-session-persistence` seam). Each session has one append-only logical JSONL log, stored as `.jsonl.zstd` by default or raw `.jsonl` when compression is disabled.
 
@@ -19,6 +34,7 @@ The JSONL durable session-persistence backend — a concrete `SessionPersistence
 - The project directory keeps the normalized cwd readable for navigation and is bounded for filesystem component limits. Separator replacement and truncation are intentionally lossy, so cwd strings that normalize alike share a project directory; session ids still select distinct session directories. On a case-insensitive filesystem, identity validation accepts an alternate path spelling only when filesystem canonicalization resolves both spellings to the same transcript. The configured root remains deployment-controlled: it may be project-local, shared, temporary, or centralized. The [project-session directory decision](../../../.agents/notes/implemented/architecture/2026-07-24-project-session-directories.md) records this tradeoff.
 - Session ids are unvalidated branded strings, so they are injectively escaped to a single safe path segment before use (no traversal, no collision). The resulting directory is reserved for additional session-owned artifacts; discovery reads only the fixed transcript filename.
 
+<a id="config"></a>
 ## Config
 
 | Key | Type | Notes |
@@ -52,6 +68,7 @@ A root belongs to one encoding. Startup discovery and targeted lookup reject the
 
 The plugin copies frozen session events into one controller per live session. The first pending event starts the configured fixed batching window, and later events join without resetting it. Expiry starts one durable append; events admitted during that write form a separately bounded follow-up batch. `session/flush` cancels the wait and drains current and pending batches. A per-session cursor prevents resumed sessions from re-appending stored events, and live sessions are seeded when the plugin loads. The owning backend instance serializes operations for one session; disposal drains every retained controller before teardown. Every logical event remains present: batching only lets one compressed frame or raw fsync carry more records.
 
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Resumed conversation history
@@ -70,9 +87,16 @@ JSONL storage does not mutate live request prefixes. A resumed loop can reuse pr
 
 ## Known Limitations and Deferred Work
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - **Only the configured encoding and current `SESSION_FORMAT_VERSION` (v0) load** — changing compression requires a separate/fresh root or selecting the legacy raw mode; the pre-release format has no migration.
 - **The flat-file storage layout does not load** — use a separate root or move pre-release artifacts into the project/session directory layout before loading.
 - **Compressed files are not directly line-readable** — use the backend to load them, or select `compression: 'none'` before writing a fresh root when external line readers are required.
 - **Nothing deletes session files** — logs accumulate under `root` until removed externally (the seam has no deletion API).
 - **One live writer per session** — append and repair are coordinated only inside the owning backend instance. Another backend instance or process must not write the same session until that owner reaches quiescent disposal; initial same-id publication remains collision-safe through the POSIX no-overwrite hard link or Windows write-through rename without replacement.
 - **POSIX materialization requires hard-link support** — first append uses `link()` so same-id races fail instead of overwriting a committed log; Windows uses write-through rename without replacement.
+
+<a id="dev-note"></a>
+### Dev Note
+
+Listing changes require deterministic ordering, bounded concurrency, and earliest-error tests.

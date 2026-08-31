@@ -7,7 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { contentHasImage, createUserMessage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema, UserMessage,
+  ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
@@ -66,12 +66,10 @@ const COMPACTION_INSTRUCTION = [
 ].join('\n')
 
 /**
- * Build the trailing compaction directive delivered as the final user message
- * after the replayed conversation prefix. Exported so replay admission can
- * price the exact instruction the summarization call appends.
- * @returns the identified plugin-sourced instruction message.
+ * Build the final user directive appended to every default summarizer replay.
+ * @returns a fresh message carrying the owned compaction instruction.
  */
-export function compactionInstructionMessage(): UserMessage {
+export function createCompactionInstructionMessage(): Message {
   return createUserMessage({
     content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
     source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
@@ -158,7 +156,7 @@ export async function summarizeWithLlm(
   const assembler = new BlockAssembler()
   const messages: Message[] = [
     ...input.messages,
-    compactionInstructionMessage(),
+    createCompactionInstructionMessage(),
   ]
   const options: GenerateOptions = {
     provider: target.provider,

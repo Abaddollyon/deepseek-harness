@@ -1,10 +1,27 @@
+---
+description: "dsh Web 客户端的共享 Workspace 浏览器与选择器插件。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-client-ui-workspace
 
 [English](README.md) | 中文
 
+## 概述
+
 共享 Workspace 浏览器与选择器插件。`WorkspaceBrowser` 填充侧边栏的 `sidebar.workspaces` slot，`WorkspacePicker` 则填充页面局部 Session Intent 主视觉区的 `conversation.hero.workspace` slot；两个界面使用同一套 Workspace 菜单和添加流程。
 
-该浏览器通过全局运行时钩子将 Session 行渲染为分组或扁平形式，并负责 Workspace 添加／重命名／重排序以及 Session 重排序。每个 Workspace 会记住自身是关闭还是显示 Session；打开后默认显示五条 Session，其余条目通过临时的**展开其余**控件显示，而关闭并重新打开整个 Workspace 后会恢复为五条。关闭 Workspace 不会隐藏进行中的工作：自身正在运行的 Session，以及经不间断的 subagent 谱系可达的后代正在运行的 Session，都会作为缩进行保留在折叠的组头之下，其后附上该折叠仍隐藏的 Session 数量。已完成但未查看的 Session 属于已结束状态，与空闲行一同折叠隐藏。这些保留行不带拖拽接线，也不属于展开列表，因此重排序永远不会以其为目标，**展开其余**的计数也始终只描述展开列表本身。从 Workspace 行创建 Session 时会先打开该分组，使 Session 状态到达后新行保持可见。未分组会话桶是松散会话（loose chat）的一等归宿：其 ＋ 会在所有 Workspace 之外创建一个 Session 并打开它——Host 为新 Session 分配默认 cwd——并基于同样的理由先展开该分组。导航也基于同样的理由打开持有当前 Session 的分组：选中某个 Session（包括新连接的 Workspace 所创建的空白 Session）时，渲染该行的分组会被打开一次，使该行无需手动点击即可抵达。该揭示只回应导航，绝不回应折叠：用户折叠当前 Session 所在分组的决定会一直生效，直到选择再次移动；揭示还会等待 Workspace 列表基线，由它决定哪个分组渲染该 Session。保留行无法覆盖此情形，因为它只保留进行中的行；揭示写入的正是组头通过 `aria-expanded` 汇报的那份持久化展开记录，因此存储的折叠状态与渲染结果不会分叉。Workspace 列表基线就绪后，浏览器持久化的展开状态与 Session 顺序记录只保留当前 Workspace id、Ungrouped 和单列表记账。视图选项把分组方式和每个记账各自的一份浏览器持久化 Session 顺序放在一起：真实 Workspace 从 `WorkspaceView.sessionIds` 初始化，Ungrouped 和跨 Workspace 的单列表则从最近更新时间顺序初始化。**手动排序**和**最近更新**在两种呈现方式下都可用。进入最近更新时会执行一次完整的时间排序，后续 user prompt 或 steer 会将对应 Session 提升一次；进入手动排序则保留所有当前位置并停用后续提升。两种模式下的拖拽都会编辑当前顺序；真实 Workspace 在手动模式下的拖拽还会更新 Host Session 记账，而 Ungrouped 和单列表因没有单一 Workspace 记账，其顺序始终只保存在浏览器本地。单列表没有父级层次，因此不显示空的左侧状态槽；Session 存在可见状态时仍保留该槽。无论采用哪种 Session 顺序，Workspace 拖拽顺序都由 Host 持久化。
+## 目录
+
+- [行为](#behavior)
+- [开发备注](#dev-note)
+- [模型体验](#model-experience)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+
+<a id="behavior"></a>
+## 行为
+
+该浏览器通过全局运行时钩子将 Session 行渲染为分组或扁平形式，并负责 Workspace 添加／重命名／重排序以及 Session 重排序。每个 Workspace 会记住自身是关闭还是显示 Session；打开后默认显示五条 Session，其余条目通过临时的**展开其余**控件显示，而关闭并重新打开整个 Workspace 后会恢复为五条。关闭 Workspace 不会隐藏进行中的工作：自身正在运行的 Session，以及经不间断的 subagent 谱系可达的后代正在运行的 Session，都会作为缩进行保留在折叠的组头之下，其后附上该折叠仍隐藏的 Session 数量。已完成但未查看的 Session 属于已结束状态，与空闲行一同折叠隐藏。这些保留行不带拖拽接线，也不属于展开列表，因此重排序永远不会以其为目标，**展开其余**的计数也始终只描述展开列表本身。从 Workspace 行创建 Session 时会先打开该分组，使 Session 状态到达后新行保持可见。导航也基于同样的理由打开持有当前 Session 的分组：选中某个 Session（包括新连接的 Workspace 所创建的空白 Session）时，渲染该行的分组会被打开一次，使该行无需手动点击即可抵达。该揭示只回应导航，绝不回应折叠：用户折叠当前 Session 所在分组的决定会一直生效，直到选择再次移动；揭示还会等待 Workspace 列表基线，由它决定哪个分组渲染该 Session。保留行无法覆盖此情形，因为它只保留进行中的行；揭示写入的正是组头通过 `aria-expanded` 汇报的那份持久化展开记录，因此存储的折叠状态与渲染结果不会分叉。Workspace 列表基线就绪后，浏览器持久化的展开状态与 Session 顺序记录只保留当前 Workspace id、Ungrouped 和单列表记账。视图选项把分组方式和每个记账各自的一份浏览器持久化 Session 顺序放在一起：真实 Workspace 从 `WorkspaceView.sessionIds` 初始化，Ungrouped 和跨 Workspace 的单列表则从最近更新时间顺序初始化。**手动排序**和**最近更新**在两种呈现方式下都可用。进入最近更新时会执行一次完整的时间排序，后续 user prompt 或 steer 会将对应 Session 提升一次；进入手动排序则保留所有当前位置并停用后续提升。两种模式下的拖拽都会编辑当前顺序；真实 Workspace 在手动模式下的拖拽还会更新 Host Session 记账，而 Ungrouped 和单列表因没有单一 Workspace 记账，其顺序始终只保存在浏览器本地。单列表没有父级层次，因此不显示空的左侧状态槽；Session 存在可见状态时仍保留该槽。无论采用哪种 Session 顺序，Workspace 拖拽顺序都由 Host 持久化。
 
 会话行菜单还提供**置顶会话**：已置顶的会话按置顶顺序渲染在侧边栏顶部的“已置顶”分区中，分组视图与单列表视图均如此。置顶是用户的显式状态，与折叠组的进行中保留行无关：分组列表和单列表都会省略已置顶的行，使每个会话恰好渲染一次；已置顶且正在进行的会话不会再作为折叠组的保留行重复出现，导航揭示也不会让已置顶的当前会话重复渲染。置顶保存在浏览器本地的视图存储中，从不发送给 Host，因此刷新后仍然保留。置顶不会让会话丢失位置：顺序记账保留已置顶的 id，单列表只在合并完已存储的顺序后才过滤置顶行，因此取消置顶会让会话回到原先在分组或扁平顺序中的位置。
 
@@ -22,6 +39,7 @@ Session 行渲染运行时的实时 `pendingInteraction` 分类：审批显示**
 
 共享侧边栏投影会隐藏持久化 Session 摘要中带有 `origin: 'subagent'` 的行；用户从所选父级的 subagent 页头目录进入这些对话。每个可见的普通行都会在经不间断的 subagent 谱系可达的任一后代运行时继承蓝色活动指示器；其悬停与无障碍文本会报告确切的运行中后代数量，同时不会把空闲 parent 描述为正在运行。普通 fork 仍然可见，并会终止此聚合，因为仅有谱系不会设置该 origin。待处理的用户交互优先于会话自身的运行中状态，二者无论哪一项存在都会保持为行的主要状态，而后代活动仍作为独立的悬停与无障碍状态保留。两者均不存在时，后代活动优先于绿色的未查看完成提醒；最后一个运行中的后代停止后，该提醒会重新出现。运行时仍保留隐藏行，供对话、标题与已寻址传输状态使用。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 无。选择器属于浏览器界面；这里没有任何内容进入模型请求。
@@ -32,7 +50,14 @@ Session 行渲染运行时的实时 `pendingInteraction` 分类：审批显示**
 
 ## 已知限制与暂缓事项
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - **没有模糊内容搜索或事件深链接**：内容后端采用字面 token／短语匹配，选择结果会打开 Session，而不是匹配的事件。
 - **没有 Session 删除与取消归档控件**：会话可以归档，但已归档会话没有查看或取消归档入口；删除 Workspace 注册记录不会删除 Session。
 - **待处理的用户交互不会聚合到折叠的分组上**：折叠分组内正在等待的行不会点亮分组头指示；既未自身运行、也没有运行中后代的等待 Session，只有展开该分组后才可见。
 - **原生文件夹选择依赖本地 Host 载体**：在 `-native` 组合下，进程内部署或远程浏览器部署无法打开本地操作系统对话框；模态框会显示平台故障，并允许重试。可远程的选取是 `-browse` 组合的应用内流程。
+
+<a id="dev-note"></a>
+### 开发备注
+
+Workspace 与 Session 投影改动需要覆盖分组、扁平、搜索、置顶和折叠状态。

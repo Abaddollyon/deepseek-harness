@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-已退役的编译产物补丁 `apply-rc6-ungrouped-sessions` 曾让侧边栏的未分组会话桶成为松散会话（loose chat）的一等归宿。0.1.1-rc.2 升级退役编译补丁机制时，该行为被悄然丢失，而第一次修复只恢复了桶的标签（见[标签 note](2026-08-24-ungrouped-bucket-loose-chats.zh.md)，仍然有效且不受本次影响）。源码中仍有两个缺陷：
+已退役的编译产物补丁 `apply-rc6-ungrouped-sessions` 曾让侧边栏的未分组会话桶成为松散会话（loose chat）的一等归宿。0.1.1-rc.2 升级退役编译补丁机制时，该行为被悄然丢失，而第一次修复只恢复了桶的标签；该行为仍然有效且不受本次影响。源码中仍有两个缺陷：
 
 1. **桶的 ＋ 按钮无效。** `WorkspaceBrowser` 的分组 `onCreate` 回调在分组没有 `workspaceId` 时什么都不做，因为唯一的启动路径是 workspace 作用域的 `ctx.workspaces.startSession`。桶本身已作为一等分组渲染（`tree.ts`），缺的只是动作。
 2. **无 Workspace 的会话不可用。** `ConversationRoot` 把 `inert` 计算为 `sessionId === undefined || (hero && chipTitle === undefined)`。没有任何 Workspace 入账的真实空白会话没有 chip 标题，因此松散会话会在禁用的编辑器上渲染 Workspace 选择器——刚刚由 ＋ 创建的会话立即失效。

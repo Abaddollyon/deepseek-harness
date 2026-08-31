@@ -8,7 +8,7 @@ import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import type { ResolvedSubagentStartRequest, SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowMeta, WorkflowResult, WorkflowResultInfo, WorkflowRun, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow'
 import * as workerEngineModule from '../src/index.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -67,7 +67,7 @@ const ESCAPE = "globalThis.constructor.constructor('return process')()"
 
 /** One controllable child run: the test (or auto mode) settles it. */
 interface ControlledRun {
-  request: SubagentStartRequest
+  request: ResolvedSubagentStartRequest
   /** Fulfill the provider's async start with a published child. */
   publish(): void
   /** Reject the provider's async start before ownership transfer. */
@@ -86,20 +86,24 @@ interface ControlledRun {
  * the request signal fires, like the real in-process backends.
  */
 class StubProvider implements SubagentProvider {
-  readonly capabilities: SubagentCapabilities = { outputSchema: true, depthLimit: true, toolFilter: true, persona: false }
+  readonly capabilities: SubagentCapabilities = {
+    outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: true,
+  }
   readonly inheritsParentContext = false
   readonly runs: ControlledRun[] = []
 
   constructor(
     readonly name: string,
-    private readonly reply?: (request: SubagentStartRequest, index: number) => SubagentResult,
+    private readonly reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult,
     private readonly disposeDelayMs = 0,
     private readonly deferStart = false,
     private readonly onAbortString?: (reason: string | undefined, index: number) => void,
     private readonly onSignalAbort?: (reason: unknown, index: number) => void,
+    private readonly validate?: (request: SubagentStartRequest) => Promise<void>,
   ) {}
 
-  async start(request: SubagentStartRequest): Promise<SubagentRun> {
+  async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
+    await this.validate?.(request)
     const startGate = Promise.withResolvers<undefined>()
     const terminal = Promise.withResolvers<SubagentResult>()
     terminal.promise.catch(() => { /* provider owns early settlement until publication */ })
@@ -164,7 +168,7 @@ function text(reply: string): SubagentResult {
 
 interface SetupOptions {
   config?: Config
-  reply?: (request: SubagentStartRequest, index: number) => SubagentResult
+  reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult
   manual?: boolean
   disposeDelayMs?: number
   deferStart?: boolean
@@ -182,6 +186,7 @@ async function setup(options?: SetupOptions) {
     options?.deferStart ?? false,
     options?.onChildAbortString,
     options?.onChildSignalAbort,
+    request => validateStubRequest(ctx, request),
   )
   ctx.subagents.registerProvider(provider)
   // A fixed concurrency ceiling: the auto-resolved default is machine-derived
@@ -189,6 +194,21 @@ async function setup(options?: SetupOptions) {
   // would wedge on small CI runners.
   const engineFiber = await ctx.plugin(WorkerThreadWorkflowEngine, { provider: 'stub', maxConcurrentAgents: 8, ...options?.config })
   return { ctx, provider, parent: fakeParent(), engineFiber }
+}
+
+async function validateStubRequest(ctx: Context, request: SubagentStartRequest): Promise<void> {
+  const effort = request.agentOptions?.reasoningEffort
+  if (effort === undefined) return
+  const llm = ctx.get('llm')
+  if (llm === undefined) throw new Error('composes no LLM capability to validate it against')
+  const provider = request.agentOptions?.provider ?? request.parent.options.provider
+  const model = request.agentOptions?.model ?? request.parent.options.model
+  if (provider === undefined || model === undefined) throw new Error(`agent() reasoningEffort "${effort}" needs a complete route`)
+  try {
+    await llm.resolveCallConfig({ provider, model, reasoningEffort: ReasoningEffortId(effort) })
+  } catch (error: unknown) {
+    throw new Error(`agent() reasoningEffort "${effort}" was refused by the selected route: ${String(error)}`)
+  }
 }
 
 /** The standard test meta plus a body, spread into a start request. */
@@ -276,10 +296,9 @@ describe('dsh-workflow-worker-thread', () => {
       `))
 
       expect(result.stopReason).toBe('completed')
-      // The seam persists request.label into the child's durable descriptor,
-      // which is the value the session sidebar projection displays.
-      expect(provider.runs[0]!.request.label).toBe('scout')
-      expect(provider.runs[1]!.request.label).toBeUndefined()
+      // Assert the provider's resolved durable descriptor, not transient request metadata.
+      expect(provider.runs[0]!.request.descriptor.label).toBe('scout')
+      expect(provider.runs[1]!.request.descriptor.label).toBeUndefined()
     })
 
     it('agent({provider}) forwards provider-only agentOptions across the thread', async () => {
@@ -577,7 +596,7 @@ describe('dsh-workflow-worker-thread', () => {
       await ctx.plugin(SubagentRuntime)
       const provider: SubagentProvider = {
         name: 'rejecting',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: async () => ({
           id: SessionId('reject-child'),
@@ -636,7 +655,7 @@ describe('dsh-workflow-worker-thread', () => {
       await ctx.plugin(SubagentRuntime)
       const provider: SubagentProvider = {
         name: 'bad-dispose',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: async () => ({
           id: SessionId('bad-dispose-child'),
@@ -658,7 +677,7 @@ describe('dsh-workflow-worker-thread', () => {
       await ctx.plugin(SubagentRuntime)
       const provider: SubagentProvider = {
         name: 'coercion-trap-dispose',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: async () => ({
           id: SessionId('trap-child'),
@@ -915,6 +934,24 @@ describe('dsh-workflow-worker-thread', () => {
       await handle.dispose()
     })
 
+    it('drops queued worker messages after terminal settlement claims admission', async () => {
+      const { ctx, parent } = await setup()
+      const phases: string[] = []
+      ctx.on('workflow/phase', (_info, title) => { phases.push(title) })
+      const handle = ctx.workflowEngine.start({ ...scripted("return 'done'"), parent })
+      await handle.result
+      const internals = handle as unknown as {
+        terminalClaimed: boolean
+        workerDeathObserved: boolean
+        onMessage(message: { type: WorkerToHostType.Phase; title: string }): void
+      }
+      expect(internals.terminalClaimed).toBe(true)
+      internals.workerDeathObserved = false
+      internals.onMessage({ type: WorkerToHostType.Phase, title: 'after terminal' })
+      expect(phases).toEqual([])
+      await handle.dispose()
+    })
+
     it('arms no wall timer when maxRunWallMs is zero', async () => {
       vi.useFakeTimers()
       const { ctx, parent } = await setup({ config: { maxRunWallMs: 0, disposeGraceMs: 10 } })
@@ -1041,7 +1078,7 @@ describe('dsh-workflow-worker-thread', () => {
       const aborted: string[] = []
       const provider: SubagentProvider = {
         name: 'signal-only',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: async (request) => {
           let settle!: (result: SubagentResult) => void
@@ -1339,7 +1376,7 @@ describe('dsh-workflow-worker-thread', () => {
       const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => ctx.logger)
       const provider: SubagentProvider = {
         name: 'late-ready',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: (request) => {
           requested.resolve(request)
@@ -1400,7 +1437,7 @@ describe('dsh-workflow-worker-thread', () => {
       const signalAborts: unknown[] = []
       const provider: SubagentProvider = {
         name: 'doomed',
-        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+        capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false, agentOptions: false },
         inheritsParentContext: false,
         start: async (request) => {
           request.signal.addEventListener('abort', () => {

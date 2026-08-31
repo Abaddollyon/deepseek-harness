@@ -1,40 +1,27 @@
-# Agent Note：会话列表加载——实测成本与两项生效的修复
+# Agent Note：有界 JSONL 会话列表
 
-状态：已实现
+Status: implemented
 
 [English](2026-08-25-session-list-load-performance.md) | 中文
 
-## 问题
+## Problem
 
-在约 1,560 个会话（其中一个 Workspace 含约 678 个）的语料上，Web GUI 的侧边栏与会话加载明显缓慢。启动路径本身没有问题——工作区分组默认折叠、只挂载十几行——因此成本藏在两个手势之后：展开分组与打开长会话。`apps/web/tests/complex-history.perf.ts` 中扩展后的基准（1,001 个预置会话、一份 500 轮日志、Chromium CDP 指标加长任务与 DOM 变更探针）在任何修复之前先量出了各条路径：
+JSONL 会话列表会按顺序读取项目和会话目录，因此大型根目录必须依次等待每个 header 探测。
 
-- `session.list` 处理 1,001 个冷会话，热缓存约 460ms、冷缓存约 1.4–1.6s，全部在 Host 侧：`JsonlSessionPersistence.listArtifacts` 以一条严格串行的系统调用链遍历每个会话目录（两次 `exists()` 探测——各一次 open，文件不存在时还有一次父目录 stat——然后才是头部读取），而 Node 的 libuv 只有四个线程，等于逐日志串行。
-- 挂载 1,001 行侧边栏会话每次展开约耗 0.5s 主线程时间；没有虚拟化。
-- 所有行已挂载时的一次列表发布约耗 120ms 任务时间并产生约 14MB 短期堆分配，而 DOM 变更为零：`SessionRuntime.projectList` 每次都重建全部行对象，且侧边栏树因行组件未做记忆化而整体重渲染。
-- 打开 500 轮会话时，首个 24 轮窗口约 0.6s 送达；继续翻页的成本受制于不断增大的未虚拟化聊天 DOM 上的布局（完整日志约 12s 墙钟时间）。
+## Decision
 
-## 决策
+默认 `listConcurrency` 为 32。`JsonlSessionPersistence` 通过已验证的并发上限执行冷根编码验证和 `listArtifacts` 目录/header 探测，同时保留发现顺序、重复 id 拒绝、取消和最早发现顺序错误语义。取消会阻止 worker 领取更多探测；普通失败仍会完成有界遍历，再抛出顺序最早的错误。
 
-在本分支所属层做两个小修复；更大的成本如实报告而不修复（见「后果」）。
+## Alternatives considered
 
-`projectList` 恢复了逐行身份复用（2d8f4dc991 的归档设计，后来被一次重构移除）：字段全部不变的行保留其对象引用；`ids`、`byId`、`subagentsByParent`、`jobsBySession`、`currentAddress` 在内容不变时保留其引用。每次投影仍然发布——抑制发布正是该提交修复的代理预设暂存回归——因此手势回波照常到达订阅者，而记录级选择器消费者（谱系头部整体读取 `byId`）在等价投影中不再重渲染。
+**使用无界 Promise 扇出。** 拒绝，因为部署根目录可能包含大量会话，无界文件系统压力不安全。
 
-`listArtifacts` 将相互独立的读取在新的受校验配置项 `listConcurrency`（默认 32）下有界并发执行，并用每个会话目录的一次 `readdir` 同时回答两个文件探测，把每个会话的系统调用链从约 7 次降到 4 次，且按线程池宽度而非严格串行执行。顺序、错误优先级（按发现顺序抛最早的失败）与重复 id 拒绝均不变；现有 239 个测试原样通过。
+**按完成顺序返回。** 拒绝，因为调用方依赖确定性发现顺序和最早顺序错误。
 
-## 测试
+## Verification
 
-`packages/client/runtime/tests/sessions-service.client.spec.ts` 同时锁定投影契约的两半：等价重发布恰好通知订阅者一次且每行每记录保持引用不变；真正变化的行是唯一被替换的行。两个用例在没有身份复用时失败、加入后通过。
+`packages/session/session-persistence-jsonl/tests/jsonl.spec.ts` 覆盖 158 个 JSONL 测试，包括不同的并发错误、证明公开 `listConcurrency` 上限会停止后续探测的冷既有根取消、该中止验证尝试后的成功重试、完整结果和持久化 API 转发。
 
-持久化改动是纯性能改动、无行为差异；包测试照常锁定列表契约（旧版布局拒绝、编码不匹配、重复 id、撕裂文件）。浏览器基准的前后对比：`session.list` 进程内 464→261ms，页面启动就绪 1510→852ms，空发布的堆扰动 13.8→3.1MB。
+## Consequences
 
-## 后果
-
-其余实测成本在本分支层之外，刻意只报告不修复：侧边栏行因 `SessionNodeItem` 未记忆化且树组件整体选择列表状态而在每次发布时全部重渲染（packages/client/ui-workspace）；聊天历史翻页受制于未虚拟化会话 DOM 的布局（packages/client/ui-conversation）；Host 内容搜索每次查询扫描全部会话日志（1,001 个桩日志约 5s，packages/host/apiproxy——需要索引，非此处修复）。
-
-## 备选方案
-
-**管理器快照引用不变时整个跳过行重建。** 管理器每次冲刷都重建该快照，捷径永远不会命中；行级复用才是有效的粒度。
-
-**为 Host 进程调大 libuv 线程池。** 为一条代码路径改进程级环境，不如让该路径本身需要更少的系统调用。
-
-**在 RPC 之间缓存列表结果。** 面对会话根目录的外部修改无法正确失效；列表必须反映文件系统的真实状态。
+部署可以使用 listConcurrency 调整文件系统压力，同时调用方获得确定性完整结果。

@@ -15,10 +15,22 @@
       "path": "../locale"
     },
     {
-      "path": "../runtime"
+      "path": "../../api/session-controller/tsconfig.client.json"
+    },
+    {
+      "path": "../store"
+    },
+    {
+      "path": "../ui-chat"
     },
     {
       "path": "../ui-conversation"
+    },
+    {
+      "path": "../ui-renderer"
+    },
+    {
+      "path": "../ui-session"
     },
     {
       "path": "../ui-primitives"
@@ -28,6 +40,9 @@
     },
     {
       "path": "../../core/session"
+    },
+    {
+      "path": "../../jobs/run-supervisor"
     },
     {
       "path": "../../workflow/workflow"

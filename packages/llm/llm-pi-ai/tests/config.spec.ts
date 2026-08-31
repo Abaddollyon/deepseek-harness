@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assertServiceable, Config, resolveProfiles } from '../src/config.ts'
+import { assertServiceable, Config, MAX_AUTH_RECOVERY_RETRIES, resolveProfiles } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -34,6 +34,17 @@ describe('reasoning schema boundary', () => {
 
   it('rejects a thinking format outside the offered set', () => {
     expect(configWith({ compat: { thinkingFormat: 'quantum' } })).toThrow(/expected/)
+  })
+
+  it('accepts Baseten template arguments and completion controls', () => {
+    expect(configWith({
+      compat: {
+        supportsFinishReason: false,
+        thinkingFormat: 'baseten',
+        chatTemplateArgs: { enable_thinking: { $var: 'thinking.enabled' } },
+        supportsThinkingTokenBudget: true,
+      },
+    })).not.toThrow()
   })
 })
 
@@ -71,6 +82,7 @@ describe('request image policy bounds', () => {
     ['requestImagePixelBudget', Number.MAX_SAFE_INTEGER + 1, /requestImagePixelBudget must be a positive safe integer/],
     ['requestImageMaxBytes', 0, /requestImageMaxBytes must be a positive safe integer/],
     ['requestImageMaxBytes', 1.5, /requestImageMaxBytes must be a positive safe integer/],
+    ['streamIdleTimeoutMs', 0.5, /streamIdleTimeoutMs must be a positive integer/],
   ] as const)('rejects %s=%s at service resolution', (field, value, message) => {
     const programmatic = {
       providers: {
@@ -103,6 +115,16 @@ describe('auth recovery policy', () => {
       },
     })
     expect(off.get('acme-gateway')?.authRecovery).toEqual({ retries: 0, delayMs: 1000 })
+  })
+
+  it('accepts exact maximum and rejects invalid budgets in both paths', () => {
+    expect(routeWith({ authRecovery: { retries: MAX_AUTH_RECOVERY_RETRIES } })).not.toThrow()
+    const invalid = [-1, 1.5, Number.MAX_VALUE, MAX_AUTH_RECOVERY_RETRIES + 1]
+    for (const retries of invalid) {
+      expect(routeWith({ authRecovery: { retries } })).toThrow()
+      const providers = { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }], authRecovery: { retries } } }
+      expect(() => resolveProfiles(providers)).toThrow(/authRecovery.retries/)
+    }
   })
 
   it('rejects an invalid budget at the schema, and at resolution when bypassed', () => {

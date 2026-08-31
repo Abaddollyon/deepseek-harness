@@ -7,10 +7,12 @@
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
+import { request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { brotliDecompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -62,9 +64,30 @@ async function loadComposition(port = 0): Promise<Context> {
 }
 
 /** GET (by default) one path against the running server; returns status plus a body prefix. */
-async function request(port: number, path: string, init?: RequestInit): Promise<{ status: number; body: string }> {
+async function request(
+  port: number,
+  path: string,
+  init?: RequestInit,
+): Promise<{ status: number; body: string; headers: Headers }> {
   const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
-  return { status: response.status, body: (await response.text()).slice(0, 80) }
+  return { status: response.status, body: (await response.text()).slice(0, 80), headers: response.headers }
+}
+
+/** Read encoded bytes without fetch's automatic content-coding decode. */
+async function rawRequest(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const client = httpRequest({ port, host: '127.0.0.1', path, headers }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+      response.on('end', () => { resolve({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks) }) })
+    })
+    client.on('error', reject)
+    client.end()
+  })
 }
 
 /** Open one raw upgrade request and return after the handler writes its response. */
@@ -100,6 +123,59 @@ describe('real Loader composition', () => {
     expect(server).toBeInstanceOf(HttpServer)
     const port = server.port
     expect(port).toBeGreaterThan(0)
+
+    // The real Loader path also carries the response-policy defaults: a body
+    // over the default 1024-byte threshold is brotli encoded at quality 5,
+    // while the same carrier keeps a small body identity encoded.
+    const largeBody = JSON.stringify({ payload: 'default-policy '.repeat(500) })
+    server.register({
+      kind: 'exact',
+      path: '/default-policy',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(largeBody)
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/default-small',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('small')
+      },
+    })
+    server.register({
+      kind: 'prefix',
+      path: '/assets',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/javascript' })
+        res.end(largeBody)
+      },
+    })
+    server.register({
+      kind: 'prefix',
+      path: '/plugins',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/javascript' })
+        res.end(largeBody)
+      },
+    })
+    const encoded = await rawRequest(port, '/default-policy', { 'accept-encoding': 'br, gzip' })
+    expect(encoded.headers['content-encoding']).toBe('br')
+    expect(encoded.headers['cache-control']).toBe('no-cache')
+    expect(brotliDecompressSync(encoded.body).toString('utf8')).toBe(largeBody)
+    const small = await rawRequest(port, '/default-small', { 'accept-encoding': 'br, gzip' })
+    expect(small.headers['content-encoding']).toBeUndefined()
+    expect(small.body.toString('utf8')).toBe('small')
+    const asset = await rawRequest(port, '/assets/app-hash.js', { 'accept-encoding': 'br, gzip' })
+    expect(asset.status).toBe(200)
+    expect(asset.headers['content-encoding']).toBe('br')
+    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(brotliDecompressSync(asset.body).toString('utf8')).toBe(largeBody)
+    const plugin = await rawRequest(port, '/plugins/example/client.js?rev=deadbeef', { 'accept-encoding': 'br, gzip' })
+    expect(plugin.headers['content-encoding']).toBe('br')
+    expect(plugin.headers['cache-control']).toBe('no-cache')
+    expect(brotliDecompressSync(plugin.body).toString('utf8')).toBe(largeBody)
 
     // Routing precedence: exact beats prefix, longest prefix wins, a prefix
     // route answers its own path, and routes own their method handling
@@ -208,6 +284,7 @@ describe('real Loader composition', () => {
       table.push(
         { kind: 'script', placement: 'head', text: 'window.__Q__=1' },
         { kind: 'script-src', placement: 'head', src: '/plugins/a.js?rev="1"&x=<y>' },
+        { kind: 'script-preload', src: '/plugins/b.js?rev="2"&x=<z>' },
         { kind: 'global', name: '__DSH_BOOT__', value: { rev: '</script><b>' } },
         { kind: 'style', text: 'body{margin:0}' },
         { kind: 'html', placement: 'head', html: '<meta name="probe">' },
@@ -222,6 +299,7 @@ describe('real Loader composition', () => {
       '<head>',
       '<script>window.__Q__=1</script>',
       '<script src="/plugins/a.js?rev=&quot;1&quot;&amp;x=&lt;y&gt;"></script>',
+      '<link rel="preload" as="script" href="/plugins/b.js?rev=&quot;2&quot;&amp;x=&lt;z&gt;">',
       'globalThis["__DSH_BOOT__"] = {"rev":"\\u003c/script>\\u003cb>"}',
       '<style>body{margin:0}</style>',
       '<meta name="probe">',
@@ -241,11 +319,13 @@ describe('real Loader composition', () => {
     expect(server.renderIndex('<head></head><body></body>')).toContain('window.__Q__=2')
     untap()
 
-    // Tag-less fragments: head rows prepend, body rows append.
+    // Tag-less fragments: head rows prepend, body rows append, and the
+    // boot-readiness tail lands after the last body row.
     expect(renderIndexInjections('<main>x</main>', [
       { kind: 'script', placement: 'head', text: 'H' },
       { kind: 'script', placement: 'body', text: 'B' },
-    ])).toBe('<script>H</script><main>x</main><script>B</script>')
+    ])).toBe('<script>H</script><main>x</main><script>B</script>'
+      + '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>')
   })
 
   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {

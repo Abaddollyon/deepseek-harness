@@ -1,11 +1,27 @@
+---
+description: "The concrete agent loop driver and lifecycle owner."
+kind: "package-reference"
+---
+
 # dsh-agent-loop
 
 English | [中文](README.zh.md)
+
+## Summary
+
+The concrete agent plugin and loop driver owns the session, turn, and step lifecycle.
+
+## Table of Contents
+
+- [Service: AgentLoop](#service-agentloop-ctx-key-agentloop)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
 
 THE concrete agent plugin and loop driver. Its package-internal implementation satisfies the `Agent` interface and drives the session/turn/step lifecycle.
 
 This is the only package in the harness that contains concrete loop logic. Everything else is an abstract service or a plugin against extension points — new behavior goes into plugins, not here.
 
+<a id="service-agentloop-ctx-key-agentloop"></a>
 ## Service: `AgentLoop` (ctx key: `agentLoop`)
 
 ### Public API
@@ -40,8 +56,10 @@ interface Config {
   maxParallelToolCalls?: number // default 10; 1 is serial
   agents: Array<{
     id: string                 // required
+    sessionId?: string          // exact create-or-resume identity; exclusive with resumeSessionId
     provider?: string
     model?: string
+    reasoningEffort?: string    // registered effort id for the configured model route
     maxTokens?: number         // positive per-request output-token cap
     resumeSessionId?: string   // load this persisted session instead of creating one
     cwd?: string               // optional workspace cwd for the fresh session
@@ -49,7 +67,7 @@ interface Config {
 }
 ```
 
-Configured agents start automatically. A model call requires both `provider` and `model`; `agent/request` may supply a missing pair before dispatch. An optional positive `maxTokens` seeds each conversation request's output cap and is logged in its request header. `maxParallelToolCalls` bounds every agent's rolling pool for parallel-safe calls and defaults to `10`; it is also the whole of the `agent-loop` Settings section, so a user layer over this entry caps the next tool group without a restart, and a value that is not a positive integer is refused at the write rather than at that group. `agents` is deliberately absent from that section — it is consumed once when the service starts, so a stored change could only look like it had an effect. `cwd` applies only to fresh sessions, while `resumeSessionId` retains persisted metadata. Configured agents use the deployment persona, and programmatic setup can shadow it per agent. This plugin supplies the per-agent `provider`, `model`, and `cwd` prompt variables; harness identity and deployment persona belong to `dsh-system-prompt`.
+Configured agents start automatically. A model call requires both `provider` and `model`; `agent/request` may supply a missing pair before dispatch. `reasoningEffort` selects a registered effort for that route. `sessionId` creates the exact identity on first use and resumes its materialized history on remount; it is mutually exclusive with `resumeSessionId`, which requires existing history. An optional positive `maxTokens` seeds each conversation request's output cap and is logged in its request header. `maxParallelToolCalls` bounds every agent's rolling pool for parallel-safe calls and defaults to `10`; it is also the whole of the `agent-loop` Settings section, so a user layer over this entry caps the next tool group without a restart, and a value that is not a positive integer is refused at the write rather than at that group. `agents` is deliberately absent from that section — it is consumed once when the service starts, so a stored change could only look like it had an effect. `cwd` applies only to fresh sessions, while `resumeSessionId` retains persisted metadata. Configured agents use the deployment persona, and programmatic setup can shadow it per agent. This plugin supplies the per-agent `provider`, `model`, and `cwd` prompt variables; harness identity and deployment persona belong to `dsh-system-prompt`.
 
 ### Internal concrete driver
 
@@ -61,7 +79,7 @@ Every inbox mutation publishes one normalized `agent/inbox/spliced` event before
 
 ### Loop lifecycle (`agent.ts`)
 
-The driver owns one agent for its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`. Package-private orchestration entry points recover the exact Agent, derive `agent.session` once, and let operation-local helpers capture it instead of forwarding the concrete driver or per-operation `Session` through shallow interfaces. A helper keeps an explicit `Session` when that is its actual interface, while creation, persistence load, unpublished setup, services, workers, processes, persistence, and wire protocols retain their explicit identities. The [agent service](../agent/README.md#initiating-agent-scope) owns propagation, teardown, and detached-work rules.
+The driver owns one agent for its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`. Package-private orchestration entry points recover the exact Agent, derive `agent.session` once, and let operation-local helpers capture it instead of forwarding the concrete driver or per-operation `Session` through shallow interfaces. A helper keeps an explicit `Session` when that is its actual interface, while creation, persistence load, unpublished setup, services, workers, processes, persistence, and wire protocols retain their explicit identities. The [agent service](../agent/README.md#initiator-scope) owns propagation, teardown, and detached-work rules.
 
 Every provider call that reaches a successful finish appends exactly one `assistant/message` completion anchor, including content-less calls and `max-tokens` finishes. The anchor records the assembled content as-is, lists the exact chunk seqs in `sourceEventSeqs` (`[]` for a stream with no chunks), and includes usage when available; empty content stays out of derived message history. A turn cancellation that interrupts streaming also appends an `interrupted: true` anchor when non-empty text or reasoning has reached the user. The anchor cites those chunk seqs and places the rendered prefix in derived message history, so the next request contains what the user saw. Undispatched tool calls are omitted, and an empty or tool-only stream produces no anchor; provider failures still commit no assistant content ([decision](../../../.agents/notes/implemented/architecture/2026-08-10-cancelled-stream-prefix-finalize.md)).
 
@@ -82,6 +100,7 @@ Everything that goes beyond "call the model, run the tools, repeat" belongs to p
 - Persistence: eager write-behind from `session/event`; `session/flush` is an explicit observation barrier
 - UI: `session/event` (assistant token stream, boundaries, tool activity) + `agent/*` control events (`agent/status`, `agent/created`/`agent/disposed`)
 
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Complete conversation request
@@ -128,7 +147,14 @@ Append-only; each synthetic result follows the reusable request prefix and does 
 
 ## Known Limitations and Deferred Work
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - **Classification is unary** — calls whose safety depends on comparing siblings or resources must remain exclusive ([rationale](../../../.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.md)).
 - **Config labels are fresh by default** — omitting `sessionId` creates a fresh `${id}-session-<uuid>` on every startup; exact resume-or-create behavior requires an explicit stable `sessionId`, while `resumeSessionId` requires existing persisted history.
 - **Config agents have no per-agent persona field or setup hook** — they use the deployment persona; scoped persona/tool composition is available only through the programmatic `ctx.agents.create()` / `resume()` factory options.
 - **No built-in turn budget** — tool calls or steering continue the current turn; a policy that bounds runaway turns must cancel from an existing lifecycle extension point such as `agent/turn-stopping`.
+
+<a id="dev-note"></a>
+### Dev Note
+
+Lifecycle changes require focused cancellation, teardown, and persistence tests.

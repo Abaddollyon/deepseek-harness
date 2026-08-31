@@ -9,11 +9,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentOptions, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { PERSONA_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 // Type-only: make `ctx.get('sandboxPolicy')` / `ctx.get('approval')` resolve
 // to the policy services when composed — delegation consumes both
@@ -28,19 +27,6 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 // them through the tool registry's global layer.
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { delegationDepthOf } from './depth.ts'
-
-declare module '@deepseek-ai/dsh-agent' {
-  interface AgentOptions {
-    /**
-     * Reasoning effort for the child's own model requests, alongside the
-     * `provider`/`model` route. Delegation applies it as an Agent-scoped model
-     * selection in the child's creation window ({@link applyChildComposition}),
-     * because the loop seeds only `provider`, `model`, and `maxTokens` from
-     * these options. Requires both `provider` and `model` to be resolved.
-     */
-    reasoningEffort?: ReasoningEffortId
-  }
-}
 
 /** Thrown when starting a child would exceed the requested depth cap. */
 export class SubagentDepthError extends Error {
@@ -72,11 +58,38 @@ export function resolveChildDepth(parent: Agent, maxDepth: number | undefined): 
 }
 
 /**
- * Resolve the child's `AgentOptions`: the parent's provider/model/maxTokens
- * route unless the request overrides it, stamped with the child's own
- * delegation depth. `provider`, `model`, and `reasoningEffort` are each
- * independently overridable, so a request that carries only one of them keeps
- * the inherited value for the others.
+ * Resolve the parent values inherited by a child. The latest request header
+ * owns provider, model, and reasoning effort after request-time selection;
+ * creation options remain the fallback before the first request and retain
+ * the configured output-token limit.
+ * @param parent - delegating parent Agent.
+ * @returns detached Agent options for child-option merging.
+ */
+export function parentAgentOptionsForDelegation(parent: Agent): AgentOptions {
+  const requestConfig = parent.session.requestHeader()?.config
+  if (requestConfig === undefined) return { ...parent.options }
+  const {
+    provider: _createdProvider,
+    model: _createdModel,
+    reasoningEffort: _createdReasoningEffort,
+    ...createdOptions
+  } = parent.options
+  return {
+    ...createdOptions,
+    provider: requestConfig.provider,
+    model: requestConfig.model,
+    ...requestConfig.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: requestConfig.reasoningEffort },
+  }
+}
+
+/**
+ * Resolve the child's `AgentOptions`: the parent's provider/model,
+ * reasoning-effort, and maxTokens values unless the request overrides them,
+ * stamped with the child's own delegation depth. Changing the route without
+ * naming an effort clears the parent's route-owned effort so the selected
+ * model resolves its own default.
  * @param parent - the delegating parent whose route the child inherits.
  * @param requested - per-child overrides, if any.
  * @param childDepth - the resolved delegation depth to stamp.
@@ -87,16 +100,22 @@ export function resolveChildAgentOptions(
   requested: AgentOptions | undefined,
   childDepth: number,
 ): AgentOptions {
-  const parentProvider = parent.options.provider
-  const parentModel = parent.options.model
-  const parentMaxTokens = parent.options.maxTokens
-  return {
+  const parentOptions = parentAgentOptionsForDelegation(parent)
+  const parentProvider = parentOptions.provider
+  const parentModel = parentOptions.model
+  const parentReasoningEffort = parentOptions.reasoningEffort
+  const parentMaxTokens = parentOptions.maxTokens
+  const resolved: AgentOptions = {
     ...parentProvider !== undefined ? { provider: parentProvider } : {},
     ...parentModel !== undefined ? { model: parentModel } : {},
+    ...parentReasoningEffort !== undefined ? { reasoningEffort: parentReasoningEffort } : {},
     ...parentMaxTokens !== undefined ? { maxTokens: parentMaxTokens } : {},
     ...requested,
     subagentDepth: childDepth,
   }
+  const routeChanged = resolved.provider !== parentProvider || resolved.model !== parentModel
+  if (routeChanged && requested?.reasoningEffort === undefined) delete resolved.reasoningEffort
+  return resolved
 }
 
 /**
@@ -167,13 +186,6 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * per-child restriction intersects with everything its chain admits — but
  * stating it here keeps the two steps from being read as independent.
  *
- * A delegated `reasoningEffort` is applied here too, as an Agent-scoped model
- * selection over the child's resolved route: the loop seeds request config from
- * `provider`/`model`/`maxTokens` alone, so an effort that stayed in
- * `AgentOptions` would be accepted and never reach a request. Taking the
- * resolved options as a parameter is what makes that omission unrepresentable
- * at the call sites.
- *
  * The join and the per-child registrations live in ONE call because a child
  * composed without the join is exactly the defect this function exists to
  * prevent: with every model-facing row on the agent plane, a child that joins
@@ -183,33 +195,19 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * @param childCtx - the child agent's scoped creation context.
  * @param parent - the delegating parent whose composition the child joins.
  * @param composition - the per-child persona and tool filter to install.
- * @param options - the child's resolved {@link resolveChildAgentOptions} result.
- * @throws when a delegated `reasoningEffort` has no complete route to apply to.
  */
 export function applyChildComposition(
   childCtx: Context,
   parent: Agent,
   composition: ChildComposition,
-  options: AgentOptions,
 ): void {
   childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
   // Order 120: after the sandbox:policy (110) and approval:policy (115) sentences.
   childCtx.systemPrompt.context({ name: 'subagent:delegation', order: 120, text: SUBAGENT_DELEGATION_CONTEXT })
   if (composition.persona !== undefined) {
-    childCtx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: composition.persona })
+    childCtx.systemPrompt.section({ name: 'deployment:persona', order: PERSONA_ORDER, text: composition.persona })
   }
   if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
-  applyChildReasoningEffort(childCtx, options)
-}
-
-/** Install the child's delegated reasoning effort over its own resolved route. */
-function applyChildReasoningEffort(childCtx: Context, options: AgentOptions): void {
-  const { provider, model, reasoningEffort } = options
-  if (reasoningEffort === undefined) return
-  if (provider === undefined || model === undefined) {
-    throw new Error(`subagent reasoningEffort "${reasoningEffort}" needs a complete route: the child resolved no ${provider === undefined ? 'provider' : 'model'}`)
-  }
-  installModelSelection(childCtx, { current: { provider, model, reasoningEffort }, assembled: undefined })
 }
 
 /** Policy seeded onto a child session's log at the delegation boundary. */

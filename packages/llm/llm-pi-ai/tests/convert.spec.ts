@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestPolicy, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { toPiContext } from '../src/context.ts'
@@ -63,7 +63,11 @@ function attachmentStore(readImageRequest: (
   policy: ImageRequestPolicy,
   signal?: AbortSignal,
 ) => Promise<RequestImageAttachment>): AttachmentStore {
-  return { readImageRequest } as unknown as AttachmentStore
+  return { readImageRequest, imageHostPath: () => undefined } as unknown as AttachmentStore
+}
+
+function imageContext(attachments: AttachmentStore) {
+  return { attachments, resolveImageAccess: () => undefined }
 }
 
 describe('toPiContext', () => {
@@ -109,7 +113,7 @@ describe('toPiContext', () => {
         content: [{ type: 'text', text: 'describe' }, { type: 'image', attachment }],
         source: { kind: 'plugin', plugin: 'test' },
       })],
-    }, attachmentStore(readImageRequest))
+    }, imageContext(attachmentStore(readImageRequest)))
 
     expect(readImageRequest).toHaveBeenCalledWith(
       attachment,
@@ -144,14 +148,14 @@ describe('toPiContext', () => {
       messages: [createUserMessage({
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('outer'),
+          toolCallId: ToolCallId('outer'),
           content: [
-            { type: 'tool-result', toolCallId: CallId('empty'), content: [] },
+            { type: 'tool-result', toolCallId: ToolCallId('empty'), content: [] },
             { type: 'text', text: 'before' },
-            { type: 'tool-result', toolCallId: CallId('text'), content: [{ type: 'text', text: 'middle' }] },
+            { type: 'tool-result', toolCallId: ToolCallId('text'), content: [{ type: 'text', text: 'middle' }] },
             {
               type: 'tool-result',
-              toolCallId: CallId('inner'),
+              toolCallId: ToolCallId('inner'),
               content: [
                 { type: 'image', attachment },
                 { type: 'text', text: 'after' },
@@ -161,7 +165,7 @@ describe('toPiContext', () => {
         }],
         source: { kind: 'plugin', plugin: 'test' },
       })],
-    }, attachmentStore(readImageRequest))
+    }, imageContext(attachmentStore(readImageRequest)))
 
     expect(context.messages).toEqual([{
       role: 'toolResult',
@@ -204,7 +208,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'hmm' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: CallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: { kind: 'plugin', plugin: 'test' },
       })],
@@ -255,7 +259,7 @@ describe('toPiContext', () => {
       model: 'm',
       messages: [createMessage({
         role: 'assistant',
-        content: [{ type: 'tool-call', id: CallId('c1'), name: 'f', arguments: '{broken' }],
+        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{broken' }],
         source: { kind: 'plugin', plugin: 'test' },
       })],
     })
@@ -269,7 +273,7 @@ describe('toPiContext', () => {
       model: 'm',
       messages: [createMessage({
         role: 'assistant',
-        content: [{ type: 'tool-call', id: CallId('c1'), name: 'f', arguments: '[1,2]' }],
+        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '[1,2]' }],
         source: { kind: 'plugin', plugin: 'test' },
       })],
     })
@@ -283,16 +287,16 @@ describe('toPiContext', () => {
       messages: [
         createMessage({
           role: 'assistant',
-          content: [{ type: 'tool-call', id: CallId('c1'), name: 'get_weather', arguments: '{}' }],
+          content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'get_weather', arguments: '{}' }],
           source: { kind: 'plugin', plugin: 'test' },
         }),
         createUserMessage({
           content: [{
             type: 'tool-result',
-            toolCallId: CallId('c1'),
+            toolCallId: ToolCallId('c1'),
             content: [
               { type: 'text', text: 'Sunny' },
-              { type: 'tool-result', toolCallId: CallId('nested'), content: [{ type: 'text', text: '!' }] },
+              { type: 'tool-result', toolCallId: ToolCallId('nested'), content: [{ type: 'text', text: '!' }] },
               { type: 'chart', data: 'ignored' } as unknown as ContentBlock,
             ],
           }],
@@ -315,7 +319,7 @@ describe('toPiContext', () => {
       provider: 'deepseek',
       model: 'm',
       messages: [createUserMessage({
-        content: [{ type: 'tool-result', toolCallId: CallId('zz'), content: [], isError: true }],
+        content: [{ type: 'tool-result', toolCallId: ToolCallId('zz'), content: [], isError: true }],
         source: { kind: 'plugin', plugin: 'test' },
       })],
     })
@@ -339,7 +343,7 @@ describe('toPiContext', () => {
         createUserMessage({
           content: [
             { type: 'text', text: 'note' },
-            { type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: 'ok' }] },
+            { type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }] },
           ],
           source: { kind: 'plugin', plugin: 'test' },
         }),
@@ -386,7 +390,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'private reasoning' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: CallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: {
           kind: 'model',
@@ -427,7 +431,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'private reasoning' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: CallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: {
           kind: 'model',
@@ -639,7 +643,7 @@ describe('toStreamChunks', () => {
       { type: 'block-start', index: 0, blockType: 'text' },
       { type: 'text-delta', index: 0, text: 'hi' },
       { type: 'block-end', index: 0, block: { type: 'text', text: 'hi' } },
-      { type: 'usage', usage: { inputTokens: 3, outputTokens: 2 } },
+      { type: 'usage', usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 } },
       {
         type: 'finish',
         reason: { kind: 'stop' },
@@ -690,7 +694,7 @@ describe('toStreamChunks', () => {
       { type: 'tool-call-delta', index: 0, id: 'call-1', name: 'f', argumentsDelta: '{"a"' },
       { type: 'tool-call-delta', index: 0, id: 'call-1', name: 'f', argumentsDelta: ':1}' },
       { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call-1', name: 'f', arguments: '{"a":1}' } },
-      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
+      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } },
       {
         type: 'finish',
         reason: { kind: 'tool-calls' },
@@ -724,7 +728,7 @@ describe('toStreamChunks', () => {
       { type: 'error', reason: 'error', error },
     )))
     expect(chunks).toEqual([
-      { type: 'usage', usage: { inputTokens: 1, outputTokens: 0 } },
+      { type: 'usage', usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 } },
       { type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'PI_AI_ERROR' } } },
     ])
   })
@@ -735,6 +739,24 @@ describe('toStreamChunks', () => {
     expect(chunks.at(-1)).toEqual({
       type: 'finish',
       reason: { kind: 'aborted', failure: { message: 'pi-ai stream aborted', code: 'ABORTED' } },
+    })
+  })
+
+  it('lets caller cancellation override retryable reset classification', async () => {
+    // An aborted caller turns any in-band terminal error into an aborted
+    // finish; the HTTP/2 reset wording must not route to TRANSPORT here.
+    const error = assistant({
+      stopReason: 'error',
+      errorMessage: 'stream error: stream ID 1; INTERNAL_ERROR; received from peer',
+    })
+    const chunks = await collect(toStreamChunks(
+      feed({ type: 'error', reason: 'error', error }),
+      undefined,
+      AbortSignal.abort('caller gone'),
+    ))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { code: 'ABORTED' } },
     })
   })
 
@@ -758,6 +780,14 @@ describe('mapStopReason / mapUsage', () => {
     ['stop', { kind: 'stop' }],
     ['length', { kind: 'max-tokens' }],
     ['toolUse', { kind: 'tool-calls' }],
+    ['pending', {
+      kind: 'error',
+      failure: { message: 'pi-ai stream for model "deepseek-v4-flash" ended pending', code: 'PI_AI_ERROR' },
+    }],
+    ['deferred', {
+      kind: 'error',
+      failure: { message: 'pi-ai deferred response for model "deepseek-v4-flash" is not supported', code: 'PI_AI_ERROR' },
+    }],
     ['aborted', { kind: 'aborted', failure: { message: 'pi-ai stream aborted', code: 'ABORTED' } }],
   ] as const)('maps %s', (stopReason, expected) => {
     expect(mapStopReason(assistant({ stopReason, content: [{ type: 'text', text: 'ok' }] }))).toEqual(expected)
@@ -849,10 +879,6 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it('feeds HTTP/2 stream resets to the default retry policy as TRANSPORT', () => {
-    // The no-detail fallback keeps the words `stream error` out of the
-    // classifier: an unknown cause must not enter the retry loop.
-    expect(mapStopReason(assistant({ stopReason: 'error' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'stream error: stream ID 3; REFUSED_STREAM; received from peer',
@@ -860,6 +886,22 @@ describe('mapStopReason / mapUsage', () => {
     const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
     if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
     expect(policy.retryableCodes).toContain('TRANSPORT')
+  })
+
+  it.each([
+    // A locally reset or otherwise truncated nghttp2 message without the
+    // peer-attribution half of the composite is not proven transient.
+    'stream error: stream ID 1; INTERNAL_ERROR',
+    // Application-level wording that happens to say `stream error`.
+    'gRPC call failed with stream error: payload decode failed',
+    // `received from peer` without `stream error` is not reset vocabulary.
+    'certificate received from peer failed validation',
+  ])('keeps non-reset wording %j out of the retry loop', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
+    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
+    expect(policy.retryableCodes).not.toContain('PI_AI_ERROR')
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
@@ -889,6 +931,11 @@ describe('mapStopReason / mapUsage', () => {
       },
     })
 
+    // Boundary: usage exactly at the window is not an overflow (the detector
+    // trips strictly above it), so the stop stays successful.
+    const atWindow = assistant({ stopReason: 'stop', usage: usage(100, 0), content: [{ type: 'text', text: 'x' }] })
+    expect(mapStopReason(atWindow, 100)).toEqual({ kind: 'stop' })
+
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
     expect(mapStopReason(truncated, 100)).toEqual({
@@ -905,10 +952,11 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapUsage(usage(10, 5, 8, 2))).toEqual({
       inputTokens: 10,
       outputTokens: 5,
+      totalTokens: 25,
       cacheReadTokens: 8,
       cacheWriteTokens: 2,
     })
-    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5 })
+    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
   })
 
   it('maps the provider-reported reasoning split without adding it to output', () => {
@@ -917,6 +965,7 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapUsage({ ...usage(10, 12), reasoning: 7 })).toEqual({
       inputTokens: 10,
       outputTokens: 12,
+      totalTokens: 22,
       reasoningTokens: 7,
     })
     // Providers that expose the breakdown report zero as a number; only
@@ -924,9 +973,10 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapUsage({ ...usage(10, 5), reasoning: 0 })).toEqual({
       inputTokens: 10,
       outputTokens: 5,
+      totalTokens: 15,
       reasoningTokens: 0,
     })
-    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5 })
+    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
   })
 })
 

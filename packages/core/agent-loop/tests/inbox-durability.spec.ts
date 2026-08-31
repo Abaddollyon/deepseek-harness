@@ -104,20 +104,12 @@ describe('pre-step abort restores the claimed batch', () => {
 
     send(agent, 'A')
     await blocked
-    // Staged steering keeps next-step non-empty through the restore, so the
-    // requeue dedupe is checked against both pending lists.
-    agent.steer(createUserMessage({
-      content: [{ type: 'text', text: 'staged steering' }],
-      source: { kind: 'user' },
-    }))
-    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    agent.cancel({ kind: 'user' })
     await agent.whenIdle()
 
     // The claim was durable but no model request ever saw the message: it
     // returns to the inbox instead of vanishing with the aborted turn.
     expect(agent.inbox.nextTurn.map(message => message.content[0])).toEqual([{ type: 'text', text: 'A' }])
-    expect(agent.inbox.nextStep.map(message => message.content[0]))
-      .toEqual([{ type: 'text', text: 'staged steering' }])
     expect(userTexts(agent)).toEqual([])
     expect(adapter.requests).toHaveLength(0)
     expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
@@ -128,7 +120,7 @@ describe('pre-step abort restores the claimed batch', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'B')
     await idle
-    expect(userTexts(agent)).toEqual(['staged steering', 'A', 'B'])
+    expect(userTexts(agent)).toEqual(['A', 'B'])
     expect(adapter.requests).toHaveLength(2)
   })
 
@@ -209,6 +201,16 @@ describe('pre-step abort restores the claimed batch', () => {
     const request = JSON.stringify(adapter.requests[1]?.messages)
     expect(request).toContain('staged steering')
     expect(request).toContain('continue')
+  })
+
+  it('rejects overlapping maintenance while the agent is active', async () => {
+    const ctx = await harness(new MockAdapter([]))
+    const agent = ctx.agentLoop.create(SessionId('maintenance-overlap'), { provider: 'mock', model: 'mock' })
+    const release = Promise.withResolvers<undefined>()
+    const running = agent.runMaintenance(async () => release.promise)
+    expect(() => agent.runMaintenance(async () => undefined)).toThrow(/already has active work/)
+    release.resolve(undefined)
+    await running
   })
 
   it('keeps a pending inbox across disposal so a remount can resume it', async () => {

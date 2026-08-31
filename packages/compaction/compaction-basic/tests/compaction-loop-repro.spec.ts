@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, resolveRetryPolicy , createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -12,7 +12,8 @@ import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
-import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import { BasicCompactionEngine, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
+import ToolResultPruner, { type ToolResultPruneConfig } from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deepseek-ai/dsh-session'
@@ -27,7 +28,7 @@ import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deeps
 class ReproCompactionEngine extends BasicCompactionEngine {
   override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
     return {
-      summary: [{ type: 'text', text: 'CHECKPOINT SUMMARY' }],
+      summary: [{ type: 'text', text: 'S' }],
       provider: 'mock',
       model: 'stub',
     }
@@ -37,7 +38,10 @@ class ReproCompactionEngine extends BasicCompactionEngine {
 /** Each call emits one tool-call until exhausted, then a final text answer. */
 class StepwiseToolAdapter extends LlmAdapter {
   calls = 0
-  constructor(private toolSteps: number) {
+  constructor(
+    private toolSteps: number,
+    private readonly contextWindow = 1_000,
+  ) {
     super()
   }
 
@@ -46,7 +50,7 @@ class StepwiseToolAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: 1_000 },
+      context: { contextWindow: this.contextWindow },
     })
   }
 
@@ -54,7 +58,7 @@ class StepwiseToolAdapter extends LlmAdapter {
     const n = this.calls
     this.calls += 1
     if (n < this.toolSteps) {
-      const id = CallId(`c${n}`)
+      const id = ToolCallId(`c${n}`)
       const args = `{"i":${n}}`
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `step ${n}` } }
@@ -146,19 +150,26 @@ async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(AgentLoopInvariant)
 }
 
-async function harness(toolSteps: number): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
+async function harness(
+  toolSteps: number,
+  config: BasicCompactionConfig = {},
+  contextWindow = 1_000,
+  toolResult = 'work result',
+  prunerConfig?: ToolResultPruneConfig,
+): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await mountInvariants(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
-  ctx.llm.registerAdapter(['mock'], new StepwiseToolAdapter(toolSteps))
+  if (prunerConfig !== undefined) void new ToolResultPruner(ctx, prunerConfig)
+  ctx.llm.registerAdapter(['mock'], new StepwiseToolAdapter(toolSteps, contextWindow))
   ctx.tools.register(defineContentToolFixture({
     name: 'work',
     description: 'does work',
     parameters: { i: { type: 'number' } },
     async execute() {
-      return [{ type: 'text', text: 'work result' }]
+      return [{ type: 'text', text: toolResult }]
     },
   }))
   // Small window so several tool steps cross the threshold and compaction
@@ -169,6 +180,7 @@ async function harness(toolSteps: number): Promise<{ ctx: Context; compact: Repr
     retainTokens: 50,
     maxTokens: 64,
     compactionRetries: 1,
+    ...config,
   })
   return { ctx, compact }
 }
@@ -215,6 +227,42 @@ function overflowHistorySeed(): SessionEvent[] {
 }
 
 describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', () => {
+  it('gives a tool-call continuation a fresh admission attempt', async () => {
+    const { ctx } = await harness(
+      1,
+      { thresholdRatio: 0.1, retainTokens: 1, maxOverflowRetries: 1 },
+      4_000,
+      'large tool result '.repeat(100),
+      { thresholdChars: 100, headChars: 20, tailChars: 10 },
+    )
+    try {
+      const agent = ctx.agentLoop.create(
+        SessionId('tool-call-continuation-admission'),
+        { provider: 'mock', model: 'mock' },
+      )
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'large first request '.repeat(80) }],
+        source: { kind: 'user' },
+      }))
+      await agent.whenIdle()
+
+      expect(agent.session.events.filter(event => event.type === 'assistant/message'))
+        .toHaveLength(2)
+      expect(agent.session.events.filter(event => event.type === 'tool/call'))
+        .toHaveLength(1)
+      expect(agent.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+      expect(agent.session.events.filter(event => event.type === 'compaction/prune'))
+        .toHaveLength(1)
+      expect(agent.session.surface.replaceGeneration).toBe(1)
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('uses the model actually routed by agent/request for post-step pressure', async () => {
     const { ctx } = await harness(8)
     ctx.on('agent/request', async (_payload, next) => ({

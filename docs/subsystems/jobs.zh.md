@@ -187,7 +187,7 @@ interface JobRead {
 
 ## 服务行为
 
-抽象的 [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition 规定原子 `start`、限定调用方作用域的 `get` 和 `list`、`read`、`kill`、有界 `wait`、故障隔离的 `onJobDone` 与 `onJobsChanged` 监听器，以及 `attachController` 何时可用；[`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) 是其进程局部 Service Provider。授权会比较拥有者会话；拥有者清理与准入会使用确切的已注册 `Agent` 实例。本地 Service Provider 的 `maxConcurrentJobsPerOwner` 配置必须是正的安全整数，默认值为 `10`；它按确切 owner 统计 `running` 与 `stopping` 记录，所有无 owner 任务共享一个服务级桶，并在生产方终止结算后释放容量。Service Definition 约定见 [`dsh-jobs`](../../packages/jobs/jobs/README.zh.md)，注册表生命周期与准入策略见 [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.zh.md)，面向模型的 Consumer 见 [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.zh.md)。
+抽象的 [`JobRegistry`](../../packages/jobs/jobs/src/index.ts) Service Definition 规定原子 `start`、限定调用方作用域的 `get` 和 `list`、`read`、`kill`、有界 `wait`、故障隔离的 `onJobDone` 与 `onJobsChanged` 监听器、全宿主范围的 `onJobAdopted` 收养观察者，以及 `attachController`；[`LocalJobRegistry`](../../packages/jobs/jobs-local/src/index.ts) 是其进程局部 Service Provider。授权会比较拥有者会话；拥有者清理与准入会使用确切的已注册 `Agent` 实例。本地 Service Provider 的 `maxConcurrentJobsPerOwner` 配置必须是正的安全整数，默认值为 `10`；它按确切 owner 统计 `running` 与 `stopping` 记录，所有无 owner 任务共享一个服务级桶，并在生产方终止结算后释放容量。Service Definition 约定见 [`dsh-jobs`](../../packages/jobs/jobs/README.zh.md)，注册表生命周期与准入策略见 [`dsh-jobs-local`](../../packages/jobs/jobs-local/README.zh.md)，面向模型的 Consumer 见 [`dsh-tool-jobs`](../../packages/jobs/tool-jobs/README.zh.md)。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -221,6 +221,16 @@ Implementations must honor these semantics:
  * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
  */
 abstract start(spec: JobStart): JobId
+
+/**
+ * Register durable work only after its initial record reaches the mounted
+ * `ctx.jobStore`; the producer's {@link JobStart.run} is not invoked
+ * before that commit. A missing or rejecting store fails without starting
+ * producer work.
+ * @param spec - producer declaration; the implementation requires durable persistence.
+ * @returns the registered id after the initial record is durable and work has started.
+ */
+abstract startDurable(spec: JobStart): Promise<JobId>
 
 /**
  * List caller-owned and unowned jobs in registration order without exposing
@@ -308,9 +318,29 @@ abstract onJobDone(listener: JobDoneListener): () => void
 abstract onJobsChanged(listener: JobsChangedListener): () => void
 
 /**
+ * Register an observer of durable adoptions. It fires once per restored
+ * record a producer resumer adopts, after the registry commits the
+ * re-stamped record — this process incarnation plus the prior one as the
+ * adoption marker — to the durable store, so an observer that crashes
+ * afterwards still finds the marker on the next boot. Delivery is global:
+ * every listener sees every adoption regardless of owner scope. A returned
+ * promise is awaited before the registry attaches the producer's
+ * completion wiring, so the observer's account lands before any settlement
+ * it must recognize. `true` confirms a durable account and lets later
+ * registry mirrors omit the marker; `false` rejects ownership, and `void`
+ * remains observational. Every listener runs, and failures are contained
+ * and logged only after all of them settle.
+ * @param listener - receives the adopted snapshot and the prior process
+ *   incarnation that wrote the record before the restart.
+ * @returns disposer that unregisters the listener.
+ */
+abstract onJobAdopted(listener: JobAdoptedListener): () => void
+
+/**
  * Register a resume handler for one job kind. On boot the registry replays
- * every non-terminal persisted record of this kind that a previous process
- * incarnation wrote: a handler that returns hooks adopts the record under
+ * every persisted `running` record of this kind that a previous process
+ * incarnation wrote; restored `stopping` records terminalize as killed and
+ * never enter a resumer. A handler that returns hooks adopts the record under
  * its original id; `undefined` settles it honestly as `failed` with detail
  * `'not resumable after host restart'`. Registration is an effect scoped to
  * the registering context; at most one resumer may serve a kind at a time,

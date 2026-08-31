@@ -10,7 +10,7 @@
 
 ## 决策
 
-`dsh-tool-workflow` 增加 `ownership: caller | supervisor`，默认值为 `caller`。调用方所有权保留现有请求 signal、中止桥接、返回形态、错误、dispose 顺序和面向模型的描述。监督器所有权不传入调用方 signal，而是注册一个由父 Agent 所有、带持久所有者 Session 身份且没有恢复规格的 `workflow` 作业，追加 `run/detached`，并立即返回 `{ runId, jobId, status: "running" }`。作业取消钩子调用 `WorkflowRun.cancel`；最终输出 promise 会先等待结果与 dispose，再关闭记录器，并通过 `job_output` 暴露现有的有界完成渲染。
+`dsh-tool-workflow` 增加 `ownership: caller | supervisor`，默认值为 `caller`。调用方所有权保留现有请求 signal、中止桥接、返回形态、错误、dispose 顺序和面向模型的描述。监督器所有权不传入调用方 signal，而是预分配 run id，并以稳定的 `workflow-${runId}` 作业 id、持久所有者 Session 身份和空恢复规格调用 `jobs.startDurable`。工作流生产方仅在初始作业记录提交后启动；工具随后追加 `run/detached` 并返回 `{ runId, jobId, status: "running" }`。作业取消钩子调用 `WorkflowRun.cancel`；最终输出 promise 会先等待结果与 dispose，再关闭记录器，并通过 `job_output` 暴露现有的有界完成渲染。
 
 受监督工作流刻意不可恢复。启动协调会为每个未配对成员合成 outcome 为 `cancelled` 的 `tool-workflow/agent-end`，随后写 stop reason 为 `cancelled` 的 `tool-workflow/run-end`，最后写 `run/abandoned`。这一顺序维持工作流 invariant，并在面向模型的放弃说明之前让持久卡片离开运行状态。
 

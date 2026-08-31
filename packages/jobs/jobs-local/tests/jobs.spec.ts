@@ -178,6 +178,7 @@ async function attachControllerIn(ctx: Context): Promise<void> {
 
 /** Let the settlement continuation (a `done.then`) run. */
 const tick = () => new Promise<void>(r => setTimeout(r, 0))
+const resumePlan = (start: () => JobHooks) => ({ start })
 
 /** Inspect the internal resolver registry to pin bounded retention while a job stays live. */
 function waitResolverCount(ctx: Context, id: JobId): number {
@@ -536,6 +537,37 @@ describe('LocalJobRegistry reads and settlement', () => {
     p.settle({ status: 'completed' })
     await tick()
     expect(seen).toEqual([])
+  })
+
+  it('delivers a scope-chain listener exactly the owners its layer covers', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry)
+    ctx.jobs.attachController('test-controller')
+    const standing = createScope(ctx, {})
+    const seen: { id: JobId; owner: Agent | undefined }[] = []
+    const mount = await standing.ctx.plugin({
+      inject: ['jobs'],
+      apply(pluginCtx: Context) {
+        pluginCtx.jobs.onJobDone((snapshot, owner) => { seen.push({ id: snapshot.id, owner }) })
+      },
+    })
+    const joined = stubAgent(ctx, 'joined', scopeOf(standing.ctx))
+    ctx.agents.register(joined)
+
+    const owned = producer({ owner: joined })
+    const ownedId = ctx.jobs.start(owned.spec)
+    owned.settle({ status: 'completed' })
+    // An unowned settlement belongs to no scope chain, so the scoped layer
+    // never observes it.
+    const unowned = producer()
+    ctx.jobs.start(unowned.spec)
+    unowned.settle({ status: 'completed' })
+    await tick()
+
+    expect(seen).toEqual([{ id: ownedId, owner: joined }])
+    await mount.dispose()
+    await disposeAgentScope(joined)
   })
 })
 
@@ -1286,6 +1318,397 @@ describe('LocalJobRegistry teardown change notifications', () => {
   })
 })
 
+describe('LocalJobRegistry.startDurable', () => {
+  it('commits the initial record before starting producer work', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const done = Promise.withResolvers<JobOutcome>()
+    const start = vi.fn((): JobHooks => {
+      expect(state.records.get('bash-durable')).toMatchObject({ status: 'running' })
+      return { cancel: () => {}, done: done.promise }
+    })
+
+    const id = await ctx.jobs.startDurable({
+      kind: 'bash', label: 'durable', idHint: 'durable', run: start,
+    })
+    expect(id).toBe('bash-durable')
+    expect(start).toHaveBeenCalledTimes(1)
+    done.resolve({ status: 'completed' })
+    await tick()
+    expect(state.records.get(String(id))).toMatchObject({ status: 'completed' })
+  })
+
+  it('rejects a missing or failing store without starting producer work', async () => {
+    const missing = await harness({ persist: true })
+    const missingStart = vi.fn((): JobHooks => ({ cancel: () => {}, done: new Promise(() => {}) }))
+    await expect(missing.jobs.startDurable({ kind: 'bash', label: 'missing', run: missingStart }))
+      .rejects.toThrow('no ctx.jobStore is mounted')
+    expect(missingStart).not.toHaveBeenCalled()
+
+    const doubled = fakeStore()
+    doubled.state.failNextPuts = 1
+    const failing = await bootPersisted(doubled.store)
+    const failingStart = vi.fn((): JobHooks => ({ cancel: () => {}, done: new Promise(() => {}) }))
+    await expect(failing.jobs.startDurable({
+      kind: 'bash', label: 'failing', idHint: 'failing', run: failingStart,
+    })).rejects.toThrow('durable background job registration failed')
+    expect(failingStart).not.toHaveBeenCalled()
+    expect(failing.jobs.get(JobId('bash-failing')).status).toBe('failed')
+  })
+
+  it('fails when persistence is disabled or an id hint already exists', async () => {
+    const disabled = await harness()
+    const start = vi.fn((): JobHooks => ({ cancel: () => {}, done: new Promise(() => {}) }))
+    await expect(disabled.jobs.startDurable({ kind: 'bash', label: 'disabled', run: start }))
+      .rejects.toThrow('persist is disabled')
+    expect(start).not.toHaveBeenCalled()
+
+    const existing = storedRecord({ id: JobId('bash-taken') })
+    const records = new Map<string, JobRecord>([[existing.id, existing]])
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    await expect(ctx.jobs.startDurable({ kind: 'bash', label: 'collision', idHint: 'taken', run: start }))
+      .rejects.toThrow('idHint collision')
+    expect(start).not.toHaveBeenCalled()
+
+    const generated = await ctx.jobs.startDurable({
+      kind: 'bash', label: 'generated',
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
+    expect(generated).toMatch(/^bash-/)
+    await tick()
+  })
+
+  it('forwards cancellation after producer start and reports a throwing producer start', async () => {
+    const { store } = fakeStore()
+    const ctx = await bootPersisted(store)
+    const done = Promise.withResolvers<JobOutcome>()
+    const cancel = vi.fn()
+    const id = await ctx.jobs.startDurable({
+      kind: 'bash', label: 'live', idHint: 'live',
+      run: () => ({ cancel, done: done.promise }),
+    })
+    expect(ctx.jobs.kill(id, undefined, 'stop durable')).toBe('requested')
+    expect(cancel).toHaveBeenCalledWith('stop durable')
+    done.resolve({ status: 'killed' })
+    await tick()
+
+    await expect(ctx.jobs.startDurable({
+      kind: 'bash', label: 'throws', idHint: 'throws',
+      run: () => { throw new Error('producer start boom') },
+    })).rejects.toThrow('producer start boom')
+    await tick()
+    expect(ctx.jobs.get(JobId('bash-throws'))).toMatchObject({
+      status: 'failed', detail: 'producer start failed: Error: producer start boom',
+    })
+  })
+
+  it('does not start producer work when killed during the durable put', async () => {
+    const records = new Map<string, JobRecord>()
+    const gate = Promise.withResolvers<undefined>()
+    let first = true
+    const store = {
+      incarnation: PROCESS_INCARNATION,
+      list: () => [...records.values()],
+      get: (id: string) => records.get(id),
+      put: (record: JobRecord): Promise<void> => {
+        records.set(record.id, record)
+        if (first) { first = false; return gate.promise }
+        return Promise.resolve()
+      },
+      delete: (id: string) => Promise.resolve(records.delete(id)),
+    } as unknown as JobStore
+    const ctx = await bootPersisted(store)
+    const start = vi.fn((): JobHooks => ({ cancel: () => {}, done: new Promise(() => {}) }))
+    const pending = ctx.jobs.startDurable({
+      kind: 'bash', label: 'gated', idHint: 'gated', run: start,
+    })
+
+    expect(ctx.jobs.kill(JobId('bash-gated'), undefined, 'cancelled during commit')).toBe('requested')
+    gate.resolve(undefined)
+    await expect(pending).resolves.toBe(JobId('bash-gated'))
+    await tick()
+    expect(start).not.toHaveBeenCalled()
+    expect(records.get('bash-gated')).toMatchObject({ status: 'killed' })
+  })
+})
+
+describe('LocalJobRegistry.onJobAdopted', () => {
+  it('announces an adoption after the durable marker commits, containing a throwing listener', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const seen: { snapshot: JobSnapshot; prior: string; markerAtNotify: string | undefined }[] = []
+    ctx.jobs.onJobAdopted(() => { throw new Error('adoption observer boom') })
+    ctx.jobs.onJobAdopted((snapshot, priorIncarnation) => {
+      seen.push({
+        snapshot,
+        prior: priorIncarnation,
+        markerAtNotify: state.records.get(stored.id)?.adoptedFromIncarnation,
+      })
+    })
+
+    const done = Promise.withResolvers<JobOutcome>()
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
+    await tick()
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.snapshot).toMatchObject({ id: stored.id, status: 'running', incarnation: PROCESS_INCARNATION })
+    expect(seen[0]?.prior).toBe('prior-incarnation')
+    // The announcement follows the durable commit: the observer already
+    // finds the re-stamped record carrying its adoption marker, so a crash
+    // after this point still lets the next boot account the adoption.
+    expect(seen[0]?.markerAtNotify).toBe('prior-incarnation')
+    expect(state.records.get(stored.id)).toMatchObject({
+      incarnation: PROCESS_INCARNATION,
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('onJobAdopted listener failed'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('adoption observer boom'))
+    done.resolve({ status: 'completed' })
+    await tick()
+    expect(state.records.get(stored.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+  })
+
+  it('awaits every observer before wiring an already-resolved done, which settles completed', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const gate = Promise.withResolvers<undefined>()
+    const order: string[] = []
+    ctx.jobs.onJobAdopted(() => true)
+    ctx.jobs.onJobAdopted(async () => { await gate.promise; order.push('observer') })
+    ctx.jobs.onJobAdopted(async () => { throw new Error('async observer boom') })
+
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({
+      cancel: () => {},
+      done: Promise.resolve<JobOutcome>({ status: 'completed', detail: 'instant' }),
+    })))
+    await tick()
+    // The done promise resolved before the resumer even ran, but completion
+    // wiring attaches only after every observer settles.
+    expect(ctx.jobs.get(stored.id).status).toBe('running')
+    gate.resolve(undefined)
+    await tick()
+
+    expect(order).toEqual(['observer'])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'completed', detail: 'instant' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('async observer boom'))
+  })
+  it('requires observer acceptance before starting a deferred producer', async () => {
+    for (const listener of [
+      () => false as const,
+      async () => false as const,
+    ]) {
+      const stored = storedRecord({ resumeSpec: { arg: 7 } })
+      const records = new Map<string, JobRecord>([[stored.id, stored]])
+      const { store } = fakeStore({ records })
+      const ctx = await bootPersisted(store)
+      const start = vi.fn((): JobHooks => ({ cancel: () => {}, done: new Promise(() => {}) }))
+      ctx.jobs.onJobAdopted(listener)
+      ctx.jobs.registerResumer('bash', () => resumePlan(start))
+      await tick()
+      expect(start).not.toHaveBeenCalled()
+      expect(ctx.jobs.get(stored.id)).toMatchObject({
+        status: 'failed', detail: 'resume adoption could not be accounted durably',
+      })
+    }
+  })
+
+  it('honestly settles when a deferred resume producer throws on start', async () => {
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    const records = new Map<string, JobRecord>([[stored.id, stored]])
+    const { store } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => { throw new Error('resume start boom') }))
+    await tick()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({
+      status: 'failed', detail: 'resume producer threw: Error: resume start boom',
+    })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('resume start boom'))
+  })
+
+})
+
+describe('LocalJobRegistry durable adoption requirement', () => {
+  it('rejects the adoption when the marker put rejects: no announcement, honest resume failure', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    state.failNextPuts = 1
+    const adopted = vi.fn()
+    ctx.jobs.onJobAdopted(adopted)
+    const cancels: (string | undefined)[] = []
+
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({
+      cancel: (reason) => { cancels.push(reason) },
+      done: new Promise<JobOutcome>(() => {}),
+    })))
+    await tick()
+
+    expect(adopted).not.toHaveBeenCalled()
+    expect(cancels).toEqual([])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'resume adoption could not be recorded durably' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('the durable marker could not be committed'))
+    // The local failure must not replace the prior incarnation's durable
+    // running record; a later store remount can restore and retry it.
+    expect(state.records.get(stored.id)).toMatchObject({ status: 'running', incarnation: 'prior-incarnation' })
+    expect(state.records.get(stored.id)?.adoptedFromIncarnation).toBeUndefined()
+  })
+
+  it('rejects the adoption when the marker put throws, leaving the prior record for a later boot', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    state.throwOnPut = true
+    const adopted = vi.fn()
+    ctx.jobs.onJobAdopted(adopted)
+
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: new Promise<JobOutcome>(() => {}) })))
+    await tick()
+
+    expect(adopted).not.toHaveBeenCalled()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'resume adoption could not be recorded durably' })
+    // The store never accepted anything: the prior incarnation's running
+    // record survives, so a later boot can retry the resume.
+    expect(state.records.get(stored.id)).toMatchObject({ status: 'running', incarnation: 'prior-incarnation' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('the durable marker could not be committed'))
+  })
+
+  it('does not start a producer when the marker put rejects', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = await bootPersisted(store)
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    state.failNextPuts = 1
+    const adopted = vi.fn()
+    ctx.jobs.onJobAdopted(adopted)
+
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({
+      cancel: () => { throw new Error('cancel boom') },
+      done: new Promise<JobOutcome>(() => {}),
+    })))
+    await tick()
+
+    expect(adopted).not.toHaveBeenCalled()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'resume adoption could not be recorded durably' })
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('cancel boom'))
+  })
+
+  it('cancels an unmarked adoption without announcing or wiring it, then retries when the store remounts', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 1 } })
+    records.set(stored.id, stored)
+    const { store, state } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const storeFiber = await ctx.plugin((inner: Context) => {
+      inner.provide('jobStore', store)
+    })
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    await tick()
+    const adopted = vi.fn()
+    ctx.jobs.onJobAdopted(adopted)
+    const first = Promise.withResolvers<JobOutcome>()
+    const second = Promise.withResolvers<JobOutcome>()
+    const cancels: (string | undefined)[] = []
+    const firstStart = vi.fn(() => ({ cancel: (reason?: string) => { cancels.push(reason) }, done: first.promise }))
+    const secondStart = vi.fn(() => ({ cancel: () => {}, done: second.promise }))
+    const resume = vi.fn()
+      .mockReturnValueOnce(resumePlan(firstStart))
+      .mockReturnValueOnce(resumePlan(secondStart))
+
+    await storeFiber.dispose()
+    ctx.jobs.registerResumer('bash', resume)
+    await tick()
+
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(adopted).not.toHaveBeenCalled()
+    expect(firstStart).not.toHaveBeenCalled()
+    expect(cancels).toEqual([])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', incarnation: 'prior-incarnation' })
+    expect(state.records.get(stored.id)).toBe(stored)
+    expect(state.puts).toEqual([])
+
+    first.resolve({ status: 'completed', detail: 'stale hooks completed' })
+    await tick()
+    expect(ctx.jobs.get(stored.id).status).toBe('failed')
+
+    await ctx.plugin((inner: Context) => {
+      inner.provide('jobStore', store)
+    })
+    await tick()
+
+    expect(resume).toHaveBeenCalledTimes(2)
+    expect(firstStart).not.toHaveBeenCalled()
+    expect(secondStart).toHaveBeenCalledTimes(1)
+    expect(adopted).toHaveBeenCalledTimes(1)
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'running', incarnation: PROCESS_INCARNATION })
+    expect(state.records.get(stored.id)).toMatchObject({
+      status: 'running',
+      incarnation: PROCESS_INCARNATION,
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+
+    second.resolve({ status: 'completed', detail: 'retried hooks completed' })
+    await tick()
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'completed', detail: 'retried hooks completed' })
+  })
+
+  it('a kill landing while the marker commits releases the producer without re-arming the record', async () => {
+    const records = new Map<string, JobRecord>()
+    const stored = storedRecord({ resumeSpec: { arg: 7 } })
+    records.set(stored.id, stored)
+    const gate = Promise.withResolvers<undefined>()
+    const store = {
+      incarnation: PROCESS_INCARNATION,
+      list: () => [...records.values()],
+      get: (id: string) => records.get(id),
+      put: (record: JobRecord): Promise<void> => {
+        records.set(String(record.id), record)
+        return gate.promise
+      },
+      delete: (id: string): Promise<boolean> => Promise.resolve(records.delete(id)),
+    } as unknown as JobStore
+    const ctx = await bootPersisted(store)
+    const adopted = vi.fn()
+    ctx.jobs.onJobAdopted(adopted)
+    const start = vi.fn((): JobHooks => ({
+      cancel: () => {},
+      done: new Promise<JobOutcome>(() => {}),
+    }))
+
+    ctx.jobs.registerResumer('bash', () => resumePlan(start))
+    expect(ctx.jobs.kill(stored.id, undefined, 'stop it')).toBe('requested')
+    await tick()
+    expect(ctx.jobs.get(stored.id).status).toBe('killed')
+    expect(adopted).not.toHaveBeenCalled()
+
+    gate.resolve(undefined)
+    await tick()
+    // The adoption committed and was announced, but producer work never began.
+    expect(adopted).toHaveBeenCalledTimes(1)
+    expect(start).not.toHaveBeenCalled()
+    expect(ctx.jobs.get(stored.id).status).toBe('killed')
+  })
+})
+
 describe('LocalJobRegistry config validation', () => {
   it.each([
     [{ maxSettledJobs: -1 }],
@@ -1419,6 +1842,26 @@ describe('LocalJobRegistry durable persistence', () => {
     expect(state.records.get(id)).toMatchObject({ id, status: 'running' })
   })
 
+  it('does not mirror a pre-store local record over a durable record with the same id', async () => {
+    const stored = storedRecord({ resumeSpec: { retry: true } })
+    const records = new Map<string, JobRecord>([[stored.id, stored]])
+    const { store, state } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.attachController('test-controller')
+    const idHint = String(stored.id).slice('bash-'.length)
+    const id = ctx.jobs.start(producer({ idHint }).spec)
+    expect(id).toBe(stored.id)
+
+    ctx.provide('jobStore', store)
+    await tick()
+
+    expect(state.records.get(stored.id)).toBe(stored)
+    expect(state.puts).toEqual([])
+    expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'running', incarnation: PROCESS_INCARNATION })
+  })
+
   it('stops writing when the store fiber disposes', async () => {
     const { store, state } = fakeStore()
     const ctx = new Context()
@@ -1487,6 +1930,27 @@ describe('LocalJobRegistry restore and resume', () => {
     expect(state.records.get(unreported.id)).toMatchObject({ reported: true })
   })
 
+  it('honest-settles a killed stopping record without invoking its resumer', async () => {
+    const stopping = storedRecord({ id: JobId('bash-stopping'), status: 'stopping', reported: true, detail: 'cancelling' })
+    const records = new Map([[String(stopping.id), stopping]])
+    const { store, state } = fakeStore({ records })
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const resumer = vi.fn(() => resumePlan(() => ({ cancel: () => {}, done: new Promise<JobOutcome>(() => {}) })))
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    ctx.jobs.registerResumer('bash', resumer)
+    ctx.provide('jobStore', store)
+    await tick()
+    const listed = ctx.jobs.list()[0]
+    const waited = await ctx.jobs.wait(stopping.id, 1)
+    expect(resumer).not.toHaveBeenCalled()
+    expect(listed).toMatchObject({ status: 'killed', detail: 'cancelled before host restart', reported: true })
+    expect(waited).toMatchObject({ status: 'killed', detail: 'cancelled before host restart', reported: true })
+    expect(state.records.get(String(stopping.id))).toMatchObject({
+      status: 'killed', detail: 'cancelled before host restart', reported: true, incarnation: 'prior-incarnation',
+    })
+  })
+
   it('honest-settles a non-resumable record from a previous incarnation at restore', async () => {
     const records = new Map<string, JobRecord>()
     const orphan = storedRecord()
@@ -1507,7 +1971,12 @@ describe('LocalJobRegistry restore and resume', () => {
   it('leaves a non-terminal record from this incarnation untouched (in-process reload guard)', async () => {
     const records = new Map<string, JobRecord>()
     const live = storedRecord({ incarnation: PROCESS_INCARNATION, resumeSpec: { keep: true } })
+    const stopping = storedRecord({
+      id: JobId('bash-same-incarnation-stopping'), incarnation: PROCESS_INCARNATION,
+      status: 'stopping', detail: 'cancelling', resumeSpec: { keep: true },
+    })
     records.set(live.id, live)
+    records.set(stopping.id, stopping)
     const { store } = fakeStore({ records })
     const ctx = await bootPersisted(store)
 
@@ -1515,6 +1984,7 @@ describe('LocalJobRegistry restore and resume', () => {
     ctx.jobs.registerResumer('bash', resumer)
     expect(resumer).not.toHaveBeenCalled()
     expect(ctx.jobs.get(live.id).status).toBe('running')
+    expect(ctx.jobs.get(stopping.id)).toMatchObject({ status: 'stopping', detail: 'cancelling' })
   })
 
   it('replays a resumable record when its kind registers a resumer, adopting under the original id', async () => {
@@ -1529,11 +1999,11 @@ describe('LocalJobRegistry restore and resume', () => {
 
     let settle!: (outcome: JobOutcome) => void
     const chunks = ['resumed delta']
-    const resume = vi.fn(() => ({
+    const resume = vi.fn(() => resumePlan(() => ({
       cancel: () => {},
       done: new Promise<JobOutcome>((resolve) => { settle = resolve }),
       readOutput: () => chunks.shift() ?? '',
-    }))
+    })))
     ctx.jobs.registerResumer('bash', resume)
 
     expect(resume).toHaveBeenCalledWith({
@@ -1633,10 +2103,10 @@ describe('LocalJobRegistry restore and resume', () => {
     const ctx = await bootPersisted(store)
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
 
-    ctx.jobs.registerResumer('bash', () => ({
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({
       cancel: () => {},
       done: Promise.reject(new Error('adopted transport exploded')),
-    }))
+    })))
     await tick()
     expect(ctx.jobs.get(stored.id)).toMatchObject({ status: 'failed', detail: 'Error: adopted transport exploded' })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('producer contract violation'))
@@ -1717,6 +2187,7 @@ describe('LocalJobRegistry settled retention', () => {
     await tick()
     state.throwOnDelete = true
     ctx.jobs.read(id2)
+    await tick()
     expect(() => ctx.jobs.get(id2)).toThrow('unknown job')
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(`failed to evict durable record ${id2}`))
   })
@@ -1777,6 +2248,33 @@ describe('LocalJobRegistry teardown grace', () => {
       detail: 'producer did not release within teardownGraceMs; work may be orphaned',
     })
   })
+  it('bounds teardown when a durable mirror never settles', async () => {
+    const store = {
+      incarnation: PROCESS_INCARNATION,
+      list: () => [],
+      get: () => undefined,
+      put: () => new Promise<void>(() => {}),
+      delete: () => Promise.resolve(false),
+    } as unknown as JobStore
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', store)
+    const fiber = await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
+    ctx.jobs.attachController('test-controller')
+    await tick()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    let settle!: (outcome: JobOutcome) => void
+    ctx.jobs.start({
+      kind: 'bash', label: 'blocked mirror',
+      run: () => ({
+        cancel: () => { settle({ status: 'killed' }) },
+        done: new Promise<JobOutcome>((resolve) => { settle = resolve }),
+      }),
+    })
+    await fiber.dispose()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('durable mirrors did not settle within teardownGraceMs'))
+  })
+
 })
 
 describe('LocalJobRegistry owner index', () => {

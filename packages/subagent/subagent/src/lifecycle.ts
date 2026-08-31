@@ -17,13 +17,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, LlmFailure } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
 import type { SubagentFailure, SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
-import { subagentFailureFromLlmFailure } from './failure.ts'
+import { ownDataProperty, subagentFailureFromLlmFailure, subagentFailureFromUnknown } from './failure.ts'
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -35,39 +35,75 @@ export interface ActivationTerminal {
   /** The epoch's final assistant content, absent when it produced none or failed. */
   readonly output?: ContentBlock[]
   /**
-   * Why the epoch failed, for a `stopReason` of `error` raised by teardown
-   * rather than by the child's own turn. The parent cannot otherwise tell a
-   * provider refusal from a quota exhaustion from a crash, and the delivery
-   * report is the only place it learns the epoch ended at all. Bounded to
-   * {@link TERMINAL_DIAGNOSTIC_LIMIT} and carrying the failure's own text, the
-   * same detail the one-shot tool path already reports.
+   * Fixed parent-safe detail for a `stopReason` of `error` raised by teardown
+   * rather than by the child's own turn. Arbitrary infrastructure exception
+   * text does not enter the parent session.
    */
   readonly diagnostic?: string
   /** Structured provider failure facts when teardown preserved a known LLM failure. */
   readonly failure?: SubagentFailure
 }
 
-/** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
-const TERMINAL_DIAGNOSTIC_LIMIT = 4096
+/** Fixed parent-safe detail for an infrastructure teardown failure. */
+const TERMINAL_DIAGNOSTIC = 'Subagent teardown failed.'
+
+/** Maximum number of cause and AggregateError nodes inspected for typed facts. */
+const MAX_FAILURE_CAUSE_NODES = 64
 
 /**
- * Render a teardown failure as bounded diagnostic text.
+ * Render teardown metadata without relaying arbitrary infrastructure exception text.
  * @param failure - the thrown value that ended the epoch.
- * @returns the diagnostic member, omitted when the failure carries no text.
+ * @returns fixed readable detail plus any safely recovered provider facts.
  */
-function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
-  const text = String(failure)
-  if (text.length === 0) return {}
-  const bounded = Buffer.byteLength(text, 'utf8') <= TERMINAL_DIAGNOSTIC_LIMIT
-    ? text
-    : Buffer.from(text, 'utf8').subarray(0, TERMINAL_DIAGNOSTIC_LIMIT).toString('utf8')
-  const structured = failure instanceof Error
-    ? subagentFailureFromLlmFailure(failure as unknown as LlmFailure)
-    : undefined
+export function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
+  if (failure === undefined) return {}
+  const structured = collectFailureCause(failure)
   return {
-    diagnostic: bounded,
+    diagnostic: TERMINAL_DIAGNOSTIC,
     ...structured === undefined ? {} : { failure: structured },
   }
+}
+
+/** Test whether a value is an Array without allowing Proxy traps to escape. */
+function safeArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value)
+  } catch {
+    // A revoked Proxy can reject the Array brand check.
+    return false
+  }
+}
+
+/** Find structured LLM facts through causes and AggregateError branches.
+ * @param failure - thrown teardown value.
+ * @returns known typed facts, or undefined when no cause is classified.
+ */
+function collectFailureCause(failure: unknown): SubagentFailure | undefined {
+  const pending: unknown[] = [failure]
+  const seen = new Set<object>()
+  let visited = 0
+  while (pending.length > 0 && visited < MAX_FAILURE_CAUSE_NODES) {
+    const current = pending.shift()
+    if (typeof current !== 'object' || current === null || seen.has(current)) continue
+    seen.add(current)
+    visited += 1
+
+    const nestedFailure = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
+    if (nestedFailure !== undefined) return nestedFailure
+    const directFailure = subagentFailureFromUnknown(current)
+    if (directFailure !== undefined) return directFailure
+
+    const cause = ownDataProperty(current, 'cause')
+    if (cause !== undefined) pending.push(cause)
+    const errors = ownDataProperty(current, 'errors')
+    if (!safeArray(errors)) continue
+    const length = ownDataProperty(errors, 'length')
+    if (typeof length !== 'number') continue
+    for (let index = 0; index < length && pending.length < MAX_FAILURE_CAUSE_NODES; index += 1) {
+      pending.push(ownDataProperty(errors, index))
+    }
+  }
+  return undefined
 }
 
 /**
@@ -186,6 +222,7 @@ export function observeRun(
         stopReason: result.stopReason,
         // Omit the field when no output exists, matching continuable epochs.
         ...result.output.length === 0 ? {} : { lastAssistantMessage: result.output },
+        ...result.failure === undefined ? {} : { failure: result.failure },
       }, parent)
     },
     () => {
@@ -234,17 +271,23 @@ export function createActivationObserver(
     capture: (child: Agent): void => {
       const own = child.session.events.slice(boundary)
       const output = finalAssistantOutput(own)
+      const end = foldConsumedWork(own).end
+      const failure = end?.data.reason.kind === 'error'
+        ? subagentFailureFromLlmFailure(end.data.reason.error)
+        : undefined
       captured = {
         stopReason: epochStopReason(own),
         ...output === undefined ? {} : { output },
+        ...failure === undefined ? {} : { failure },
       }
     },
     terminal,
     settle: (failure: unknown): void => {
-      const { stopReason, output } = terminal(failure)
+      const { output, stopReason, failure: typedFailure } = terminal(failure)
       emit('subagent/end', {
         ...identity,
         stopReason,
+        ...typedFailure === undefined ? {} : { failure: typedFailure },
         ...output === undefined ? {} : { lastAssistantMessage: output },
       }, parent)
     },
@@ -286,9 +329,6 @@ function epochStopReason(events: readonly SessionEvent[]): SubagentResult['stopR
     case undefined:
     case 'completed':
       return droppedUnrun ? 'aborted' : 'completed'
-    /* v8 ignore next 3 -- `TurnEndReason` is merge-extensible, so this arm needs a
-     * backend that adds a variant; treating an unnameable reason as success would
-     * report failed work as completed. */
     default:
       return 'error'
   }

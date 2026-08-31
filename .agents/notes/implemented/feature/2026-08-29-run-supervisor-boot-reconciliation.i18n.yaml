@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-29-run-supervisor-boot-reconciliation.md
-2026-08-29-run-supervisor-boot-reconciliation.md: fa6b3e77cf5451f6b7e124d17ee81d660ced1bca
-2026-08-29-run-supervisor-boot-reconciliation.zh.md: dfcafcb595600d35712b79796905cab719884650
+2026-08-29-run-supervisor-boot-reconciliation.md: 465e87b582d62ef2c50735e0032eea2cce276dbd
+2026-08-29-run-supervisor-boot-reconciliation.zh.md: 8834f7b90abe3484c5f0bda5a5757add569b3e7f

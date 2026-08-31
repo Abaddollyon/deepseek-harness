@@ -65,6 +65,7 @@ interface DriverState {
   needsCheckpoint: boolean
   lastWakeSeq: number
   wakeBaselineSeq: number
+  wakeObservedPending: boolean
   wakeTimer: (() => void) | undefined
   timeoutDue: boolean
   requested: boolean
@@ -85,8 +86,9 @@ function sameRound(source: GoalMessageSource, round: RoundIdentity): boolean {
 }
 
 /** Compare the complete queued record to the driver's reservation. */
-function sameQueued(content: ContentBlock[], source: MessageSource, attempt: RoundAttempt): boolean {
-  return isGoalRoundSource(source) && sameRound(source, attempt) && isDeepStrictEqual(content, attempt.content)
+function sameQueued(messageId: MessageId, content: ContentBlock[], source: MessageSource, attempt: RoundAttempt): boolean {
+  return messageId === attempt.messageId && isGoalRoundSource(source) && sameRound(source, attempt)
+    && isDeepStrictEqual(content, attempt.content)
 }
 
 /** Exact current ref for a view. */
@@ -124,6 +126,7 @@ export function apply(ctx: Context, config: Config): void {
       needsCheckpoint: false,
       lastWakeSeq: 0,
       wakeBaselineSeq: 0,
+      wakeObservedPending: false,
       wakeTimer: undefined,
       timeoutDue: false,
       requested: false,
@@ -161,16 +164,23 @@ export function apply(ctx: Context, config: Config): void {
     state.wakeTimer = undefined
   }
 
-  /** Whether event-driven policy permits a continuation at this idle checkpoint. */
-  function wakeDue(state: DriverState): boolean {
-    if (state.timeoutDue || state.lastWakeSeq > state.wakeBaselineSeq) return true
+  /** Read pending work without allowing an optional registry failure to stall a goal. */
+  function pendingWork(state: DriverState): boolean | undefined {
     const jobs: JobRegistry | undefined = ctx.get('jobs')
     try {
-      return !hasPendingWork(state.agent, ctx.agents.list(), jobs)
+      return hasPendingWork(state.agent, ctx.agents.list(), jobs)
     } catch (error: unknown) {
       ctx.logger.warn(`goal-round-driver: could not inspect pending work for agent "${state.agent.id}": ${renderThrown(error)}`)
-      return true
+      return undefined
     }
+  }
+
+  /** Whether event-driven policy permits a continuation at this idle checkpoint. */
+  function wakeDue(state: DriverState): boolean {
+    if (state.timeoutDue) return true
+    const pending = pendingWork(state)
+    if (pending === undefined) return true
+    return !pending || (state.wakeObservedPending && state.lastWakeSeq > state.wakeBaselineSeq)
   }
 
   /** Arm one process-local safety net while a goal waits on owned work. */
@@ -227,6 +237,7 @@ export function apply(ctx: Context, config: Config): void {
 
     const attempt = state.attempt
     if (attempt !== undefined) {
+      agent.inbox.remove(attempt.messageId)
       state.attempt = undefined
       state.needsCheckpoint = true
       state.requested = true
@@ -345,6 +356,7 @@ export function apply(ctx: Context, config: Config): void {
       state.needsCheckpoint = false
       state.lastWakeSeq = 0
       state.wakeBaselineSeq = 0
+      state.wakeObservedPending = false
       clearWakeTimer(state)
       state.timeoutDue = false
     })
@@ -373,6 +385,7 @@ export function apply(ctx: Context, config: Config): void {
       state.timeoutDue = false
       state.needsCheckpoint = true
       state.wakeBaselineSeq = Math.max(state.wakeBaselineSeq, state.lastWakeSeq)
+      state.wakeObservedPending = false
       requestDrive(state)
     })
 
@@ -380,21 +393,21 @@ export function apply(ctx: Context, config: Config): void {
       if (!agent.inbox.nextTurn.some(candidate => candidate.id === message.id)) return
       const state = stateFor(agent)
       const attempt = state.attempt
-      if (attempt !== undefined && sameQueued(message.content, message.source, attempt)) return
+      if (attempt !== undefined && sameQueued(message.id, message.content, message.source, attempt)) return
       state.competingQueued = true
       if (attempt?.phase === 'queued') attempt.stale = true
     })
     ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       const state = stateFor(agent)
       const attempt = state.attempt
-      if (attempt !== undefined && sameQueued(message.content, message.source, attempt)) {
+      if (attempt !== undefined && sameQueued(message.id, message.content, message.source, attempt)) {
         attempt.phase = 'claimed'
       }
     })
     ctx.on('agent/inbox/discarded', ({ agent, message }) => {
       const state = stateFor(agent)
       const attempt = state.attempt
-      if (attempt !== undefined && sameQueued(message.content, message.source, attempt)) {
+      if (attempt !== undefined && sameQueued(message.id, message.content, message.source, attempt)) {
         attempt.cancelled = true
       }
     })
@@ -407,6 +420,7 @@ export function apply(ctx: Context, config: Config): void {
         case 'user/message':
           if (isWakeSource(event.data.source)) {
             state.lastWakeSeq = event.seq
+            state.wakeObservedPending = pendingWork(state) ?? false
             clearWakeTimer(state)
             state.timeoutDue = false
             if (timer !== undefined) requestDrive(state)
@@ -415,6 +429,7 @@ export function apply(ctx: Context, config: Config): void {
           if (state.attempt !== undefined && event.data.id === state.attempt.messageId) {
             state.attempt.phase = 'admitted'
             state.wakeBaselineSeq = event.seq
+            state.wakeObservedPending = false
             clearWakeTimer(state)
             state.timeoutDue = false
           }
@@ -438,6 +453,7 @@ export function apply(ctx: Context, config: Config): void {
     /** Fail closed unless the queued prompt still owns the exact live revision. */
     function validReservation(
       state: DriverState,
+      messageId: MessageId,
       content: ContentBlock[],
       source: GoalMessageSource,
     ): boolean {
@@ -445,10 +461,22 @@ export function apply(ctx: Context, config: Config): void {
       const goal = currentGoal(state)
       return ctx.fiber.state === FiberState.ACTIVE
         && !state.stopping && attempt !== undefined && attempt.phase === 'claimed'
-      && !attempt.stale && sameQueued(content, source, attempt)
+      && !attempt.stale && sameQueued(messageId, content, source, attempt)
       && goal !== undefined && goal.id === source.goalId && goal.revision === source.revision
       && goal.phase === 'active' && goal.activation === 'armed'
       && source.round === goal.roundsStarted + 1
+    }
+
+    /** Clear only the reservation that owns the submitted prompt. */
+    function clearSubmittedReservation(
+      state: DriverState,
+      messageId: MessageId,
+      content: ContentBlock[],
+      source: GoalMessageSource,
+    ): void {
+      const attempt = state.attempt
+      if (attempt === undefined || !sameQueued(messageId, content, source, attempt)) return
+      state.attempt = undefined
     }
 
     ctx.on('agent/pre-step', async ({ agent, messages, signal }, next): Promise<PreStepDecision> => {
@@ -459,14 +487,14 @@ export function apply(ctx: Context, config: Config): void {
       const state = stateFor(agent)
       let valid = false
       try {
-        valid = validReservation(state, content, source)
+        valid = validReservation(state, submitted.id, content, source)
       } catch (error: unknown) {
         ctx.logger.warn(`goal-round-driver: pre-step check failed for agent "${agent.id}": ${renderThrown(error)}`)
         disarm(state)
       }
       if (!valid) {
         const attempt = state.attempt
-        if (attempt !== undefined && sameRound(source, attempt)) {
+        if (attempt !== undefined && sameQueued(submitted.id, content, source, attempt)) {
           attempt.stale = true
           state.attempt = undefined
         }
@@ -474,24 +502,33 @@ export function apply(ctx: Context, config: Config): void {
         requestDrive(state)
         return { kind: 'reject' }
       }
+      const removeSubmitted = (): void => {
+        const index = messages.findIndex(message => message.id === submitted.id)
+        if (index !== -1) messages.splice(index, 1)
+      }
       let decision: PreStepDecision
       try {
         decision = await next()
       } catch (error: unknown) {
-        if (signal.aborted) throw error
+        if (signal.aborted) {
+          removeSubmitted()
+          restoreOtherClaimed(agent, messages, submitted.id)
+          throw error
+        }
         // A throwing downstream hook drops the whole step proposal. Clear the
         // reservation before the balanced no-step turn returns to idle so the
         // next drive pass can reschedule the round.
-        state.attempt = undefined
+        clearSubmittedReservation(state, submitted.id, content, source)
         requestDrive(state)
         throw error
       }
       if (signal.aborted) {
-        if (decision.kind === 'enter') restoreOtherClaimed(agent, decision.messages, submitted.id)
+        removeSubmitted()
+        restoreOtherClaimed(agent, decision.kind === 'enter' ? decision.messages : messages, submitted.id)
         return decision
       }
       if (decision.kind === 'reject') {
-        state.attempt = undefined
+        clearSubmittedReservation(state, submitted.id, content, source)
         const goal = currentGoal(state)
         if (goal !== undefined && goal.id === source.goalId && goal.revision === source.revision
           && goal.phase === 'active' && goal.activation === 'armed') {
@@ -503,19 +540,19 @@ export function apply(ctx: Context, config: Config): void {
         return decision
       }
       try {
-        valid = validReservation(state, content, source)
+        valid = validReservation(state, submitted.id, content, source)
       } catch (error: unknown) {
         ctx.logger.warn(`goal-round-driver: post-decision check failed for agent "${agent.id}": ${renderThrown(error)}`)
         disarm(state)
         valid = false
       }
       if (!valid) {
-        state.attempt = undefined
+        clearSubmittedReservation(state, submitted.id, content, source)
         restoreOtherClaimed(agent, decision.messages, submitted.id)
         requestDrive(state)
         return { kind: 'reject' }
       }
-      return decision
+      return { ...decision, startsRequestSeries: true }
     })
 
     // Loading a lifecycle driver over existing agents never inherits hidden
@@ -529,23 +566,25 @@ export function apply(ctx: Context, config: Config): void {
     // composite effect removes listeners only after its promise settles.
     yield async () => {
       const waits: Promise<void>[] = []
+      const ownedAttemptIds: { agent: Agent; messageId: MessageId }[] = []
       for (const state of states.values()) {
         state.stopping = true
         disarm(state)
         const attempt = state.attempt
         if (attempt !== undefined) {
+          ownedAttemptIds.push({ agent: state.agent, messageId: attempt.messageId })
           attempt.stale = true
-          /* v8 ignore next -- followup reserves the live agent before publishing a queued attempt */
-          if (state.agent.status === 'running') {
-            // The driver interrupts only its own round; pending input it does
-            // not own survives teardown for the next lifecycle.
-            state.agent.cancel({ kind: 'parent' }, { keepInbox: true })
-            waits.push(state.agent.whenIdle())
-          }
+          state.agent.inbox.remove(attempt.messageId)
+          // The driver interrupts only its own round; pending input it does
+          // not own survives teardown for the next lifecycle.
+          state.agent.cancel({ kind: 'parent' }, { keepInbox: true })
+          state.agent.inbox.remove(attempt.messageId)
+          waits.push(state.agent.whenIdle())
         }
         if (state.run !== undefined) waits.push(state.run)
       }
       await Promise.allSettled(waits)
+      for (const { agent, messageId } of ownedAttemptIds) agent.inbox.remove(messageId)
       states.clear()
     }
   }, 'goal-round-driver lifecycle')

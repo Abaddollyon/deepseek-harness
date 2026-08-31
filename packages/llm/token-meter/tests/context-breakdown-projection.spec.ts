@@ -64,7 +64,7 @@ function appendSummaryMeter(ctx: Context, session: Session, start: number, end: 
     summary: [{ type: 'text', text: 'summary' }],
     shadowedRange: { start, end },
     shadowedSeqs: shadowed.map(node => node.seq),
-    shadowedTokenCount: shadowed.reduce((total, node) => total + node.tokens, 0),
+    shadowedTokenCount: shadowed.reduce((total, node) => total + node.heuristicTokens, 0),
     provider: 'mock',
     model: 'mock',
   })
@@ -94,7 +94,7 @@ describe('contextBreakdown session projection', () => {
       header: { config: CONFIG, system: 'You are terse.', tools: TOOLS },
       reason: 'change',
     })
-    session.append('todo/write', { todos: [] })
+    session.append('session/end-seed', {})
     expect(changed).not.toContain('contextBreakdown')
 
     // A system-less, tool-less envelope prices back to zero.
@@ -168,17 +168,27 @@ describe('contextBreakdown session projection', () => {
     session.append('step/end', { turn: 1, step: 1 })
     const grown = agree()
     expect(grown).toBeGreaterThan(0)
+    const beforeNodes = ctx.tokenMeter.measure(session).nodes
+    const beforeHeuristic = beforeNodes.reduce((total, node) => total + node.heuristicTokens, 0)
+    const shadowedHeuristic = beforeNodes
+      .filter(node => node.seq === question || node.seq === answer)
+      .reduce((total, node) => total + node.heuristicTokens, 0)
 
     appendSummaryMeter(ctx, session, question, answer)
     // The armed shadow price must not move the published figure by itself.
     expect(agree()).toBe(grown)
-    session.append('user/message', createUserMessage({
+    const summary = createUserMessage({
       content: [{ type: 'text', text: 'summary' }],
       source: { kind: 'plugin', plugin: 'test' },
-    }), {
+    })
+    session.append('user/message', summary, {
       surfaceOp: { op: 'replace', start: question, end: answer },
       sourceEventSeqs: [question, answer],
     })
+    const expected = beforeHeuristic - shadowedHeuristic + estimateMessage(summary)
+    expect(projected(ctx, session).messageTokens).toBe(expected)
+    expect(ctx.tokenMeter.measure(session).nodes
+      .reduce((total, node) => total + node.heuristicTokens, 0)).toBe(expected)
     expect(agree()).toBeLessThan(grown)
   })
 
@@ -216,7 +226,7 @@ describe('contextBreakdown session projection', () => {
     expect(() => definition.apply(mismatched, replace(1, 3))).toThrow('no adjacent shadow price')
     // A claim expires after one intervening event, so replacement delta is zero.
     let expired = definition.apply(state, meter(1, 3, 8))
-    expired = definition.apply(expired, { type: 'todo/write', seq: 9, time: 0, data: { todos: [] } } as unknown as SessionEvent)
+    expired = definition.apply(expired, { type: 'session/end-seed', seq: 9, time: 0, data: {} })
     expect(definition.wire.view(definition.apply(expired, replace(1, 3))).messageTokens)
       .toBe(definition.wire.view(state).messageTokens)
     // The armed claim prices exactly the next event's matching replacement.

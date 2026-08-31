@@ -11,7 +11,7 @@
  * @module @deepseek-ai/dsh-loader-smoke
  */
 
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -26,6 +26,31 @@ const DEFAULT_PROCESS_TIMEOUT_MS = 30_000
 
 /** Vitest deadline that leaves room for the subprocess-owned 30-second diagnostic timeout. */
 export const LOADER_SMOKE_TEST_TIMEOUT_MS = DEFAULT_PROCESS_TIMEOUT_MS + 15_000
+
+/** Project-root marker used to stop upward workspace discovery at an owned cwd. */
+export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
+
+/**
+ * Anchor Loader discovery at a harness-owned cwd so ancestor worktrees cannot
+ * contribute instructions or skills. Creates the marker when absent and keeps an
+ * existing real marker directory. Any other pre-existing entry fails loud: a
+ * symlinked or file marker would alias project state the harness does not own.
+ * @param cwd - isolated process cwd.
+ */
+export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
+  const marker = join(cwd, ISOLATED_PROJECT_ROOT_MARKER)
+  const existing = await lstat(marker).catch((error: unknown): undefined => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return undefined
+  })
+  if (existing === undefined) {
+    await mkdir(marker)
+    return
+  }
+  if (existing.isDirectory()) return
+  const kind = existing.isSymbolicLink() ? 'a symbolic link' : 'a non-directory entry'
+  throw new Error(`isolateWorkspaceProjectRoot: ${marker} already exists as ${kind}; an owned cwd must not alias foreign project state.`)
+}
 
 /** Which artifact an example bin is booted from: unbuilt `src` via tsx, or built `lib` via plain Node. */
 export type ExampleMode = 'src' | 'lib'
@@ -65,6 +90,8 @@ export interface ExampleLaunchOptions {
   readonly mode?: ExampleMode
   /** Absolute repo tsconfig whose `paths` map resolves unbuilt workspace imports. Required in `src` mode, ignored in `lib`. */
   readonly tsconfigPath?: string
+  /** Select the ESM-only tsx hook instead of the generic loader. */
+  readonly sourceImport?: 'tsx/esm'
   /** Extra environment entries the mode-specific ones layer over; the caller then merges the result over `process.env`. */
   readonly env?: NodeJS.ProcessEnv
 }
@@ -113,37 +140,14 @@ export function resolveExampleLaunch(options: ExampleLaunchOptions): ExampleLaun
     if (options.tsconfigPath === undefined) {
       throw new Error("resolveExampleLaunch: 'src' mode needs tsconfigPath for the workspace paths map.")
     }
-    const tsxLoader = import.meta.resolve('tsx')
+    const tsxLoader = options.sourceImport === 'tsx/esm'
+      ? import.meta.resolve('tsx/esm')
+      : import.meta.resolve('tsx')
     env.TSX_TSCONFIG_PATH = options.tsconfigPath
     return { command: process.execPath, args: ['--import', tsxLoader, options.srcBin, ...configArgs], env }
   }
 
   return { command: process.execPath, args: [options.libBin ?? toLibBin(options.srcBin), ...configArgs], env }
-}
-
-/**
- * The default project-root marker seeded by {@link isolateWorkspaceProjectRoot}.
- * Matches the agent-instructions and skill-filesystem default project-root markers.
- */
-export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
-
-/**
- * Anchor workspace discovery at a harness-owned isolated cwd. Workspace
- * instruction files and project skill roots are discovered by walking UP from
- * the session cwd to the first directory holding a project-root marker, so a
- * temp cwd whose ancestor chain contains a real checkout — a developer home
- * kept under git, or a TMPDIR rooted inside one — would otherwise adopt that
- * checkout's AGENTS.md and .agents/skills into replays and fail keyless
- * snapshot comparisons for purely environmental reasons. Seeding an empty
- * marker directory makes the isolated cwd its own project root: discovery
- * still runs against exactly the files the scenario seeded, while nothing
- * above the cwd is reachable. Every harness that creates an isolated example
- * cwd calls this before spawning the process, mirroring how the same
- * harnesses pin DSH_HOME inside the cwd.
- * @param cwd - the harness-owned isolated working directory.
- */
-export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
-  await mkdir(join(cwd, ISOLATED_PROJECT_ROOT_MARKER), { recursive: true })
 }
 
 /** Inputs that vary between real-Loader example smokes. */
@@ -152,6 +156,8 @@ export interface LoaderSmokeOptions {
   readonly label: string
   /** Prefix for the isolated temporary process cwd. */
   readonly tempDirPrefix: string
+  /** Existing parent for the generated cwd; defaults to the platform temporary directory. */
+  readonly tempDirParent?: string
   /** Absolute app-bin source path (`<pkg>/src/bin.ts`); the `lib` bin is derived from it. */
   readonly binScript: string
   /** Explicit plain-Node entry for `lib` mode; intended for test fixtures outside a package `src/` tree. */
@@ -197,11 +203,10 @@ export interface LoaderSmokeResult {
  * @returns captured stdout and stderr after a zero exit.
  */
 export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<LoaderSmokeResult> {
-  const cwd = await mkdtemp(join(tmpdir(), options.tempDirPrefix))
+  const cwd = await mkdtemp(join(options.tempDirParent ?? tmpdir(), options.tempDirPrefix))
   const processTimeoutMs = options.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS
   try {
     await options.prepare?.(cwd)
-    // Anchor workspace discovery at the isolated cwd; see isolateWorkspaceProjectRoot.
     await isolateWorkspaceProjectRoot(cwd)
     const launch = resolveExampleLaunch({
       srcBin: options.binScript,

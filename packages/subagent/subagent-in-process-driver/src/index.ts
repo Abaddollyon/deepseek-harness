@@ -117,15 +117,13 @@ export async function startInProcessRun(
   // parent's future.
   const inherited = captureDelegatedPolicyOverrides(parent)
 
-  const childAgentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
-
   let structured: StructuredAttachment | undefined
   const setup = (childCtx: Context): void => {
     appendDelegatedPolicyOverrides((childCtx.agent as Agent).session, inherited)
     applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
-    }, childAgentOptions)
+    })
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
     }
@@ -136,7 +134,7 @@ export async function startInProcessRun(
     sessionId: childId,
     meta: childSessionMeta(parent, childDepth, activationBoundary),
     ...seed !== undefined ? { seed } : {},
-    agentOptions: childAgentOptions,
+    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
     signal: request.signal,
     setup,
   })
@@ -231,9 +229,10 @@ function readResult(
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      return { output, structured: structured.captured.value, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
+      // A committed capture concludes the turn; every later error path rolls it back.
+      return { output, structured: structured.captured.value, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
+  return { output, stopReason, ...stopReason !== 'error' || failure === undefined ? {} : { failure } }
 }

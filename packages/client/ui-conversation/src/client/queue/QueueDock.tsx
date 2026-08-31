@@ -1,15 +1,10 @@
-// Queue dock entry: renders the authoritative transient inbox snapshot and
-// addresses per-row mutations through the session-scoped conversation face.
-//
-// The 'conversation.input.dock' SlotMap declaration lives in
-// ../contract/slots.ts beside the other input-region slots.
 import type { Context } from '@deepseek-ai/cordis'
 import { useEffect, useId, useMemo, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
   IconCheckOutline16, IconChevronDownOutline14, IconChevronUpOutline14, IconCloseOutline16,
-  IconEditOutline16, IconQueueOutline14, IconSendOutline14, IconTrashOutline16, Tooltip,
+  IconEditOutline16, IconQueueOutline14, IconSendOutline14, IconTrashOutline16, projectUserText, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { QueueAction, QueueItemId } from '../contract/queue.ts'
 import { NS } from '../locales.ts'
@@ -32,9 +27,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
   const inbox = useSession(s => s.queue)
   const queue = useMemo(() => inbox.filter(row => row.placement === 'queued'), [inbox])
   const running = useSession(s => s.running)
-  // Nullish on purpose: an omitted addressed-subagent marker still denotes an
-  // ordinary session — reading absence as a subagent hid the queued-row controls.
-  const queueMutable = useSession(s => s.subagent == null)
+  const queueMutable = useSession(s => s.subagent === null)
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)
   const [busy, setBusy] = useState<QueueItemId | null>(null)
   const [collapsed, setCollapsed] = useState(true)
@@ -121,7 +114,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                     }}
                   />
                 )
-                : <span className={css.preview}>{row.preview}</span>}
+                : <span className={css.preview}>{projectUserText(row.preview, [])}</span>}
               {queueMutable && <div className={css.actions}>
                 {editing?.id === row.id
                   ? (
@@ -214,17 +207,10 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
   )
 }
 
-/**
- * The dock entry as a plain registrant plugin. The conversation service is
- * the action contract; the slot declaration has an independent lifecycle boundary.
- */
+/** Registers queue actions backed by the session-scoped conversation service. */
 export const queueDockEntry = {
   name: 'conversation-queue-dock',
   inject: ['slots', 'conversation', 'sessions'],
-  /**
-   * Register the queue strip as the terminal input-dock entry (order 20).
-   * @param ctx - registrant context (disposal rides ctx.effect inside slots.register).
-   */
   apply(ctx: Context): void {
     ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
       name: 'conversation.input.dock',

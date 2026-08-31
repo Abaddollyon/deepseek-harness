@@ -42,7 +42,10 @@ interface SurfaceSelection {
 interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
+  /** Heuristic total persisted for token-meter replacement projection. */
   readonly shadowedTokenCount: number
+  /** Route-priced total used only to compare summary admission size. */
+  readonly shadowedRouteTokenCount: number
   readonly input: SummarizationInput
 }
 
@@ -210,7 +213,7 @@ export async function compactSurfaceRegion(
   options: CompactionTransactionOptions,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
-  if (options.owner === null) signal?.throwIfAborted()
+  signal?.throwIfAborted()
   const selection = validateSurfaceRegion(session, start, end)
   const entryState = inspectCompactionEntryState(session.events)
   assertCompactionInactive(
@@ -259,7 +262,7 @@ export async function compactSurfaceRegion(
       options.sourceCommandId,
       signal,
     )
-    if (options.owner === null) signal?.throwIfAborted()
+    signal?.throwIfAborted()
     assertStable(dependencies, session, summarized)
     stage = 'commit'
     const pending = commitCompactionBody(session, startEvent, summarized)
@@ -288,7 +291,7 @@ export async function compactSurfaceRegion(
     }
   }
 
-  if (options.owner === null) signal?.throwIfAborted()
+  signal?.throwIfAborted()
   if (failure !== undefined) {
     if (options.owner === null) throwManualFailure(failure)
     throw failure.error
@@ -403,7 +406,8 @@ function prepareCompaction(
     ...selection,
     measurement,
     selectedNodes,
-    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
+    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
+    shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
     input: buildSummarizationInput(session, selection.shadowedSeqs),
   }
 }
@@ -422,10 +426,12 @@ async function summarizeCompaction(
     content: frameSummary(summaryResult.summary),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
+  // The checkpoint is text-only, so its fixed-heuristic price is its route price.
+  // Compare it against the selected span route price for admission.
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
-  if (framedSummaryTokenCount >= prepared.shadowedTokenCount) {
+  if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
     throw new Error(
-      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
+      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedRouteTokenCount})`,
     )
   }
   return {

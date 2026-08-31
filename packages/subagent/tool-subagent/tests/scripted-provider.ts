@@ -13,6 +13,7 @@ import type {
 } from '@deepseek-ai/dsh-subagent'
 
 const DEFAULT_CAPABILITIES: SubagentCapabilities = {
+  agentOptions: true,
   outputSchema: true,
   depthLimit: true,
   toolFilter: true,
@@ -29,10 +30,14 @@ export interface Config {
   stopReason?: SubagentStopReason
   /** Safe non-assistant detail for a non-completed result. */
   diagnostic?: string
+  /** Typed provider cause retained through the tool error. */
+  failure?: { readonly code: string; readonly retryAfterMs?: number }
   /** Start-time features advertised by the provider. */
   capabilities?: Partial<SubagentCapabilities>
   /** Whether tool descriptions say the child inherits completed turns. */
   inheritsParentContext?: boolean
+  /** Provider-owned child route defaults. */
+  agentRouteDefaults?: Readonly<{ provider: string; model: string }>
   /** Structured value returned when the request asks for one. */
   structured?: unknown
   /** Observes each start; the child's result additionally waits for the returned promise. */
@@ -75,6 +80,9 @@ class ScriptedSubagentProvider implements SubagentProvider {
         ...this.config.diagnostic !== undefined && terminal !== 'completed'
           ? { diagnostic: this.config.diagnostic }
           : {},
+        ...this.config.failure !== undefined && terminal !== 'completed'
+          ? { failure: this.config.failure }
+          : {},
         stopReason: terminal,
       }
     }
@@ -98,6 +106,24 @@ class ScriptedSubagentProvider implements SubagentProvider {
   }
 }
 
+/** Fixture plugin name. */
+const name = 'scripted-subagent-provider'
+
+/** The scripted provider registers on the real subagent registry. */
+const inject = ['subagents']
+
+/**
+ * Register one scripted provider from Loader composition configuration.
+ * @param ctx - context carrying the real subagent registry.
+ * @param config - scripted provider identity and outcome.
+ */
+function apply(ctx: Context, config: Config): void {
+  const provider = new ScriptedSubagentProvider(config.name, config)
+  ctx.subagents.registerProvider(config.agentRouteDefaults === undefined
+    ? provider
+    : Object.assign(provider, { agentRouteDefaults: config.agentRouteDefaults }))
+}
+
 /**
  * Mount one scripted provider through an effect-scoped local plugin.
  * @param ctx - context carrying the real subagent registry.
@@ -105,11 +131,5 @@ class ScriptedSubagentProvider implements SubagentProvider {
  * @returns the fixture plugin's disposable fiber.
  */
 export function mountScriptedProvider(ctx: Context, config: Config) {
-  return ctx.plugin({
-    name: 'scripted-subagent-provider',
-    inject: ['subagents'],
-    apply(pluginCtx: Context): void {
-      pluginCtx.subagents.registerProvider(new ScriptedSubagentProvider(config.name, config))
-    },
-  })
+  return ctx.plugin({ name, inject, apply }, config)
 }

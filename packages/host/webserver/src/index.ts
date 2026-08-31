@@ -1,11 +1,9 @@
 /**
- * @deepseek-ai/dsh-host-webserver — Web route-registration plugin: a node:http
- * server plus the `webServer` service (HTTP and upgrade route registries, the
- * structured index injection table with raw transform taps behind it, and the
- * single fallback seat for everything no route claims). Knows no harness concepts and serves no files; the composing
- * application's frontend plugin owns dist serving through the fallback hook.
- * Web shape only — Electron loads dist over file:// and carries fetch over an
- * IPC bridge. This package never prints: the URL line belongs to the shell.
+ * @deepseek-ai/dsh-host-webserver — node:http route registration with
+ * negotiated response encoding, index injection, and one fallback seat. It knows no harness concepts
+ * and serves no files; the composing application owns dist serving. Electron
+ * uses file:// plus IPC instead, and this package never prints the URL.
+ * Route handlers retain direct response ownership.
  */
 
 import { createServer } from 'node:http'
@@ -14,6 +12,7 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { applyResponsePolicy, type ResponsePolicy } from './response-policy.ts'
 import { renderIndexInjections, type IndexInjection } from './injections.ts'
 
 export { renderIndexInjections } from './injections.ts'
@@ -55,13 +54,31 @@ export interface WebUpgradeRoute {
   handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
 }
 
-/** Gateway config: the listen address. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
+  /** Whether responses are compressed at all. */
+  compress?: boolean
+  /** Smallest body the carrier encodes. */
+  compressMinBytes?: number
+  /** Brotli quality, 0-11. */
+  brotliQuality?: number
+  /** Deflate level for gzip, 0-9. */
+  gzipLevel?: number
+  /** Content-hashed asset pathname prefixes. */
+  immutablePathPrefixes?: string[]
+  /** Lifetime for immutable responses, in seconds. */
+  immutableMaxAgeSeconds?: number
 }
+
+const DEFAULT_COMPRESS_MIN_BYTES = 1024
+const DEFAULT_BROTLI_QUALITY = 5
+const DEFAULT_GZIP_LEVEL = 6
+const DEFAULT_IMMUTABLE_PATH_PREFIXES = ['/assets/']
+const DEFAULT_IMMUTABLE_MAX_AGE_SECONDS = 31_536_000
 
 /**
  * The browser HTTP carrier service. Activation listens immediately. Route
@@ -74,6 +91,12 @@ export class WebServer extends Service {
   static Config: z<Config> = z.object({
     host: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).required(),
     port: z.natural().max(65535).required(),
+    compress: z.boolean().default(true),
+    compressMinBytes: z.natural().default(DEFAULT_COMPRESS_MIN_BYTES),
+    brotliQuality: z.natural().max(11).default(DEFAULT_BROTLI_QUALITY),
+    gzipLevel: z.natural().max(9).default(DEFAULT_GZIP_LEVEL),
+    immutablePathPrefixes: z.array(z.string().pattern(/^\/[^/?#\s][^?#\s]*\/$/)).default(DEFAULT_IMMUTABLE_PATH_PREFIXES),
+    immutableMaxAgeSeconds: z.natural().default(DEFAULT_IMMUTABLE_MAX_AGE_SECONDS),
   })
 
   private readonly exact = new Map<string, WebRoute>()
@@ -84,9 +107,22 @@ export class WebServer extends Service {
   private fallback: WebRoute['handler'] | undefined
   private server!: Server
   private listenedPort!: number
+  private readonly responsePolicy: ResponsePolicy
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'webServer')
+    this.responsePolicy = {
+      compression: {
+        enabled: config.compress ?? true,
+        minBytes: config.compressMinBytes ?? DEFAULT_COMPRESS_MIN_BYTES,
+        brotliQuality: config.brotliQuality ?? DEFAULT_BROTLI_QUALITY,
+        gzipLevel: config.gzipLevel ?? DEFAULT_GZIP_LEVEL,
+      },
+      cache: {
+        immutablePathPrefixes: config.immutablePathPrefixes ?? DEFAULT_IMMUTABLE_PATH_PREFIXES,
+        immutableMaxAgeSeconds: config.immutableMaxAgeSeconds ?? DEFAULT_IMMUTABLE_MAX_AGE_SECONDS,
+      },
+    }
   }
 
   /** The listening port (the OS-assigned value when config.port is 0). */
@@ -94,7 +130,7 @@ export class WebServer extends Service {
     return this.listenedPort
   }
 
-  /** The configured bind host (the loopback or all-interfaces literal). */
+  /** Configured bind host: loopback by default or deliberate `0.0.0.0` exposure. */
   get host(): Config['host'] {
     return this.config.host
   }
@@ -162,6 +198,7 @@ export class WebServer extends Service {
   /** Listen; resolves once the socket is bound (rejection = FAILED fiber). */
   async [Service.init](): Promise<void> {
     const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+      applyResponsePolicy(req, res, this.responsePolicy, (error) => { this.ctx.logger.warn(error) })
       /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
       requests; the field is only optional on the client-side IncomingMessage type */
       const rawPath = new URL(req.url ?? '/', 'http://x').pathname

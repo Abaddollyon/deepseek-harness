@@ -1,19 +1,55 @@
+---
+description: "The persistent terminal-bash backend for users and maintainers choosing, configuring, or debugging PTY shell sessions and readiness behavior."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-terminal-bash
 
 English | [中文](README.zh.md)
 
+## Summary
+
+`dsh-terminal-bash` provides the persistent `ctx.terminals` backend over `ctx.subprocess.spawnTerminal`. It starts interactive bash or pwsh sessions under the shared sandbox policy, retains bounded line-oriented output, and detects readiness while the subprocess provider owns PTY allocation, environment scrubbing, foreground process groups, signalling, and complete terminal-session cleanup.
+
+## Table of Contents
+
+- [Use this package](#use-this-package)
+- [Understand the implementation](#understand-the-implementation)
+- [Further Exploration](#further-exploration)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="use-this-package"></a>
+## Use this package
+
 Persistent shell backend for `ctx.terminals` over `ctx.subprocess.spawnTerminal`. It starts an interactive shell under the shared `ctx.sandboxPolicy`, retains bounded line-oriented output, and detects readiness while the subprocess provider owns PTY allocation, environment scrubbing, foreground process groups, signalling, and complete terminal-session cleanup. The same PTY backend therefore composes with local or remote execution-world providers.
 
-## Plugin (`terminal-bash`)
+### Plugin (`terminal-bash`)
 
 The plugin injects `pty`, `sandboxPolicy`, and `subprocess`, then registers the configured backend type (`shell`). `danger-full-access` starts the shell directly without requiring a sandbox provider; confined modes require a same-world `ctx.sandbox` and wrap the exact shell argv through it, failing before spawn when none is mounted. At spawn, one `ctx.sandboxPolicy.resolve({ session })` call supplies both the effective mode and the session workspace root; the same root is the default shell cwd when the caller omits one. A change to a different effective mode is rejected before its `sandbox/mode` event commits while that owner has an open PTY or a spawn in progress; the fence is attached to the exact owner and therefore outlives a provider reload that retains existing sessions. Wait for creation to settle and close the sessions before changing modes, so a terminal opened with wider access cannot survive a downgrade.
 
-`shellDialect` selects the shell stack (`bash` default, `pwsh`): it picks the default `shellPath`/`shellArgs` (bash `--noprofile --norc -i`; pwsh `-NoLogo -NoProfile` through the shared `dsh-pwsh-local` resolver) and the startup contract. The bash dialect installs its prompt through the environment (`PS1` plus an OSC `133;D;`-terminated `PROMPT_COMMAND`). pwsh cannot install a prompt from the environment, so the backend first waits for startup readiness, then writes a `prompt` function once and waits within the startup timeout until the controlled prompt is actually visible — using output-free follow-up sends because rendering can outlast the silence bound — while its environment drops the bash-only markers and adds `NO_COLOR`. That bootstrap send also prefixes the shared `dsh-pwsh-local` encoding preamble, pinning `[Console]::OutputEncoding` and `$OutputEncoding` to UTF-8 before anything runs: the session decode path reads PTY bytes as UTF-8, and an un-pinned console writes its host code page for non-ASCII output. Both dialects emit the same BEL-terminated OSC marker, so the readiness machinery and consumers are dialect-agnostic.
+`shellDialect` selects the shell stack (`bash` default, `pwsh`): it picks the default `shellPath`/`shellArgs` (bash `--noprofile --norc -i`; pwsh `-NoLogo -NoProfile` through the shared `dsh-pwsh-local` resolver) and the startup contract. The bash dialect installs its prompt through the environment (`PS1` plus an OSC `133;D;`-terminated `PROMPT_COMMAND`). pwsh cannot install a prompt from the environment, so the backend immediately submits one bootstrap send containing the shared encoding preamble and a `prompt` function, while its environment drops the bash-only markers and adds `NO_COLOR`. Startup concludes only on an exact stdin-wait settlement — a controlled prompt marker verified against the shell's foreground group, or exact foreground stdin-wait evidence. A silence settlement is not startup readiness and instead triggers another output-free follow-up observation send, with one absolute deadline bounding every retry. The encoding preamble pins `[Console]::OutputEncoding` and `$OutputEncoding` to UTF-8 before the prompt setup runs: the session decode path reads PTY bytes as UTF-8, and an un-pinned console writes its host code page for non-ASCII output. Both dialects emit the same BEL-terminated OSC marker, so the readiness machinery and consumers are dialect-agnostic.
 
-Readiness combines a foreground-verified private bash prompt marker, provider-reported foreground stdin-wait facts, silence fallback, and absolute timeout. While the session is live, the line-oriented terminal answers cursor-position queries with a stable origin so PowerShell's line editor can finish rendering without a screen model; a rejected advisory reply does not fail the session. A marker is not ready until the printable tail after the latest owned marker exactly equals the controlled `PS1`, including when the OSC marker and prompt are split across data callbacks; echoed input or output following an earlier prompt therefore cannot settle the current send. The controlled `PROMPT_COMMAND` re-asserts that `PS1` before every prompt, so an in-shell prompt override cannot degrade later sends to silence readiness. Prompt and silence evidence collected before the provider write, including while pre-write foreground inspection is pending, is discarded at the write boundary. Silence remains available to sends that legitimately produce no output, including hidden input and an empty submission. PowerShell output receives a second `idleSilenceMs` window plus `handoffGraceMs` beyond the ordinary silence bound so line-editor rendering can finish; when bash prints the marker before the terminal provider publishes its return to the foreground process group, polling uses the same grace so a coincident handoff can win. An interactive child that inherits `PROMPT_COMMAND` therefore cannot suppress inferred-idle readiness until the absolute timeout. Unknown foreground state is never a positive exact-idle signal. A foreground group's stdin wait that existed before a send is likewise not post-write readiness: the same group must be observed outside that wait before a later wait can settle the send, while a changed foreground group is new evidence. During unpublished startup, a fallback requires observed output; zero-output silence cannot publish an empty session, and timeout rejects the spawn. Cancellation closes the unpublished shell and rejects with the caller's exact abort reason; `TerminalBackendCleanupError` separately preserves a cleanup failure. The caller's signal is forwarded for terminal allocation and readiness initialization; after publication the handle owns its lifetime. Incomplete terminal-control sequences are bounded by `maxReadBytes` and discarded through their terminator after crossing that limit; malformed UTF-8 terminal output uses replacement characters, and a trailing carriage return is carried across callbacks so split CRLF becomes one newline.
+Readiness combines a foreground-verified private bash prompt marker, provider-reported foreground stdin-wait facts, silence fallback, and absolute timeout. The line-oriented terminal answers cursor-position queries with a stable origin so PowerShell's line editor can finish rendering without a screen model. A marker is not ready until the printable tail after the latest owned marker exactly equals the controlled `PS1`, including when the OSC marker and prompt are split across data callbacks; echoed input or output following an earlier prompt therefore cannot settle the current send. The controlled `PROMPT_COMMAND` re-asserts that `PS1` before every prompt, so an in-shell prompt override cannot degrade later sends to silence readiness. Prompt and silence evidence collected before the provider write, including while pre-write foreground inspection is pending, is discarded at the write boundary. A non-empty write cannot settle from silence until that send has produced output; an empty observation send may use silence while waiting for delayed prompt output. When bash prints the marker before the terminal provider publishes its return to the foreground process group, polling retains the candidate for `handoffGraceMs` past the ordinary silence bound so a coincident handoff can win. An interactive child that inherits `PROMPT_COMMAND` therefore cannot suppress inferred-idle readiness until the absolute timeout. Unknown foreground state is never a positive exact-idle signal. A foreground group's stdin wait that existed before a send is likewise not post-write readiness: the same group must be observed outside that wait before a later wait can settle the send, while a changed foreground group is new evidence. During the bash dialect's unpublished `initialize()` path, a fallback requires observed output; zero-output silence cannot publish an empty session, and timeout rejects the spawn. The pwsh bootstrap never publishes through this fallback. Cancellation closes the unpublished shell and rejects with the caller's exact abort reason; `TerminalBackendCleanupError` separately preserves a cleanup failure. The caller's signal is forwarded for terminal allocation and readiness initialization; after publication the handle owns its lifetime. Incomplete terminal-control sequences are bounded by `maxReadBytes` and discarded through their terminator after crossing that limit; malformed UTF-8 terminal output uses replacement characters, and a trailing carriage return is carried across callbacks so split CRLF becomes one newline.
 
 Send cancellation marks queued input as canceled before asking the terminal handle to signal the current foreground process group with a real `SIGINT`; if asynchronous pre-write inspection later settles, it cannot execute that input. If a provider write is already in flight, signalling waits for it to settle; a rejected write sends no signal. The canceled send retains its slot until the write and foreground signalling settle, so a successor cannot receive either late bytes or that signal. A provider write or signal that never settles therefore retains the slot indefinitely; closing the session (`terminal_close`) is the recovery. The absolute deadline remains armed while cancellation waits. A signal failure is a terminal transport failure and rejects the active send. Cancellation never emulates interruption by writing `\x03`, so raw-mode programs remain cancellable. Close rejects new public signals, stops readiness polling, and awaits the handle's provider-owned complete-session termination before settling the active send as `session_exit`.
 
+<a id="understand-the-implementation"></a>
+## Understand the implementation
+
+The plugin combines sandbox resolution, dialect-specific bootstrap, marker and silence readiness, bounded reads, cancellation, and provider-owned cleanup. The plugin details above are the operational implementation reference.
+
+<a id="further-exploration"></a>
+## Further Exploration
+
+- [terminal package map](../README.md) — the persistent PTY capability family.
+- [persistent bash tool](../../shell/tool-bash-persistent/README.md) — a model-facing consumer of this backend.
+- [persistent pwsh tool](../../shell/tool-pwsh-persistent/README.md) — the PowerShell consumer and fallback-output contract.
+
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Current file policy and indirect consumer
@@ -32,8 +68,20 @@ A standing-policy change appends an owner-rendered superseding runtime-context s
 
 ## Known Limitations and Deferred Work
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - Line-oriented output is normalized; full-screen alternate-buffer interaction is unsupported.
-- Exact stdin-wait detection depends on the mounted subprocess provider; providers that cannot prove it use prompt-marker and silence/timeout readiness. Windows is such a provider: the shell pid is the pseudo foreground group and there is no exact stdin-wait tier, so a marker-less child settles on the silence bound.
-- The pwsh bootstrap writes through `[Console]::` (the UTF-8 encoding pin and the prompt function), which the Windows ACL sandbox's read-only mode (ConstrainedLanguage) may deny. The shell can still settle through the controlled printable prompt and silence tier, but marker readiness is unavailable and non-ASCII output may follow the host code page.
+- Exact stdin-wait detection depends on the mounted subprocess provider. After startup publishes the shell, ordinary sends can use prompt-marker and silence/timeout readiness when a provider cannot prove stdin wait. Windows is such a provider: the shell pid is the pseudo foreground group and there is no exact stdin-wait tier, so a marker-less foreground child settles an ordinary send on the silence bound.
+- The pwsh bootstrap writes through `[Console]::` (the UTF-8 encoding pin and the prompt function), which the Windows ACL sandbox's read-only mode (ConstrainedLanguage) may deny. A provider with exact stdin-wait evidence can still complete startup without the marker, but non-ASCII output may follow the host code page. Windows has no exact stdin-wait tier, so its startup rejects at the absolute deadline rather than publishing a shell whose prompt setup was denied.
 - Cleanup guarantees are those of `SubprocessTerminalHandle`; provider-specific gaps belong to that implementation's contract rather than this PTY consumer.
 - Sessions do not survive harness process exit.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+Keyless fixtures cover dialect bootstrap, readiness, cancellation, bounded reads, sandbox mode fences, and provider cleanup. PowerShell-dependent composition coverage belongs to platform CI.
+
+</details>

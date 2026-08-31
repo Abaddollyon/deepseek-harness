@@ -1,11 +1,27 @@
+---
+description: "具体的 agent 循环驱动器与生命周期所有者。"
+kind: "package-reference"
+---
+
 # dsh-agent-loop
 
 [English](README.md) | 中文
+
+## 概述
+
+具体的 agent 插件和循环驱动器拥有 session、turn 与 step 生命周期。
+
+## 目录
+
+- [服务：AgentLoop](#service-agentloop-ctx-key-agentloop)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
 agent（智能体）的唯一具体实现插件和循环驱动器。其包内部实现满足 `Agent` 接口，并驱动会话、轮次和步骤的生命周期。
 
 这是 harness 中唯一包含具体循环逻辑的包。其他所有内容要么是抽象服务，要么是针对扩展点的插件：新行为应放入插件，而不是这里。
 
+<a id="service-agentloop-ctx-key-agentloop"></a>
 ## 服务：`AgentLoop`（ctx 键：`agentLoop`）
 
 ### 公开 API
@@ -40,8 +56,10 @@ interface Config {
   maxParallelToolCalls?: number // default 10; 1 is serial
   agents: Array<{
     id: string                 // required
+    sessionId?: string          // exact create-or-resume identity; exclusive with resumeSessionId
     provider?: string
     model?: string
+    reasoningEffort?: string    // registered effort id for the configured model route
     maxTokens?: number         // positive per-request output-token cap
     resumeSessionId?: string   // load this persisted session instead of creating one
     cwd?: string               // optional workspace cwd for the fresh session
@@ -49,7 +67,7 @@ interface Config {
 }
 ```
 
-通过配置创建的 agent 会自动启动。模型调用同时需要 `provider` 和 `model`；`agent/request` 可以在分发前补齐缺失的这一对值。可选的正数 `maxTokens` 会为每次对话请求提供初始输出上限，并记录在请求 header 中。`maxParallelToolCalls` 限制每个 agent 针对并行安全调用使用的滚动池，默认值为 `10`；它同时也是 `agent-loop` Settings 段的全部内容，因此叠加在该条目之上的用户层无需重启即可限制下一组工具调用，而非正整数的值会在写入时被拒绝，而不是到那一组时才失败。`agents` 刻意不在该段中——它在服务启动时被消费一次，所以存储的改动只会看起来生效。`cwd` 仅应用于全新会话，而 `resumeSessionId` 保留持久化元数据。通过配置创建的 agent 使用部署 persona；编程式 setup 可以按 agent 遮蔽它。该插件为每个 agent 提供 `provider`、`model` 和 `cwd` 提示词变量；harness 身份与部署 persona 属于 `dsh-system-prompt`。
+通过配置创建的 agent 会自动启动。模型调用同时需要 `provider` 和 `model`；`agent/request` 可以在分发前补齐缺失的这一对值。`reasoningEffort` 为该路由选择已注册的推理强度。`sessionId` 在首次使用时创建确切身份，并在重新挂载时恢复已物化的历史记录；它与要求已有历史记录的 `resumeSessionId` 互斥。可选的正数 `maxTokens` 会为每次对话请求提供初始输出上限，并记录在请求 header 中。`maxParallelToolCalls` 限制每个 agent 针对并行安全调用使用的滚动池，默认值为 `10`；它同时也是 `agent-loop` Settings 段的全部内容，因此叠加在该条目之上的用户层无需重启即可限制下一组工具调用，而非正整数的值会在写入时被拒绝，而不是到那一组时才失败。`agents` 刻意不在该段中——它在服务启动时被消费一次，所以存储的改动只会看起来生效。`cwd` 仅应用于全新会话，而 `resumeSessionId` 保留持久化元数据。通过配置创建的 agent 使用部署 persona；编程式 setup 可以按 agent 遮蔽它。该插件为每个 agent 提供 `provider`、`model` 和 `cwd` 提示词变量；harness 身份与部署 persona 属于 `dsh-system-prompt`。
 
 ### 包内部具体驱动器
 
@@ -61,11 +79,11 @@ interface Config {
 
 ### 循环生命周期（`agent.ts`）
 
-驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。包私有的编排入口点会恢复确切的 Agent，一次性派生 `agent.session`，并让操作局部的辅助函数捕获它，而不是通过浅层接口继续传递具体驱动器或每次操作的 `Session`。如果显式 `Session` 正是辅助函数的实际接口，该辅助函数会保留它；创建、持久化加载、未发布 setup、服务、worker、进程、持久化和 wire 协议则继续保留各自的显式身份。[agent 服务](../agent/README.zh.md#initiating-agent-scope)规定传播、teardown 和分离工作规则。
+驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。包私有的编排入口点会恢复确切的 Agent，一次性派生 `agent.session`，并让操作局部的辅助函数捕获它，而不是通过浅层接口继续传递具体驱动器或每次操作的 `Session`。如果显式 `Session` 正是辅助函数的实际接口，该辅助函数会保留它；创建、持久化加载、未发布 setup、服务、worker、进程、持久化和 wire 协议则继续保留各自的显式身份。[agent 服务](../agent/README.zh.md#initiator-scope)规定传播、teardown 和分离工作规则。
 
 每次提供方调用成功结束时，都会恰好追加一个 `assistant/message` 完成锚点，包括无内容调用和以 `max-tokens` 结束的调用。该锚点原样记录组装后的内容，在 `sourceEventSeqs` 中列出确切的分片 seq（流没有分片时为 `[]`），并在用量可用时包含用量；空内容不会进入派生消息历史。轮次取消打断流式输出时，如果非空文本或推理内容已送达用户，循环也会追加一个带 `interrupted: true` 的锚点。该锚点引用对应的分片 seq，并把已渲染的前缀放入派生消息历史，使下一次请求包含用户看到的内容。未分派的工具调用会被省略，空流或只包含工具调用的流不会生成锚点；提供方故障也不提交 assistant 内容（[决策](../../../.agents/notes/implemented/architecture/2026-08-10-cancelled-stream-prefix-finalize.zh.md)）。
 
-在 `agent/request` 返回提供方／模型调用配置后，循环会调用 `ctx.llm.prepareCall()`，在活跃轮次信号的控制下校验由适配器负责的字段，并填入配置的推理（reasoning）强度和输出 token 默认值。准备完成的调用会在这次异步解析、`request/header` 日志记录和最终分派期间保留同一项确切的适配器注册，因此 HMR（热模块替换）不会把某个适配器的能力解析结果与另一适配器的请求混用。请求 header 会记录生效配置以及哪些字段来自适配器。下一次 waterfall（瀑布式事件）前，循环会从提议中移除这些带标记字段，使当前精确路由重新填入自身默认值；未带标记的显式设置会跨步骤和路由变化保留。没有已注册适配器的路由会保留原定配置，使 `llm/stream` 监听器可以接管并短路该请求；最终分派仍会以 `NO_ADAPTER` 拒绝未得到处理的路由。新循环实例在恢复时会遵循同一套适配器默认值标记规则。之后，循环会在派生消息之前，将冻结的规范 header 和已解析容量传给 `agent/request-preflight`。监听器只有在提交并标识更新的替换表层后才能要求重新分派；只有日志增长会直接失败。循环最多允许八次有效重新分派，随后会把未截断的持久历史交给提供方，并保留通过 `agent/request-error` 恢复的机会。
+在 `agent/request` 返回提供方／模型调用配置后，循环会调用 `ctx.llm.prepareCall()`，在活跃轮次信号的控制下校验由适配器负责的字段，并填入配置的推理（reasoning）强度和输出 token 默认值。准备完成的调用会在这次异步解析、`request/header` 日志记录和最终分派期间保留同一项确切的适配器注册，因此 HMR（热模块替换）不会把某个适配器的能力解析结果与另一适配器的请求混用。请求 header 会记录生效配置以及哪些字段来自适配器。下一次 waterfall（瀑布式事件）前，循环会从提议中移除这些带标记字段，使当前精确路由重新填入自身默认值；未带标记的显式设置会跨步骤和路由变化保留。没有已注册适配器的路由会保留原定配置，使 `llm/stream` 监听器可以接管并短路该请求；最终分派仍会以 `NO_ADAPTER` 拒绝未得到处理的路由。新循环实例在恢复时会遵循同一套适配器默认值标记规则。随后，冻结的规范 header 与已解析容量在消息派生之前进入 `agent/request-preflight`。监听器只有在提交并标识更新的替换表层之后才能请求重新分派；仅写日志的活动会响亮失败。八次有效重新分派是循环的安全上限，此后未改变的持久历史会继续发往提供方，并仍有资格进入 `agent/request-error` 恢复。
 
 插件失败会结束当前轮次，而不是结束循环。最终适配器选择、分发与迭代失败会以终止错误或中止结束的形式由 `ctx.llm` 传来，并进入 `agent/request-error`；middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次。恢复逻辑会接收请求坐标、不可变的提供方事实、准备完成的适配器注册所捕获的不可变重试策略以及轮次信号；middleware 接管未准备路由时，该策略缺失。处理失败的监听器返回 `{ kind: 'retry' }`；未被处理的失败是终态。AgentLoop 为当前准入操作或轮次拥有一个取消信号。有效的 `cancel(cause)` 在未设置 `keepInbox` 时清除待处理工作，并以协作方式中止该信号；空闲取消是空操作。abort 触发后、活动收敛到空闲前到达的唤醒输入会被锁存（`wakeRequested`），并在 driver 自身的收敛边界重放，无需再发一条唤醒 send 即可执行；`disposed` 取消从不锁存，而 agent 已处于空闲时发送的唤醒总是打开自己的 turn 边界（即使消息已被清除，状态也会显示瞬态 `idle → running → idle` 对）。持久 `turn/end` 为 `user` 和 `parent` 记录 `aborted`，dispose 则记录 `disposed`；未分发的模型工具调用会收到合成的 `tool/call` 与 `ABORTED_BEFORE_DISPATCH` 结果对。取消原因只影响报告方式，不影响如何处理在取消后完成终结的结果上下文。dispose 会等待忽略信号的工作完成，然后才从注册表移除。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)与[取消收敛窗口唤醒锁存](../../../.agents/notes/implemented/bug-fix/2026-08-07-cancel-convergence-wake-latch.zh.md)规定生命周期与竞态约定。
 
@@ -82,6 +100,7 @@ interface Config {
 - 持久化：`session/event` 发生后立即安排延后写入；`session/flush` 是显式观测屏障
 - UI：`session/event`（assistant token 流、边界、工具活动）+ `agent/*` 控制事件（`agent/status`、`agent/created`/`agent/disposed`）
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 完整对话请求
@@ -126,9 +145,17 @@ interface Config {
 
 仅追加；每个合成结果都位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
 
+<a id="known-limitations-and-deferred-work"></a>
 ## 已知限制与暂缓事项
+
+<a id="known-limitations-and-deferred-work"></a>
 
 - **分类是一元的**：安全性取决于比较同级调用或资源的调用必须保持独占（参见[设计原理](../../../.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.zh.md)）。
 - **配置 label 默认对应新会话**：省略 `sessionId` 时，每次启动都会创建新的 `${id}-session-<uuid>`；如需确切的恢复或创建行为，必须显式提供稳定的 `sessionId`，而 `resumeSessionId` 要求已有持久化历史。
 - **配置 agent 没有逐 agent persona 字段或 setup 钩子**：它们使用部署 persona；只有编程式 `ctx.agents.create()` / `resume()` 工厂选项支持带作用域的 persona／工具组合。
 - **没有内置轮次预算**：工具调用或 steering 会让当前轮次继续；限制失控轮次的策略必须从既有生命周期扩展点（如 `agent/turn-stopping`）执行取消。
+
+<a id="dev-note"></a>
+### 开发备注
+
+生命周期变更需要覆盖取消、teardown 和持久化的专项测试。

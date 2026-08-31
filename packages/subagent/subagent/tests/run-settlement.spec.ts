@@ -66,6 +66,17 @@ describe('outcome mapping helpers', () => {
       status: 'failed',
       detail: 'Error: result failed; dispose failed: Error: reap failed',
     })
+
+    const unrenderable = { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } }
+    await expect(settleRun({
+      id: SessionId('child-hostile'),
+      localAgent: undefined,
+      result: (async () => { throw unrenderable })(),
+      dispose: async () => { throw unrenderable },
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: '<unrenderable value>; dispose failed: <unrenderable value>',
+    })
   })
 
   it('keeps provider diagnostics separate in failed background outcomes', async () => {
@@ -81,6 +92,38 @@ describe('outcome mapping helpers', () => {
     })).resolves.toEqual({
       status: 'failed',
       detail: 'error; diagnostic: Claude Code denied a tool request',
+    })
+  })
+
+  it('retains provider routing facts in failed background outcomes', async () => {
+    await expect(settleRun({
+      id: SessionId('child-rate-limit'),
+      localAgent: undefined,
+      result: Promise.resolve({
+        output: [],
+        stopReason: 'error',
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      }),
+      dispose: () => Promise.resolve(),
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: 'error; failure code: RATE_LIMIT; retry after: 12000 ms',
+    })
+  })
+
+  it('treats a diagnostic-bearing remote abort as failed without changing local cancellation', async () => {
+    await expect(settleRun({
+      id: SessionId('child-remote-abort'),
+      localAgent: undefined,
+      result: Promise.resolve({
+        output: [],
+        diagnostic: 'ACP permission was denied',
+        stopReason: 'aborted',
+      }),
+      dispose: () => Promise.resolve(),
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: 'aborted; diagnostic: ACP permission was denied',
     })
   })
 
@@ -113,5 +156,45 @@ describe('outcome mapping helpers', () => {
     expect(limited).not.toContain('\uFFFD')
     expect(result.stopReason).toBe('error')
     expect(result.diagnostic).toBe(limited)
+  })
+
+  it('applies the same diagnostic rules to provider-returned results', async () => {
+    const controller = new AbortController()
+    const oversized = '权限'.repeat(MAX_SUBAGENT_DIAGNOSTIC_BYTES)
+    const failed = await settleRunResult({
+      attempt: () => Promise.resolve({
+        output: [],
+        diagnostic: oversized,
+        stopReason: 'error',
+      }),
+      collectOutput: () => [],
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort: () => {},
+    })
+    expect(Buffer.byteLength(failed.diagnostic ?? '', 'utf8'))
+      .toBeLessThanOrEqual(MAX_SUBAGENT_DIAGNOSTIC_BYTES)
+    expect(failed.diagnostic).toMatch(/\[diagnostic truncated\]$/)
+
+    const plainFailure = await settleRunResult({
+      attempt: () => Promise.resolve({ output: [], stopReason: 'error' }),
+      collectOutput: () => [],
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort: () => {},
+    })
+    expect(plainFailure).toEqual({ output: [], stopReason: 'error' })
+
+    const cancelledAfterAttempt = await settleRunResult({
+      attempt: () => Promise.resolve({ output: [], stopReason: 'completed' }),
+      collectOutput: () => [{ type: 'text', text: 'partial' }],
+      cancelled: () => true,
+      signal: controller.signal,
+      onAbort: () => {},
+    })
+    expect(cancelledAfterAttempt).toEqual({
+      output: [{ type: 'text', text: 'partial' }],
+      stopReason: 'aborted',
+    })
   })
 })

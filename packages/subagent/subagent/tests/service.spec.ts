@@ -1,8 +1,9 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { type Agent } from '@deepseek-ai/dsh-agent'
+import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { HarnessError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import SubagentRuntime, {
   foldSubagentDescriptor,
@@ -18,14 +19,16 @@ import SubagentRuntime, {
   type SubagentRunEndInfo,
   type SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 
 function fakeParent(id = 'parent-1'): Agent {
   return { id: SessionId(id) } as unknown as Agent
 }
 
-const ALL_CAPS: SubagentCapabilities = { outputSchema: true, depthLimit: true, toolFilter: true, persona: true }
-const NO_CAPS: SubagentCapabilities = { outputSchema: false, depthLimit: false, toolFilter: false, persona: false }
+const ALL_CAPS: SubagentCapabilities = { agentOptions: true, outputSchema: true, depthLimit: true, toolFilter: true, persona: true }
+const NO_CAPS: SubagentCapabilities = { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false }
 
 function baseRequest(overrides: Partial<SubagentStartRequest> = {}): SubagentStartRequest {
   return {
@@ -161,7 +164,49 @@ describe('SubagentRuntime', () => {
     )).rejects.toMatchObject({ code: 'CONTINUATION_UNAVAILABLE' })
   })
 
+  it('rebinds and removes the continuation manager with the Agent registry lifecycle', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime, {})
+    const runtimeFiber = await ctx.plugin(SubagentRuntime)
+    const registryFiber = await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    let parentOrdinal = 0
+    const parent = (): Agent => ctx.agentLoop.create(
+      SessionId(`binding-parent-${++parentOrdinal}`),
+      { provider: 'mock', model: 'mock' },
+    )
+    const expectBound = async (): Promise<Agent> => {
+      const liveParent = parent()
+      await expect(ctx.subagents.startContinuable({
+        provider: 'unused',
+        label: 'unused child',
+        request: baseRequest({ parent: liveParent }),
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'PERSISTENCE_UNAVAILABLE' })
+      return liveParent
+    }
+    try {
+      await expectBound()
+      await registryFiber.restart()
+      const liveParent = await expectBound()
+      await registryFiber.dispose()
+      await expect(ctx.subagents.startContinuable({
+        provider: 'unused',
+        label: 'unused child',
+        request: baseRequest({ parent: liveParent }),
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'CONTINUATION_UNAVAILABLE' })
+    } finally {
+      await registryFiber.dispose()
+      await runtimeFiber.dispose()
+    }
+  })
+
   it.each([
+    ['agentOptions', { agentOptions: { model: 'child-model' } }],
     ['outputSchema', { outputSchema: { type: 'object', properties: {} } }],
     ['depthLimit', { maxDepth: 1 }],
     ['toolFilter', { toolFilter: { deny: ['bash'] } }],
@@ -348,6 +393,7 @@ describe('subagent descriptors', () => {
       label: 'complete child',
       agentProvider: 'deepseek',
       agentModel: 'chat',
+      agentReasoningEffort: ReasoningEffortId('high'),
       persona: 'reviewer',
       toolFilter: { allow: ['read'], deny: ['bash'] },
     }
@@ -357,6 +403,7 @@ describe('subagent descriptors', () => {
       label: complete.label,
       agentProvider: complete.agentProvider,
       agentModel: complete.agentModel,
+      agentReasoningEffort: complete.agentReasoningEffort,
       persona: complete.persona,
       toolFilter: complete.toolFilter,
     })).toEqual(complete)
@@ -448,6 +495,13 @@ describe('subagent descriptors', () => {
       label: 'l',
       agentModel: [],
     }, 'agentModel must be a string'],
+    ['invalid agent reasoning effort', {
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'l',
+      agentReasoningEffort: 7,
+    }, 'agentReasoningEffort must be a string'],
     ['invalid persona', {
       version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'continuable',

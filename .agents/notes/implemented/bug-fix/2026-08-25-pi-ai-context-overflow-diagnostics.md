@@ -16,7 +16,7 @@ The local fallback message now names the resolved capacity and the usage that tr
 
 The interpolated values need no `unknown` fallbacks, and adding them would be dead code: on the fallback path `message.errorMessage` is absent, and pi-ai's detector only fires without error wording for the two usage-versus-window cases, both of which require a resolved `contextWindow`; `usage` is a required field on pi-ai's `AssistantMessage`. An unreachable fallback branch would also fail the per-file 100% coverage gate on `packages/*/*/src`.
 
-The focused expectations in `convert.spec.ts` and the catalog-window adapter test in `adapter.spec.ts` pin the new wording, including a length-stop case whose cache-read share is visible in the message.
+The message interpolates only the model id and integer counts — never request or response content — so the diagnostic cannot leak prompt payload or credentials. The focused expectations in `convert.spec.ts` and the catalog-window adapter test in `adapter.spec.ts` pin the new wording, including a length-stop case whose cache-read share is visible in the message and a boundary case whose at-window usage stays a successful stop. The authored `context-overflow-diagnostic` session snapshot replays a turn that ends on the actionable error finish — the failed compaction recovery retaining the original failure — and proves the diagnostic persists to the session log and the headless stderr projection.
 
 ## Alternatives considered
 

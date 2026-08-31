@@ -16,7 +16,7 @@ Status: implemented
 
 插值的值不需要 `unknown` 兜底，加上反而是死代码：兜底路径上 `message.errorMessage` 必然缺省，而 pi-ai 的检测器在没有错误措辞时只为两种用量对比窗口的情形触发，两者都要求已解析的 `contextWindow`；`usage` 在 pi-ai 的 `AssistantMessage` 上是必填字段。不可达的兜底分支还会破坏 `packages/*/*/src` 的逐文件 100% 覆盖率门禁。
 
-`convert.spec.ts` 中的聚焦断言与 `adapter.spec.ts` 中的目录窗口适配器测试钉住了新措辞，包括一个能在消息中看到缓存读取份额的 length 停止用例。
+消息只插值模型 id 与整数计数——绝不包含请求或响应内容——因此该诊断不会泄漏提示词载荷或凭据。`convert.spec.ts` 中的聚焦断言与 `adapter.spec.ts` 中的目录窗口适配器测试钉住了新措辞，包括一个能在消息中看到缓存读取份额的 length 停止用例，以及一个恰好等于窗口时仍为成功停止的边界用例。`context-overflow-diagnostic` 会话快照回放了一个以可操作错误 finish 结束的轮次——失败的压缩恢复保留了原始失败——证明该诊断会持久化到会话日志与 headless 的 stderr 投影中。
 
 ## 否决的替代方案
 

@@ -28,13 +28,17 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
-import { compactionInstructionMessage, summarizeWithLlm } from './summarizer.ts'
+import { createCompactionInstructionMessage, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
+function isAborted(signal: AbortSignal): boolean {
+  return signal.aborted
+}
+
 import type {
   BasicCompactionConfig,
   ModelCompactPolicyConfig,
+  ResolvedCompactSpec,
   ResolvedConfig,
-  ResolvedTargetPolicy,
 } from './types.ts'
 
 export type {
@@ -49,6 +53,15 @@ export type {
 
 /** The region transaction's view of this service's dynamically dispatched summarizer. */
 type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortSignal) => Promise<SummaryResult>
+
+type AdmissionAttempt = { key: string; count: number }
+
+function canonicalRequestKey(session: Session, header: EpochHeader): string {
+  const series = session.events.filter(event => event.type === 'request/header'
+    && (event.data.reason === 'initial' || event.data.reason === 'resume'
+      || event.data.reason === 'series' || event.data.startsSeries === true)).length
+  return JSON.stringify(header) + ':' + String(series)
+}
 
 /** Resolve the exact provider/model durably routed for the latest request. */
 function routedTarget(
@@ -124,6 +137,7 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly warnedPressureConfigTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
+  private readonly requestAttempts = new WeakMap<Session, AdmissionAttempt>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -147,24 +161,29 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
 
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.overflowRetries.delete(agent)
+      if (status === 'idle') {
+        this.overflowRetries.delete(agent)
+        this.requestAttempts.delete(agent.session)
+      }
     })
 
     // A successful response starts a fresh overflow-recovery sequence even
     // when tool calls continue the same turn into another request.
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'assistant/message') return
+      this.requestAttempts.delete(session)
       const agent = this.overflowAgents.get(session)
-      if (agent !== undefined) this.overflowRetries.delete(agent)
+      if (agent !== undefined) {
+        this.overflowRetries.delete(agent)
+      }
     })
 
     ctx.on('agent/request-preflight', async (
-      { agent, header, contextWindow, attempt, signal },
+      { agent, header, contextWindow, signal },
       next,
     ): Promise<RequestPreflightAction> => {
       if (signal.aborted) return next()
       const policy = resolveTargetPolicy(this.config, header.config)
-      if (attempt > policy.maxOverflowRetries) return next()
       const targetKey = `${header.config.provider}/${header.config.model}`
       if (contextWindow === undefined) {
         if (!this.warnedPressureConfigTargets.has(targetKey)) {
@@ -174,60 +193,32 @@ export class BasicCompactionEngine extends CompactionEngine {
         return next()
       }
 
-      const meter = this.ctx.tokenMeter
-      const measurement = meter.measure(agent.session)
-      let spec: ReturnType<typeof resolveCompactSpec>
-      try {
-        spec = resolveCompactSpec(policy, contextWindow)
-      } catch (error: unknown) {
-        if (error instanceof TargetPressureConfigError) {
-          if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
-          this.warnedPressureConfigTargets.add(error.targetKey)
-        }
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`request preflight compaction skipped: ${message}`)
+      const resolution = resolveCompactSpec(policy, contextWindow)
+      if (resolution.kind === 'invalid') {
+        if (this.warnedPressureConfigTargets.has(resolution.error.targetKey)) return next()
+        this.warnedPressureConfigTargets.add(resolution.error.targetKey)
+        ctx.logger.warn(`request preflight compaction skipped: ${resolution.error.message}`)
         return next()
       }
+      const { spec } = resolution
+      const meter = this.ctx.tokenMeter
+      const measurement = meter.measure(agent.session)
       if (measurement.totalTokens < spec.thresholdTokens
         && measurement.totalTokens + (header.config.maxTokens ?? 0) <= contextWindow) {
         return next()
       }
 
       const generation = agent.session.surface.replaceGeneration
-      let result: CompactionResult | null
-      try {
-        result = await this.compactForPreflight(
-          agent,
-          header,
-          contextWindow,
-          policy,
-          signal,
-        )
-      } catch (error: unknown) {
-        signal.throwIfAborted()
-        const message = error instanceof Error ? error.message : String(error)
-        if (agent.session.surface.replaceGeneration > generation) {
-          ctx.logger.warn(
-            `request preflight compaction failed after durable surface progress: ${message}; `
-            + 'retrying admission from the replacement surface',
-          )
-          return {
-            kind: 'retry',
-            surfaceGeneration: agent.session.surface.replaceGeneration,
-          }
-        }
-        ctx.logger.warn(
-          `request preflight compaction failed: ${message}; preserving the full request`,
-        )
-        return next()
-      }
+      const admissionKey = canonicalRequestKey(agent.session, header)
+      const priorAttempt = this.requestAttempts.get(agent.session)
+      const admissionAttempt = priorAttempt?.key === admissionKey ? priorAttempt.count + 1 : 1
+      if (admissionAttempt > spec.maxOverflowRetries) return next()
+      this.requestAttempts.set(agent.session, { key: admissionKey, count: admissionAttempt })
+      const result = await this.compactForPreflight(agent, header, spec, signal)
       signal.throwIfAborted()
-      if (agent.session.surface.replaceGeneration <= generation) return next()
+      if (agent.session.surface.replaceGeneration <= generation) return await next()
       if (result !== null) logResult(result, 'request preflight')
-      return {
-        kind: 'retry',
-        surfaceGeneration: agent.session.surface.replaceGeneration,
-      }
+      return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
     })
 
     ctx.on('agent/request-error', async (
@@ -251,8 +242,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (!isAborted(signal) && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `context-overflow compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -261,28 +251,31 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
-          `context-overflow compaction failed: ${message}; ${signal.aborted
+          `context-overflow compaction failed: ${message}; ${isAborted(signal)
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while compaction is awaited.
-      if (signal.aborted
-        || agent.session.surface.replaceGeneration <= generation) return next()
+      if (isAborted(signal)
+        || agent.session.surface.replaceGeneration <= generation) return await next()
       if (result !== null) logResult(result, 'context overflow recovery')
       this.overflowRetries.set(agent, retries + 1)
       return { kind: 'retry' }
     })
   }
 
-  /** Compact one over-capacity canonical request without dispatching it first. */
+  /**
+   * Compact one over-capacity canonical request without dispatching it first.
+   * @param agent - owner of the measured session surface.
+   * @param header - exact canonical request envelope being admitted.
+   * @param spec - already-resolved pressure and retention budget for that request.
+   * @param signal - live request cancellation signal.
+   */
   private async compactForPreflight(
     agent: Agent,
     header: EpochHeader,
-    contextWindow: number,
-    policy: ResolvedTargetPolicy,
+    spec: ResolvedCompactSpec,
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     const meter = this.ctx.tokenMeter
@@ -291,29 +284,38 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (prune !== undefined) {
       prune.pruneSession(agent.session)
       measurement = meter.measure(agent.session)
-      if (measurement.totalTokens + (header.config.maxTokens ?? 0) <= contextWindow) return null
+      if (measurement.totalTokens + (header.config.maxTokens ?? 0) <= spec.contextWindow) return null
     }
 
-    const spec = resolveCompactSpec(policy, contextWindow)
     const selected = selectCompactableRange(agent.session, measurement, spec.retainTokens)
     if (selected === null) return null
 
-    const summaryTarget = policy.summarizationProvider.length === 0
+    const summaryTarget = spec.summarizationProvider.length === 0
       ? header.config
-      : { provider: policy.summarizationProvider, model: policy.summarizationModel }
+      : { provider: spec.summarizationProvider, model: spec.summarizationModel }
     const summaryContext = (await this.ctx.llm.resolveModelInfo(
       summaryTarget.provider,
       summaryTarget.model,
       signal,
     )).context
     if (summaryContext === undefined) return null
+    const summaryHeader: EpochHeader = {
+      config: {
+        provider: summaryTarget.provider,
+        model: summaryTarget.model,
+        maxTokens: spec.maxTokens,
+      },
+      ...header.system === undefined ? {} : { system: header.system },
+      ...header.tools === undefined ? {} : { tools: header.tools },
+    }
+    const summaryMeasurement = meter.measure(agent.session, summaryHeader)
     const replayBudget = summaryContext.contextWindow
-      - policy.maxTokens
-      - meter.estimateHeader(header)
-      - meter.estimateMessage(compactionInstructionMessage())
+      - spec.maxTokens
+      - meter.estimateHeader(summaryHeader)
+      - meter.estimateMessage(createCompactionInstructionMessage())
     const range = capRangeForReplayBudget(
       agent.session,
-      measurement,
+      summaryMeasurement,
       selected,
       replayBudget,
     )
@@ -398,7 +400,9 @@ export class BasicCompactionEngine extends CompactionEngine {
         + 'configure contextWindow on that adapter model',
       )
     }
-    const spec = resolveCompactSpec(policy, context.contextWindow)
+    const resolution = resolveCompactSpec(policy, context.contextWindow)
+    if (resolution.kind === 'invalid') throw resolution.error
+    const { spec } = resolution
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a
@@ -525,5 +529,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
   }
 }
+
+export { createCompactionInstructionMessage } from './summarizer.ts'
 
 export default BasicCompactionEngine

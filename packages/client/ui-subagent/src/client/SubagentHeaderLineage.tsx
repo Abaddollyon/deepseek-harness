@@ -3,18 +3,20 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  indexSubagentDescendants, type SessionId, type SessionListState, type SessionProjectionMap,
-  type SessionSummary, type SubagentAddress, type SubagentCatalogSnapshot,
-} from '@deepseek-ai/dsh-client-runtime/client'
+  type SessionListState, type SessionProjectionMap, type SessionSummary,
+  type SubagentCatalogSnapshot,
+} from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
   IconChevronDownOutline14, IconChevronRightOutline14, IconRefreshOutline14, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type {} from '@deepseek-ai/dsh-subagent/client'
 import type {} from '@deepseek-ai/dsh-token-meter/client'
 import css from './SubagentHeaderLineage.module.css'
+import { indexSubagentDescendants } from './subagent-lineage.ts'
 
 type CatalogEntry = SubagentCatalogSnapshot['entries'][number]
 type Catalogs = SessionListState['subagentsByParent']
@@ -63,13 +65,13 @@ function treeItems(root: HTMLDivElement | null): HTMLElement[] {
 }
 
 /** Compact token count shared in shape with the conversation stats strip. */
-function formatTokens(value: number): string {
+function formatTokens(value: number, t: TranslateNS<typeof NS>): string {
   const scaled = (next: number): string => next >= 100
     ? String(Math.round(next))
     : String(Math.round(next * 10) / 10)
   if (value < 1_000) return String(value)
-  if (value < 1_000_000) return `${scaled(value / 1_000)}K`
-  return `${scaled(value / 1_000_000)}M`
+  if (value < 1_000_000) return t('tokens.thousand', { value: scaled(value / 1_000) })
+  return t('tokens.million', { value: scaled(value / 1_000_000) })
 }
 
 /** Sum the four disjoint durable provider-usage buckets. */
@@ -310,7 +312,7 @@ function CatalogRows({
         )
         const tokenMetric = totalTokens === undefined
           ? undefined
-          : `${formatTokens(totalTokens)} tok`
+          : t('tokens.total', { value: formatTokens(totalTokens, t) })
         const durationMetric = durationMs === undefined
           ? undefined
           : {
@@ -495,8 +497,8 @@ function CatalogDropdown({
   const menuRef = useRef<HTMLDivElement>(null)
   const hoverOpenTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const clickPinned = useRef(false)
   const observedCatalogs = useRef(new Set<SessionId>())
-  const requestedInitialCatalog = useRef<SessionId>()
   const setCatalogOpenRef = useRef(setCatalogOpen)
   setCatalogOpenRef.current = setCatalogOpen
   const currentEntry = currentSessionId === undefined
@@ -527,16 +529,6 @@ function CatalogDropdown({
       error: null,
     }
     : catalog
-
-  useEffect(() => {
-    if (
-      variant !== 'switcher'
-      || catalog !== undefined
-      || requestedInitialCatalog.current === rootSessionId
-    ) return
-    requestedInitialCatalog.current = rootSessionId
-    refresh(rootSessionId)
-  }, [catalog, refresh, rootSessionId, variant])
 
   const observeCatalog = (parentSessionId: SessionId, next: boolean): void => {
     if (next) observedCatalogs.current.add(parentSessionId)
@@ -577,6 +569,7 @@ function CatalogDropdown({
       observeCatalog(rootSessionId, true)
     }
     else {
+      clickPinned.current = false
       setOpen(false)
       setMenuPosition(undefined)
       closeAllCatalogs()
@@ -597,6 +590,7 @@ function CatalogDropdown({
   const scheduleHoverClose = (): void => {
     cancelHoverOpen()
     cancelHoverClose()
+    if (clickPinned.current) return
     hoverCloseTimer.current = setTimeout(() => {
       hoverCloseTimer.current = undefined
       changeOpen(false)
@@ -686,6 +680,7 @@ function CatalogDropdown({
     if (visible) return
     cancelHoverOpen()
     cancelHoverClose()
+    clickPinned.current = false
     if (!open) return
     setOpen(false)
     closeAllCatalogs()
@@ -750,12 +745,16 @@ function CatalogDropdown({
             openTitle()
             return
           }
+          if (!open) clickPinned.current = true
           changeOpen(!open)
         }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown') return
           event.preventDefault()
-          if (!open) changeOpen(true)
+          if (!open) {
+            clickPinned.current = true
+            changeOpen(true)
+          }
           queueMicrotask(() => { focusAt(0) })
         }}
       >
@@ -834,7 +833,7 @@ export function SubagentHeaderLineage({
   return (
     <>
       <CatalogDropdown
-        key={lineageSessionId}
+        key={`${lineageSessionId}:switcher`}
         rootSessionId={parentId}
         currentSessionId={lineageSessionId}
         variant="switcher"
@@ -844,7 +843,7 @@ export function SubagentHeaderLineage({
       />
       {openTitle === undefined && (
         <CatalogDropdown
-          key={lineageSessionId}
+          key={`${lineageSessionId}:count`}
           rootSessionId={lineageSessionId}
           variant="count"
           {...shared}

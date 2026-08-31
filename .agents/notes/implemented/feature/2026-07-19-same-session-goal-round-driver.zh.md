@@ -22,7 +22,7 @@ Status: implemented
 
 当 agent 空闲、没有竞争中的排队工作，且当前目标为 `active` 加 `armed` 时，驱动器会先将待处理的目标变更持久化到检查点，并在等待完成后重新校验所有条件。若 `roundsStarted` 已等于 `maxGoalRounds`，它会记录代码为 `round-limit` 的 `blocked`；否则，它会先预留精确身份 `{ goalId, revision, round: roundsStarted + 1 }` 和完整渲染提示词，再以 `GoalMessageSource` 调用 `Agent.followup()`。提示词用 JSON 引号编码目标描述，使多行或类似标签的文本在熟悉框架中仍是无歧义的数据值。
 
-`agent/pre-step` waterfall（瀑布式事件）是进入栅栏。Round 编号为正数的目标来源只有在完全匹配驱动器待处理的身份和内容、实时目标仍具有相同 id 与修订号、激活态仍为 armed，并且该 Round 仍是下一个编号时才会进入。插件在委托下游监听器前检查一次，在下游返回后再检查一次。第二次检查防止异步监听器编辑或暂停目标后，旧提示词仍会进入。
+`agent/pre-step` waterfall（瀑布式事件）是进入栅栏。Round 编号为正数的目标来源只有在精确 `MessageId`、身份和内容都完全匹配驱动器待处理的预留、实时目标仍具有相同 id 与修订号、激活态仍为 armed，并且该 Round 仍是下一个编号时才会进入。插件在委托下游监听器前检查一次，在下游返回后再检查一次。第二次检查防止异步监听器编辑或暂停目标后，旧提示词仍会进入。
 
 只有最终产生的 `user/message` 才是已进入的 Goal Round，并推进目标折叠。陈旧预留会关闭一个被阻塞的零步骤轮次；驱动器会把它标记为陈旧，不计入 Round 数。若下游策略拒绝并非由陈旧状态导致，目标会进入 blocked，而不会绕过该策略自动重试。
 
@@ -34,7 +34,7 @@ Status: implemented
 
 ### 事件条件续行
 
-`always` 模式保留原有 idle 循环行为。`event-driven` 模式在没有待完成自有工作时立即续行。运行中的直属子 agent，或调用者拥有且状态为 `running`／`stopping` 的 job，会抑制下一 Goal Round，直到用户消息、完成 notice、relay 或安全超时到达。goal 来源消息、`tool-goal` 上下文、snapshot 与 instructions 不会授权另一轮。
+`always` 模式保留原有 idle 循环行为。`event-driven` 模式在没有待完成自有工作时立即续行。运行中的直属子 agent，或调用者拥有且状态为 `running`／`stopping` 的 job，会抑制下一 Goal Round，直到用户消息、完成 notice、relay 或安全超时到达。只有消息进入会话时这些工作已经处于运行状态，该消息才可越过待处理工作授权续行；某个人类消息自己的轮次新启动后台工作时，不能把这条消息重复当作该工作的完成信号。goal 来源消息、`tool-goal` 上下文、snapshot 与 instructions 不会授权另一轮。
 
 驱动器为唤醒消息与已准入 Goal Round 记录精确会话事件序号。唤醒计数器与 Cordis 计时器 disposer 只存在于当前进程：会话启动会重置它们，goal 变更、停用续行、agent 销毁与插件 teardown 会取消计时器。事件驱动模式在缺少 timer 服务时于挂载阶段失败；可选 job registry 在挂载后提供待完成工作事实；检查失败时会记录警告并准入续行，而不会造成静默停滞。该机制不修改持久 goal 或 session 格式。
 

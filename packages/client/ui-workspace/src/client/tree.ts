@@ -3,22 +3,33 @@
  * Unassigned Sessions trail under Ungrouped; only the selected blank Session
  * remains visible.
  */
-import {
-  indexSubagentDescendants, type PendingInteractionStatus, type SessionId, type SessionListState,
-  type SessionSearchResultItem, type SessionSummary, type SubagentDescendantSummary,
-  type WorkspaceId, type WorkspaceView,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import { type SessionListState, type SessionSearchResultItem, type SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { indexSubagentDescendants, type SubagentDescendantSummary } from './subagent-lineage.ts'
+
+type PendingInteractionStatus = 'approval' | 'plan-review' | 'question'
+/** Pending interaction kind indexed by owning Session id. */
+export type PendingInteractionSnapshot = ReadonlyMap<SessionId, { readonly kind: string }>
+
+function pendingStatus(snapshot: PendingInteractionSnapshot, id: SessionId): PendingInteractionStatus | undefined {
+  const kind = snapshot.get(id)?.kind
+  return kind === 'approval' || kind === 'plan-review' || kind === 'question' ? kind : undefined
+}
+
+function pendingFields(snapshot: PendingInteractionSnapshot, id: SessionId):
+  | Record<never, never>
+  | { readonly pendingInteraction: PendingInteractionStatus } {
+  const status = pendingStatus(snapshot, id)
+  return status === undefined ? {} : { pendingInteraction: status }
+}
 
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
 
-/**
- * Display label for the ungrouped bucket row: loose chats attached to no
- * workspace. Keep verbatim-equal to the dictionary's `group.ungrouped`
- * entry; the row renderer reads the dictionary, this constant backs the
- * non-localized derivations (search labels, cwd-less fallbacks).
- */
-export const UNGROUPED_LABEL = 'Ungrouped chats'
+/** Display label for the ungrouped bucket row. */
+/** Empty sentinel; renderers localize the Ungrouped label through their locale seat. */
+export const UNGROUPED_LABEL = ''
 
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
@@ -176,7 +187,7 @@ function sessionVisible(session: SessionSummary, current: SessionId | undefined,
  * and the renderer localizes its display label.
  */
 function sessionTitle(session: SessionSummary): string {
-  return session.blank ? 'New Session' : session.displayTitle
+  return session.blank ? '' : session.displayTitle
 }
 
 /** Build one group without projecting session lineage into presentation. */
@@ -266,6 +277,7 @@ function groupByWorkspace(
 function sessionNode(
   s: SessionSummary,
   descendants: ReadonlyMap<SessionId, SubagentDescendantSummary>,
+  pendingInteractions: PendingInteractionSnapshot,
 ): SessionNode {
   return {
     id: s.id,
@@ -276,7 +288,7 @@ function sessionNode(
     runningSubagentCount: descendants.get(s.id)?.runningCount ?? 0,
     completed: s.completed === true,
     updatedAt: s.updatedAt,
-    ...(s.pendingInteraction === undefined ? {} : { pendingInteraction: s.pendingInteraction }),
+    ...pendingFields(pendingInteractions, s.id),
   }
 }
 
@@ -335,6 +347,7 @@ function numberUntitledCollisions(rows: SessionNode[]): SessionNode[] {
  * @param workspaces - real workspaces in stable Host order.
  * @param archivedSessionIds - registry-global archive set.
  * @param view - local expansion arrays.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns group sections in render order.
  */
 export function deriveGroups(
@@ -342,6 +355,7 @@ export function deriveGroups(
   workspaces: readonly WorkspaceView[],
   archivedSessionIds: readonly SessionId[],
   view: TreeView,
+  pendingInteractions: PendingInteractionSnapshot = new Map(),
 ): GroupNode[] {
   const archived = new Set(archivedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
@@ -351,7 +365,7 @@ export function deriveGroups(
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder, userPinned)) {
     const expanded = expandedGroups.has(g.key)
-    const rows = g.sessions.map(session => sessionNode(session, descendants))
+    const rows = g.sessions.map(session => sessionNode(session, descendants, pendingInteractions))
     groups.push({
       key: g.key,
       workspaceId: g.workspaceId,
@@ -380,12 +394,14 @@ export function deriveGroups(
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @param pinnedSessionIds - user-pinned Session ids in pin order.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns pinned rows in render order.
  */
 export function derivePinnedSessions(
   list: SessionListState,
   archivedSessionIds: readonly SessionId[],
   pinnedSessionIds: readonly string[],
+  pendingInteractions: PendingInteractionSnapshot = new Map(),
 ): SessionNode[] {
   const archived = new Set(archivedSessionIds)
   const descendants = indexSubagentDescendants(list.byId)
@@ -395,7 +411,7 @@ export function derivePinnedSessions(
     // Blank rows are provisional placeholders and never carry the row menu,
     // so a blank id can only arrive through stale persisted pins.
     if (summary === undefined || summary.blank || !sessionVisible(summary, list.current, archived)) continue
-    rows.push(sessionNode(summary, descendants))
+    rows.push(sessionNode(summary, descendants, pendingInteractions))
   }
   return numberUntitledCollisions(rows)
 }
@@ -410,11 +426,13 @@ export function derivePinnedSessions(
  * outside this derivation (see {@link deriveSearchResults}).
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns flat rows in render order.
  */
 export function deriveFlat(
   list: SessionListState,
   archivedSessionIds: readonly SessionId[],
+  pendingInteractions: PendingInteractionSnapshot = new Map(),
 ): SessionNode[] {
   const archived = new Set(archivedSessionIds)
   const descendants = indexSubagentDescendants(list.byId)
@@ -425,7 +443,7 @@ export function deriveFlat(
     rows.push(s)
   }
   rows.sort(byRecency)
-  return numberUntitledCollisions(rows.map(session => sessionNode(session, descendants)))
+  return numberUntitledCollisions(rows.map(session => sessionNode(session, descendants, pendingInteractions)))
 }
 
 /** Relative-time bucket of a session row's trailing label. */
@@ -447,6 +465,7 @@ export interface RelativeTime {
  * @param archivedSessionIds - registry-global archive set (members never match).
  * @param content - ranked Host content-search page.
  * @param limit - protocol-owned maximum merged row count.
+ * @param pendingInteractions - current user-interaction state by Session id.
  * @returns bounded deduplicated flat rows and a refine-query hint bit.
  */
 export function deriveSearchResults(
@@ -456,6 +475,7 @@ export function deriveSearchResults(
   archivedSessionIds: readonly SessionId[],
   content: { items: readonly SessionSearchResultItem[]; hasMore: boolean },
   limit: number,
+  pendingInteractions: PendingInteractionSnapshot = new Map(),
 ): SearchResultSet {
   const q = query.trim().toLowerCase()
   if (q === '') return { items: [], hasMore: false }
@@ -512,10 +532,8 @@ export function deriveSearchResults(
         workspace: labelOf(summary),
         running: summary.running,
         runningSubagentCount: descendants.get(summary.id)?.runningCount ?? 0,
-        ...(summary.pendingInteraction === undefined
-          ? {}
-          : { pendingInteraction: summary.pendingInteraction }),
         completed: summary.completed === true,
+        ...pendingFields(pendingInteractions, summary.id),
         ...match === undefined ? {} : { snippet: match.snippet },
       }
     }),

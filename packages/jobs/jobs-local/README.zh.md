@@ -1,53 +1,146 @@
+---
+description: "进程本地后台任务注册表，供组合、容量评估或排查进程内任务的用户与维护者阅读：按所有者的准入、生命周期与销毁。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-jobs-local
 
 [English](README.md) | 中文
 
-[`@deepseek-ai/dsh-jobs`](../jobs/README.zh.md) 注册表约定的进程本地实现：`LocalJobRegistry` 把每条记录保存在内存中，铸造 `<kind>-<uuid>` id（生产方提供稳定片段时则为 `<kind>-<idHint>`），为每个所有者桶编排从 1 开始的展示序号，并且只交出全新快照，从不交出实时状态。作为插件加载后即注册为 `ctx.jobs`。当 `persist: true` 且挂载了 [`ctx.jobStore`](../jobs-store-domain/README.zh.md) 时，记录还会镜像到持久存储；没有存储时其行为就是纯内存注册表。
+## 概述
 
-## 准入
+`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它以进程本地实时状态和全新快照实现 `dsh-jobs` 约定。启用 `persist: true` 并挂载 `ctx.jobStore` 后，记录可跨宿主重启，用于诚实结算或由生产方控制的重新采用；生产方执行本身仍是进程本地的。
 
-`maxConcurrentJobsPerOwner` 必须是正的安全整数，默认值为 `10`。调用生产方之前，`start()` 会通过按会话键控的所有者索引统计确切 owner 的 `running` 与 `stopping` 记录；所有无 owner 任务共享另一个独立的服务级桶。终止历史不占用容量，处于 `stopping` 的任务只有在生产方 `done` 结算后才释放名额。
+## 目录
 
-达到容量时，`start()` 会在生产方执行和 id 分配前失败；错误会给出上限，并告诉模型使用 `job_kill`、等待任务完全停稳后再重试。注册表不会排队或抢占任务，也不会维护第二份可变计数。
+- [使用本包](#use-this-package)
+- [理解实现](#understand-the-implementation)
+- [进一步探索](#further-exploration)
+- [模型体验](#model-experience)
+- [已知限制与延期工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
-## 生命周期
+-----
 
-任务属于其所有者和后端，而不是生产方工具 fiber，因此重载生产方或控制器不会停止任务。某个所有者的第一个任务会把一个会被等待的 effect 附加到对应 `Agent` 对象的 scope 上。所有者的 dispose（资源释放）会取消该对象的任务，等待生产方完全停稳，并移除其快照；复用的 agent（智能体）id 或会话 id 无法重定向旧的清理操作。
+<a id="use-this-package"></a>
+## 使用本包
 
-服务 dispose 会关闭监听器、取消所有存活任务、在 `teardownGraceMs` 期限内等待其记录完成，并从仍存活的所有者 scope 中分离 effect。如果销毁期间的取消操作抛出异常，服务会强制将记录标为失败，并警告工作可能成为孤立工作，而不会死锁；一个始终不结算 `done` 的生产方在宽限期到期后也会以同样方式被强制标为失败（`producer did not release within teardownGraceMs; work may be orphaned`），因此关停总能完成。
+当组合需要进程内后台任务时加载本插件：长时间运行的工具注册其工作，拥有它的 agent 在不阻塞自身轮次的情况下读取、等待、列出和取消。它实现 [`dsh-jobs`](../jobs/README.zh.md) 约定；模型侧的 `job_output`、`job_list` 与 `job_kill` 工具来自 [`dsh-tool-jobs`](../tool-jobs/README.zh.md)。
 
-结算遵循首次结算优先原则：最早出现的终止结果（生产方结算、作为 `failed` 隔离处理的 `done` 拒绝，或销毁时的强制失败）只记录一次，随后释放等待方，再只通知监听器一次；各监听器的故障会单独隔离。挂起的等待会在监听器运行前把任务标记为已报告，因此完成报告方不会重复发出通知；销毁时的取消出于同样的理由也会标记：面向正在被销毁的所有者的通知不会有人读到。完成是一次结算最后才宣布的事情，排在记录提交与可见集变更发布之后，因为报告方可能同步开启一个模型轮次，而该结算的其他所有观察者都必须已经看到已结算的记录。
+### 何时选择
 
-控制器与监听器按注册方所在的 scope 分层，形状与 tools 注册表一致：一次注册归档到其注册上下文的 scope，一次读取则把全局层与所有者的 scope 链求并集。因此一个进程级注册表能逐所有者地回答逐所有者的问题——对自身组合未附加任何控制器的所有者，无论其他组合附加了多少，`start()` 都会拒绝并抛出 `background jobs unavailable: no job controller serves this agent (load @deepseek-ai/dsh-tool-jobs in its composition)`；一次结算也只会抵达其所有者所属组合注册的监听器。
+当生产方在进程本地运行时选择它；若需要重启核算，可再配合持久记录 store 与运行监督器。当需要跨进程延续的是生产方执行本身，而不只是记录与恢复载荷时，应使用其他 provider。
 
-## 持久化
+### 最小配置
 
-当 `persist: true` 时，每个提交点——注册、kill、结算、销毁时的 stopping 转换，以及终止态 read/wait 对 `reported` 的翻转——都会以“发出即不管”的方式把记录镜像到 `ctx.jobStore`。写入被拒绝时会记录日志并把这一条记录降级为仅内存；注册表自身的状态始终是权威。最终输出在持久化前会按 `maxPersistedOutputBytes` 截取（保留尾部）；内存中的输出永不截取。
+加载插件会注册 `ctx.jobs`。持久注册要求启用 `persist: true` 并挂载 `ctx.jobStore`；普通任务不需要这两项。
 
-存储挂载时，注册表会恢复其中的记录：终止态记录原样恢复（持久化的 `reported` 标志让通知门控跨重启保持正确）；来自上一个进程 incarnation 的非终止记录，要么立即诚实结算（`resumeSpec` 为 null——`not resumable after host restart`），要么以可见、可 kill 的状态等待其 kind 的 `registerResumer` 处理器决定收养或拒绝。本 incarnation 写下的非终止记录保持原样，因为进程内的注册表重载绝不能把存活工作误认为孤儿。恢复的记录保留其会话围栏但没有存活 `Agent`，其变更通过全局观察者通道宣布。
+```yaml
+- name: '@deepseek-ai/dsh-jobs-local'
+```
 
-已结算历史按所有者受 `maxSettledJobs` 约束：超出上限的已报告终止记录按 FIFO 逐出（内存与持久镜像一并删除），而未报告的终止记录始终幸存——逐出它会丢失模型从未读到的完成通知。
-
-## 配置
-
-| 键 | 默认值 | 含义 |
+| 字段 | 默认值 | 含义 |
 |---|---|---|
-| `maxConcurrentJobsPerOwner` | `10` | 每个确切所有者或共享无主桶的活跃（`running` + `stopping`）任务数 |
-| `persist` | `false` | 镜像记录到已挂载的 `ctx.jobStore`；无存储挂载时记录仅存内存 |
-| `maxSettledJobs` | `100` | 每所有者保留的已报告终止记录的 FIFO 上限；`0` 表示不保留 |
-| `teardownGraceMs` | `10000` | `disposeAll` 等待生产方释放的时限，超时即强制失败其记录 |
-| `maxPersistedOutputBytes` | `65536` | 记录持久化最终输出的字节上限（保留尾部） |
+| `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享无所有者桶中，`running` 加 `stopping` 任务的最大数量。 |
+| `persist` | `false` | 将记录镜像到已挂载的 `ctx.jobStore`，并启用有确认的持久启动。 |
+| `maxSettledJobs` | `100` | 每个所有者保留的已报告终态记录；未报告记录不会因容量压力被逐出。 |
+| `teardownGraceMs` | `10000` | teardown 中等待生产方释放以及最终持久镜像落位的界限。 |
+| `maxPersistedOutputBytes` | `65536` | 存入持久记录的输出 UTF-8 字节上限。 |
 
+生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
+
+### 每个所有者得到什么
+
+上限统计精确所有者的 `running` 与 `stopping` 记录；所有无主任务共享另一个独立的服务级桶。终止历史不占用容量，只有生产方的 `done` 结算才释放一个停止中任务的名额。达到上限时，`start()` 会在生产方运行前失败，错误会指出上限并告诉 agent 终止一个不需要的任务、等它结束后再重试——注册表既不排队也不抢占。
+
+### 生命周期
+
+任务属于其所有者和后端，而非生产方工具，因此重载生产方或控制器不会停止任务。拥有任务的 agent 被释放时，其任务会被取消、生产方会被等待、快照会被移除；服务释放对每个剩余任务执行同样的操作。销毁期间抛出的取消会强制失败记录并警告工作可能成为孤立工作，因此销毁永远不会死锁。
+
+### 可能出什么问题
+
+没有服务于所有者的控制器时无法启动工作——加载 `dsh-tool-jobs` 即附加一个，否则 `start()` 会以指出它的消息拒绝。返回但始终未结算 `done` 的生产方取消与缓慢停止无法区分，可能使销毁停滞并持续占用一个容量名额。每条记录都会在 harness 进程退出时消失。
+
+-----
+
+<a id="understand-the-implementation"></a>
+## 理解实现
+
+<details>
+<summary>实现细节——点击展开</summary>
+
+本节解释注册表背后的设计决策，并指出实现它们的代码位置；可观察行为已在[使用本包](#use-this-package)中完整说明。
+
+### 设计理念
+
+- **内存记录，全新快照。** `LocalJobRegistry` 为每个任务保存一条 `TrackedTask`，每次调用都投影出新的只读快照；调用方永远不会拿到实时状态。
+- **按所有者分层，一个进程级注册表。** 控制器、完成监听器与变更观察者归档到注册方所在的 scope（`ScopedLayers`），读取把全局层与所有者的 scope 链求并集——因此某个 preset 的任务控制绝不会为自身组合未加载任何控制器的 agent 保持 `start()` 可用，一次结算也只会抵达其所有者所属组合注册的监听器。
+- **启动前先预检。** `start()` 在调用生产方之前检查控制器服务、spec 有效性、仍存活的所有权与容量，因此拒绝不会留下 job id 或执行资源；注册一旦提交，后续不再有可失败步骤。
+- **结算首次优先，完成最后。** 最早的终止结果只记录一次，释放等待方，并只通知监听器一次，各监听器故障单独隔离；完成在记录提交且可见集变更发布之后才宣布，因为报告方可能同步开启一个模型轮次。
+- **销毁永不死锁。** 抛出的取消会强制失败记录并报告可能的孤立工作，而不是让释放停滞。
+
+### 源码地图
+
+| 文件 | 职责 |
+|---|---|
+| [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、`LocalJobRegistry`、准入、生命周期、销毁 |
+| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；快照检查位于 `dsh-jobs/invariant`） |
+
+### scope 分层
+
+`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是宿主范围的，因为重启核算跨越会话。resumer 返回延迟生产方计划：registry 先提交采用标记并等待观察者，账目接受所有权后才启动生产方。观察者返回 `true` 确认其持久账目后，registry 会丢弃内存中的标记，防止后续报告与结算镜像复活 supervisor 已清除的证明；若只有观察性监听器，则保留标记。store 缺失、标记写入被拒或观察者显式否决时，生产方工作因此不会启动；多次重启之间，最早尚未核算的标记继续保持权威。
+
+### 准入与结算
+
+`activeTaskCount` 按精确所有者或共享无主桶统计权威记录。`settle` 在存在挂起等待方时把任务标为已报告，解析每个等待方，记录终止快照，宣布可见集变更，然后通知完成监听器。挂起的等待会在监听器运行前把任务标为已报告，因此完成报告方不会重复通知；销毁时的取消出于同样理由标记——面向正在被销毁的所有者的通知不会有人读到。
+
+### 销毁
+
+所有者释放（`disposeOwned`）会取消该所有者的任务、等待其结算、移除其记录，并宣布移除——这是任何逐任务记录都无法表达的可见集变更。服务释放（`disposeAll`）会关闭监听器、取消所有存活任务、等待结算、清空存储、向不同的所有者宣布清空，然后分离跨 fiber 的所有者清理 effect。
+
+</details>
+
+-----
+
+<a id="further-exploration"></a>
+## 进一步探索
+
+当包级约定不够用时阅读以下页面。它们从注册表约定逐步进入模型侧控制与设计记录。
+
+- [后台任务运行时子系统](../../../docs/subsystems/jobs.zh.md)——任务类型、快照字段与 `ctx.jobs` 的 cordis 接口面。
+- [jobs 组映射](../README.zh.md)——同级组页面及其包表格。
+- [注册表约定](../jobs/README.zh.md)——本包实现的抽象 `ctx.jobs` 服务。
+- [模型侧任务控制](../tool-jobs/README.zh.md)——`job_output`、`job_list` 与 `job_kill` 工具及完成通知。
+- [通用长时间运行工具运行时 Agent Note](../../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.zh.md)——后台任务运行时背后的设计。
+- [任务注册表 seam Agent Note](../../../.agents/notes/implemented/architecture/2026-07-26-job-registry-seam.zh.md)——按所有者隔离的注册表约定及其理由。
+
+-----
+
+<a id="model-experience"></a>
 ## 模型体验
 
-通过生产方插件和 [`dsh-tool-jobs`](../tool-jobs/README.zh.md) 间接影响；它们会呈现 job id、输出、状态、取消和完成通知。
+通过生产方插件与 `dsh-tool-jobs` 间接影响模型，注册表后端把全部模型渲染委托给它们。
 
 #### KV Cache 影响
 
 不会直接导致 KV Cache 失效；请求前缀变更由上述消费方负责。
 
-## 已知限制与暂缓事项
+## 已知限制与延期工作
 
-- **即使开启持久化，执行仍是进程本地的**：重启后记录幸存，正在运行的生产方不会。跨重启的续跑只存在于注册了 resumer 的 kind；其余一律诚实结算。
-- **`persist: true` 而没有挂载存储时是静默的**：注册表无法区分“存储稍后加载”与“从未配置存储”，因此记录会留在内存中直到存储出现；由组合负责提供 `ctx.jobStore`。
-- **静默无效的取消会占用容量直到销毁**：如果 `cancel` 返回后始终未结算 `done`，注册表就无法将其与缓慢停止区分开；该任务会持续占用一个桶名额，直到服务销毁在宽限边界强制将其标为失败。
+<a id="known-limitations-and-deferred-work"></a>
+
+
+这些限制说明注册表何时不合适。它们是当前包约束，不是任务积压。
+
+- **生产方执行是进程本地的**——持久化保留记录和恢复载荷，而不是运行中的 JavaScript 生产方；可恢复种类必须提供幂等的延迟 resumer。
+- **静默无效的取消可能使销毁停滞并持续占用容量**——如果 `cancel` 返回后始终未结算 `done`，注册表就无法将其与缓慢停止区分开；该任务会在服务剩余生命周期内持续占用一个桶名额，只有显式抛出异常才能安全地强制标为失败。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者的工作上下文——点击展开</summary>
+
+无。
+
+</details>

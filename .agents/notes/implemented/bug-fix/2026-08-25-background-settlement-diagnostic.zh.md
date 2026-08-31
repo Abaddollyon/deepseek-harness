@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-失败的后台子代理只会告诉父代理 `Background subagent <id> failed before it finished.`。原因本来存在，却被丢弃：`ActivationTerminal` 携带 `stopReason` 与 `output`，但没有承载失败信息的成员，因此 `lifecycle.ts` 中的 `terminal(failure)` 把每一次拆卸失败都映射为裸的 `{ stopReason: 'error' }`，抛出的值被直接丢掉。
+失败的后台子代理只会告诉父代理 `Background subagent <id> failed before it finished.`。原始拆卸诊断本来存在，却没有被转发：`ActivationTerminal` 携带 `stopReason` 与 `output`，但没有承载失败信息的成员，因此 `lifecycle.ts` 中的 `terminal(failure)` 把每一次拆卸失败都映射为裸的 `{ stopReason: 'error' }`，抛出的值被直接丢掉。已捕获的已知 LLM 错误会携带类型化的 `QUOTA` 或 `RATE_LIMIT` 事实；仍未分类的已捕获错误可能没有类型化 failure。
 
 一次性工具路径并不会丢失它——`stopReasonError` 会经由 `withDiagnosticAndPartialText` 与 `SubagentResult.diagnostic` 及子代理的部分文本拼接。只有后台投递路径是盲的，而这正是包约定所警告的不对称。
 
@@ -14,22 +14,22 @@ Status: implemented
 
 ## 决定
 
-`ActivationTerminal` 增加可选的 `diagnostic`，仅在拆卸失败这一边被填充；`settlementSummary` 将其以 ` Reason: <text>` 追加到 `error` 语句之后。文本取失败自身的 `String(failure)`，上限 4096 UTF-8 字节——与 `SubagentResult.diagnostic` 所记载的上限一致，也与一次性路径已通过 `detail: String(error)` 报告的细节一致。
+`ActivationTerminal` 增加可选的 `diagnostic`，仅在拆卸失败这一边被填充；`settlementSummary` 追加固定句子 ` Reason: Subagent teardown failed.`。该文本标识基础设施失败，但不会把异常消息、凭据、路径、协议载荷或注入指令转发到父会话。类型化失败恢复另行通过数据描述符遍历有界的 `cause` 与 `AggregateError.errors` 图，并包含恶意 Proxy 陷阱。
 
 原因只在子代理无法自述时附加。经由自身回合结束的 epoch 仍报告 `captured`，其 `stopReason` 由子代理自己的事件推导；这类结束对父代理而言已体现在子代理输出中，无需再合成解释。
 
 ## 备选方案
 
-**将失败分类为代码——配额、传输、崩溃。** 暂时否决：这些错误本就带有上下文文本（`SubagentError: subagent "<id>" activation handle disposal failed: ...`），而分类层需要为每个供应商维护一套分类法，同时丢弃任何枚举都无法承载的细节。当有消费者需要据此分支而非阅读时，再加代码才有价值。
+**将每次失败都分类为代码——配额、传输、崩溃。** 否决：只有已知 LLM 原因会被分类为 `QUOTA` 或 `RATE_LIMIT`；未分类的拆卸错误与已捕获错误没有类型化 failure。更宽泛的分类法需要供应商专属类别，还会让消费者基于猜测分支。
 
 **包含失败的调用栈。** 否决：父代理是一个决定重试还是改道的模型，调用栈对该决策属于传输层噪声，同时提高了把环境路径带入通知的风险。
 
-**原样、不设上限地报告抛出值。** 否决：diagnostic 契约规定 4096 字节上限，正是因为供应商载荷可能任意大，而通知会进入父代理的上下文窗口。
+**报告有字节上限的原始异常文本。** 否决：字节上限只能控制上下文成本，无法移除凭据、私有路径、原始载荷或提示注入文本。基础设施异常保留在内部。
 
 ## 验证
 
-`packages/subagent/subagent/tests/continuation.spec.ts` —— 'withholds an outcome the harness could not durably release' 注入一次处置失败，现在断言父代理的通知携带 `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`。该用例此前把这一丢失固化为正确行为；它随其所描述的行为一同被修改。源自子代理自身回合的结束保持原有文本，周边用例仍在断言这一点。
+`packages/subagent/subagent/tests/continuation.spec.ts` 注入普通处置失败与恶意 Proxy 处置失败，断言父通知仅包含固定原因，并证明嵌套所有权会被释放，从而让祖先完成结算。`failure.spec.ts` 覆盖循环 cause、`AggregateError.errors`、描述符陷阱和已撤销 Proxy，同时保留已知提供方事实。
 
 ## 影响
 
-编排后台子代理的父代理现在能够判断某个子代理为何结束并据此行动——停止向已耗尽的路由重复派发、改用其他供应商，或把配额问题呈报给人——而不必从沉默中推断原因。通知仅在失败这一边增加一句有上限的说明。
+编排后台子代理的父代理可以区分基础设施拆卸失败与普通子代理错误，而不会接收基础设施异常文本。当已知 LLM 原因在拆卸后仍可恢复时，父代理可基于 `QUOTA` 或 `RATE_LIMIT` 分支；未分类错误没有类型化 failure。通知仅在拆卸失败这一边增加一句固定说明。

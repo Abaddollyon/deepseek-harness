@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-25-context-preflight-admission.md
-2026-08-25-context-preflight-admission.md: bcd88c089c5b0e41a37c1a7c14ec5f1282541709
-2026-08-25-context-preflight-admission.zh.md: fb50b3322eb11f250e4ee26b810686dc7bafa1d1
+2026-08-25-context-preflight-admission.md: 275e763dd8c3a85e19a31cdf1e1836e82805aed9
+2026-08-25-context-preflight-admission.zh.md: aa29fd912f74dbdde0948a196cda9a3edc43d774

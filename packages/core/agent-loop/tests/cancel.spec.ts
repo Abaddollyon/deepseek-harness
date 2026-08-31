@@ -1,4 +1,4 @@
-import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 /**
  * Tests for the queue-aware `Agent.cancel()` primitive. The default clears
  * queued and steering work, while `keepInbox` preserves pending input for a
@@ -77,10 +77,12 @@ describe('Agent.cancel()', () => {
     const ctx = await harness(adapter)
     const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
 
-    agent.followup(createUserMessage({
+    const prompt = createUserMessage({
       content: [{ type: 'text', text: 'preserved' }],
       source: { kind: 'user' },
-    }))
+    })
+    agent.followup(prompt)
+    agent.followup(prompt)
     // A waking send starts and claims synchronously; the abort lands before
     // the step starts, so the unstarted claim returns to the inbox rather
     // than vanishing with the aborted turn.
@@ -259,6 +261,34 @@ describe('Agent.cancel()', () => {
     expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
       .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
     expect(agent.status).toBe('idle')
+  })
+
+  it('cancel wins when a pre-step listener requeues claimed input and rejects the proposed step', async () => {
+    const adapter = new MockAdapter([textResponse('should not run')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('cancel-reject-pre-step'), { provider: 'mock', model: 'mock' })
+    const prompt = createUserMessage({
+      content: [{ type: 'text', text: 'cancel this proposal' }],
+      source: { kind: 'user' },
+    })
+
+    ctx.on('agent/pre-step', async ({ agent: subject, messages }) => {
+      if (subject === agent) {
+        const claimed = messages[0]
+        if (claimed === undefined) throw new Error('pre-step omitted the claimed prompt')
+        subject.inject(claimed)
+        subject.cancel({ kind: 'user' }, { keepInbox: true })
+      }
+      return { kind: 'reject' as const }
+    })
+
+    agent.followup(prompt)
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(0)
+    expect(agent.inbox.nextStep.map(message => message.id)).toEqual([prompt.id])
+    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
+      .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
   })
 
   it('disposal from the running notification drops queued work before turn start', async () => {
@@ -551,7 +581,7 @@ describe('Agent.cancel()', () => {
         { type: 'text-delta', index: 0, text: 'reading the file' },
         { type: 'block-end', index: 0, block: { type: 'text', text: 'reading the file' } },
         { type: 'block-start', index: 1, blockType: 'tool-call' },
-        { type: 'tool-call-delta', index: 1, id: CallId('c1'), name: 'read', argumentsDelta: '{"pa' },
+        { type: 'tool-call-delta', index: 1, id: ToolCallId('c1'), name: 'read', argumentsDelta: '{"pa' },
       ],
     }])
     const ctx = await harness(adapter)
@@ -628,7 +658,7 @@ describe('Agent.cancel()', () => {
     const adapter = new MockAdapter([{
       hangAfter: [
         { type: 'block-start', index: 0, blockType: 'tool-call' },
-        { type: 'tool-call-delta', index: 0, id: CallId('c1'), name: 'read', argumentsDelta: '{"pa' },
+        { type: 'tool-call-delta', index: 0, id: ToolCallId('c1'), name: 'read', argumentsDelta: '{"pa' },
       ],
     }])
     const ctx = await harness(adapter)
@@ -818,6 +848,7 @@ describe('Agent.cancel()', () => {
     expect(adapter.requests).toHaveLength(3)
     expect(agent.session.events.filter(event => event.type === 'turn/end')).toHaveLength(4)
   })
+
 
   it("cancel clears the turn's steering — it is not re-enqueued as a fresh turn", async () => {
     const adapter = new MockAdapter(['hang'])

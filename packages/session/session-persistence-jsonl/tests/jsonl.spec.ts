@@ -17,11 +17,32 @@ const statRace = vi.hoisted(() => ({
   path: undefined as string | undefined,
   reads: 0,
 }))
+const listingRace = vi.hoisted(() => ({
+  enabled: false,
+  active: 0,
+  max: 0,
+  started: 0,
+  abort: undefined as { after: number; controller: AbortController; reason: Error } | undefined,
+}))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    readdir: (async (...args: Parameters<typeof actual.readdir>) => {
+      const result = await actual.readdir(...args)
+      if (listingRace.enabled && String(args[0]).includes('/--')) {
+        listingRace.active += 1
+        listingRace.started += 1
+        listingRace.max = Math.max(listingRace.max, listingRace.active)
+        if (listingRace.started === listingRace.abort?.after) {
+          listingRace.abort.controller.abort(listingRace.abort.reason)
+        }
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
+        listingRace.active -= 1
+      }
+      return result
+    }) as typeof actual.readdir,
     stat: (async (...args: Parameters<typeof actual.stat>) => {
       const identity = await actual.stat(...args)
       if (String(args[0]) !== statRace.path || !('mtimeNs' in identity)) return identity
@@ -86,6 +107,11 @@ function rawLogPath(root: string, cwd: string | undefined, id: SessionId): strin
 afterEach(async () => {
   statRace.path = undefined
   statRace.reads = 0
+  listingRace.enabled = false
+  listingRace.active = 0
+  listingRace.max = 0
+  listingRace.started = 0
+  listingRace.abort = undefined
   vi.restoreAllMocks()
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
@@ -99,7 +125,6 @@ function appendClosedTurn(session: Session): void {
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 }
 
-// Run the shared backend contract against the real JSONL backend.
 runPersistenceContract('jsonl-none', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-jsonl-'))
   const ctx = new Context()
@@ -192,7 +217,7 @@ describe('JsonlSessionPersistence: format helpers', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const fiber = await ctx.plugin(JsonlSessionPersistence, { root: absoluteRoot, compression: 'none' })
-    // A future format need not satisfy today's header shape at all (no
+    // A future format need not satisfy this build's header shape at all (no
     // createdAt, unknown fields): the version must be refused before shape
     // validation, so the user sees the upgrade direction.
     const id = SessionId('future-shape')
@@ -285,6 +310,27 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect((await stat(dir)).isDirectory()).toBe(true)
     expect((await stat(rawLogPath(root, '/work', m.id))).isFile()).toBe(true)
     expect((await ctx.sessionPersistence.list()).map(h => h.id)).toContain(m.id)
+  })
+
+  it('materializes an explicitly durable empty live session without an event row', async () => {
+    const id = SessionId('durable-empty')
+    const session = ctx.sessions.create(id, { meta: { cwd: '/work' } })
+
+    await ctx.sessionPersistence.ensureMaterialized(session)
+
+    expect(await readFile(rawLogPath(root, '/work', id), 'utf8')).toBe(`${JSON.stringify(toHeaderLine(session.header))}\n`)
+    await expect(ctx.sessionPersistence.load(id)).resolves.toEqual({ meta: session.header, events: [] })
+  })
+
+  it('delegates direct preparation through the JSONL provider', async () => {
+    const m = meta('direct-prepare', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const preparation = await ctx.sessionPersistence.prepare(m.id)
+
+    expect(preparation.session.header).toMatchObject(m)
+    preparation[Symbol.dispose]()
   })
 
   it('readRaw returns the stored artifact text verbatim with its original filename', async () => {
@@ -778,6 +824,128 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect(all.length).toBeGreaterThan(0)
     expect(all.every(p => p.startsWith(root))).toBe(true)
   })
+
+  it('returns borrowed sessions through the coordinator', async () => {
+    const m = meta('borrow-forwarded', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const borrowed = await ctx.sessionPersistence.borrowSession(m.id)
+    expect(borrowed.inspection.meta.id).toBe(m.id)
+    borrowed[Symbol.dispose]()
+  })
+
+  it('bounds public list in-flight probes and returns every entry', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      const m = meta(`list-bound-${i}`, `/bound-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    listingRace.enabled = true
+    const listed = await limited.sessionPersistence.list()
+    expect(listed).toHaveLength(5)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('bounds and aborts cold existing-root encoding probes', async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const m = meta(`list-cold-abort-${i}`, `/cold-abort-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('stop cold encoding probes')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    const first = limited.sessionPersistence.list(controller.signal)
+    const concurrent = limited.sessionPersistence.list()
+    await expect(first).rejects.toBe(reason)
+    await expect(concurrent).resolves.toHaveLength(8)
+    expect(listingRace.max).toBe(4)
+    expect(listingRace.started).toBeGreaterThan(8)
+
+    listingRace.abort = undefined
+    listingRace.started = 0
+    listingRace.max = 0
+    const listed = await limited.sessionPersistence.list()
+    expect(listed).toHaveLength(8)
+    expect(listingRace.started).toBeGreaterThan(0)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('lets an earlier root validation succeed when a later caller aborts', async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const m = meta(`list-later-abort-${i}`, `/later-abort-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('abort later cold encoding attempt')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    let firstSettled = false
+    const first = limited.sessionPersistence.list().then((result) => {
+      firstSettled = true
+      return result
+    }, (error: unknown) => {
+      firstSettled = true
+      throw error
+    })
+    const later = limited.sessionPersistence.list(controller.signal)
+    await expect(later).rejects.toBe(reason)
+    expect(firstSettled).toBe(false)
+    await expect(first).resolves.toHaveLength(8)
+    await limited.fiber.dispose()
+  })
+
+  it('retries cold encoding validation after an aborted attempt', async () => {
+    for (let i = 0; i < 6; i += 1) {
+      const m = meta(`list-cold-retry-${i}`, `/cold-retry-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('abort first cold encoding attempt')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    await expect(limited.sessionPersistence.list(controller.signal)).rejects.toBe(reason)
+    listingRace.abort = undefined
+    listingRace.started = 0
+    listingRace.max = 0
+    await expect(limited.sessionPersistence.list()).resolves.toHaveLength(6)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('reports the earliest listing failure when concurrent probes fail', async () => {
+    const first = SessionId('list-failure-first')
+    const second = SessionId('list-failure-second')
+    for (const [id, cwd] of [[first, '/b'], [second, '/a']] as const) {
+      const path = rawLogPath(root, cwd, id)
+      await mkdir(dirname(path), { recursive: true })
+      const badCwd = '/wrong' + (cwd === '/a' ? 'x'.repeat(1_000_000) : '')
+      await writeFile(path, JSON.stringify({ ...toHeaderLine(meta(id, cwd)), cwd: badCwd }) + '\n')
+    }
+    const failure = await ctx.sessionPersistence.list().then(() => undefined, (error: unknown) => error as Error)
+    expect(failure?.message).toContain(`header id "${second}" and cwd identify`)
+    expect(failure?.message).not.toContain(`header id "${first}" and cwd identify`)
+  })
 })
 
 describe('JsonlSessionPersistence: write path (session/event → flush)', () => {
@@ -972,13 +1140,20 @@ describe('JsonlSessionPersistence: scanLog unit', () => {
     expect(() => scanLog(Buffer.from(log))).toThrow(/seq gap in committed region/)
   })
 
-  it('rejects a corrupt line BEFORE a later committed turn/end (committed data damaged)', () => {
-    const log = [
-      JSON.stringify({ type: 'session', version: 0, id: 'c', createdAt: 1, delegationDepth: 0 }),
-      '{not json', // corrupt, sits in the committed region (a turn/end follows)
-      JSON.stringify({ type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }),
-    ].join('\n') + '\n'
-    expect(() => scanLog(Buffer.from(log))).toThrow(/unparsable committed event/)
+  it('rejects malformed records before a later committed turn/end', () => {
+    const corruptRecords = [
+      '{not json',
+      'null',
+      JSON.stringify({ type: 'assistant/message', sourceEventSeqs: [0], data: {} }),
+    ]
+    for (const record of corruptRecords) {
+      const log = [
+        JSON.stringify({ type: 'session', version: 0, id: 'c', createdAt: 1, delegationDepth: 0 }),
+        record,
+        JSON.stringify({ type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }),
+      ].join('\n') + '\n'
+      expect(() => scanLog(Buffer.from(log))).toThrow(/unparsable committed event/)
+    }
   })
 
   it('a header-only log (no event lines at all) preserves nothing — committedBytes is the header', () => {
@@ -1157,9 +1332,20 @@ describe('JsonlSessionPersistence: default packed chunk rows', () => {
     expect(scanned.committedBytes).toBe(Buffer.byteLength(headerAndTurn, 'utf8'))
   })
 
-  it('eventLines(packChunks: false) is byte-identical to the pre-packing layout', () => {
+  it('eventLines(packChunks: false) keeps one event per line and round-trips provenance', () => {
     const log = chunkRunLog()
-    expect(eventLines(log, false)).toBe(log.map(e => JSON.stringify(e)).join('\n'))
+    const text = eventLines(log, false)
+    const lines = text.split('\n')
+    expect(lines).toHaveLength(log.length)
+    for (const line of lines) {
+      expect((JSON.parse(line) as { type: string }).type).not.toMatch(/-chunks$/)
+    }
+    // the message's consecutive provenance is stored as an inclusive range
+    const messageLine = lines.map(l => JSON.parse(l) as { type: string; sourceEventSeqs?: unknown })
+      .find(r => r.type === 'assistant/message')
+    expect(messageLine?.sourceEventSeqs).toEqual([[2, 6]])
+    const header = JSON.stringify(toHeaderLine(meta('packed', '/work'))) + '\n'
+    expect(scanLog(Buffer.from(header + text + '\n')).events).toEqual(log)
   })
 })
 

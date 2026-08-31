@@ -18,15 +18,15 @@ export const inject = ['invariants']
  * No runtime invariant: token estimates are per-call outputs and the private
  * session cache is invalidated at its event mutation boundary. The package's
  * four projections do expose observation streams, but their schemas fix the
- * JSON payloads; the usage folds replace same-step samples, so totals need not
- * be monotone when a final sample corrects an earlier chunk, and the
+ * JSON payloads; the usage folds replace same-attempt samples, so totals need
+ * not be monotone when a final sample corrects an earlier chunk, and the
  * composition fold prices through the same `estimate.ts` heuristic as the
  * measurement service and subtracts producer-logged shadow prices derived
- * from that service's own nodes, which makes its message figure equal
- * `measure().surfaceTokens` by construction rather than by a relation worth
- * observing at runtime. The route fold copies one `request/context` payload
- * verbatim, so its only relation to the log is the identity the session owner
- * already validates on append.
+ * from that service's own fixed-heuristic node prices, which makes its
+ * message figure equal the sum of `measure().nodes[].heuristicTokens` by
+ * construction rather than by a relation worth observing at runtime; the
+ * route-priced `surfaceTokens` deliberately diverges by the routed model's
+ * image repricing.
  */
 const install: InvariantInstaller = () => {}
 
