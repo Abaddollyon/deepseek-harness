@@ -485,7 +485,7 @@ export class ReactLoopAgent implements Agent {
       && persistedHeader?.adapterDefaults?.reasoningEffort !== true
       ? persistedConfig.reasoningEffort
       : undefined
-    const reasoningEffort = persistedReasoningEffort ?? this.options.reasoningEffort
+    const reasoningEffort = this.options.reasoningEffort ?? persistedReasoningEffort
     const maxTokens = this.options.maxTokens
     const seedConfig = deepFreeze(structuredClone(
       this.requestHeaderLogged

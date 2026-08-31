@@ -210,7 +210,7 @@ export async function compactSurfaceRegion(
   options: CompactionTransactionOptions,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
-  if (options.owner === null) signal?.throwIfAborted()
+  signal?.throwIfAborted()
   const selection = validateSurfaceRegion(session, start, end)
   const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
@@ -259,7 +259,7 @@ export async function compactSurfaceRegion(
       options.sourceCommandId,
       signal,
     )
-    if (options.owner === null) signal?.throwIfAborted()
+    signal?.throwIfAborted()
     assertStable(dependencies, session, summarized)
     stage = 'commit'
     const pending = commitCompactionBody(session, startEvent, summarized)
@@ -288,7 +288,7 @@ export async function compactSurfaceRegion(
     }
   }
 
-  if (options.owner === null) signal?.throwIfAborted()
+  signal?.throwIfAborted()
   if (failure !== undefined) {
     if (options.owner === null) throwManualFailure(failure)
     throw failure.error
