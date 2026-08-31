@@ -45,7 +45,11 @@ function mapFailure(code: unknown, providerRetryAfterMs: unknown): SubagentFailu
  */
 export function subagentFailureFromUnknown(value: unknown): SubagentFailure | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  return mapFailure(ownDataProperty(value, 'code'), ownDataProperty(value, 'providerRetryAfterMs'))
+  const providerRetryAfterMs = ownDataProperty(value, 'providerRetryAfterMs')
+  const retryAfterMs = providerRetryAfterMs === undefined
+    ? ownDataProperty(value, 'retryAfterMs')
+    : providerRetryAfterMs
+  return mapFailure(ownDataProperty(value, 'code'), retryAfterMs)
 }
 
 /**

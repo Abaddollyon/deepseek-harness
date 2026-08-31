@@ -2313,6 +2313,48 @@ describe('continuable settlement delivery', () => {
     await waitNoActivation(ctx, outer.childId)
   })
 
+  it('preserves nested descendant routing facts through ancestor teardown', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('outer') },
+      { chunks: textResponse('inner'), gate: releaseChild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const outer = await ctx.subagents.startContinuable(startSpec(parent))
+    const middle = await vi.waitFor(() => {
+      const live = ctx.agents.get(outer.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const inner = await ctx.subagents.startContinuable(startSpec(middle))
+    const manager = (ctx.subagents as unknown as {
+      continuations: { activations: Map<SessionId, { handle: { dispose(): Promise<void> } }> }
+    }).continuations
+    const activation = await vi.waitFor(() => {
+      const live = manager.activations.get(inner.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const dispose = activation.handle.dispose.bind(activation.handle)
+    activation.handle.dispose = async () => {
+      await dispose()
+      throw Object.assign(new Error('private provider failure'), {
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      })
+    }
+
+    const drained = ctx.subagents.drainContinuableDescendants([parent])
+    releaseChild.resolve(undefined)
+    await expect(drained).rejects.toThrow('child teardown failed')
+    await waitNoActivation(ctx, outer.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      'The provider is temporarily rate-limiting this route; wait 12 seconds before retrying.',
+    )
+    expect(settlementNotices(parent)[0]!.text).toContain('Reason: Subagent teardown failed.')
+    expect(settlementNotices(parent)[0]!.text).not.toContain('private provider failure')
+  })
+
   it('releases nested ownership after a hostile teardown rejection', async () => {
     const releaseChild = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([

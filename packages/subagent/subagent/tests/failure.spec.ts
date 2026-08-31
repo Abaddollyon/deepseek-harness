@@ -69,6 +69,9 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(terminalDiagnostic(new Error('wrapper', {
       cause: new AggregateError([new Error('generic'), nested]),
     })).failure).toEqual({ code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 })
+    expect(terminalDiagnostic({
+      failure: { code: 'RATE_LIMIT', retryAfterMs: 3_000 },
+    }).failure).toEqual({ code: 'RATE_LIMIT', retryAfterMs: 3_000 })
     expect(terminalDiagnostic(undefined)).toEqual({})
     expect(terminalDiagnostic('private primitive')).toEqual({ diagnostic: 'Subagent teardown failed.' })
   })
