@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { subagentFailureFromLlmFailure } from '../src/index.ts'
 import { settlementSummary } from '../src/continuation.ts'
 import { terminalDiagnostic } from '../src/lifecycle.ts'
@@ -18,11 +19,11 @@ describe('subagentFailureFromLlmFailure', () => {
   it('formats every parent-facing failure classification', () => {
     const quota = { code: 'QUOTA' as const }
     const rate = { code: 'RATE_LIMIT' as const, retryAfterMs: 12_000 }
-    expect(settlementSummary('child' as never, 'error', 'quota detail', quota)).toContain('quota for this route is exhausted')
-    expect(settlementSummary('child' as never, 'error', 'rate detail', rate)).toContain('wait 12 seconds before retrying')
-    expect(settlementSummary('child' as never, 'error', 'unknown detail', { code: 'OTHER' })).toBe('Background subagent child failed before it finished. Reason: unknown detail')
-    expect(settlementSummary('child' as never, 'completed', 'ignored')).toContain('finished')
-    expect(settlementSummary('child' as never, 'error', 'rate detail', { code: 'RATE_LIMIT' })).toContain('wait before retrying')
+    expect(settlementSummary(SessionId('child'), 'error', 'quota detail', quota)).toContain('quota for this route is exhausted')
+    expect(settlementSummary(SessionId('child'), 'error', 'rate detail', rate)).toContain('wait 12 seconds before retrying')
+    expect(settlementSummary(SessionId('child'), 'error', 'unknown detail', { code: 'OTHER' })).toBe('Background subagent child failed before it finished. Reason: unknown detail')
+    expect(settlementSummary(SessionId('child'), 'completed', 'ignored')).toContain('finished')
+    expect(settlementSummary(SessionId('child'), 'error', 'rate detail', { code: 'RATE_LIMIT' })).toContain('wait before retrying')
   })
 
   it('bounds lifecycle diagnostics and preserves typed causes', () => {

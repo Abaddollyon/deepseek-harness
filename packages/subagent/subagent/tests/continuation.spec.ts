@@ -2784,11 +2784,7 @@ describe('SubagentRuntime.interrupt', () => {
 
   it('ignores absent ids during selected child teardown', async () => {
     const { ctx, parent } = await setup([textResponse('unused')])
-    const manager = (ctx.subagents as unknown as {
-      continuations?: { drainChildren(parent: Agent, ids: readonly SessionId[]): Promise<void> }
-    }).continuations
-    if (manager === undefined) throw new Error('expected a bound continuation manager')
-    await expect(manager.drainChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
+    await expect(ctx.subagents.drainContinuableChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
   })
 
   it('accepts an interrupt after natural completion', async () => {

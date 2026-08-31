@@ -362,11 +362,12 @@ export async function startCodexRun(
       : `${failure}\n${permission}`
     return diagnostic
   }
-  const withProcessOutcome = (facts: CodexFailureFacts): CodexFailureFacts => {
+  const withProcessOutcome = (facts: CodexFailureFacts | undefined): CodexFailureFacts => {
+    const base: CodexFailureFacts = { stage: 'turn', category: 'unknown', ...facts }
     const outcome = processFailureFacts?.outcome
     return outcome === undefined
-      ? facts
-      : { ...facts, outcome }
+      ? base
+      : { ...base, outcome }
   }
   const publishedProcessFailure = processFailure.catch(
     async (error: unknown): Promise<never> => {
@@ -421,10 +422,7 @@ export async function startCodexRun(
     },
     collectOutput,
     collectDiagnostic: () => diagnostic,
-    collectFailure: () => {
-      const facts = wire.collectFailure() as CodexWireFailureFacts | undefined
-      return facts === undefined ? undefined : facts.failure
-    },
+    collectFailure: () => wire.collectFailure()?.failure,
     cancelled: () => runAbort.signal.aborted,
     onError: spec.onError,
     signal: request.signal,
