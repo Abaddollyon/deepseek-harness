@@ -13,7 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import {
@@ -140,6 +140,19 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
+/**
+ * Render a startup failure without allowing a hostile coercion hook to escape.
+ * @param value - value rejected by provider startup.
+ * @returns ordinary JavaScript stringification or a safe fallback.
+ */
+function startupFailureDetail(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return errorChain(value)
+  }
+}
+
 /** Settle pending startup without rejecting the task producer contract. */
 async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
   try {
@@ -149,7 +162,7 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
     // must not turn a failed cleanup into a cleanly killed Job.
     return signal.aborted && !(error instanceof AggregateError)
       ? { status: 'killed' }
-      : { status: 'failed', detail: String(error) }
+      : { status: 'failed', detail: startupFailureDetail(error) }
   }
 }
 

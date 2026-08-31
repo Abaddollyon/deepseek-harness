@@ -173,6 +173,20 @@ describe('settleRunResult', () => {
     })
   })
 
+  it('normalizes an unrenderable attempt rejection without rejecting', async () => {
+    const { controller, onAbort } = wiring()
+    const onError = vi.fn()
+    await expect(settleRunResult({
+      attempt: async () => { throw { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } },
+      collectOutput: () => [],
+      cancelled: () => false,
+      onError,
+      signal: controller.signal,
+      onAbort,
+    })).resolves.toEqual({ output: [], stopReason: 'error' })
+    expect(onError).toHaveBeenCalledWith(new Error('<unrenderable value>'), 'error')
+  })
+
   it('contains provider snapshot failures after publication', async () => {
     const { controller, onAbort } = wiring()
     await expect(settleRunResult({

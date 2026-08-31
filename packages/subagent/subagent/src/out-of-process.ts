@@ -13,6 +13,7 @@
 
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
+import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentCapabilities, SubagentFailure, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
 
@@ -154,7 +155,7 @@ export function resolveChildCwd(prefix: string, configured: string | undefined, 
 
 /** Normalize an unknown thrown value to an Error (the catch binding is `unknown`). */
 function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value))
+  return value instanceof Error ? value : new Error(errorChain(value))
 }
 
 /**

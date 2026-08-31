@@ -1018,14 +1018,14 @@ describe('dsh-tool-subagent background mode', () => {
     expect(replacementStart).not.toHaveBeenCalled()
   })
 
-  it('settles an asynchronous provider-start failure as a failed task', async () => {
+  it('settles an unrenderable asynchronous provider-start failure as a failed task', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' })
     const parent = ownerAgent(ctx, 'sess-parent')
     ctx.subagents.registerProvider({
       name: 'broken-start',
       capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
       inheritsParentContext: false,
-      start: async () => { throw new Error('setup failed') },
+      start: async () => { throw { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } },
     })
     tool.apply(ctx, { provider: 'broken-start', toolName: 'subagent_broken' })
 
@@ -1044,7 +1044,7 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
-    expect(text(output)).toContain('[status: failed, Error: setup failed]')
+    expect(text(output)).toContain('[status: failed, <unrenderable value>]')
   })
 
   it('kills a subagent task while provider readiness is still pending', async () => {

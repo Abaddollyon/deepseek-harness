@@ -2371,6 +2371,15 @@ describe('disposeCodexChild', () => {
     ))
   })
 
+  it('contains an unrenderable non-Error tree-wait failure', async () => {
+    const child = fakeChild({ waitForExitError: { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } })
+    const disposal = disposeCodexChild(defaultWire(child), child.handle)
+    await expect(disposal).rejects.toMatchObject({
+      name: 'CodexRunFailure',
+      cause: { message: '<unrenderable value>' },
+    })
+  })
+
   it('does not wait for a pending process outcome after tree observation fails', async () => {
     const child = fakeChild({
       exitOnTerminate: false,
