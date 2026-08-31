@@ -26,6 +26,7 @@ import type {
   SubprocessOutcome,
   SubprocessSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
+import { thrown } from './error.ts'
 import {
   CodexAppServerWire,
   type CodexWireFailureFacts,
@@ -153,10 +154,6 @@ export interface CodexRunSpec {
   readonly onError?: (error: Error, stopReason: SubagentStopReason) => void
 }
 
-function thrown(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value))
-}
-
 /**
  * Validate and preserve the one-shot task before crossing the process boundary.
  * @param prompt - task content accepted from the shared subagent service.
@@ -192,6 +189,11 @@ export async function disposeCodexChild(
   wire.close()
 
   if (child.pid > 0) {
+    let outcome: SubprocessOutcome | undefined
+    void child.done.then(
+      (value) => { outcome = value },
+      () => {},
+    )
     try {
       child.stdin?.end()
     } catch {
@@ -204,7 +206,7 @@ export async function disposeCodexChild(
       throw new CodexRunFailure({
         stage: 'teardown',
         category: 'unknown',
-        outcome: await child.done,
+        outcome,
       }, thrown(error))
     }
     await child.done
