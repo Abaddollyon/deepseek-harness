@@ -679,9 +679,7 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = scopedInstalls.get(candidate)
     if (fiber === undefined) return
     scopedInstalls.delete(candidate)
-    void fiber.dispose().catch((error: unknown) => {
-      ctx.logger.warn(`tool-subagent: failed to remove recomposed Agent "${candidate.id}" definitions: ${String(error)}`)
-    })
+    void fiber.dispose()
   }
   const reconcileComposedAgents = (): void => {
     // Every Agent and preset scope is minted by the Agent registry; the scope

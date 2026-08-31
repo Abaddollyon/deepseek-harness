@@ -1268,12 +1268,6 @@ export class SubagentContinuationManager {
   ): MessageId {
     signal.throwIfAborted()
     this.assertAdmitting(parent)
-    if (disposalOf(activation) !== undefined) {
-      throw new SubagentError(
-        `subagent "${activation.childId}" activation is being disposed; the message was not accepted`,
-        'ACTIVATION_CLOSING',
-      )
-    }
     this.authorizeLineage(
       parent,
       activation.childId,

@@ -192,11 +192,6 @@ export async function disposeCodexChild(
   wire.close()
 
   if (child.pid > 0) {
-    let outcome: SubprocessOutcome | undefined
-    void child.done.then(
-      (value) => { outcome = value },
-      () => {},
-    )
     try {
       child.stdin?.end()
     } catch {
@@ -209,7 +204,7 @@ export async function disposeCodexChild(
       throw new CodexRunFailure({
         stage: 'teardown',
         category: 'unknown',
-        outcome,
+        outcome: await child.done,
       }, thrown(error))
     }
     await child.done

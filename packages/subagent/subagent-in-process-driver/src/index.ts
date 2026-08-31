@@ -229,9 +229,9 @@ function readResult(
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      return { output, structured: structured.captured.value, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
+      return { output, structured: structured.captured.value, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason, ...stopReason === 'completed' || failure === undefined ? {} : { failure } }
+  return { output, stopReason, ...failure === undefined ? {} : { failure } }
 }

@@ -217,7 +217,7 @@ export class SubagentRuntime extends TypertRemoteService {
       }, this.setupRegistry)
       this.continuations = manager
       childCtx.effect(() => () => {
-        if (this.continuations === manager) this.continuations = undefined
+        this.continuations = undefined
       }, 'subagents.continuationBinding()')
     })
     ctx.inject(['sessionProjections'], (projectionCtx) => {
