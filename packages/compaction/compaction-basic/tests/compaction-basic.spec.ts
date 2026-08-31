@@ -116,11 +116,11 @@ class ObservableCompactionAdapter extends LlmAdapter {
   }
 }
 
-function createContext(contextWindow = 1_000): Context {
+function createContext(contextWindow = 1_000, adapter: ContextAdapter = new ContextAdapter(contextWindow)): Context {
   const ctx = new Context()
   void new LlmRuntime(ctx)
   void new TokenMeter(ctx)
-  ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], new ContextAdapter(contextWindow))
+  ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], adapter)
   return ctx
 }
 
@@ -1026,10 +1026,10 @@ describe('compaction region transaction', () => {
   })
 
   it('persists heuristic shadow tokens for an image-priced route', async () => {
-    const ctx = createContext()
-    ctx.llm.registerAdapter([MODEL], new ImagePricedContextAdapter(1_000))
+    const ctx = createContext(1_000, new ImagePricedContextAdapter(1_000))
     const compact = service({ auto: false }, ctx)
     const session = Session.create(SessionId('image-priced-compaction'))
+    session.append('turn/start', { turn: 1 })
     const image = createUserMessage({
       content: [
         { type: 'text', text: 'inspect this image' },
