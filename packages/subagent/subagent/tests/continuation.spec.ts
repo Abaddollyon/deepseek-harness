@@ -12,7 +12,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,7 +22,14 @@ import SubagentRuntime, {
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
+import { createActivationObserver, createLifecycleEmitter } from '../src/lifecycle.ts'
 import { TestSessionQuery } from './test-session-query.ts'
+
+declare module '@deepseek-ai/dsh-session' {
+  interface TurnEndReasonMap {
+    'test-future': { kind: 'test-future' }
+  }
+}
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
@@ -1348,6 +1355,52 @@ describe('continuable review regressions', () => {
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     // Deriving this from disposal success would report the failure as completed.
     expect(ends[0]!.stopReason).toBe('max-tokens')
+  })
+
+  it('carries typed quota facts through the continuable lifecycle and parent notice', async () => {
+    const { ctx, parent } = await setup([
+      () => {
+        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
+          message: 'quota exhausted',
+          code: QUOTA_EXCEEDED_CODE,
+          providerRetryAfterMs: 12_000,
+        })
+      },
+      textResponse('parent ack'),
+    ])
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+    expect(ends[0]).toMatchObject({
+      stopReason: 'error',
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
+    })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
+  })
+
+  it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('future-reason-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    child.session.append('turn/start', { turn: 1 })
+    child.session.append('step/start', { turn: 1, step: 1 })
+    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } })
+    observer.capture(child)
+
+    expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
   })
 
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
