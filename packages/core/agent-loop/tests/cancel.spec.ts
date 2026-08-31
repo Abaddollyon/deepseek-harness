@@ -262,6 +262,34 @@ describe('Agent.cancel()', () => {
     expect(agent.status).toBe('idle')
   })
 
+  it('cancel wins when a pre-step listener requeues claimed input and rejects the proposed step', async () => {
+    const adapter = new MockAdapter([textResponse('should not run')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('cancel-reject-pre-step'), { provider: 'mock', model: 'mock' })
+    const prompt = createUserMessage({
+      content: [{ type: 'text', text: 'cancel this proposal' }],
+      source: { kind: 'user' },
+    })
+
+    ctx.on('agent/pre-step', async ({ agent: subject, messages }) => {
+      if (subject === agent) {
+        const claimed = messages[0]
+        if (claimed === undefined) throw new Error('pre-step omitted the claimed prompt')
+        subject.inject(claimed)
+        subject.cancel({ kind: 'user' }, { keepInbox: true })
+      }
+      return { kind: 'reject' as const }
+    })
+
+    agent.followup(prompt)
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(0)
+    expect(agent.inbox.nextStep.map(message => message.id)).toEqual([prompt.id])
+    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
+      .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
+  })
+
   it('disposal from the running notification drops queued work before turn start', async () => {
     const adapter = new MockAdapter([textResponse('should not run')])
     const ctx = await harness(adapter)
