@@ -131,10 +131,10 @@ Append-only tool results follow the reusable request prefix.
 - The tool requires an owning Agent and a real terminal backend with a pwsh dialect (Windows ConPTY or POSIX pwsh).
 - **Input echo is unavoidable**: PowerShell's line editor renders submitted input into the terminal stream, and removing PSReadLine does not suppress it. Marker-anchored extraction excludes the echo in complete results, and fallback matching spans physical line breaks. If scrollback clips part of the wrapper before capture, an unmatched fragment can remain in an incomplete result; retained fallback includes fixed marker framing and stays bounded by wrapper length and `maxOutputChars`.
 - Raw ESC characters inside model commands are unsupported: PSReadLine consumes them before execution. The wrapper escapes the control bytes it needs, including OSC markers built from `[char]27` and body backtick escapes.
-- A model redefinition of `prompt` removes the readiness marker; the shell settles through the printable prompt or silence tier.
+- A model redefinition of `prompt` removes the readiness marker; later commands settle through exact foreground stdin-wait where the terminal provider supports it, or through the silence tier.
 - There is no interactive stdin during a command; a foreground command that reads input blocks until the readiness timeout, which resets the shell.
 - SIGTSTP/SIGHUP are unavailable on Windows; SIGINT is delivered as console-wide Ctrl-C input, which cancels a pending prompt line instead of signalling a process.
-- Under the Windows ACL sandbox's read-only mode, pwsh starts in ConstrainedLanguage, which may deny the bootstrap's Console encoding pin and prompt marker. Commands can still settle through the printable prompt and silence tier, but non-ASCII output may follow the host code page.
+- Under the Windows ACL sandbox's read-only mode, pwsh starts in ConstrainedLanguage, which may deny the bootstrap's Console encoding pin or prompt marker. If prompt setup is denied, Windows has no exact stdin-wait tier, so startup rejects at the absolute deadline and the tool remains unavailable. If only the encoding pin is denied, marker readiness can publish the shell, but non-ASCII output may follow the host code page.
 - The BEL-terminated OSC marker remains a readiness signal only; a BEL event channel to the model remains deferred.
 
 <a id="dev-note"></a>

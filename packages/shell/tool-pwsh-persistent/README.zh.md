@@ -130,10 +130,10 @@ kind: "package-reference"
 - 工具需要拥有者 Agent 与一个真实支持 pwsh 方言的 terminal backend（Windows ConPTY 或 POSIX pwsh）。
 - **输入回显不可避免**：PowerShell 的行编辑器会把提交的输入渲染回终端流，移除 PSReadLine 也不会抑制这种渲染。完整结果中 marker 锚定提取排除回显，回退路径中的匹配可跨越物理换行。若 scrollback 在捕获前裁掉包装器的一部分，无法匹配的片段仍可能保留在不完整结果中；保留的回退包含固定 marker 框架，并受包装器长度与 `maxOutputChars` 共同限制。
 - 模型命令中的裸 ESC 字符不受支持：PSReadLine 会在执行前吞掉它们。包装器转义它需要的控制字节，包括由 `[char]27` 构造的 OSC marker 与 body 的反引号转义。
-- 模型重定义 `prompt` 函数会移除就绪 marker；shell 会通过可打印提示符或静默档结算。
+- 模型重定义 `prompt` 函数会移除就绪 marker；后续命令会在 terminal 提供方支持时通过精确的前台 stdin 等待结算，否则通过静默档结算。
 - 命令执行期间没有交互 stdin；读取输入的前台命令会阻塞到就绪超时，随后重置 shell。
 - SIGTSTP/SIGHUP 在 Windows 不可用；SIGINT 以控制台级 Ctrl-C 输入投递，在提示符处取消当前行而非向进程发信号。
-- 在 Windows ACL 沙箱的只读模式下，pwsh 以 ConstrainedLanguage 启动，可能拒绝引导代码固定 Console 编码并写入 prompt marker。命令仍可通过可打印提示符和静默档结算，但非 ASCII 输出可能沿用宿主代码页。
+- 在 Windows ACL 沙箱的只读模式下，pwsh 以 ConstrainedLanguage 启动，可能拒绝引导代码固定 Console 编码或写入 prompt marker。若提示符设置遭拒，Windows 又没有精确 stdin-wait 档，因此启动会在绝对 deadline 处拒绝，工具保持不可用。若仅编码固定遭拒，marker 就绪仍可发布 shell，但非 ASCII 输出可能沿用宿主代码页。
 - BEL 终结的 OSC marker 仍只是就绪信号；面向模型的 BEL 事件通道保持延后。
 
 <a id="dev-note"></a>
