@@ -17,13 +17,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, LlmFailure } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
 import type { SubagentFailure, SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
-import { subagentFailureFromLlmFailure } from './failure.ts'
+import { ownDataProperty, subagentFailureFromLlmFailure, subagentFailureFromUnknown } from './failure.ts'
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -92,14 +92,11 @@ function collectFailureCause(failure: unknown): SubagentFailure | undefined {
   const seen = new Set<unknown>()
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current)
-    const failure = (current as Error & { readonly failure?: unknown }).failure
-    if (failure !== undefined) {
-      const structured = subagentFailureFromLlmFailure(failure as LlmFailure)
-      if (structured !== undefined) return structured
-    }
-    const structured = subagentFailureFromLlmFailure(current as unknown as LlmFailure)
-    if (structured !== undefined) return structured
-    current = current.cause
+    const nestedFailure = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
+    if (nestedFailure !== undefined) return nestedFailure
+    const directFailure = subagentFailureFromUnknown(current)
+    if (directFailure !== undefined) return directFailure
+    current = ownDataProperty(current, 'cause')
   }
   return undefined
 }

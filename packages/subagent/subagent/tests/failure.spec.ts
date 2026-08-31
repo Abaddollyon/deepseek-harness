@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { subagentFailureFromLlmFailure } from '../src/index.ts'
+import { subagentFailureFromUnknown } from '../src/failure.ts'
 import { settlementSummary } from '../src/continuation.ts'
 import { terminalDiagnostic } from '../src/lifecycle.ts'
 
@@ -14,6 +15,24 @@ describe('subagentFailureFromLlmFailure', () => {
   it('maps rate limits and leaves unknown causes absent', () => {
     expect(subagentFailureFromLlmFailure({ message: 'busy', code: 'RATE_LIMIT' })).toEqual({ code: 'RATE_LIMIT' })
     expect(subagentFailureFromLlmFailure({ message: 'failure', code: 'OTHER' })).toBeUndefined()
+  })
+
+  it('rejects malformed unknown failure fields and bounds retry delays', () => {
+    expect(subagentFailureFromUnknown(null)).toBeUndefined()
+    expect(subagentFailureFromUnknown({ code: 'OTHER', providerRetryAfterMs: 10 })).toBeUndefined()
+    expect(subagentFailureFromUnknown({
+      code: QUOTA_EXCEEDED_CODE,
+      providerRetryAfterMs: Number.NaN,
+    })).toEqual({ code: QUOTA_EXCEEDED_CODE })
+    expect(subagentFailureFromUnknown({ code: 'RATE_LIMIT', providerRetryAfterMs: -1 })).toEqual({ code: 'RATE_LIMIT' })
+    expect(subagentFailureFromUnknown({ code: 'RATE_LIMIT', providerRetryAfterMs: Number.POSITIVE_INFINITY })).toEqual({ code: 'RATE_LIMIT' })
+    expect(subagentFailureFromUnknown({ code: 'RATE_LIMIT', providerRetryAfterMs: 0 })).toEqual({ code: 'RATE_LIMIT', retryAfterMs: 0 })
+  })
+
+  it('terminates on a self-referential Error cause', () => {
+    const cyclic = new Error('cycle')
+    Object.defineProperty(cyclic, 'cause', { value: cyclic })
+    expect(terminalDiagnostic(cyclic)).toEqual({ diagnostic: 'Error: cycle' })
   })
 
   it('formats every parent-facing failure classification', () => {
