@@ -905,6 +905,10 @@ describe('CodexAppServerWire', () => {
         httpStatus: 429,
         failure: { code: 'RATE_LIMIT', retryAfterMs: 0 },
       }],
+      [null, { status: 429, retryAfterMs: -1 }, {
+        httpStatus: 429,
+        failure: { code: 'RATE_LIMIT' },
+      }],
     ] as const
     for (const [codexErrorInfo, fields, expected] of scenarios) {
       const { child, wire } = await initializeWire()
