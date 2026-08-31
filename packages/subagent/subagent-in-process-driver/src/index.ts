@@ -228,12 +228,8 @@ function readResult(
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      return {
-        output,
-        structured: structured.captured.value,
-        stopReason,
-        ...failure === undefined ? {} : { failure },
-      }
+      // A committed capture concludes the turn; every later error path rolls it back.
+      return { output, structured: structured.captured.value, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }

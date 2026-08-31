@@ -7,7 +7,12 @@ import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmFailure } from '@deepseek-ai/dsh-llm'
 import type { SubagentFailure } from './types.ts'
 
-/** Read an own data property without invoking accessors or inherited values. */
+/**
+ * Read an own data property without invoking accessors or inherited values.
+ * @param object - object whose own descriptor is inspected.
+ * @param key - property name to read.
+ * @returns the descriptor's data value, or undefined for an accessor or absent property.
+ */
 export function ownDataProperty(object: object, key: PropertyKey): unknown {
   return Object.getOwnPropertyDescriptor(object, key)?.value
 }
