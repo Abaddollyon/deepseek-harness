@@ -57,7 +57,7 @@ class ContextAdapter extends LlmAdapter {
 class ImagePricedContextAdapter extends ContextAdapter {
   override imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing {
     return {
-      priceImages: images => images.map(() => ({ visualTokens: 100, text: "image handle" })),
+      priceImages: images => images.map(() => ({ visualTokens: 100, text: 'image handle' })),
     }
   }
 }
