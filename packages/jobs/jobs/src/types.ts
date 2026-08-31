@@ -258,8 +258,10 @@ export type JobsChangedListener = (owner: Agent | undefined) => void
 
 /**
  * Listener for one restored job accepted by a producer resumer. Returned
- * promises settle before producer work starts. Returning `false` rejects the
- * ownership transfer; throws are contained so observational listeners cannot
+ * promises settle before producer work starts. Returning `true` confirms the
+ * listener durably accounted the adoption, allowing later registry mirrors to
+ * omit the marker; `false` rejects the ownership transfer, while `void` is
+ * observational. Throws are contained so observational listeners cannot
  * accidentally veto it.
  */
 export type JobAdoptedListener = (

@@ -989,12 +989,15 @@ export class LocalJobRegistry extends JobRegistry {
       this.settle(job, { status: 'failed', detail: ADOPTION_NOT_DURABLE_DETAIL })
       return
     }
+    let adoptionAccounted: boolean
     try {
-      await this.notifyAdopted(this.snapshot(job), accountIncarnation)
+      adoptionAccounted = await this.notifyAdopted(this.snapshot(job), accountIncarnation)
     } catch {
       this.settle(job, { status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL })
       return
     }
+    // An explicit account acknowledgment transfers the marker's durable proof.
+    if (adoptionAccounted) job.adoptedFromIncarnation = undefined
     if (isTerminal(job.status)) {
       // A kill landed while the marker and its account committed; producer
       // work has not started and must remain unstarted.
@@ -1039,15 +1042,17 @@ export class LocalJobRegistry extends JobRegistry {
    * producer starts. Every observer runs; throws are logged after all settle,
    * while an explicit `false` rejects the adoption account.
    */
-  private async notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): Promise<void> {
+  private async notifyAdopted(snapshot: JobSnapshot, priorIncarnation: string): Promise<boolean> {
     const failures: unknown[] = []
     const pending: PromiseLike<void | boolean>[] = []
+    let accounted = false
     let rejected = false
     for (const listener of this.layers.global.adopted.values()) {
       try {
         const result = listener(snapshot, priorIncarnation)
         if (result === false) rejected = true
-        else if (result !== undefined && result !== true) pending.push(result)
+        else if (result === true) accounted = true
+        else if (result !== undefined) pending.push(result)
       } catch (error: unknown) {
         failures.push(error)
       }
@@ -1055,11 +1060,13 @@ export class LocalJobRegistry extends JobRegistry {
     for (const outcome of await Promise.allSettled(pending)) {
       if (outcome.status === 'rejected') failures.push(outcome.reason)
       else if (outcome.value === false) rejected = true
+      else if (outcome.value === true) accounted = true
     }
     for (const failure of failures) {
       this.selfCtx.logger.warn(`jobs: onJobAdopted listener failed: ${String(failure)}`)
     }
     if (rejected) throw new Error('job adoption observer rejected ownership')
+    return accounted
   }
 
   /**

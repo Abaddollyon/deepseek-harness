@@ -533,7 +533,9 @@ describe('RunSupervisor pending-record reconciliation', () => {
     expect(alice.injected).toHaveLength(1)
     const text = (alice.injected[0]?.content[0] as { type: 'text'; text: string }).text
     expect(text).toContain('[status: completed, done]')
-    expect(state.records.get(String(record.id))?.reported).toBe(true)
+    const stored = state.records.get(String(record.id)) as JobRecord
+    expect(stored.reported).toBe(true)
+    expect('adoptedFromIncarnation' in stored).toBe(false)
   })
 
   it('an already-resolved done settles completed after the account, never abandoned', async () => {
@@ -695,7 +697,14 @@ describe('RunSupervisor pending-record reconciliation', () => {
     expect(ctx.jobs.get(stopped.id, alice.agent)).toMatchObject({
       status: 'killed', detail: 'cancelled before host restart',
     })
-    expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
+    const stoppedResumed = runEvents(alice.agent.session, 'run/resumed')
+      .filter(event => (event.data as { jobId: JobId }).jobId === stopped.id)
+    const stoppedAbandoned = runEvents(alice.agent.session, 'run/abandoned')
+      .filter(event => (event.data as { jobId: JobId }).jobId === stopped.id)
+    expect(stoppedResumed).toHaveLength(1)
+    expect(stoppedResumed[0]?.data).toMatchObject({ priorIncarnation: 'pre-supervisor-adoption' })
+    expect(stoppedAbandoned).toHaveLength(1)
+    expect(stoppedAbandoned[0]?.data).toMatchObject({ priorIncarnation: stopped.incarnation })
     expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/agent-end')).toBe(true)
     expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/run-end')).toBe(true)
     expect(alice.injected).toHaveLength(0)
@@ -876,6 +885,41 @@ describe('RunSupervisor durable adoption markers', () => {
     expect(alice.injected).toHaveLength(0)
   })
 
+  it('converges a stopped adopted workflow account across later boots', async () => {
+    const runId = WorkflowRunId('stopped-adopted-cross-boot')
+    const record = storedRecord({
+      id: JobId(`workflow-${runId}`), kind: 'workflow', status: 'killed',
+      detail: 'cancelled before host restart', finishedAt: 200, reported: true,
+      resumeSpec: { runId }, incarnation: 'adopting-incarnation',
+      adoptedFromIncarnation: 'original-incarnation',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', [
+      { type: 'tool-workflow/agent-start', seq: 0, time: 1, data: { runId, seq: 1, label: 'child', childId: 'child' } },
+      { type: 'run/detached', seq: 1, time: 2, data: {
+        jobId: record.id, kind: 'workflow', label: record.label, runId, resumable: true,
+      } },
+    ] as SessionEvent[]]])
+    const persistence = fakePersistence({ logs, appended: [] })
+
+    const first = tracked(await boot({ records: [record], persistence }))
+    await flush()
+    const afterFirst = logs.get('alice') ?? []
+    expect(afterFirst.filter(event => event.type === 'run/resumed')).toHaveLength(1)
+    expect(afterFirst.find(event => event.type === 'run/resumed')?.data).toMatchObject({
+      priorIncarnation: 'original-incarnation',
+    })
+    expect(afterFirst.filter(event => event.type === 'run/abandoned')).toHaveLength(1)
+    expect(afterFirst.find(event => event.type === 'run/abandoned')?.data).toMatchObject({
+      priorIncarnation: 'adopting-incarnation',
+    })
+    expect('adoptedFromIncarnation' in (first.state.records.get(record.id) as JobRecord)).toBe(false)
+
+    tracked(await boot({ records: [...first.state.records.values()], persistence }))
+    await flush()
+    expect(logs.get('alice')?.filter(event => event.type === 'run/resumed')).toHaveLength(1)
+    expect(logs.get('alice')?.filter(event => event.type === 'run/abandoned')).toHaveLength(1)
+  })
+
   it('closes a killed workflow from a terminal adoption marker before clearing it', async () => {
     const record = storedRecord({
       kind: 'workflow', status: 'killed', detail: null, finishedAt: 200, reported: true,
@@ -944,10 +988,31 @@ describe('RunSupervisor durable adoption markers', () => {
 
   it('keeps a killed workflow marker when its owner has no append lane', async () => {
     const record = storedRecord({
-      kind: 'workflow', status: 'killed', finishedAt: Date.now(),
-      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+      kind: 'workflow', status: 'killed', detail: 'cancelled before host restart', finishedAt: Date.now(),
+      incarnation: 'adopting-incarnation', adoptedFromIncarnation: 'prior-incarnation',
     })
     const { state } = tracked(await boot({ records: [record] }))
+    expect(state.records.get(String(record.id))).toMatchObject({
+      status: 'killed', adoptedFromIncarnation: 'prior-incarnation',
+    })
+  })
+
+  it('keeps a stopped workflow marker when its owner disappears after resume accounting', async () => {
+    const record = storedRecord({
+      kind: 'workflow', status: 'killed', detail: 'cancelled before host restart',
+      finishedAt: Date.now(), incarnation: 'adopting-incarnation',
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', []]])
+    let appends = 0
+    const persistence = fakePersistence({
+      logs, appended: [],
+      onAppend: () => {
+        appends += 1
+        if (appends === 1) queueMicrotask(() => { logs.delete('alice') })
+      },
+    })
+    const { state } = tracked(await boot({ records: [record], persistence }))
     expect(state.records.get(String(record.id))).toMatchObject({
       status: 'killed', adoptedFromIncarnation: 'prior-incarnation',
     })
@@ -1549,6 +1614,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
       candidates: Map<JobId, { record: JobRecord; membership: 'owned' | 'unowned'; decision: string; detail: string }>
       deadline: AbortController
       emissions: Set<Promise<void>>
+      markerAccountedSettlements: Set<JobId>
       nudge: (() => void) | undefined
     }
     const fakePass = (): FakePass => ({
@@ -1556,6 +1622,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
       candidates: new Map(),
       deadline: new AbortController(),
       emissions: new Set(),
+      markerAccountedSettlements: new Set(),
       nudge: undefined,
     })
     const internals = instance as unknown as {
@@ -1563,13 +1630,14 @@ describe('RunSupervisor internals (defensive lanes)', () => {
       pendingStore: JobStore | undefined
       runPass(store: JobStore): Promise<void>
       onAdopted(snapshot: unknown, priorIncarnation: string): Promise<boolean>
-      emitResumed(owner: SessionId, candidate: unknown): Promise<'appended' | 'duplicate' | 'unavailable'>
+      emitResumed(owner: SessionId, candidate: unknown): Promise<'recorded' | 'already-present' | 'unavailable'>
       accountAdoptionMarkers(pass: FakePass): Promise<void>
       onJobDone(snapshot: unknown): void
       waitForCandidates(pass: FakePass): Promise<void>
       emitAbandoned(pass: FakePass, owner: SessionId, view: unknown, reason: string, priorIncarnation: string): Promise<'recorded' | 'already-present' | 'unavailable'>
       deliverNoticeWhenLive(pass: FakePass, owner: SessionId, view: unknown): void
       activePass: FakePass | undefined
+      adopted: Map<JobId, { record: JobRecord; membership: 'owned' | 'unowned'; decision: 'adoptable'; detail: string }>
       clearAdoptionMarker(candidate: { record: JobRecord }): Promise<void>
     }
 
@@ -1617,6 +1685,15 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     })
     state.records.set(unownedMarker.id, unownedMarker)
     await expect(internals.onAdopted({ id: unownedMarker.id }, 'prior-incarnation')).resolves.toBe(true)
+
+    const sweptMarker = storedRecord({ ownerSession: null, incarnation: PROCESS_INCARNATION })
+    internals.adopted.set(sweptMarker.id, {
+      record: { ...sweptMarker, incarnation: 'swept-prior' },
+      membership: 'unowned', decision: 'adoptable', detail: '',
+    })
+    state.records.set(sweptMarker.id, sweptMarker)
+    await expect(internals.onAdopted({ id: sweptMarker.id }, 'swept-prior')).resolves.toBe(true)
+    await expect(internals.onAdopted({ id: sweptMarker.id }, 'different-prior')).resolves.toBe(false)
 
     const ownedMarker = storedRecord({
       ownerSession: SessionId('alice'), adoptedFromIncarnation: 'prior-incarnation',
@@ -1690,6 +1767,20 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     // already-evicted record is contained.
     const stub = stubAgent(ctx, 'alice')
     ctx.agents.register(stub.agent)
+
+    const stranded = storedRecord({
+      kind: 'workflow', status: 'killed', detail: 'cancelled before host restart',
+      ownerSession: SessionId('alice'), incarnation: 'adopting-incarnation',
+      adoptedFromIncarnation: 'stranded-prior',
+    })
+    const strandedStore = fakeStore(new Map([[stranded.id, stranded]]))
+    const resumedSpy = vi.spyOn(internals, 'emitResumed').mockResolvedValueOnce('recorded')
+    const abandonedSpy = vi.spyOn(internals, 'emitAbandoned').mockResolvedValueOnce('unavailable')
+    await internals.accountAdoptionMarkers({ ...fakePass(), store: strandedStore.store })
+    expect(strandedStore.state.records.get(stranded.id)?.adoptedFromIncarnation).toBe('stranded-prior')
+    resumedSpy.mockRestore()
+    abandonedSpy.mockRestore()
+
     const detailLess = storedRecord({ resumeSpec: { n: 3 } })
     internals.activePass = pass
     pass.deadline = new AbortController()
