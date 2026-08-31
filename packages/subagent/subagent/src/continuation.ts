@@ -631,7 +631,6 @@ export class SubagentContinuationManager {
    * @throws {SubagentError} when the sender is unauthorized, the parent is not
    *   live, or continuation admission is closing.
    */
-  // oxlint-disable-next-line typescript/require-await -- keep rejection semantics without yielding during admission
   async reportFrom(
     child: Agent,
     content: ContentBlock[],
@@ -641,7 +640,7 @@ export class SubagentContinuationManager {
     this.assertAdmitting(child)
     const activation = this.authorizeReporter(child)
     const parent = this.resolveReportParent(activation)
-    return this.deliverReport(activation, parent, content, options.delivery)
+    return await Promise.resolve(this.deliverReport(activation, parent, content, options.delivery))
   }
 
   /** Authorize only the exact Agent of one resident Activation. */

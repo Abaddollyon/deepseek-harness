@@ -735,24 +735,43 @@ describe('SubagentRuntime.followup residency routing', () => {
       .rejects.toBe(failure)
   })
 
-  it('cold-resumes a delivery that lost the race with final disposal', async () => {
-    const { ctx, parent } = await setup([textResponse('first'), textResponse('after the race')])
+  it('waits out an open disposal and cold-resumes the delivery', async () => {
+    const releaseResponse = Promise.withResolvers<undefined>()
+    const releaseFlush = Promise.withResolvers<undefined>()
+    const atFlush = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first'), gate: releaseResponse.promise },
+      { chunks: textResponse('after the race') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
     const started = await ctx.subagents.startContinuable(startSpec(parent))
-    const child = await vi.waitFor(() => {
-      const found = ctx.agents.get(started.childId)
-      expect(found).toBeDefined()
-      return found!
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    let held = false
+    ctx.on('session/flush', async (session) => {
+      if (session.header.id !== started.childId || held) return
+      held = true
+      atFlush.resolve(undefined)
+      await releaseFlush.promise
     })
-    // Deliver in the same tick the settlement watcher opens its transaction:
-    // exactly one side wins the cutoff. A delivery that loses awaits release and
-    // cold-resumes rather than reaching a handle being torn down.
-    const delivery = child.whenIdle().then(() =>
-      followup(ctx, parent, started.childId, message('raced')))
 
-    await expect(delivery).resolves.toBeTypeOf('string')
+    releaseResponse.resolve(undefined)
+    await atFlush.promise
+    const delivery = followup(ctx, parent, started.childId, message('raced'))
+    let settled = false
+    const observed = delivery.then(
+      (messageId) => { settled = true; return messageId },
+      (error: unknown) => { settled = true; throw error },
+    )
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    releaseFlush.resolve(undefined)
+    await expect(observed).resolves.toBeTypeOf('string')
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
     expect(hasUserText(loaded.events, 'raced')).toBe(true)
+    expect(adapter.requests.filter(request => request.sessionId === started.childId)).toHaveLength(2)
   })
 })
 
@@ -1800,6 +1819,35 @@ describe('continuable report delivery', () => {
     await vi.waitFor(() => {
       expect(adapter.requests.filter(request => request.sessionId === parent.id)).toHaveLength(2)
     })
+  })
+
+  it('rejects a report whose own activation is being disposed', async () => {
+    const releaseResponse = Promise.withResolvers<undefined>()
+    const releaseFlush = Promise.withResolvers<undefined>()
+    const atFlush = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child answer'), gate: releaseResponse.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)!
+    ctx.on('session/flush', async (session) => {
+      if (session.header.id !== started.childId) return
+      atFlush.resolve(undefined)
+      await releaseFlush.promise
+    })
+
+    releaseResponse.resolve(undefined)
+    await atFlush.promise
+    await expect(ctx.subagents.reportFrom(child, message('too late'), {
+      delivery: 'quiet',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'ACTIVATION_CLOSING' })
+
+    releaseFlush.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
   })
 })
 
