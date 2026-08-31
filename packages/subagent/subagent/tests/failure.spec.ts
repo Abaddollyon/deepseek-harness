@@ -32,7 +32,7 @@ describe('subagentFailureFromLlmFailure', () => {
   it('terminates on a self-referential Error cause', () => {
     const cyclic = new Error('cycle')
     Object.defineProperty(cyclic, 'cause', { value: cyclic })
-    expect(terminalDiagnostic(cyclic)).toEqual({ diagnostic: 'Error: cycle' })
+    expect(terminalDiagnostic(cyclic)).toEqual({ diagnostic: 'Subagent teardown failed.' })
   })
 
   it('formats every parent-facing failure classification', () => {
@@ -48,10 +48,12 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(settlementSummary(SessionId('child'), 'error', 'rate detail', { code: 'RATE_LIMIT', retryAfterMs: 1_500 })).toContain('wait 1.5 seconds before retrying')
   })
 
-  it('bounds lifecycle diagnostics and preserves typed causes', () => {
-    const failure = Object.assign(new Error('quota detail'), { code: 'QUOTA' })
-    expect(terminalDiagnostic(failure)).toEqual({ diagnostic: 'Error: quota detail', failure: { code: 'QUOTA' } })
-    expect(terminalDiagnostic(Object.assign(new Error('x'.repeat(5_000)), { code: 'OTHER' })).diagnostic).toHaveLength(4096)
+  it('uses fixed teardown text and preserves typed causes across failure graphs', () => {
+    const failure = Object.assign(new Error('quota detail must stay private'), { code: 'QUOTA' })
+    expect(terminalDiagnostic(failure)).toEqual({
+      diagnostic: 'Subagent teardown failed.',
+      failure: { code: 'QUOTA' },
+    })
     const nested = new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 12_000 })
     expect(terminalDiagnostic(new Error('wrapper', { cause: nested })).failure).toEqual({
       code: QUOTA_EXCEEDED_CODE,
@@ -64,15 +66,27 @@ describe('subagentFailureFromLlmFailure', () => {
       code: QUOTA_EXCEEDED_CODE,
       retryAfterMs: 12_000,
     })
-    const multibyte = terminalDiagnostic('🙂'.repeat(2_000)).diagnostic!
-    expect(Buffer.byteLength(multibyte, 'utf8')).toBe(4096)
-    expect(multibyte).toBe('🙂'.repeat(1_024))
-    expect(terminalDiagnostic('')).toEqual({})
-    expect(terminalDiagnostic({})).toEqual({ diagnostic: '[object Object]' })
-    const unprintable = {
-      [Symbol.toPrimitive](): never { throw new Error('coercion failed') },
-      toString(): never { throw new Error('coercion failed') },
-    }
-    expect(terminalDiagnostic(unprintable)).toEqual({ diagnostic: '[unprintable thrown value]' })
+    expect(terminalDiagnostic(new Error('wrapper', {
+      cause: new AggregateError([new Error('generic'), nested]),
+    })).failure).toEqual({ code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 })
+    expect(terminalDiagnostic(undefined)).toEqual({})
+    expect(terminalDiagnostic('private primitive')).toEqual({ diagnostic: 'Subagent teardown failed.' })
+  })
+
+  it('contains hostile Proxy metadata while classifying teardown facts', () => {
+    const direct = new Proxy({}, {
+      getOwnPropertyDescriptor(): never { throw new Error('descriptor denied') },
+    })
+    expect(subagentFailureFromUnknown(direct)).toBeUndefined()
+    expect(terminalDiagnostic(direct)).toEqual({ diagnostic: 'Subagent teardown failed.' })
+
+    const revoked = Proxy.revocable([], {})
+    revoked.revoke()
+    expect(terminalDiagnostic({ errors: revoked.proxy })).toEqual({ diagnostic: 'Subagent teardown failed.' })
+
+    const descriptorDeniedArray = new Proxy([], {
+      getOwnPropertyDescriptor(): never { throw new Error('descriptor denied') },
+    })
+    expect(terminalDiagnostic({ errors: descriptorDeniedArray })).toEqual({ diagnostic: 'Subagent teardown failed.' })
   })
 })

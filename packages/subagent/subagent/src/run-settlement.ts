@@ -19,12 +19,12 @@ function finalText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Render a failed stop reason with optional provider-authored detail. */
+/** Render a failed stop reason with provider-authored detail and routing facts. */
 function failureDetail(result: SubagentResult): string {
-  const stopReason = result.stopReason
-  return result.diagnostic === undefined
-    ? stopReason
-    : `${stopReason}; diagnostic: ${result.diagnostic}`
+  const diagnostic = result.diagnostic === undefined ? '' : `; diagnostic: ${result.diagnostic}`
+  const failure = result.failure === undefined ? '' : `; failure code: ${result.failure.code}`
+  const retry = result.failure?.retryAfterMs === undefined ? '' : `; retry after: ${result.failure.retryAfterMs} ms`
+  return `${result.stopReason}${diagnostic}${failure}${retry}`
 }
 
 /**

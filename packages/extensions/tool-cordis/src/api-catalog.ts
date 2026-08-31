@@ -4278,7 +4278,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailureCodeMap',
-    declaration: 'export interface LlmFailureCodeMap {\n    quota: typeof QUOTA_EXCEEDED_CODE;\n    rateLimit: \'RATE_LIMIT\';\n}',
+    declaration: 'export interface LlmFailureCodeMap {\n    quota: \'QUOTA\';\n    rateLimit: \'RATE_LIMIT\';\n}',
   },
   {
     name: 'LlmImageRequestPrice',

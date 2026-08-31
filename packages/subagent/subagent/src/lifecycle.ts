@@ -35,82 +35,73 @@ export interface ActivationTerminal {
   /** The epoch's final assistant content, absent when it produced none or failed. */
   readonly output?: ContentBlock[]
   /**
-   * Why the epoch failed, for a `stopReason` of `error` raised by teardown
-   * rather than by the child's own turn. The parent cannot otherwise tell a
-   * provider refusal from a quota exhaustion from a crash, and the delivery
-   * report is the only place it learns the epoch ended at all. Bounded to
-   * {@link TERMINAL_DIAGNOSTIC_LIMIT} and carrying the failure's own text, the
-   * same detail the one-shot tool path already reports.
+   * Fixed parent-safe detail for a `stopReason` of `error` raised by teardown
+   * rather than by the child's own turn. Arbitrary infrastructure exception
+   * text does not enter the parent session.
    */
   readonly diagnostic?: string
   /** Structured provider failure facts when teardown preserved a known LLM failure. */
   readonly failure?: SubagentFailure
 }
 
-/** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
-const TERMINAL_DIAGNOSTIC_LIMIT = 4096
+/** Fixed parent-safe detail for an infrastructure teardown failure. */
+const TERMINAL_DIAGNOSTIC = 'Subagent teardown failed.'
+
+/** Maximum number of cause and AggregateError nodes inspected for typed facts. */
+const MAX_FAILURE_CAUSE_NODES = 64
 
 /**
- * Convert an unknown thrown value without letting its coercion hook throw.
- * @param failure - value rejected by the teardown operation.
- * @returns printable diagnostic text or a stable fallback.
- */
-function thrownText(failure: unknown): string {
-  try {
-    return String(failure)
-  } catch {
-    // A rejection value may itself refuse string conversion.
-    return '[unprintable thrown value]'
-  }
-}
-
-/**
- * Render a teardown failure as bounded diagnostic text.
+ * Render teardown metadata without relaying arbitrary infrastructure exception text.
  * @param failure - the thrown value that ended the epoch.
- * @returns the diagnostic member, omitted when the failure carries no text.
+ * @returns fixed readable detail plus any safely recovered provider facts.
  */
 export function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
-  const text = thrownText(failure)
-  if (text.length === 0) return {}
-  const bounded = truncateDiagnostic(text)
+  if (failure === undefined) return {}
   const structured = collectFailureCause(failure)
   return {
-    diagnostic: bounded,
+    diagnostic: TERMINAL_DIAGNOSTIC,
     ...structured === undefined ? {} : { failure: structured },
   }
 }
 
-/** Truncate UTF-8 text without splitting a Unicode code point.
- * @param text - diagnostic text to bound.
- * @returns text no larger than the terminal diagnostic byte limit.
- */
-function truncateDiagnostic(text: string): string {
-  if (Buffer.byteLength(text, 'utf8') <= TERMINAL_DIAGNOSTIC_LIMIT) return text
-  let bytes = 0
-  let result = ''
-  for (const character of text) {
-    const size = Buffer.byteLength(character, 'utf8')
-    if (bytes + size > TERMINAL_DIAGNOSTIC_LIMIT) break
-    result += character
-    bytes += size
+/** Test whether a value is an Array without allowing Proxy traps to escape. */
+function safeArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value)
+  } catch {
+    // A revoked Proxy can reject the Array brand check.
+    return false
   }
-  return result
 }
 
-/** Find structured LLM facts through nested Error causes.
+/** Find structured LLM facts through causes and AggregateError branches.
  * @param failure - thrown teardown value.
  * @returns known typed facts, or undefined when no cause is classified.
  */
 function collectFailureCause(failure: unknown): SubagentFailure | undefined {
-  let current: unknown = failure
-  const seen = new Set<unknown>()
-  while (current instanceof Error && !seen.has(current)) {
+  const pending: unknown[] = [failure]
+  const seen = new Set<object>()
+  let visited = 0
+  while (pending.length > 0 && visited < MAX_FAILURE_CAUSE_NODES) {
+    const current = pending.shift()
+    if (typeof current !== 'object' || current === null || seen.has(current)) continue
     seen.add(current)
+    visited += 1
+
     const nestedFailure = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
     if (nestedFailure !== undefined) return nestedFailure
     const directFailure = subagentFailureFromUnknown(current)
     if (directFailure !== undefined) return directFailure
-    current = ownDataProperty(current, 'cause')
+
+    const cause = ownDataProperty(current, 'cause')
+    if (cause !== undefined) pending.push(cause)
+    const errors = ownDataProperty(current, 'errors')
+    if (!safeArray(errors)) continue
+    const length = ownDataProperty(errors, 'length')
+    if (typeof length !== 'number') continue
+    for (let index = 0; index < length && pending.length < MAX_FAILURE_CAUSE_NODES; index += 1) {
+      pending.push(ownDataProperty(errors, index))
+    }
   }
   return undefined
 }

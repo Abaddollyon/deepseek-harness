@@ -29,7 +29,7 @@ export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 
 /** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
 export interface LlmFailureCodeMap {
-  quota: typeof QUOTA_EXCEEDED_CODE
+  quota: 'QUOTA'
   rateLimit: 'RATE_LIMIT'
 }
 /** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */

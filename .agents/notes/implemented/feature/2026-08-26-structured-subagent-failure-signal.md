@@ -24,8 +24,8 @@ The subagent-level closed cause taxonomy was considered and rejected: the subage
 
 **Add an unknown member or synthesize a code.** Rejected because an absent optional failure already means no classified cause reached the seam. Guessing would make an orchestrator retry an error that cannot succeed.
 
-This note partially supersedes the deferred classification discussion in [background settlement diagnostics](../bug-fix/2026-08-25-background-settlement-diagnostic.md), which remains authoritative for bounded readable diagnostics.
+This note partially supersedes the deferred classification discussion in [background settlement diagnostics](../bug-fix/2026-08-25-background-settlement-diagnostic.md), which remains authoritative for parent-safe teardown diagnostics.
 
 ## Consequences
 
-One-shot local results and applicable background settlement notices carry the signal. The parent-facing notice says the provider quota is exhausted or is temporarily rate-limiting the route, and includes retry-after seconds only when known; it never exposes transport vocabulary, credentials, or raw provider payloads. The existing teardown diagnostic remains unchanged and is still bounded. SDK `SubagentFinishedNotification` payloads do not carry failure; neither the TypeScript nor Python SDK notification is extended.
+One-shot local results and applicable background settlement notices carry the signal. The parent-facing notice says the provider quota is exhausted or is temporarily rate-limiting the route, and includes retry-after seconds only when known; it never exposes transport vocabulary, credentials, raw provider payloads, or infrastructure exception text. Teardown uses one fixed generic diagnostic while bounded cause traversal preserves known typed facts. SDK `SubagentFinishedNotification` payloads do not carry failure; neither the TypeScript nor Python SDK notification is extended.

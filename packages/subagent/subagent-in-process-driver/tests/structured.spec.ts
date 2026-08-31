@@ -274,6 +274,22 @@ describe('in-process structured output', () => {
     await run.dispose()
   })
 
+  it('does not retain provider failure facts when cancellation wins settlement', async () => {
+    const { ctx, parent } = await setup([
+      () => { throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE) },
+    ])
+    const controller = new AbortController()
+    const run = await ctx.subagents.start('spawn', structuredRequest(parent, { signal: controller.signal }))
+    ctx.on('session/event', (session, event) => {
+      const child = ctx.agents.get(run.id)
+      if (session === child?.session && event.type === 'turn/end') controller.abort('cancelled at turn end')
+    })
+    const result = await run.result
+    expect(result.stopReason).toBe('aborted')
+    expect(result.failure).toBeUndefined()
+    await run.dispose()
+  })
+
   it('a cancel landing after a clean capture-less turn settles aborted, not error', async () => {
     const { ctx, parent } = await setup([textResponse('prose, no capture')])
     const controller = new AbortController()

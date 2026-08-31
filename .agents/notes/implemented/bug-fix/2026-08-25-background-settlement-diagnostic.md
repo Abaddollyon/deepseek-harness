@@ -14,22 +14,22 @@ The cost is misattribution, and it is not hypothetical. When a provider route re
 
 ## Decision
 
-`ActivationTerminal` gains an optional `diagnostic`, populated only on the teardown-failure edge, and `settlementSummary` appends it to the `error` sentence as ` Reason: <text>`. The text is the failure's own `String(failure)`, bounded to 4096 UTF-8 bytes — the same ceiling `SubagentResult.diagnostic` documents, and the same detail the one-shot path already reports through `detail: String(error)`.
+`ActivationTerminal` gains an optional `diagnostic`, populated only on the teardown-failure edge, and `settlementSummary` appends the fixed ` Reason: Subagent teardown failed.` sentence. The fixed text identifies infrastructure failure without relaying exception messages, credentials, paths, protocol payloads, or injected instructions into the parent session. Typed failure recovery separately traverses bounded `cause` and `AggregateError.errors` graphs through data descriptors and contains hostile Proxy traps.
 
 The reason is attached only where the child cannot speak for itself. An epoch that ended through its own turn keeps reporting `captured`, whose `stopReason` is derived from the child's own events; those endings are already visible to the parent in the child's output and need no synthesized explanation.
 
 ## Alternatives considered
 
-**Classify every failure into a code — quota, transport, crash.** Rejected: only known LLM causes are classified as `QUOTA` or `RATE_LIMIT`; raw teardown diagnostics remain readable text, and unclassified captured errors may have no typed failure. A broader taxonomy would need provider-specific categories and would make consumers branch on guesses.
+**Classify every failure into a code — quota, transport, crash.** Rejected: only known LLM causes are classified as `QUOTA` or `RATE_LIMIT`; unclassified teardown and captured errors have no typed failure. A broader taxonomy would need provider-specific categories and would make consumers branch on guesses.
 
 **Include the failure's stack.** Rejected: the parent is a model deciding whether to retry or re-route, and a stack is transport-level noise for that decision while raising the chance of carrying environment paths into a notice.
 
-**Report the raw thrown value unbounded.** Rejected: the diagnostic contract states a 4096-byte ceiling precisely because a provider payload can be arbitrarily large, and a notice enters the parent's context window.
+**Report bounded raw exception text.** Rejected: a byte ceiling controls context cost but does not remove credentials, private paths, raw payloads, or prompt-injection text. Infrastructure exceptions remain internal.
 
 ## Verification
 
-`packages/subagent/subagent/tests/continuation.spec.ts` — 'withholds an outcome the harness could not durably release' injects a disposal failure and asserts that the parent's notice carries `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`. Surrounding cases assert that endings from the child's own turn keep their existing text.
+`packages/subagent/subagent/tests/continuation.spec.ts` injects ordinary and hostile Proxy disposal failures, asserts that parent notices contain only the fixed reason, and proves nested ownership is released so ancestors settle. `failure.spec.ts` exercises cyclic causes, `AggregateError.errors`, descriptor traps, and revoked Proxies while preserving known provider facts.
 
 ## Consequences
 
-A parent orchestrating background children can read raw teardown diagnostics and, when a captured LLM cause is known, branch on `QUOTA` or `RATE_LIMIT` — stopping re-dispatch onto an exhausted route, falling back to another provider, or surfacing the quota to a human. A captured error that is not classified has no typed failure. The notice grows by one bounded sentence, and only on the failure edge.
+A parent orchestrating background children can distinguish infrastructure teardown from an ordinary child error without receiving infrastructure exception text. When a known LLM cause survives teardown, it can branch on `QUOTA` or `RATE_LIMIT`; an unclassified error has no typed failure. The notice grows by one fixed sentence only on the teardown-failure edge.

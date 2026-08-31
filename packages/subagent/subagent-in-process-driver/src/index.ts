@@ -234,5 +234,5 @@ function readResult(
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason, ...failure === undefined ? {} : { failure } }
+  return { output, stopReason, ...stopReason !== 'error' || failure === undefined ? {} : { failure } }
 }

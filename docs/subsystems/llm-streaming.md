@@ -223,7 +223,7 @@ Every thrown or in-band final-adapter failure normalizes to one serializable pro
 ```ts type-equiv
 /** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
 interface LlmFailureCodeMap {
-  quota: typeof QUOTA_EXCEEDED_CODE
+  quota: 'QUOTA'
   rateLimit: 'RATE_LIMIT'
 }
 ```

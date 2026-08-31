@@ -2177,14 +2177,14 @@ describe('continuable settlement delivery', () => {
 
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
-    // The parent is told WHY. A teardown failure is the one ending the child
-    // cannot describe itself, so without the reason an exhausted provider quota
-    // and a crashed scope reach the parent as the same sentence.
+    // Infrastructure exceptions stay out of parent model context; typed facts,
+    // when present, carry the retry decision separately.
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} failed before it finished.`
-      + ` Reason: SubagentError: subagent "${started.childId}" activation handle disposal failed: scope unwind failed`
+      + ' Reason: Subagent teardown failed.'
       + '\nIt left no closing message.',
     )
+    expect(settlementNotices(parent)[0]!.text).not.toContain('scope unwind failed')
   })
 
   it('gives an idle parent one ordinary turn on the notice', async () => {
@@ -2310,6 +2310,44 @@ describe('continuable settlement delivery', () => {
     // Still owned at delivery: the parent is structurally unable to settle in
     // the window the notice crosses, rather than winning a race against it.
     expect(ownedAtDelivery).toEqual([inner.childId])
+    await waitNoActivation(ctx, outer.childId)
+  })
+
+  it('releases nested ownership after a hostile teardown rejection', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('outer') },
+      { chunks: textResponse('inner'), gate: releaseChild.promise },
+      { chunks: textResponse('outer reacts') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const outer = await ctx.subagents.startContinuable(startSpec(parent))
+    const middle = await vi.waitFor(() => {
+      const live = ctx.agents.get(outer.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const inner = await ctx.subagents.startContinuable(startSpec(middle))
+    const manager = (ctx.subagents as unknown as {
+      continuations: { activations: Map<SessionId, { handle: { dispose(): Promise<void> } }> }
+    }).continuations
+    const activation = await vi.waitFor(() => {
+      const live = manager.activations.get(inner.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const dispose = activation.handle.dispose.bind(activation.handle)
+    const rejected = Proxy.revocable({}, {})
+    rejected.revoke()
+    activation.handle.dispose = async () => {
+      await dispose()
+      throw rejected.proxy
+    }
+
+    releaseChild.resolve(undefined)
+    await waitNoActivation(ctx, inner.childId)
+    await vi.waitFor(() => { expect(settlementNotices(middle)).toHaveLength(1) })
+    expect(settlementNotices(middle)[0]!.text).toContain('Reason: Subagent teardown failed.')
     await waitNoActivation(ctx, outer.childId)
   })
 

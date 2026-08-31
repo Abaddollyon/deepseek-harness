@@ -124,7 +124,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-One user-role parent message opening with the outcome — `Background subagent <child-id> finished and will do no further work unless you send it more.`, or the matching line for a child that was stopped, ran out of room, declined, or failed — followed by `Its closing message:` and the text blocks from the child's final assistant message, or `It left no closing message.` when that message has no text. This is the service's only direct parent-side contribution; delegation schemas, parent continuation and discovery, and the child-scoped `report` belong to `dsh-tool-subagent`, `dsh-tool-subagent-control`, and `dsh-tool-subagent-report`.
+One user-role parent message opening with the outcome — `Background subagent <child-id> finished and will do no further work unless you send it more.`, or the matching line for a child that was stopped, ran out of room, declined, or failed — followed by `Its closing message:` and the text blocks from the child's final assistant message, or `It left no closing message.` when that message has no text. Known quota and rate-limit failures add routing guidance and an available retry delay; teardown adds only the fixed `Reason: Subagent teardown failed.` text, never infrastructure exception text. This is the service's only direct parent-side contribution; delegation schemas, parent continuation and discovery, and the child-scoped `report` belong to `dsh-tool-subagent`, `dsh-tool-subagent-control`, and `dsh-tool-subagent-report`.
 
 #### Token effect
 
@@ -162,7 +162,7 @@ Prefix-stable within a child: the statement never changes during the child's lif
 These limits define when the seam is a poor fit or needs special operational care. They are current package constraints, not a general delegation comparison or a task backlog.
 
 - **ACP children remain one-shot and are not trace-enumerable** — an ACP run has no local child session in the parent's session corpus, and remote providers need an Activation ownership contract before they can support continuable children.
-- **Typed failure detail is provider-specific** — in-process runs and the Codex wire classify known `QUOTA` or `RATE_LIMIT` causes; generic dsh-sdk, ACP, and Claude Code transports do not. Other captured codes can reach a continuable parent as a generic failure sentence, while teardown failures retain their bounded raw diagnostic.
+- **Typed failure detail is provider-specific** — in-process runs and the Codex wire classify known `QUOTA` or `RATE_LIMIT` causes; generic dsh-sdk, ACP, and Claude Code transports do not. Other captured codes can reach a continuable parent as a generic failure sentence; teardown reports fixed generic detail while preserving any known typed cause.
 - **No host-user continuation** — `followup()` requires the exact live direct parent; only `interrupt()` accepts a durable human parent address.
 - **Continuation messages never steer** — parent-to-child follow-ups enqueue later turns; they never redirect the child's current turn.
 - **Wake gap during cancellation convergence** — a follow-up accepted after an interrupt signal but before the driver becomes idle stays queued until another waking send.

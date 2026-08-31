@@ -317,7 +317,7 @@ type SubagentDescendantListEntry = SubagentListEntry & {
 
 ## 终态结果：`SubagentResult`
 
-单次 run 的最终产出，由 `SubagentRun.result` resolve。`structured` 仅在请求了 `outputSchema` 且成功满足时才存在；请求 schema 不保证一定能得到它，当子 agent 失败或结束时未产出有效 capture 时，提供方可能返回 `stopReason: 'error'`。提供方可以为非 `completed` 结果附带安全且不属于 assistant 内容的 `diagnostic`；在消费方将它与 `output` 分开呈现前，提供方会排除工具输入、文件内容、环境值、凭证与原始协议载荷，并把完整值限制在 4096 个 UTF-8 字节以内。可选的 `failure` 事实使用 LLM seam 的可合并扩展 code，并可携带提供方指定的重试延迟；消费方将未知 code 视为不可重试。非 `completed` 的 `stopReason` 意味着 `output` 可能不完整——消费方将其映射为 `isError` 的工具结果，而非将部分输出报告为成功。
+单次 run 的最终产出，由 `SubagentRun.result` resolve。`structured` 仅在请求了 `outputSchema` 且成功满足时才存在；请求 schema 不保证一定能得到它，当子 agent 失败或结束时未产出有效 capture 时，提供方可能返回 `stopReason: 'error'`。提供方可以为非 `completed` 结果附带安全且不属于 assistant 内容的 `diagnostic`；在消费方将它与 `output` 分开呈现前，提供方会排除工具输入、文件内容、环境值、凭证与原始协议载荷，并把完整值限制在 4096 个 UTF-8 字节以内。可选的 `failure` 事实使用 LLM seam 的可合并扩展 code，并可携带提供方指定的重试延迟；前台与一次性后台消费方会保留两个字段，所有消费方都将未知 code 视为不可重试。可继续拆卸使用固定的通用可读文本，并仅从有界 cause 图中恢复类型化事实，因此基础设施异常文本绝不会进入父会话。非 `completed` 的 `stopReason` 意味着 `output` 可能不完整——消费方将其映射为 `isError` 的工具结果，而非将部分输出报告为成功。
 
 ```ts type-equiv
 /**

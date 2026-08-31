@@ -11,10 +11,15 @@ import type { SubagentFailure } from './types.ts'
  * Read an own data property without invoking accessors or inherited values.
  * @param object - object whose own descriptor is inspected.
  * @param key - property name to read.
- * @returns the descriptor's data value, or undefined for an accessor or absent property.
+ * @returns the data value, or undefined for an accessor, absent property, or rejected inspection.
  */
 export function ownDataProperty(object: object, key: PropertyKey): unknown {
-  return Object.getOwnPropertyDescriptor(object, key)?.value
+  try {
+    return Object.getOwnPropertyDescriptor(object, key)?.value
+  } catch {
+    // A revoked or hostile Proxy can reject descriptor inspection.
+    return undefined
+  }
 }
 
 /**

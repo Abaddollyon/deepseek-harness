@@ -95,6 +95,22 @@ describe('outcome mapping helpers', () => {
     })
   })
 
+  it('retains provider routing facts in failed background outcomes', async () => {
+    await expect(settleRun({
+      id: SessionId('child-rate-limit'),
+      localAgent: undefined,
+      result: Promise.resolve({
+        output: [],
+        stopReason: 'error',
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      }),
+      dispose: () => Promise.resolve(),
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: 'error; failure code: RATE_LIMIT; retry after: 12000 ms',
+    })
+  })
+
   it('treats a diagnostic-bearing remote abort as failed without changing local cancellation', async () => {
     await expect(settleRun({
       id: SessionId('child-remote-abort'),

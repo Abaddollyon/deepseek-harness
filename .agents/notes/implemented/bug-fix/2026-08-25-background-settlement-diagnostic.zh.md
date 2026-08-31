@@ -14,22 +14,22 @@ Status: implemented
 
 ## 决定
 
-`ActivationTerminal` 增加可选的 `diagnostic`，仅在拆卸失败这一边被填充；`settlementSummary` 将其以 ` Reason: <text>` 追加到 `error` 语句之后。文本取失败自身的 `String(failure)`，上限 4096 UTF-8 字节——与 `SubagentResult.diagnostic` 所记载的上限一致，也与一次性路径已通过 `detail: String(error)` 报告的细节一致。
+`ActivationTerminal` 增加可选的 `diagnostic`，仅在拆卸失败这一边被填充；`settlementSummary` 追加固定句子 ` Reason: Subagent teardown failed.`。该文本标识基础设施失败，但不会把异常消息、凭据、路径、协议载荷或注入指令转发到父会话。类型化失败恢复另行通过数据描述符遍历有界的 `cause` 与 `AggregateError.errors` 图，并包含恶意 Proxy 陷阱。
 
 原因只在子代理无法自述时附加。经由自身回合结束的 epoch 仍报告 `captured`，其 `stopReason` 由子代理自己的事件推导；这类结束对父代理而言已体现在子代理输出中，无需再合成解释。
 
 ## 备选方案
 
-**将每次失败都分类为代码——配额、传输、崩溃。** 否决：只有已知 LLM 原因会被分类为 `QUOTA` 或 `RATE_LIMIT`；原始拆卸诊断仍以可读文本保留，未分类的已捕获错误可能没有类型化 failure。更宽泛的分类法需要供应商专属类别，还会让消费者基于猜测分支。
+**将每次失败都分类为代码——配额、传输、崩溃。** 否决：只有已知 LLM 原因会被分类为 `QUOTA` 或 `RATE_LIMIT`；未分类的拆卸错误与已捕获错误没有类型化 failure。更宽泛的分类法需要供应商专属类别，还会让消费者基于猜测分支。
 
 **包含失败的调用栈。** 否决：父代理是一个决定重试还是改道的模型，调用栈对该决策属于传输层噪声，同时提高了把环境路径带入通知的风险。
 
-**原样、不设上限地报告抛出值。** 否决：diagnostic 契约规定 4096 字节上限，正是因为供应商载荷可能任意大，而通知会进入父代理的上下文窗口。
+**报告有字节上限的原始异常文本。** 否决：字节上限只能控制上下文成本，无法移除凭据、私有路径、原始载荷或提示注入文本。基础设施异常保留在内部。
 
 ## 验证
 
-`packages/subagent/subagent/tests/continuation.spec.ts` —— 'withholds an outcome the harness could not durably release' 注入一次处置失败，并断言父代理的通知携带 `Reason: SubagentError: subagent "<id>" activation handle disposal failed: scope unwind failed`。周边用例断言源自子代理自身回合的结束保持原有文本。
+`packages/subagent/subagent/tests/continuation.spec.ts` 注入普通处置失败与恶意 Proxy 处置失败，断言父通知仅包含固定原因，并证明嵌套所有权会被释放，从而让祖先完成结算。`failure.spec.ts` 覆盖循环 cause、`AggregateError.errors`、描述符陷阱和已撤销 Proxy，同时保留已知提供方事实。
 
 ## 影响
 
-编排后台子代理的父代理能够读取原始拆卸诊断，并在捕获到已知 LLM 原因时基于 `QUOTA` 或 `RATE_LIMIT` 分支——停止向已耗尽的路由重复派发、改用其他供应商，或把配额问题呈报给人。未分类的已捕获错误没有类型化 failure。通知仅在失败这一边增加一句有上限的说明。
+编排后台子代理的父代理可以区分基础设施拆卸失败与普通子代理错误，而不会接收基础设施异常文本。当已知 LLM 原因在拆卸后仍可恢复时，父代理可基于 `QUOTA` 或 `RATE_LIMIT` 分支；未分类错误没有类型化 failure。通知仅在拆卸失败这一边增加一句固定说明。

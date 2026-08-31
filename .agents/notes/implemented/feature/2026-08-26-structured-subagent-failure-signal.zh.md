@@ -24,8 +24,8 @@ SubagentResult.failure 是 diagnostic 的可选机器可读伴随字段。diagno
 
 **增加 unknown 成员或合成代码。** 拒绝，因为可选 failure 缺失已经表示没有已分类原因到达该 seam。猜测会让编排器重试无法成功的错误。
 
-本笔记部分取代[后台结算诊断](../bug-fix/2026-08-25-background-settlement-diagnostic.zh.md)中关于延后分类的讨论；后者仍是有界可读诊断的权威记录。
+本笔记部分取代[后台结算诊断](../bug-fix/2026-08-25-background-settlement-diagnostic.zh.md)中关于延后分类的讨论；后者仍是父会话安全的拆卸诊断权威记录。
 
 ## 后果
 
-一次性本地结果和适用的后台结算通知会携带该信号。父代理通知会说明提供方配额已耗尽或路由暂时受到速率限制，并且只在已知时加入 retry-after 秒数；不会暴露传输术语、凭据或原始提供方载荷。现有拆卸诊断保持不变且仍有界。SDK 的 `SubagentFinishedNotification` 载荷不携带 failure；TypeScript 与 Python SDK 通知都不扩展该字段。
+一次性本地结果和适用的后台结算通知会携带该信号。父代理通知会说明提供方配额已耗尽或路由暂时受到速率限制，并且只在已知时加入 retry-after 秒数；不会暴露传输术语、凭据、原始提供方载荷或基础设施异常文本。拆卸使用一条固定的通用诊断，同时由有界 cause 遍历保留已知类型化事实。SDK 的 `SubagentFinishedNotification` 载荷不携带 failure；TypeScript 与 Python SDK 通知都不扩展该字段。

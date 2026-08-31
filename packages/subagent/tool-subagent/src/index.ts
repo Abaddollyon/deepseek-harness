@@ -201,6 +201,7 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const failure = result.failure === undefined
     ? ''
     : `\nFailure code: ${result.failure.code}`
+      + (result.failure.retryAfterMs === undefined ? '' : `\nRetry after: ${result.failure.retryAfterMs} ms`)
   const text = result.output
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
     .map(block => block.text)
