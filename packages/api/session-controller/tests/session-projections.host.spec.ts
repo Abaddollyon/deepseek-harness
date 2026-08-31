@@ -467,21 +467,32 @@ describe('Session control projection frames', () => {
     return frames
   }
 
+  /**
+   * Let the open stream drain before the next append. A live agent loop awaits
+   * between committed events, so this is the delivery cadence the per-unit push
+   * contract below is written against; appending several events in one
+   * synchronous run instead exercises the control queue's coalescing, which
+   * control-coalescing.host.spec.ts owns.
+   */
+  const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
+
   it('broadcasts a frame per changed unit with the causing seq, and none for same-reference applies', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())
     const proxy = remote(ctx)
     // The controller's onChanged subscription lives in an inject child whose
     // fiber activates asynchronously; yield until it lands before appending.
-    await new Promise(resolve => setTimeout(resolve, 0))
+    await settle()
     const abort = new AbortController()
     const stream = proxy.control(abort.signal)
     const collected = collect(stream, 5, abort)
 
     const now = vi.spyOn(Date, 'now').mockReturnValue(100)
     seedMessages(session, 1)
+    await settle()
     now.mockReturnValue(200)
     session.append('turn/start', { turn: 1 })
+    await settle()
     now.mockReturnValue(300)
     seedMessages(session, 1)
     now.mockRestore()

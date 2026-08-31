@@ -1009,7 +1009,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/jobs/jobs-local/src/index.ts:52`](../packages/jobs/jobs-local/src/index.ts)
+Source: [`packages/jobs/jobs-local/src/index.ts:51`](../packages/jobs/jobs-local/src/index.ts)
 
 <a id="deepseek-aidsh-jobs-store-domain"></a>
 
@@ -1840,7 +1840,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/jobs/run-supervisor/src/index.ts:94`](../packages/jobs/run-supervisor/src/index.ts)
+Source: [`packages/jobs/run-supervisor/src/index.ts:95`](../packages/jobs/run-supervisor/src/index.ts)
 
 <a id="deepseek-aidsh-sandbox-local"></a>
 
