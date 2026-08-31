@@ -487,6 +487,7 @@ export class RunSupervisor {
       const { adoptedFromIncarnation: _marker, ...cleared } = current
       try {
         await pass.store.put(cleared)
+        this.adopted.set(record.id, candidate)
       } catch (error: unknown) {
         this.ctx.logger.warn(`run-supervisor: failed to clear adoption marker ${record.id}: ${String(error)}`)
       }
@@ -496,11 +497,16 @@ export class RunSupervisor {
   /** Deliver unread terminal records restored from an earlier incarnation. */
   private deliverPersistedCompletions(pass: ReconcilePass): void {
     for (const record of pass.store.list()) {
-      if (record.incarnation === PROCESS_INCARNATION || record.reported) continue
+      const adopted = this.adopted.get(record.id)
+      if ((record.incarnation === PROCESS_INCARNATION && adopted === undefined) || record.reported) {
+        if (adopted !== undefined) this.adopted.delete(record.id)
+        continue
+      }
       if (record.status === 'running' || record.status === 'stopping') continue
       if (laneSettlement(record) !== undefined) continue
       const owner = record.ownerSession ?? undefined
       if (owner === undefined) continue
+      if (this.ctx.get('agents')?.get(owner) === undefined) continue
       this.deliverNoticeWhenLive(pass, owner, {
         id: record.id,
         kind: record.kind,
@@ -509,7 +515,8 @@ export class RunSupervisor {
         detail: record.detail ?? undefined,
         reported: record.reported,
         outputLimitBytes: record.outputLimitBytes ?? undefined,
-      })
+      }, adopted)
+      if (adopted !== undefined) this.adopted.delete(record.id)
     }
   }
 
@@ -803,6 +810,7 @@ export class RunSupervisor {
     const adopted = this.adopted.get(snapshot.id)
     if (adopted !== undefined) {
       this.adopted.delete(snapshot.id)
+      this.track(pass, this.clearAdoptionMarker(adopted))
       if (!snapshot.reported) {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
@@ -819,6 +827,15 @@ export class RunSupervisor {
         }
       }
     }
+  }
+
+  /** Clear the marker that the registry may have re-persisted with completion state. */
+  private async clearAdoptionMarker(candidate: PendingCandidate): Promise<void> {
+    const store = this.ctx.get('jobStore')
+    const current = store?.get(candidate.record.id)
+    if (current === undefined || current.adoptedFromIncarnation !== candidate.record.incarnation) return
+    const { adoptedFromIncarnation: _marker, ...cleared } = current
+    await store?.put(cleared)
   }
 
   /**
@@ -898,7 +915,12 @@ export class RunSupervisor {
   }
 
   /** Deliver exactly one completion notice to a live owner, then claim it reported. */
-  private deliverNoticeWhenLive(pass: ReconcilePass | undefined, owner: SessionId, view: TerminalView): void {
+  private deliverNoticeWhenLive(
+    pass: ReconcilePass | undefined,
+    owner: SessionId,
+    view: TerminalView,
+    adopted?: PendingCandidate,
+  ): void {
     const agent = this.ctx.get('agents')?.get(owner)
     if (agent === undefined) return
     const text = fitNotice(
@@ -917,7 +939,10 @@ export class RunSupervisor {
     // Claim the terminal report so no later boot re-delivers. wait() marks a
     // terminal job reported without consuming its output cursor (read()
     // would), and a record already evicted simply leaves nothing to mark.
-    const claimed = this.ctx.jobs.wait(view.id, 1, agent).then(() => {}, () => {})
+    const claimed = this.ctx.jobs.wait(view.id, 1, agent).then(
+      async () => { if (adopted !== undefined) await this.clearAdoptionMarker(adopted) },
+      () => {},
+    )
     this.track(pass, claimed)
   }
 
