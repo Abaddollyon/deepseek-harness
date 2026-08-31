@@ -76,7 +76,11 @@ class RoutedContextAdapter extends LlmAdapter {
 class ObservableCompactionAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
-  constructor(private readonly summaryContextWindow: () => number) {
+  constructor(
+    private readonly summaryContextWindow: () => number,
+    private readonly conversationContextWindow = 1_000,
+    private readonly onRequest: (options: GenerateOptions) => void = () => {},
+  ) {
     super()
   }
 
@@ -88,13 +92,14 @@ class ObservableCompactionAdapter extends LlmAdapter {
       context: {
         contextWindow: provider === 'summary-provider'
           ? this.summaryContextWindow()
-          : 1_000,
+          : this.conversationContextWindow,
       },
     })
   }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    this.onRequest(options)
     const text = options.purpose === 'compaction' ? 'boundary checkpoint' : 'continued answer'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -2018,142 +2023,6 @@ describe('automatic listener and loader composition', () => {
     expect(ctx.get('tokenMeter')).toBeUndefined()
   })
 
-  it('deduplicates concurrent duplicate canonical admission', async () => {
-    const ctx = createContext()
-    class GatedEngine extends TestCompactionEngine {
-      entered = 0
-      gate: Promise<void> = Promise.resolve()
-
-      override async summarize(
-        input: SummarizationInput,
-        owner: Agent,
-        signal?: AbortSignal,
-      ): Promise<SummaryResult> {
-        this.entered += 1
-        await this.gate
-        return super.summarize(input, owner, signal)
-      }
-    }
-    const compact = new GatedEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
-    let release!: () => void
-    compact.gate = new Promise<void>((resolve) => { release = resolve })
-    const session = conversation(4)
-    const owner = agent(session, MODEL)
-    const first = preflight(ctx, owner)
-    await vi.waitFor(() => { expect(compact.entered).toBe(1) })
-    const cancelledBeforeJoin = new AbortController()
-    const measure = ctx.tokenMeter.measure.bind(ctx.tokenMeter)
-    vi.spyOn(ctx.tokenMeter, 'measure').mockImplementationOnce((subject) => {
-      cancelledBeforeJoin.abort('cancelled before joining shared work')
-      return measure(subject)
-    })
-    await expect(preflight(ctx, owner, cancelledBeforeJoin.signal)).resolves.toBeUndefined()
-
-    const controller = new AbortController()
-    const cancelled = preflight(ctx, owner, controller.signal)
-    const joined = preflight(ctx, owner)
-    controller.abort('waiter cancelled')
-    await expect(cancelled).resolves.toBeUndefined()
-    release()
-    const results = await Promise.all([first, joined])
-    expect(results).toEqual([
-      { kind: 'retry', surfaceGeneration: 1 },
-      { kind: 'retry', surfaceGeneration: 1 },
-    ])
-    expect(compact.calls).toHaveLength(1)
-
-    const other = conversation(4)
-    await preflight(ctx, agent(other, MODEL))
-    expect(compact.calls).toHaveLength(2)
-
-    compact.gate = new Promise<void>((resolve) => { release = resolve })
-    compact.error = new Error('retryable failure')
-    const failedSession = conversation(4)
-    const failedOwner = agent(failedSession, MODEL)
-    const failedFirst = preflight(ctx, failedOwner)
-    await vi.waitFor(() => { expect(compact.entered).toBe(3) })
-    const failedJoined = preflight(ctx, failedOwner)
-    release()
-    await expect(Promise.all([failedFirst, failedJoined]))
-      .rejects.toThrow('retryable failure')
-    compact.error = undefined
-    await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeDefined()
-  })
-
-  it('delegates a joined admission that finished without surface progress', async () => {
-    const ctx = createContext()
-    const compact = new TestCompactionEngine(ctx, {
-      thresholdRatio: 0.5,
-      retainTokens: 180,
-      maxTokens: 8_192,
-    })
-    const session = conversation(4)
-    const owner = agent(session, MODEL)
-    const before = [...session.surface.nodes]
-
-    // The summarizer replay budget cannot fit, so the shared admission work
-    // declines without a replacement; the joining dispatch must delegate too.
-    const results = await Promise.all([preflight(ctx, owner), preflight(ctx, owner)])
-    expect(results).toEqual([undefined, undefined])
-    expect(compact.calls).toHaveLength(0)
-    expect(session.surface.nodes).toEqual(before)
-  })
-
-  it('releases only its own admission when a newer canonical request supersedes it', async () => {
-    const ctx = createContext()
-    const warnings: string[] = []
-    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
-
-    class GatedEngine extends TestCompactionEngine {
-      gate: Promise<void> = Promise.resolve()
-
-      override async summarize(
-        input: SummarizationInput,
-        owner: Agent,
-        signal?: AbortSignal,
-      ): Promise<SummaryResult> {
-        const result = await super.summarize(input, owner, signal)
-        await this.gate
-        return result
-      }
-    }
-    const compact = new GatedEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
-    let releaseSummary!: () => void
-    compact.gate = new Promise<void>((resolve) => { releaseSummary = resolve })
-
-    const session = conversation(4)
-    const owner = agent(session, MODEL)
-    const baseline = session.requestHeader()
-    if (baseline === undefined) throw new Error('test session needs a canonical request header')
-
-    // The first admission owns the compaction bracket inside summarization
-    // while a second canonical request for the same session starts its own
-    // admission work and fails on the active bracket. The superseded first
-    // admission must leave the registry entry it no longer owns untouched.
-    const first = preflight(ctx, owner)
-    await vi.waitFor(() => { expect(compact.calls).toHaveLength(1) })
-
-    const second = agentEvents(ctx, owner).waterfall(
-      'agent/request-preflight',
-      {
-        turn: 1,
-        step: 1,
-        header: { ...baseline, config: { ...baseline.config, maxTokens: 128 } },
-        contextWindow: 1_000,
-        attempt: 1,
-        maxAttempts: 8,
-        signal: SIGNAL,
-      },
-      () => Promise.resolve<RequestPreflightAction>(undefined),
-    )
-    await expect(second).rejects.toThrow('compaction lock is already active')
-    expect(compact.calls).toHaveLength(1)
-
-    releaseSummary()
-    await expect(first).resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
-    expect(warnings).toEqual([])
-  })
-
   it('retries admission from the pruned surface when pruning alone clears request pressure', async () => {
     const ctx = createContext(1_000)
     void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
@@ -2332,6 +2201,107 @@ describe('automatic listener and loader composition', () => {
       const admitted = JSON.stringify(conversationRequests[0]!.messages)
       expect(admitted).toContain('boundary checkpoint')
       expect(admitted).not.toContain('user 1')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('starts its retry budget when an earlier listener replaces the same public request series', async () => {
+    const ctx = new Context()
+    const maxTokens = 64
+    const retainTokens = 80
+    let owner: Agent | undefined
+    let waterfallAttempt = 0
+    const summaryAttempts: number[] = []
+
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const adapter = new ObservableCompactionAdapter(() => {
+      if (owner === undefined) throw new Error('summary capacity resolved before agent creation')
+      const header = owner.session.requestHeader()
+      const nodes = ctx.tokenMeter.measure(owner.session).nodes
+      const nextLargeNode = nodes.findIndex(node => node.tokens > 200)
+      if (header === undefined || nextLargeNode === -1) {
+        throw new Error('seeded real agent needs a routed priced surface')
+      }
+      return maxTokens
+        + ctx.tokenMeter.estimateHeader(header)
+        + ctx.tokenMeter.estimateMessage(createCompactionInstructionMessage())
+        + nodes.slice(0, nextLargeNode + 1).reduce((tokens, node) => tokens + node.tokens, 0)
+    }, 256, (request) => {
+      if (request.purpose === 'compaction') summaryAttempts.push(waterfallAttempt)
+    })
+    ctx.llm.registerAdapter([MODEL, 'summary-provider'], adapter)
+    const attempts: number[] = []
+    const seriesCounts: number[] = []
+    ctx.on('agent/request-preflight', async ({ agent: subject, attempt }, next) => {
+      if (subject !== owner) return next()
+      waterfallAttempt = attempt
+      attempts.push(attempt)
+      seriesCounts.push(subject.session.events.filter(event => event.type === 'request/header'
+        && (event.data.reason === 'initial' || event.data.reason === 'resume'
+          || event.data.reason === 'series' || event.data.startsSeries === true)).length)
+      if (attempt !== 1) return next()
+      const tail = subject.session.surface.nodes.at(-1)
+      if (tail === undefined) throw new Error('public request needs a surface message')
+      subject.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'earlier listener checkpoint' }],
+        source: { kind: 'plugin', plugin: 'earlier-preflight' },
+      }), {
+        surfaceOp: { op: 'replace', start: tail, end: tail },
+        sourceEventSeqs: [tail],
+      })
+      return {
+        kind: 'retry',
+        surfaceGeneration: subject.session.surface.replaceGeneration,
+      }
+    })
+    await ctx.plugin(BasicCompactionEngine, {
+      thresholdRatio: 0.5,
+      retainTokens,
+      maxTokens,
+      maxOverflowRetries: 2,
+      summarizationProvider: 'summary-provider',
+      summarizationModel: 'summary-model',
+    })
+
+    try {
+      const seed = conversation(8, 'large fixture '.repeat(300).trim()).events.slice(0, -1)
+      const handle = await ctx.agentLoop.createAgent(ctx, {
+        sessionId: SessionId('earlier-listener-replacement'),
+        seed,
+        agentOptions: { provider: MODEL, model: MODEL },
+      })
+      owner = handle.agent
+      owner.followup(createUserMessage({
+        content: [{ type: 'text', text: 'public followup replaced before compaction' }],
+        source: { kind: 'user' },
+      }))
+      await owner.whenIdle()
+
+      const summaryRequests = adapter.requests.filter(request => request.purpose === 'compaction')
+      const conversationRequests = adapter.requests.filter(request => request.purpose === undefined)
+      expect({
+        attempts,
+        seriesCounts,
+        summaryAttempts,
+        summaryRequests: summaryRequests.length,
+        conversationRequests: conversationRequests.length,
+        replaceGeneration: owner.session.surface.replaceGeneration,
+      }).toEqual({
+        attempts: [1, 2, 3, 4],
+        seriesCounts: [2, 2, 2, 2],
+        summaryAttempts: [2, 3],
+        summaryRequests: 2,
+        conversationRequests: 1,
+        replaceGeneration: 3,
+      })
+      expect(JSON.stringify(conversationRequests[0]!.messages)).toContain('earlier listener checkpoint')
     } finally {
       await ctx.fiber.dispose()
     }

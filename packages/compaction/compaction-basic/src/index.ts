@@ -54,28 +54,7 @@ export type {
 /** The region transaction's view of this service's dynamically dispatched summarizer. */
 type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortSignal) => Promise<SummaryResult>
 
-type AdmissionWork = { key: string; generation: number; work: Promise<CompactionResult | null> }
 type AdmissionAttempt = { key: string; count: number }
-
-/** Join one admission without cancelling its shared work or suppressing its rejection. */
-async function awaitAdmissionWork(work: Promise<CompactionResult | null>, signal: AbortSignal): Promise<boolean> {
-  if (signal.aborted) return false
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const finish = (settle: () => void): void => {
-      if (settled) return
-      settled = true
-      signal.removeEventListener('abort', onAbort)
-      settle()
-    }
-    const onAbort = (): void => finish(() => resolve(false))
-    signal.addEventListener('abort', onAbort, { once: true })
-    void work.then(
-      () => finish(() => resolve(true)),
-      error => finish(() => reject(error)),
-    )
-  })
-}
 
 function canonicalRequestKey(session: Session, header: EpochHeader): string {
   const series = session.events.filter(event => event.type === 'request/header'
@@ -158,7 +137,6 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly warnedPressureConfigTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
-  private readonly requestAdmissions = new WeakMap<Session, AdmissionWork>()
   private readonly requestAttempts = new WeakMap<Session, AdmissionAttempt>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
@@ -226,31 +204,15 @@ export class BasicCompactionEngine extends CompactionEngine {
 
       const generation = agent.session.surface.replaceGeneration
       const admissionKey = canonicalRequestKey(agent.session, header)
-      const key = admissionKey + ':' + String(generation)
-      const prior = this.requestAdmissions.get(agent.session)
-      if (prior?.key === key) {
-        if (!await awaitAdmissionWork(prior.work, signal)) return await next()
-        signal.throwIfAborted()
-        return agent.session.surface.replaceGeneration > generation
-          ? { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
-          : next()
-      }
       const priorAttempt = this.requestAttempts.get(agent.session)
       const admissionAttempt = priorAttempt?.key === admissionKey ? priorAttempt.count + 1 : 1
       if (admissionAttempt > spec.maxOverflowRetries) return next()
       this.requestAttempts.set(agent.session, { key: admissionKey, count: admissionAttempt })
-      const work = this.compactForPreflight(agent, header, spec, signal)
-      this.requestAdmissions.set(agent.session, { key, generation, work })
-      try {
-        const result = await work
-        signal.throwIfAborted()
-        if (agent.session.surface.replaceGeneration <= generation) return await next()
-        if (result !== null) logResult(result, 'request preflight')
-        return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
-      } finally {
-        const current = this.requestAdmissions.get(agent.session)
-        if (current?.work === work) this.requestAdmissions.delete(agent.session)
-      }
+      const result = await this.compactForPreflight(agent, header, spec, signal)
+      signal.throwIfAborted()
+      if (agent.session.surface.replaceGeneration <= generation) return await next()
+      if (result !== null) logResult(result, 'request preflight')
+      return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
     })
 
     ctx.on('agent/request-error', async (
