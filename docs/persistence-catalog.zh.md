@@ -287,7 +287,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'compaction/end': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null; error?: string }
 ```
 
-来源：[`packages/compaction/compaction/src/types.ts:71`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:72`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionprune--log-only"></a>
 
@@ -313,7 +313,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/compaction/compaction/src/types.ts:81`](../packages/compaction/compaction/src/types.ts)
+来源：[`packages/compaction/compaction/src/types.ts:82`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionstart--log-only"></a>
 
@@ -350,6 +350,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
   summary: ContentBlock[]
   shadowedRange: { start: number; end: number }
   shadowedSeqs: number[]
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
   /** The provider route that wrote the summary. */
   provider: string

@@ -52,7 +52,7 @@ interface CompactionResult {
   shadowedRange: { start: number; end: number }
   /** The seqs of all shadowed surface nodes, in surface order. */
   shadowedSeqs: number[]
-  /** Estimated token count of the shadowed content. */
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
 }
 ```
