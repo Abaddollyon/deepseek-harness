@@ -167,14 +167,18 @@ interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
+  /**
+   * Explicit reasoning effort seeded into a new loop's first request proposal.
+   * It overrides a resumed value; omission restores only an explicit value
+   * persisted for the same provider/model route.
+   */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
 }
 ```
 
-在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。显式 `reasoningEffort` 会为该路由的首次请求提供初始值；确切模型解析会校验该值，省略时则允许填入适配器默认值。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
+在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。`reasoningEffort` 为新建循环实例的首个请求提案设定种子值，并优先于恢复日志中的显式值。省略时，恢复仅会取回为同一 provider/model 记录的显式值；由适配器物化的默认值会从后续提案中移除，并基于当前适配器注册重新解析。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
 
 inbox 即投递词汇——agent 以持久投影形式拥有的两条有序待处理消息列表：
 
@@ -249,7 +253,14 @@ type PreStepDecision =
 type RequestErrorAction = { kind: 'retry' } | undefined
 ```
 
-`agent/pre-step` 是请求推导前唯一的 waterfall（瀑布式）监听器链。`agent/turn-stopping` 在轮次没有工具或 steering（中途引导）后续时运行，先于最后一次 steering 排空。
+`agent/request-preflight` 在规范 header 和已解析路由容量被记录之后、消息派生之前接收它们。监听器通过 `next()` 委托，或返回由循环在重新分派前验证的替换 generation：
+
+```ts type-equiv
+/** Action returned by a listener after committing a newer replacement surface. */
+type RequestPreflightAction = { kind: 'retry'; surfaceGeneration: number } | undefined
+```
+
+`agent/pre-step` 是请求推导前唯一的串行监听器链。`agent/turn-stopping` 在轮次没有工具或 steering（中途引导）后续时运行，先于最后一次 steering 排空。
 
 `agent/session-start` 携带 `SessionStartSource`（会话生命周期为何开始；桥接层据此匹配其 SessionStart）：
 
@@ -1009,6 +1020,49 @@ Handle one failed model-request attempt before the loop retries or closes its st
 ```
 
 Types: [LlmFailure](llm-streaming.zh.md) · [ResolvedRetryPolicy](llm-streaming.zh.md) · [Scoped](scope.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
+<a id="agentrequest-preflight--waterfall"></a>
+
+#### `agent/request-preflight` — waterfall
+
+Admit one exact model request before its messages are derived. The payload carries the canonical header just logged for this request and the resolved adapter capacity, so listeners price admission against the exact target request rather than a stale one. Calling `next()` admits the request. A listener that durably reduced request pressure (for example through compaction) returns `{ kind: 'retry' }` without calling `next()`; the loop then re-dispatches the preflight so every listener re-admits against the rebuilt surface, and only after that admission passes are request messages derived. The action identifies the committed replacement generation; the loop rejects stale or log-only progress. Listeners own their policy budgets, while the loop's fixed safety ceiling admits the full request after repeated productive retries so provider overflow recovery remains available. The default `undefined` admits the request unchanged; a request that still exceeds capacity is admitted and left to the provider's overflow failure and `agent/request-error` recovery, never silently truncated.
+
+```ts cordis-catalog
+/**
+ * Admit one exact model request before its messages are derived. The
+ * payload carries the canonical header just logged for this request and
+ * the resolved adapter capacity, so listeners price admission against the
+ * exact target request rather than a stale one. Calling `next()` admits
+ * the request. A listener that durably reduced request pressure (for
+ * example through compaction) returns `{ kind: 'retry' }` without
+ * calling `next()`; the loop then re-dispatches the preflight so every
+ * listener re-admits against the rebuilt surface, and only after that
+ * admission passes are request messages derived. The action identifies
+ * the committed replacement generation; the loop rejects stale or
+ * log-only progress. Listeners own their policy budgets, while the loop's
+ * fixed safety ceiling admits the full request after repeated productive
+ * retries so provider overflow recovery remains available. The default
+ * `undefined` admits the request unchanged; a
+ * request that still exceeds capacity is admitted and left to the
+ * provider's overflow failure and `agent/request-error` recovery, never
+ * silently truncated.
+ * @param payload.agent - the agent making the model call.
+ * @param payload.turn - the open turn number.
+ * @param payload.step - the step whose request this is.
+ * @param payload.header - the exact canonical request header logged for this request.
+ * @param payload.contextWindow - the resolved adapter context capacity, when advertised.
+ * @param payload.attempt - one-based dispatch count for this canonical request.
+ * @param payload.maxAttempts - fixed loop safety ceiling for this canonical request.
+ * @param payload.signal - the current turn's explicit abort signal.
+ * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+ * @mode waterfall
+ */
+'agent/request-preflight'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; attempt: number; maxAttempts: number; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>
+```
+
+Types: [EpochHeader](session.zh.md) · [Scoped](scope.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 

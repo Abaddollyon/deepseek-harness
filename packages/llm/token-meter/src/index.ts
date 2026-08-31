@@ -174,6 +174,17 @@ export class TokenMeter extends Service {
     }))
   }
 
+  /**
+   * Heuristically price the non-surface request envelope — system prompt and
+   * tool schemas — under the same fixed heuristic `measure` applies (instance
+   * face of the pure `estimateHeader` export from `estimate.ts`).
+   * @param header - canonical envelope, or undefined before any request.
+   * @returns heuristic system plus tool tokens; 0 for an absent envelope.
+   */
+  estimateHeader(header: EpochHeader | undefined): number {
+    return estimateHeader(header)
+  }
+
   /** Resolve the routed model's image pricing, when the llm service and route declare one. */
   private _routeImagePricing(header: EpochHeader | undefined): LlmImageRequestPricing | undefined {
     const config = header?.config

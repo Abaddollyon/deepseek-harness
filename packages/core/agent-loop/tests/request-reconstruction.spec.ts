@@ -232,24 +232,21 @@ describe('request stability across the loop', () => {
     ])
     expect(headers.map(event => event.data.reason)).toEqual(['initial', 'change'])
 
-    for (const [model, effort] of [
-      ['mock', ReasoningEffortId('max')],
-      ['replacement', ReasoningEffortId('high')],
-    ] as const) {
+    for (const model of ['mock', 'replacement'] as const) {
       const resumedAdapter = new MockAdapter([textResponse('resumed')], reasoning)
       const resumedCtx = await harness(resumedAdapter)
       const resumedHandle = await resumedCtx.agents.create({
         sessionId: SessionId(`effort-${model}`),
         seed: structuredClone(agent.session.events),
-        agentOptions: { provider: 'mock', model },
+        agentOptions: { provider: 'mock', model, reasoningEffort: ReasoningEffortId('high') },
       })
       send(resumedHandle.agent, 'resumed')
       await waitForIdle(resumedCtx, resumedHandle.agent)
 
       expect(resumedAdapter.requests[0]?.model).toBe(model)
-      expect(resumedAdapter.requests[0]?.reasoningEffort).toBe(effort)
+      expect(resumedAdapter.requests[0]?.reasoningEffort).toBe(ReasoningEffortId('high'))
       const resumedHeaders = resumedHandle.agent.session.events.filter(event => event.type === 'request/header')
-      expect(resumedHeaders.at(-1)?.data.header.config.reasoningEffort).toBe(effort)
+      expect(resumedHeaders.at(-1)?.data.header.config.reasoningEffort).toBe(ReasoningEffortId('high'))
       expect(resumedHeaders.at(-1)?.data.reason).toBe('resume')
     }
   })

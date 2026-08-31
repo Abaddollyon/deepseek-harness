@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type { LlmCallConfig, LlmFailure, ReasoningEffortId, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AgentCancelCause, EpochHeader, Session, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Inbox } from './inbox.ts'
 import type { Agent } from './types.ts'
@@ -27,7 +27,11 @@ export interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
+  /**
+   * Explicit reasoning effort seeded into a new loop's first request proposal.
+   * It overrides a resumed value; omission restores only an explicit value
+   * persisted for the same provider/model route.
+   */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
@@ -64,6 +68,9 @@ export type PreStepDecision =
 
 /** Action returned by a listener that owns model-request recovery. */
 export type RequestErrorAction = { kind: 'retry' } | undefined
+
+/** Action returned by a listener after committing a newer replacement surface. */
+export type RequestPreflightAction = { kind: 'retry'; surfaceGeneration: number } | undefined
 
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
@@ -251,6 +258,36 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
     */
     'agent/request'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; signal: AbortSignal }, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
+    /**
+     * Admit one exact model request before its messages are derived. The
+     * payload carries the canonical header just logged for this request and
+     * the resolved adapter capacity, so listeners price admission against the
+     * exact target request rather than a stale one. Calling `next()` admits
+     * the request. A listener that durably reduced request pressure (for
+     * example through compaction) returns `{ kind: 'retry' }` without
+     * calling `next()`; the loop then re-dispatches the preflight so every
+     * listener re-admits against the rebuilt surface, and only after that
+     * admission passes are request messages derived. The action identifies
+     * the committed replacement generation; the loop rejects stale or
+     * log-only progress. Listeners own their policy budgets, while the loop's
+     * fixed safety ceiling admits the full request after repeated productive
+     * retries so provider overflow recovery remains available. The default
+     * `undefined` admits the request unchanged; a
+     * request that still exceeds capacity is admitted and left to the
+     * provider's overflow failure and `agent/request-error` recovery, never
+     * silently truncated.
+     * @param payload.agent - the agent making the model call.
+     * @param payload.turn - the open turn number.
+     * @param payload.step - the step whose request this is.
+     * @param payload.header - the exact canonical request header logged for this request.
+     * @param payload.contextWindow - the resolved adapter context capacity, when advertised.
+     * @param payload.attempt - one-based dispatch count for this canonical request.
+     * @param payload.maxAttempts - fixed loop safety ceiling for this canonical request.
+     * @param payload.signal - the current turn's explicit abort signal.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/request-preflight'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; attempt: number; maxAttempts: number; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>
     /**
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
