@@ -57,11 +57,27 @@ type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortS
 type AdmissionWork = { key: string; generation: number; work: Promise<CompactionResult | null> }
 type AdmissionAttempt = { key: string; count: number }
 
-function canonicalRequestKey(session: Session, header: EpochHeader, generation: number): string {
+async function awaitAdmissionWork(work: Promise<CompactionResult | null>, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (completed: boolean): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      resolve(completed)
+    }
+    const onAbort = (): void => finish(false)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void work.then(() => finish(true), () => finish(true))
+  })
+}
+
+function canonicalRequestKey(session: Session, header: EpochHeader): string {
   const series = session.events.filter(event => event.type === 'request/header'
     && (event.data.reason === 'initial' || event.data.reason === 'resume'
       || event.data.reason === 'series' || event.data.startsSeries === true)).length
-  return JSON.stringify(header) + ':' + String(series) + ':' + String(generation)
+  return JSON.stringify(header) + ':' + String(series)
 }
 
 /** Resolve the exact provider/model durably routed for the latest request. */
@@ -207,24 +223,20 @@ export class BasicCompactionEngine extends CompactionEngine {
       }
 
       const generation = agent.session.surface.replaceGeneration
-      const key = canonicalRequestKey(agent.session, header, generation)
+      const admissionKey = canonicalRequestKey(agent.session, header)
+      const key = admissionKey + ':' + String(generation)
       const prior = this.requestAdmissions.get(agent.session)
       if (prior?.key === key) {
-        try {
-          await prior.work
-        } catch {
-          signal.throwIfAborted()
-          return await next()
-        }
+        if (!await awaitAdmissionWork(prior.work, signal)) return await next()
         signal.throwIfAborted()
         return agent.session.surface.replaceGeneration > generation
           ? { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
           : next()
       }
       const priorAttempt = this.requestAttempts.get(agent.session)
-      const admissionAttempt = priorAttempt?.key === key ? priorAttempt.count + 1 : 1
+      const admissionAttempt = priorAttempt?.key === admissionKey ? priorAttempt.count + 1 : 1
       if (admissionAttempt > policy.maxOverflowRetries) return next()
-      this.requestAttempts.set(agent.session, { key, count: admissionAttempt })
+      this.requestAttempts.set(agent.session, { key: admissionKey, count: admissionAttempt })
       const work = this.compactForPreflight(agent, header, contextWindow, policy, signal)
       this.requestAdmissions.set(agent.session, { key, generation, work })
       try {
