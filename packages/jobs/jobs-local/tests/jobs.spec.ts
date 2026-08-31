@@ -1451,7 +1451,8 @@ describe('LocalJobRegistry.onJobAdopted', () => {
       })
     })
 
-    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: new Promise<JobOutcome>(() => {}) })))
+    const done = Promise.withResolvers<JobOutcome>()
+    ctx.jobs.registerResumer('bash', () => resumePlan(() => ({ cancel: () => {}, done: done.promise })))
     await tick()
 
     expect(seen).toHaveLength(1)
@@ -1467,6 +1468,9 @@ describe('LocalJobRegistry.onJobAdopted', () => {
     })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('onJobAdopted listener failed'))
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('adoption observer boom'))
+    done.resolve({ status: 'completed' })
+    await tick()
+    expect(state.records.get(stored.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
   })
 
   it('awaits every observer before wiring an already-resolved done, which settles completed', async () => {
@@ -1478,6 +1482,7 @@ describe('LocalJobRegistry.onJobAdopted', () => {
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     const gate = Promise.withResolvers<undefined>()
     const order: string[] = []
+    ctx.jobs.onJobAdopted(() => true)
     ctx.jobs.onJobAdopted(async () => { await gate.promise; order.push('observer') })
     ctx.jobs.onJobAdopted(async () => { throw new Error('async observer boom') })
 

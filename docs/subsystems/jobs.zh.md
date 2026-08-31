@@ -326,8 +326,10 @@ abstract onJobsChanged(listener: JobsChangedListener): () => void
  * every listener sees every adoption regardless of owner scope. A returned
  * promise is awaited before the registry attaches the producer's
  * completion wiring, so the observer's account lands before any settlement
- * it must recognize; every listener runs, and failures are contained and
- * logged only after all of them settle.
+ * it must recognize. `true` confirms a durable account and lets later
+ * registry mirrors omit the marker; `false` rejects ownership, and `void`
+ * remains observational. Every listener runs, and failures are contained
+ * and logged only after all of them settle.
  * @param listener - receives the adopted snapshot and the prior process
  *   incarnation that wrote the record before the restart.
  * @returns disposer that unregisters the listener.

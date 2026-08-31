@@ -88,7 +88,7 @@ kind: "package-reference"
 
 ### scope 分层
 
-`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是宿主范围的，因为重启核算跨越会话。resumer 返回延迟生产方计划：registry 先提交采用标记并等待观察者，账目接受所有权后才启动生产方。store 缺失、标记写入被拒或观察者显式否决时，生产方工作因此不会启动；多次重启之间，最早尚未核算的标记继续保持权威。
+`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是宿主范围的，因为重启核算跨越会话。resumer 返回延迟生产方计划：registry 先提交采用标记并等待观察者，账目接受所有权后才启动生产方。观察者返回 `true` 确认其持久账目后，registry 会丢弃内存中的标记，防止后续报告与结算镜像复活 supervisor 已清除的证明；若只有观察性监听器，则保留标记。store 缺失、标记写入被拒或观察者显式否决时，生产方工作因此不会启动；多次重启之间，最早尚未核算的标记继续保持权威。
 
 ### 准入与结算
 
