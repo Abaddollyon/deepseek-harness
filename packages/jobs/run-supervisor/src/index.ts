@@ -43,6 +43,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
 import { PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs/incarnation'
+import { JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL } from '@deepseek-ai/dsh-jobs'
 import type { JobId, JobKind, JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
 import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
@@ -451,8 +452,9 @@ export class RunSupervisor {
    * clears only after the append is confirmed recorded or found already
    * present — a lane failure or an owner no lane can reach keeps it for a
    * later boot. Terminal records use the same marker account before their
-   * unread completion is delivered, and a cleared marker cannot double-account
-   * a later boot.
+   * unread completion is delivered, except a rejected adoption account: its
+   * producer never started, so that marker clears without a false
+   * `run/resumed`. A cleared marker cannot double-account a later boot.
    */
   private async accountAdoptionMarkers(pass: ReconcilePass): Promise<void> {
     for (const record of pass.store.list()) {
@@ -464,7 +466,9 @@ export class RunSupervisor {
         detail: '',
       }
       const owner = record.ownerSession ?? undefined
-      if (owner !== undefined) {
+      const accountRejected = record.status === 'failed'
+        && record.detail === JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL
+      if (owner !== undefined && !accountRejected) {
         // The marker clears only once the account is durably recorded (or
         // found already present); a lane failure or an unreachable owner
         // retains it for a later boot.

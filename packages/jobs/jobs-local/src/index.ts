@@ -23,7 +23,7 @@ import { AnonymousEntries, ScopedLayers, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeLayer } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
-import { JobRegistry, JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
+import { JobRegistry, JobId, JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type {
   JobAdoptedListener, JobDoneListener, JobHooks, JobKind, JobOutcome, JobRead, JobResumeCandidate, JobResumePlan, JobResumer,
   JobSnapshot, JobStart, JobStatus, JobsChangedListener,
@@ -43,7 +43,6 @@ const NOT_RESUMABLE_DETAIL = 'not resumable after host restart'
 const ADOPTION_NOT_DURABLE_DETAIL = 'resume adoption could not be recorded durably'
 
 /** Terminal detail for an adoption whose durable session account was unavailable. */
-const ADOPTION_ACCOUNT_FAILED_DETAIL = 'resume adoption could not be accounted durably'
 
 /** Honest terminal detail for a producer that outlived the teardown grace. */
 const TEARDOWN_GRACE_DETAIL = 'producer did not release within teardownGraceMs; work may be orphaned'
@@ -986,7 +985,7 @@ export class LocalJobRegistry extends JobRegistry {
     try {
       await this.notifyAdopted(this.snapshot(job), accountIncarnation)
     } catch {
-      this.settle(job, { status: 'failed', detail: ADOPTION_ACCOUNT_FAILED_DETAIL })
+      this.settle(job, { status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL })
       return
     }
     if (isTerminal(job.status)) {
