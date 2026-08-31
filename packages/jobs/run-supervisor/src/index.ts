@@ -463,9 +463,10 @@ export class RunSupervisor {
    * as the live {@link onAdopted} lane would have named it. The marker
    * clears only after the append is confirmed recorded or found already
    * present — a lane failure or an owner no lane can reach keeps it for a
-   * later boot. Terminal records use the same marker account before their
-   * unread completion is delivered, except a rejected adoption account: its
-   * producer never started, so that marker clears without a false
+   * later boot. A workflow stranded while stopping first records the missing
+   * resume account, then abandons the incarnation that ran the adopted work;
+   * other killed markers abandon the marked adoption without claiming its
+   * producer started. A rejected adoption marker clears without a false
    * `run/resumed`. A cleared marker cannot double-account a later boot.
    */
   private async accountAdoptionMarkers(pass: ReconcilePass): Promise<void> {
@@ -486,18 +487,23 @@ export class RunSupervisor {
         && record.kind === 'workflow' && !accountRejected) {
         if (stoppingSettlement?.notify === false) pass.markerAccountedSettlements.add(record.id)
         if (owner !== undefined) {
-          let outcome: RunEventAppendOutcome
           try {
-            outcome = await this.emitAbandoned(pass, owner, {
+            if (stoppingSettlement !== undefined) {
+              const resumed = await this.emitResumed(owner, candidate)
+              if (resumed === 'unavailable') continue
+            }
+            const abandoned = await this.emitAbandoned(pass, owner, {
               id: record.id, kind: record.kind, label: record.label, status: record.status === 'stopping' ? 'killed' : record.status,
               detail: stoppingSettlement?.detail ?? record.detail ?? undefined, reported: record.reported,
               outputLimitBytes: record.outputLimitBytes ?? undefined,
-            }, stoppingSettlement?.reason ?? 'resume-failed', record.adoptedFromIncarnation, stoppingSettlement?.notify ?? true)
+            }, stoppingSettlement?.reason ?? 'resume-failed',
+            stoppingSettlement === undefined ? record.adoptedFromIncarnation : record.incarnation,
+            stoppingSettlement?.notify ?? true)
+            if (abandoned === 'unavailable') continue
           } catch (error: unknown) {
             this.ctx.logger.warn(`run-supervisor: failed to close adopted workflow ${record.id}: ${String(error)}`)
             continue
           }
-          if (outcome === 'unavailable') continue
         }
         await this.clearAdoptionMarker(candidate, record.status === 'stopping')
         continue
@@ -764,6 +770,10 @@ export class RunSupervisor {
     const pass = this.activePass
     let candidate = pass?.candidates.get(snapshot.id)
     if (candidate === undefined) {
+      const accounted = this.adopted.get(snapshot.id)
+      if (accounted?.record.incarnation === priorIncarnation) candidate = accounted
+    }
+    if (candidate === undefined) {
       const record = this.ctx.get('jobStore')?.get(snapshot.id)
       if (record === undefined || record.adoptedFromIncarnation !== priorIncarnation) {
         this.ctx.logger.warn(`run-supervisor: durable adoption marker missing for ${snapshot.id}`)
@@ -874,7 +884,7 @@ export class RunSupervisor {
             reported: snapshot.reported,
             outputLimitBytes: snapshot.outputLimitBytes,
           }
-          this.deliverNoticeWhenLive(pass, owner, view)
+          this.deliverNoticeWhenLive(pass, owner, view, adopted)
         }
       }
     }
