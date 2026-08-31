@@ -1387,8 +1387,6 @@ describe('continuable review regressions', () => {
     const { ctx, parent } = await setup([
       () => {
         throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
-          message: 'quota exhausted',
-          code: QUOTA_EXCEEDED_CODE,
           providerRetryAfterMs: 12_000,
         })
       },
