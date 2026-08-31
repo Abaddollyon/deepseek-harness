@@ -903,7 +903,7 @@ describe('CodexAppServerWire', () => {
       [{ futureVariant: {} }, { statusCode: 503 }, { httpStatus: 503 }],
       [null, { status: 429, retryAfterMs: 0 }, {
         httpStatus: 429,
-        failure: { code: 'RATE_LIMIT' },
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 0 },
       }],
     ] as const
     for (const [codexErrorInfo, fields, expected] of scenarios) {
@@ -1629,6 +1629,7 @@ describe('run lifecycle and quiescence', () => {
       ['unauthorized', 'access-policy', 'error', undefined],
       ['internalServerError', 'service', 'error', undefined],
       [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'transport', 'error', 503],
+      [{ httpConnectionFailed: { httpStatusCode: 429, retryAfterMs: 12_000 } }, 'transport', 'error', 429, { code: 'RATE_LIMIT', retryAfterMs: 12_000 }],
       [{ activeTurnNotSteerable: { turnKind: 'review' } }, 'product-error', 'error', undefined],
       ['futureError', 'unknown', 'error', undefined],
     ] as const

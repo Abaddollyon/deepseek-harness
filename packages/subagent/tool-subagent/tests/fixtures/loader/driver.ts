@@ -2,10 +2,9 @@
 /** Test driver for one structured subagent failure through the real Loader tree. */
 
 import { writeFile } from 'node:fs/promises'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boot, resolveConfigPath } from '@deepseek-ai/dsh-app-boot'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
 const configPath = process.argv[2]
@@ -17,12 +16,10 @@ try {
   const ends: SubagentRunEndInfo[] = []
   ctx.on('subagent/start', info => void starts.push(info))
   ctx.on('subagent/end', info => void ends.push(info))
-  const parentId = SessionId('loader-parent')
-  const parent = {
-    id: parentId,
-    options: {},
-    session: Session.create(parentId),
-  } as Agent
+  const parent = ctx.agentLoop.create(SessionId('loader-parent'), {
+    provider: 'unused',
+    model: 'unused',
+  })
   const result = await ctx.tools.execute({
     signal: new AbortController().signal,
     callId: ToolCallId('loader-subagent'),

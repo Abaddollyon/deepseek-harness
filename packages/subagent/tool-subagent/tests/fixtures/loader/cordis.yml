@@ -8,6 +8,17 @@
 - id: tools
   name: '@deepseek-ai/dsh-tools'
 
+- id: session
+  name: '@deepseek-ai/dsh-session'
+
+- id: agents
+  name: '@deepseek-ai/dsh-agent'
+
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents: []
+
 - id: subagent
   name: '@deepseek-ai/dsh-subagent'
 

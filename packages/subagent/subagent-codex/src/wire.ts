@@ -88,7 +88,7 @@ interface ParsedFailureInfo {
 }
 
 function retryAfterMs(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function httpFailure(fields: JsonObject, status: number | undefined): SubagentFailure | undefined {

@@ -338,7 +338,7 @@ export function settlementSummary(
  * @returns a natural-language delay phrase.
  */
 export function formatRetryAfter(retryAfterMs: number | undefined): string {
-  if (retryAfterMs === undefined) return 'before retrying'
+  if (retryAfterMs === undefined || retryAfterMs === 0) return 'before retrying'
   return `${retryAfterMs / 1000} seconds before retrying`
 }
 

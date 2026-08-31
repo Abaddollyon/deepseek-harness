@@ -43,6 +43,8 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(settlementSummary(SessionId('child'), 'error', 'unknown detail', { code: 'OTHER' })).toBe('Background subagent child failed before it finished. Reason: unknown detail')
     expect(settlementSummary(SessionId('child'), 'completed', 'ignored')).toContain('finished')
     expect(settlementSummary(SessionId('child'), 'error', 'rate detail', { code: 'RATE_LIMIT' })).toContain('wait before retrying')
+    expect(settlementSummary(SessionId('child'), 'error', 'rate detail', { code: 'RATE_LIMIT', retryAfterMs: 0 })).toContain('wait before retrying')
+    expect(settlementSummary(SessionId('child'), 'error', 'rate detail', { code: 'RATE_LIMIT', retryAfterMs: 1_500 })).toContain('wait 1.5 seconds before retrying')
   })
 
   it('bounds lifecycle diagnostics and preserves typed causes', () => {

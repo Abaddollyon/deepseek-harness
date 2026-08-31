@@ -162,6 +162,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 这些限制说明该 seam 何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是通用委派对比或任务积压。
 
 - **ACP 子级仍为一次性，且无法通过追踪枚举**——ACP 运行在父级会话语料中没有本地子会话，远程提供方需要 Activation 所有权约定才能支持可继续子级。
+- **类型化失败细节取决于提供方**——进程内运行与 Codex wire 会分类已知的 `QUOTA` 或 `RATE_LIMIT` 原因；通用 dsh-sdk、ACP 与 Claude Code 传输不会。其他已捕获代码可能只向可继续父级提供通用失败句，而拆卸失败仍保留有界的原始诊断。
 - **无 host-user 继续执行**——`followup()` 要求确切在线直接父级；只有 `interrupt()` 接受持久化的人类父级地址。
 - **继续执行消息绝不 steering（中途引导）**——父到子的后续消息排入后续轮次；它们绝不会重定向子级当前轮次。
 - **取消收敛期间存在唤醒缺口**——中断信号发出后、driver 进入 idle 前被接受的后续消息会保持排队，直到另一条唤醒发送到达。

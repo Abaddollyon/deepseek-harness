@@ -1,8 +1,9 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { type Agent } from '@deepseek-ai/dsh-agent'
+import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 
-import { HarnessError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { HarnessError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import SubagentRuntime, {
   foldSubagentDescriptor,
@@ -18,7 +19,9 @@ import SubagentRuntime, {
   type SubagentRunEndInfo,
   type SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 
 function fakeParent(id = 'parent-1'): Agent {
   return { id: SessionId(id) } as unknown as Agent
@@ -159,6 +162,47 @@ describe('SubagentRuntime', () => {
       [{ type: 'text', text: 'hello' }],
       { source: { kind: 'user' }, signal: new AbortController().signal },
     )).rejects.toMatchObject({ code: 'CONTINUATION_UNAVAILABLE' })
+  })
+
+  it('rebinds and removes the continuation manager with the Agent registry lifecycle', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime, {})
+    const runtimeFiber = await ctx.plugin(SubagentRuntime)
+    const registryFiber = await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    let parentOrdinal = 0
+    const parent = (): Agent => ctx.agentLoop.create(
+      SessionId(`binding-parent-${++parentOrdinal}`),
+      { provider: 'mock', model: 'mock' },
+    )
+    const expectBound = async (): Promise<Agent> => {
+      const liveParent = parent()
+      await expect(ctx.subagents.startContinuable({
+        provider: 'unused',
+        label: 'unused child',
+        request: baseRequest({ parent: liveParent }),
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'PERSISTENCE_UNAVAILABLE' })
+      return liveParent
+    }
+    try {
+      await expectBound()
+      await registryFiber.restart()
+      const liveParent = await expectBound()
+      await registryFiber.dispose()
+      await expect(ctx.subagents.startContinuable({
+        provider: 'unused',
+        label: 'unused child',
+        request: baseRequest({ parent: liveParent }),
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ code: 'CONTINUATION_UNAVAILABLE' })
+    } finally {
+      await registryFiber.dispose()
+      await runtimeFiber.dispose()
+    }
   })
 
   it.each([
