@@ -165,7 +165,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
   const peer = new ProtocolPeer(toChild, fromChild)
   let exited = false
   let resolveDone!: (outcome: SubprocessOutcome) => void
-  let rejectDone!: (error: Error) => void
+  let rejectDone!: (error: unknown) => void
   const done = new Promise<SubprocessOutcome>((resolve, reject) => {
     resolveDone = resolve
     rejectDone = reject

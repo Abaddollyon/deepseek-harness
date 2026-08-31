@@ -1494,6 +1494,56 @@ describe('continuable review regressions', () => {
     expect(ends[0]!.stopReason).toBe('max-tokens')
   })
 
+  it('carries typed quota facts through the continuable lifecycle and parent notice', async () => {
+    const { ctx, parent } = await setup([
+      () => {
+        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
+          providerRetryAfterMs: 12_000,
+        })
+      },
+      textResponse('parent ack'),
+    ])
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+    expect(ends[0]).toMatchObject({
+      stopReason: 'error',
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
+    })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
+  })
+
+  it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('future-reason-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    child.session.append('turn/start', { turn: 1 })
+    child.session.append('step/start', { turn: 1, step: 1 })
+    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } })
+    observer.capture(child)
+
+    expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
+  })
+
+  it('renders a future backend stop reason as an abnormal settlement', () => {
+    expect(settlementSummary(SessionId('future-child'), 'test-future')).toBe(
+      'Background subagent future-child ended abnormally (test-future) before it finished.',
+    )
+  })
+
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
     const releaseFirst = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('working'), gate: releaseFirst.promise }])
