@@ -541,7 +541,12 @@ export class SubagentContinuationManager {
         // A delivery that arrives after the disposal transaction began must not
         // reach a handle being torn down; wait for release, then cold-resume.
         if (activation.disposal !== undefined) {
-          return activation.disposal.then(() => undefined, () => undefined)
+          try {
+            await activation.disposal
+          } catch {
+            // The disposal owner reports its teardown failure; delivery only waits for release.
+          }
+          return undefined
         }
         return this.submitAdmitted(activation, content, options.source, parent, options.signal)
       })
@@ -635,7 +640,7 @@ export class SubagentContinuationManager {
     options.signal.throwIfAborted()
     this.assertAdmitting(child)
     const activation = this.authorizeReporter(child)
-    const parent = this.resolveReportParent(child)
+    const parent = this.resolveReportParent(activation)
     return this.deliverReport(activation, parent, content, options.delivery)
   }
 
@@ -657,10 +662,9 @@ export class SubagentContinuationManager {
     return activation
   }
 
-  /** Resolve the reporting child's live direct parent from durable lineage. */
-  private resolveReportParent(child: Agent): Agent {
-    const parentId = child.session.header.parentSession
-    const parent = parentId === undefined ? undefined : this.ctx.agents.get(parentId)
+  /** Resolve the reporting child's live direct parent from its resident Activation. */
+  private resolveReportParent(activation: Activation): Agent {
+    const parent = this.ctx.agents.get(activation.parentSession)
     if (parent === undefined) {
       throw new SubagentError(
         'direct parent is not live; report was not delivered',
@@ -1037,7 +1041,11 @@ export class SubagentContinuationManager {
     try {
       return this.submitAdmitted(activation, content, source, parent, signal)
     } catch (error: unknown) {
-      await this.dispose(activation).catch(() => undefined)
+      try {
+        await this.dispose(activation)
+      } catch {
+        // Rollback failure must not mask the admission failure that selected this path.
+      }
       throw error
     }
   }
@@ -1130,9 +1138,9 @@ export class SubagentContinuationManager {
       inputs.signal.throwIfAborted()
       this.assertAdmitting(parent)
       this.acquireOwnership(parent, childId)
-      // Every accepted id leaves the inbox exactly once, through dequeue or
-      // discard. Clearing it there is what lets `stateOf()` distinguish a truly
-      // quiet Agent from one whose accepted turn has not been admitted yet.
+      // Clear an accepted id on its first claim or discard. A pre-step abort can
+      // restore the same id to the inbox, so a later claim or teardown discard
+      // is intentionally ignored after the first deletion.
       // Registered through the child's own scoped context, so scope filtering
       // already restricts both listeners to this exact agent.
       handle.agent.ctx.on('agent/inbox/claimed', ({ message }) => {
@@ -1149,7 +1157,11 @@ export class SubagentContinuationManager {
     } catch (error: unknown) {
       // Listener exceptions are contained by the lifecycle emitter; a start
       // publication throw therefore leaves no residency edge to pair.
-      await this.rollbackUnpublished(activation).catch(() => undefined)
+      try {
+        await this.rollbackUnpublished(activation)
+      } catch {
+        // Rollback failure must not mask the failure that prevented publication.
+      }
       throw error
     }
     this.watchSettlement(activation)

@@ -22,12 +22,19 @@ import SubagentRuntime, {
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
+import { settlementSummary } from '../src/continuation.ts'
 import { createActivationObserver, createLifecycleEmitter } from '../src/lifecycle.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 
 declare module '@deepseek-ai/dsh-session' {
   interface TurnEndReasonMap {
     'test-future': { kind: 'test-future' }
+  }
+}
+
+declare module '../src/types.ts' {
+  interface SubagentStopReasonMap {
+    'test-future': 'test-future'
   }
 }
 
@@ -1401,6 +1408,12 @@ describe('continuable review regressions', () => {
     observer.capture(child)
 
     expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
+  })
+
+  it('renders a future backend stop reason as an abnormal settlement', () => {
+    expect(settlementSummary(SessionId('future-child'), 'test-future')).toBe(
+      'Background subagent future-child ended abnormally (test-future) before it finished.',
+    )
   })
 
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
