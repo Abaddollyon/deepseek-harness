@@ -1011,7 +1011,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/jobs/jobs-local/src/index.ts:52`](../packages/jobs/jobs-local/src/index.ts)
+来源：[`packages/jobs/jobs-local/src/index.ts:51`](../packages/jobs/jobs-local/src/index.ts)
 
 <a id="deepseek-aidsh-jobs-store-domain"></a>
 
@@ -1842,7 +1842,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/jobs/run-supervisor/src/index.ts:94`](../packages/jobs/run-supervisor/src/index.ts)
+来源：[`packages/jobs/run-supervisor/src/index.ts:95`](../packages/jobs/run-supervisor/src/index.ts)
 
 <a id="deepseek-aidsh-sandbox-local"></a>
 
