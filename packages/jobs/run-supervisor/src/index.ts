@@ -182,6 +182,8 @@ interface ReconcilePass {
   readonly candidates: Map<JobId, PendingCandidate>
   /** Aborts at the pass deadline, cancelling owner-restoration I/O. */
   readonly deadline: AbortController
+  /** Settled lanes already owned by an adoption-marker account this pass. */
+  readonly markerAccountedSettlements: Set<JobId>
   /** Async event/notice emissions, awaited before the pass completes. */
   readonly emissions: Set<Promise<void>>
   /** Notifies the wait loop that a candidate resolved. */
@@ -192,6 +194,7 @@ interface ReconcilePass {
 interface LaneSettlement {
   readonly reason: 'not-resumable' | 'resume-failed'
   readonly detail: string
+  readonly notify?: boolean
 }
 
 const encoder = new TextEncoder()
@@ -225,7 +228,8 @@ function hasRunEvent(
     | { readonly type: 'run/resumed'; readonly data: RunResumedData }
     | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
 ): boolean {
-  return events.some(event => (event.type === 'run/resumed' || event.type === 'run/abandoned')
+  return events.some(event => (event.type === expected.type
+      || (expected.type === 'run/resumed' && event.type === 'run/abandoned'))
     && event.data.jobId === expected.data.jobId
     && event.data.priorIncarnation === expected.data.priorIncarnation)
 }
@@ -287,6 +291,11 @@ function laneSettlement(record: JobRecord): LaneSettlement | undefined {
   }
   if (record.detail !== null && record.detail.startsWith(REGISTRY_RESUME_THREW_PREFIX)) {
     return { reason: 'resume-failed', detail: record.detail }
+  }
+  if (record.kind === 'workflow'
+    && (record.status === 'stopping'
+      || (record.status === 'killed' && record.detail === 'cancelled before host restart'))) {
+    return { reason: 'resume-failed', detail: 'cancelled before host restart', notify: false }
   }
   return undefined
 }
@@ -381,6 +390,7 @@ export class RunSupervisor {
       store,
       candidates: new Map(),
       deadline: new AbortController(),
+      markerAccountedSettlements: new Set(),
       emissions: new Set(),
       nudge: undefined,
     }
@@ -470,6 +480,28 @@ export class RunSupervisor {
       const owner = record.ownerSession ?? undefined
       const accountRejected = record.status === 'failed'
         && record.detail === JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL
+      const stoppingSettlement = laneSettlement(record)
+      if ((record.status === 'killed'
+        || (record.status === 'stopping' && record.incarnation !== PROCESS_INCARNATION))
+        && record.kind === 'workflow' && !accountRejected) {
+        if (stoppingSettlement?.notify === false) pass.markerAccountedSettlements.add(record.id)
+        if (owner !== undefined) {
+          let outcome: RunEventAppendOutcome
+          try {
+            outcome = await this.emitAbandoned(pass, owner, {
+              id: record.id, kind: record.kind, label: record.label, status: record.status === 'stopping' ? 'killed' : record.status,
+              detail: stoppingSettlement?.detail ?? record.detail ?? undefined, reported: record.reported,
+              outputLimitBytes: record.outputLimitBytes ?? undefined,
+            }, stoppingSettlement?.reason ?? 'resume-failed', record.adoptedFromIncarnation, stoppingSettlement?.notify ?? true)
+          } catch (error: unknown) {
+            this.ctx.logger.warn(`run-supervisor: failed to close adopted workflow ${record.id}: ${String(error)}`)
+            continue
+          }
+          if (outcome === 'unavailable') continue
+        }
+        await this.clearAdoptionMarker(candidate, record.status === 'stopping')
+        continue
+      }
       if (owner !== undefined && !accountRejected) {
         // The marker clears only once the account is durably recorded (or
         // found already present); a lane failure or an unreachable owner
@@ -577,7 +609,7 @@ export class RunSupervisor {
     for (const record of pass.store.list()) {
       if (pass.deadline.signal.aborted) return
       if (record.incarnation === PROCESS_INCARNATION) continue
-      if (record.status === 'running' || record.status === 'stopping') continue
+      if (pass.markerAccountedSettlements.has(record.id)) continue
       const settlement = laneSettlement(record)
       if (settlement === undefined) continue
       const owner = record.ownerSession ?? undefined
@@ -591,7 +623,7 @@ export class RunSupervisor {
         reported: record.reported,
         outputLimitBytes: record.outputLimitBytes ?? undefined,
       }
-      this.track(pass, this.emitAbandoned(pass, owner, view, settlement.reason, record.incarnation))
+      this.track(pass, this.emitAbandoned(pass, owner, view, settlement.reason, record.incarnation, settlement.notify))
     }
   }
 
@@ -811,8 +843,6 @@ export class RunSupervisor {
     }
     const adopted = this.adopted.get(snapshot.id)
     if (adopted !== undefined) {
-      this.adopted.delete(snapshot.id)
-      this.track(pass, this.clearAdoptionMarker(adopted))
       if (snapshot.status === 'killed' && adopted.record.kind === 'workflow') {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
@@ -821,10 +851,18 @@ export class RunSupervisor {
             status: snapshot.status, detail: snapshot.detail,
             reported: snapshot.reported, outputLimitBytes: snapshot.outputLimitBytes,
           }
-          this.track(pass, this.emitAbandoned(pass, owner, view, 'resume-failed', adopted.record.incarnation))
+          const closure = this.emitAbandoned(pass, owner, view, 'resume-failed', adopted.record.incarnation)
+          this.track(pass, closure.then(async (outcome) => {
+            if (outcome !== 'unavailable') await this.clearAdoptionMarker(adopted)
+          }))
+        } else {
+          this.track(pass, this.clearAdoptionMarker(adopted))
         }
+      } else {
+        this.track(pass, this.clearAdoptionMarker(adopted))
       }
-      if (!snapshot.reported) {
+      this.adopted.delete(snapshot.id)
+      if (!(snapshot.status === 'killed' && adopted.record.kind === 'workflow') && !snapshot.reported) {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
           const view: TerminalView = {
@@ -843,11 +881,17 @@ export class RunSupervisor {
   }
 
   /** Clear the marker that the registry may have re-persisted with completion state. */
-  private async clearAdoptionMarker(candidate: PendingCandidate): Promise<void> {
+  private async clearAdoptionMarker(candidate: PendingCandidate, normalizeStopping = false): Promise<void> {
     const store = this.ctx.get('jobStore')
     const current = store?.get(candidate.record.id)
     if (current === undefined || current.adoptedFromIncarnation !== candidate.record.incarnation) return
-    const { adoptedFromIncarnation: _marker, ...cleared } = current
+    const normalized = normalizeStopping && candidate.record.kind === 'workflow'
+      ? {
+        ...current, status: 'killed' as const, detail: 'cancelled before host restart',
+        finishedAt: current.finishedAt ?? Date.now(),
+      }
+      : current
+    const { adoptedFromIncarnation: _marker, ...cleared } = normalized
     await store?.put(cleared)
   }
 
@@ -856,8 +900,8 @@ export class RunSupervisor {
    * warning. Without an active pass (an adopted record settling after
    * reconciliation ended) the emission is still contained, just not awaited.
    */
-  private track(pass: ReconcilePass | undefined, emission: Promise<void>): void {
-    const contained = emission.catch((error: unknown) => {
+  private track(pass: ReconcilePass | undefined, emission: Promise<unknown>): void {
+    const contained = emission.then(() => undefined).catch((error: unknown) => {
       this.ctx.logger.warn(`run-supervisor: failed to record a reconciliation outcome: ${String(error)}`)
     })
     if (pass === undefined) return
@@ -915,7 +959,8 @@ export class RunSupervisor {
     view: TerminalView,
     reason: RunAbandonReason,
     priorIncarnation: string,
-  ): Promise<void> {
+    notify = true,
+  ): Promise<RunEventAppendOutcome> {
     const data: RunAbandonedData = {
       jobId: view.id,
       kind: view.kind,
@@ -923,8 +968,9 @@ export class RunSupervisor {
       reason,
       detail: view.detail ?? '',
     }
-    await this.appendRunEvent(owner, { type: 'run/abandoned', data })
-    if (!view.reported) this.deliverNoticeWhenLive(pass, owner, view)
+    const outcome = await this.appendRunEvent(owner, { type: 'run/abandoned', data })
+    if (outcome !== 'unavailable' && notify && !view.reported) this.deliverNoticeWhenLive(pass, owner, view)
+    return outcome
   }
 
   /** Deliver exactly one completion notice to a live owner, then claim it reported. */
@@ -986,6 +1032,26 @@ export class RunSupervisor {
     }
   }
 
+  private appendRunEventLive(
+    live: Agent,
+    event:
+      | { readonly type: 'run/resumed'; readonly data: RunResumedData }
+      | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
+  ): Exclude<RunEventAppendOutcome, 'unavailable'> {
+    const accounted = hasRunEvent(live.session.events, event)
+    if (event.type === 'run/resumed') {
+      if (accounted) return 'already-present'
+      live.session.append('run/resumed', event.data)
+      return 'recorded'
+    }
+    const closers = workflowClosers(live.session.events, event.data.jobId, event.data.kind)
+    for (const closer of closers) {
+      (live.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
+    }
+    if (!accounted) live.session.append('run/abandoned', event.data)
+    return accounted && closers.length === 0 ? 'already-present' : 'recorded'
+  }
+
   private async appendRunEventNow(
     owner: SessionId,
     event:
@@ -993,26 +1059,16 @@ export class RunSupervisor {
       | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
   ): Promise<RunEventAppendOutcome> {
     const live = this.ctx.get('agents')?.get(owner)
-    if (live !== undefined) {
-      if (hasRunEvent(live.session.events, event)) return 'already-present'
-      if (event.type === 'run/resumed') {
-        live.session.append('run/resumed', event.data)
-      } else {
-        for (const closer of workflowClosers(live.session.events, event.data.jobId, event.data.kind)) {
-          (live.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
-        }
-        live.session.append('run/abandoned', event.data)
-      }
-      return 'recorded'
-    }
+    if (live !== undefined) return this.appendRunEventLive(live, event)
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return 'unavailable'
     const loaded = await persistence.load(owner)
-    if (hasRunEvent(loaded.events, event)) return 'already-present'
+    const accounted = hasRunEvent(loaded.events, event)
     const closers = event.type === 'run/abandoned'
       ? workflowClosers(loaded.events, event.data.jobId, event.data.kind)
       : []
-    const batch = [...closers, event].map((item, index) => ({
+    if (accounted && closers.length === 0) return 'already-present'
+    const batch = [...closers, ...(accounted ? [] : [event])].map((item, index) => ({
       type: item.type, seq: loaded.events.length + index, time: Date.now(), data: item.data,
     }) as SessionEvent)
     try {
@@ -1023,16 +1079,7 @@ export class RunSupervisor {
       // next seq moved); retry through the live lane before giving up.
       const raced = this.ctx.get('agents')?.get(owner)
       if (raced === undefined) throw error
-      if (hasRunEvent(raced.session.events, event)) return 'already-present'
-      if (event.type === 'run/resumed') {
-        raced.session.append('run/resumed', event.data)
-      } else {
-        for (const closer of workflowClosers(raced.session.events, event.data.jobId, event.data.kind)) {
-          (raced.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
-        }
-        raced.session.append('run/abandoned', event.data)
-      }
-      return 'recorded'
+      return this.appendRunEventLive(raced, event)
     }
   }
 }
