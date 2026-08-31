@@ -283,7 +283,7 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
     const { state, agents } = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
     const alice = agents.get('alice') as StubAgent
 
-    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'stopping' })
+    expect(jobView({} as Context, state, record)).toMatchObject({ status: 'killed' })
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
     expect(alice.injected).toHaveLength(0)
   })
@@ -666,7 +666,7 @@ describe('RunSupervisor pending-record reconciliation', () => {
     const alice = agents.get('alice') as StubAgent
     await vi.advanceTimersByTimeAsync(30_000)
     await flush()
-    expect(ctx.jobs.get(record.id, alice.agent).status).toBe('stopping')
+    expect(ctx.jobs.get(record.id, alice.agent).status).toBe('killed')
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(0)
   })
 })
@@ -830,7 +830,7 @@ describe('RunSupervisor durable adoption markers', () => {
     const { state } = tracked(await boot({ records: [record] }))
 
     const cleared = state.records.get(String(record.id)) as JobRecord
-    expect(cleared).toMatchObject({ status: 'stopping', incarnation: PROCESS_INCARNATION })
+    expect(cleared).toMatchObject({ status: 'killed', incarnation: PROCESS_INCARNATION })
     expect('adoptedFromIncarnation' in cleared).toBe(false)
   })
 
