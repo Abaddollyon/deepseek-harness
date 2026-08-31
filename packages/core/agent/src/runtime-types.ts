@@ -27,7 +27,11 @@ export interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
+  /**
+   * Explicit reasoning effort seeded into a new loop's first request proposal.
+   * It overrides a resumed value; omission restores only an explicit value
+   * persisted for the same provider/model route.
+   */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number

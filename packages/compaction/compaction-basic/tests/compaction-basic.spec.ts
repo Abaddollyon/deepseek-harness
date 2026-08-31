@@ -23,7 +23,7 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, type EpochHeader } from '@deepseek-ai/dsh-session'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import AgentRegistry, { agentEvents, Inbox, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -2099,6 +2099,31 @@ describe('automatic listener and loader composition', () => {
 
     await expect(preflight(ctx, agent(session, MODEL)))
       .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    expect(compact.calls).toHaveLength(1)
+  })
+
+  it('prices replay nodes through the exact summary-target request header', async () => {
+    const ctx = createContext()
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 180,
+      maxTokens: 64,
+      summarizationProvider: 'actual',
+      summarizationModel: 'summary-model',
+    })
+    const session = conversation(4)
+    const routed = session.requestHeader()
+    if (routed === undefined) throw new Error('priced replay fixture needs a request header')
+    const summaryHeader: EpochHeader = {
+      config: { provider: 'actual', model: 'summary-model', maxTokens: 64 },
+      ...routed.system === undefined ? {} : { system: routed.system },
+      ...routed.tools === undefined ? {} : { tools: routed.tools },
+    }
+    const measure = vi.spyOn(ctx.tokenMeter, 'measure')
+
+    await expect(preflight(ctx, agent(session, MODEL)))
+      .resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
+    expect(measure).toHaveBeenCalledWith(session, summaryHeader)
     expect(compact.calls).toHaveLength(1)
   })
 

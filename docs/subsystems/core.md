@@ -163,14 +163,18 @@ interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
+  /**
+   * Explicit reasoning effort seeded into a new loop's first request proposal.
+   * It overrides a resumed value; omission restores only an explicit value
+   * persisted for the same provider/model route.
+   */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
 }
 ```
 
-Dispatch requires `provider` and `model` after `agent/request`. When present, `maxTokens` must be a positive safe integer and caps every conversation-model request; omission allows the exact-model adapter default to materialize before the request header, or otherwise leaves provider behavior unchanged. An agent-scoped `deployment:persona` prompt section may shadow the global default persona.
+Dispatch requires `provider` and `model` after `agent/request`. `reasoningEffort` seeds a newly created loop instance's first request proposal and takes precedence over an explicit resumed value. When omitted, resume restores only an explicit value recorded for the same provider/model; adapter-materialized defaults are removed from later proposals and resolved again against the current adapter registration. When present, `maxTokens` must be a positive safe integer and caps every conversation-model request; omission allows the exact-model adapter default to materialize before the request header, or otherwise leaves provider behavior unchanged. An agent-scoped `deployment:persona` prompt section may shadow the global default persona.
 
 The inbox is the delivery vocabulary — two ordered pending-message lists the agent owns as a durable projection:
 

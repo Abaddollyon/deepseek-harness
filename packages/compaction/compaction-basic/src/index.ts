@@ -171,10 +171,10 @@ export class BasicCompactionEngine extends CompactionEngine {
     // when tool calls continue the same turn into another request.
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'assistant/message') return
+      this.requestAttempts.delete(session)
       const agent = this.overflowAgents.get(session)
       if (agent !== undefined) {
         this.overflowRetries.delete(agent)
-        this.requestAttempts.delete(session)
       }
     })
 
@@ -299,13 +299,23 @@ export class BasicCompactionEngine extends CompactionEngine {
       signal,
     )).context
     if (summaryContext === undefined) return null
+    const summaryHeader: EpochHeader = {
+      config: {
+        provider: summaryTarget.provider,
+        model: summaryTarget.model,
+        maxTokens: spec.maxTokens,
+      },
+      ...header.system === undefined ? {} : { system: header.system },
+      ...header.tools === undefined ? {} : { tools: header.tools },
+    }
+    const summaryMeasurement = meter.measure(agent.session, summaryHeader)
     const replayBudget = summaryContext.contextWindow
       - spec.maxTokens
-      - meter.estimateHeader(header)
+      - meter.estimateHeader(summaryHeader)
       - meter.estimateMessage(createCompactionInstructionMessage())
     const range = capRangeForReplayBudget(
       agent.session,
-      measurement,
+      summaryMeasurement,
       selected,
       replayBudget,
     )

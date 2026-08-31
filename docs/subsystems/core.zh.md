@@ -167,14 +167,18 @@ interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /** Adapter-owned reasoning effort for the selected provider/model route. */
+  /**
+   * Explicit reasoning effort seeded into a new loop's first request proposal.
+   * It overrides a resumed value; omission restores only an explicit value
+   * persisted for the same provider/model route.
+   */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
 }
 ```
 
-在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
+在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。`reasoningEffort` 为新建循环实例的首个请求提案设定种子值，并优先于恢复日志中的显式值。省略时，恢复仅会取回为同一 provider/model 记录的显式值；由适配器物化的默认值会从后续提案中移除，并基于当前适配器注册重新解析。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
 
 inbox 即投递词汇——agent 以持久投影形式拥有的两条有序待处理消息列表：
 
