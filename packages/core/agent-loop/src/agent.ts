@@ -474,9 +474,9 @@ export class ReactLoopAgent implements Agent {
   ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
-    // A loop instance starts from its declared route, restoring an explicit
-    // effort persisted for that exact model, or seeding the configured option
-    // when no explicit persisted effort matches. Later steps re-resolve marked defaults.
+    // AgentOptions seeds this loop instance's first proposal and wins over a
+    // resumed effort. Omission restores only a same-route explicit value;
+    // later proposals re-resolve values marked as adapter defaults.
     const persistedHeader = session.requestHeader()
     const persistedConfig = persistedHeader?.config
     const route = { provider: this.options.provider ?? '', model: this.options.model ?? '' }
