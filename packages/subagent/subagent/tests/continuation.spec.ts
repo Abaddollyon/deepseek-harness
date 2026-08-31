@@ -2952,6 +2952,11 @@ describe('SubagentRuntime.interrupt', () => {
     await run.dispose()
   })
 
+  it('ignores absent ids during selected child teardown', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    await expect(ctx.subagents.drainContinuableChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
+  })
+
   it('accepts an interrupt after natural completion', async () => {
     const { ctx, parent } = await setup([textResponse('done')])
     const started = await ctx.subagents.startContinuable(startSpec(parent))

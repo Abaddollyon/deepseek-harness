@@ -440,10 +440,10 @@ export class CodexAppServerWire {
   /**
    * The structured failure fact observed for this published turn.
    * Call only after a non-completed return or rejection from {@link runTurn}.
-   * @returns the fixed stage/category pair and optional HTTP status.
+   * @returns the fixed stage/category pair and optional HTTP status, when a failure was observed.
    */
-  collectFailure(): CodexWireFailureFacts {
-    return this.failure as CodexWireFailureFacts
+  collectFailure(): CodexWireFailureFacts | undefined {
+    return this.failure
   }
 
   /** Detach JSON-RPC listeners and reject outstanding requests. Idempotent. */
