@@ -6,7 +6,7 @@ import type { SessionEvent, SessionPreparation, UserMessage } from '@deepseek-ai
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JobHooks, JobOutcome, JobSnapshot } from '@deepseek-ai/dsh-jobs'
-import { JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
+import { JobId, JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
 import RunSupervisor, {
@@ -711,6 +711,30 @@ describe('RunSupervisor durable adoption markers', () => {
     expect('adoptedFromIncarnation' in cleared).toBe(false)
     await flush()
     expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+  })
+
+  it('clears a rejected adoption marker without claiming the producer resumed', async () => {
+    const record = storedRecord({
+      status: 'failed',
+      detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL,
+      incarnation: 'rejecting-incarnation',
+      adoptedFromIncarnation: 'prior-incarnation',
+      settledAt: Date.now(),
+    })
+    const first = tracked(await boot({ records: [record], liveAgents: ['alice'] }))
+    const firstAlice = first.agents.get('alice') as StubAgent
+    expect(runEvents(firstAlice.agent.session, 'run/resumed')).toHaveLength(0)
+    expect(runEvents(firstAlice.agent.session, 'run/abandoned')).toHaveLength(0)
+
+    const second = tracked(await boot({
+      records: [...first.state.records.values()],
+      liveAgents: ['alice'],
+    }))
+    const secondAlice = second.agents.get('alice') as StubAgent
+    expect(runEvents(secondAlice.agent.session, 'run/resumed')).toHaveLength(0)
+    const cleared = second.state.records.get(String(record.id)) as JobRecord
+    expect(cleared.status).toBe('failed')
+    expect('adoptedFromIncarnation' in cleared).toBe(false)
   })
 
   it('accounts each adoption incarnation after a SIGKILLed boot', async () => {

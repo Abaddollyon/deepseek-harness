@@ -14,6 +14,9 @@ import type {
 
 export { JobId } from './types.ts'
 export { PROCESS_INCARNATION } from './incarnation.ts'
+
+/** Terminal detail proving a committed adoption marker never reached producer start. */
+export const JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL = 'resume adoption could not be accounted durably'
 export type {
   JobAdoptedListener,
   JobDoneListener,
