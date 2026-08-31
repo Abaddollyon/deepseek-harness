@@ -42,7 +42,10 @@ interface SurfaceSelection {
 interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
+  /** Heuristic total persisted for token-meter replacement projection. */
   readonly shadowedTokenCount: number
+  /** Route-priced total used only to compare summary admission size. */
+  readonly shadowedRouteTokenCount: number
   readonly input: SummarizationInput
 }
 
@@ -403,7 +406,8 @@ function prepareCompaction(
     ...selection,
     measurement,
     selectedNodes,
-    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
+    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
+    shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
     input: buildSummarizationInput(session, selection.shadowedSeqs),
   }
 }
@@ -422,10 +426,12 @@ async function summarizeCompaction(
     content: frameSummary(summaryResult.summary),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
+  // The checkpoint is text-only, so its fixed-heuristic price is its route price.
+  // Compare it against the selected span route price for admission.
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
-  if (framedSummaryTokenCount >= prepared.shadowedTokenCount) {
+  if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
     throw new Error(
-      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
+      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedRouteTokenCount})`,
     )
   }
   return {
