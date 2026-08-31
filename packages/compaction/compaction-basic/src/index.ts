@@ -37,8 +37,8 @@ function isAborted(signal: AbortSignal): boolean {
 import type {
   BasicCompactionConfig,
   ModelCompactPolicyConfig,
+  ResolvedCompactSpec,
   ResolvedConfig,
-  ResolvedTargetPolicy,
 } from './types.ts'
 
 export type {
@@ -57,19 +57,23 @@ type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortS
 type AdmissionWork = { key: string; generation: number; work: Promise<CompactionResult | null> }
 type AdmissionAttempt = { key: string; count: number }
 
+/** Join one admission without cancelling its shared work or suppressing its rejection. */
 async function awaitAdmissionWork(work: Promise<CompactionResult | null>, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false
-    const finish = (completed: boolean): void => {
+    const finish = (settle: () => void): void => {
       if (settled) return
       settled = true
       signal.removeEventListener('abort', onAbort)
-      resolve(completed)
+      settle()
     }
-    const onAbort = (): void => finish(false)
+    const onAbort = (): void => finish(() => resolve(false))
     signal.addEventListener('abort', onAbort, { once: true })
-    void work.then(() => finish(true), () => finish(true))
+    void work.then(
+      () => finish(() => resolve(true)),
+      error => finish(() => reject(error)),
+    )
   })
 }
 
@@ -205,18 +209,16 @@ export class BasicCompactionEngine extends CompactionEngine {
         return next()
       }
 
-      const meter = this.ctx.tokenMeter
-      const measurement = meter.measure(agent.session)
-      let spec: ReturnType<typeof resolveCompactSpec>
-      try {
-        spec = resolveCompactSpec(policy, contextWindow)
-      } catch (error: unknown) {
-        if (!(error instanceof TargetPressureConfigError)) throw error
-        if (this.warnedPressureConfigTargets.has(error.targetKey)) return next()
-        this.warnedPressureConfigTargets.add(error.targetKey)
-        ctx.logger.warn(`request preflight compaction skipped: ${error.message}`)
+      const resolution = resolveCompactSpec(policy, contextWindow)
+      if (resolution.kind === 'invalid') {
+        if (this.warnedPressureConfigTargets.has(resolution.error.targetKey)) return next()
+        this.warnedPressureConfigTargets.add(resolution.error.targetKey)
+        ctx.logger.warn(`request preflight compaction skipped: ${resolution.error.message}`)
         return next()
       }
+      const { spec } = resolution
+      const meter = this.ctx.tokenMeter
+      const measurement = meter.measure(agent.session)
       if (measurement.totalTokens < spec.thresholdTokens
         && measurement.totalTokens + (header.config.maxTokens ?? 0) <= contextWindow) {
         return next()
@@ -235,9 +237,9 @@ export class BasicCompactionEngine extends CompactionEngine {
       }
       const priorAttempt = this.requestAttempts.get(agent.session)
       const admissionAttempt = priorAttempt?.key === admissionKey ? priorAttempt.count + 1 : 1
-      if (admissionAttempt > policy.maxOverflowRetries) return next()
+      if (admissionAttempt > spec.maxOverflowRetries) return next()
       this.requestAttempts.set(agent.session, { key: admissionKey, count: admissionAttempt })
-      const work = this.compactForPreflight(agent, header, contextWindow, policy, signal)
+      const work = this.compactForPreflight(agent, header, spec, signal)
       this.requestAdmissions.set(agent.session, { key, generation, work })
       try {
         const result = await work
@@ -245,15 +247,6 @@ export class BasicCompactionEngine extends CompactionEngine {
         if (agent.session.surface.replaceGeneration <= generation) return await next()
         if (result !== null) logResult(result, 'request preflight')
         return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
-      } catch (error: unknown) {
-        signal.throwIfAborted()
-        const message = error instanceof Error ? error.message : String(error)
-        if (agent.session.surface.replaceGeneration > generation) {
-          ctx.logger.warn(`request preflight compaction failed after durable surface progress: ${message}; retrying admission from the replacement surface`)
-          return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
-        }
-        ctx.logger.warn(`request preflight compaction failed: ${message}; preserving the full request`)
-        return await next()
       } finally {
         const current = this.requestAdmissions.get(agent.session)
         if (current?.work === work) this.requestAdmissions.delete(agent.session)
@@ -304,12 +297,17 @@ export class BasicCompactionEngine extends CompactionEngine {
     })
   }
 
-  /** Compact one over-capacity canonical request without dispatching it first. */
+  /**
+   * Compact one over-capacity canonical request without dispatching it first.
+   * @param agent - owner of the measured session surface.
+   * @param header - exact canonical request envelope being admitted.
+   * @param spec - already-resolved pressure and retention budget for that request.
+   * @param signal - live request cancellation signal.
+   */
   private async compactForPreflight(
     agent: Agent,
     header: EpochHeader,
-    contextWindow: number,
-    policy: ResolvedTargetPolicy,
+    spec: ResolvedCompactSpec,
     signal: AbortSignal,
   ): Promise<CompactionResult | null> {
     const meter = this.ctx.tokenMeter
@@ -318,16 +316,15 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (prune !== undefined) {
       prune.pruneSession(agent.session)
       measurement = meter.measure(agent.session)
-      if (measurement.totalTokens + (header.config.maxTokens ?? 0) <= contextWindow) return null
+      if (measurement.totalTokens + (header.config.maxTokens ?? 0) <= spec.contextWindow) return null
     }
 
-    const spec = resolveCompactSpec(policy, contextWindow)
     const selected = selectCompactableRange(agent.session, measurement, spec.retainTokens)
     if (selected === null) return null
 
-    const summaryTarget = policy.summarizationProvider.length === 0
+    const summaryTarget = spec.summarizationProvider.length === 0
       ? header.config
-      : { provider: policy.summarizationProvider, model: policy.summarizationModel }
+      : { provider: spec.summarizationProvider, model: spec.summarizationModel }
     const summaryContext = (await this.ctx.llm.resolveModelInfo(
       summaryTarget.provider,
       summaryTarget.model,
@@ -335,7 +332,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     )).context
     if (summaryContext === undefined) return null
     const replayBudget = summaryContext.contextWindow
-      - policy.maxTokens
+      - spec.maxTokens
       - meter.estimateHeader(header)
       - meter.estimateMessage(createCompactionInstructionMessage())
     const range = capRangeForReplayBudget(
@@ -425,7 +422,9 @@ export class BasicCompactionEngine extends CompactionEngine {
         + 'configure contextWindow on that adapter model',
       )
     }
-    const spec = resolveCompactSpec(policy, context.contextWindow)
+    const resolution = resolveCompactSpec(policy, context.contextWindow)
+    if (resolution.kind === 'invalid') throw resolution.error
+    const { spec } = resolution
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a

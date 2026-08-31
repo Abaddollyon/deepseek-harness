@@ -10,6 +10,7 @@ import {
   resolveCompactSpec,
   resolveConfig,
   resolveTargetPolicy,
+  TargetPressureConfigError,
 } from '@deepseek-ai/dsh-compaction-basic/src/config.ts'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import LlmRuntime, { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, createToolResultMessage, LlmAdapter , createMessage } from '@deepseek-ai/dsh-llm'
@@ -374,12 +375,18 @@ describe('compact configuration and defaults', () => {
     })
 
     expect(resolveCompactSpec(small, 1_000)).toMatchObject({
-      thresholdTokens: 500,
-      retainTokens: 120,
+      kind: 'resolved',
+      spec: {
+        thresholdTokens: 500,
+        retainTokens: 120,
+      },
     })
     expect(resolveCompactSpec(otherProvider, 2_000)).toMatchObject({
-      thresholdTokens: 1_600,
-      retainTokens: 200,
+      kind: 'resolved',
+      spec: {
+        thresholdTokens: 1_600,
+        retainTokens: 200,
+      },
     })
 
     const ratioOverride = resolveTargetPolicy(resolveConfig({
@@ -397,13 +404,16 @@ describe('compact configuration and defaults', () => {
       }],
     }), { provider: 'ratio-provider', model: 'ratio-model' })
     expect(resolveCompactSpec(ratioOverride, 2_000)).toMatchObject({
-      thresholdTokens: 1_200,
-      retainTokens: 400,
-      summarizationProvider: 'summary-provider',
-      summarizationModel: 'summary-model',
-      maxTokens: 512,
-      compactionRetries: 2,
-      maxOverflowRetries: 3,
+      kind: 'resolved',
+      spec: {
+        thresholdTokens: 1_200,
+        retainTokens: 400,
+        summarizationProvider: 'summary-provider',
+        summarizationModel: 'summary-model',
+        maxTokens: 512,
+        compactionRetries: 2,
+        maxOverflowRetries: 3,
+      },
     })
   })
 
@@ -501,9 +511,21 @@ describe('compact configuration and defaults', () => {
       thresholdRatio: 0.5,
       retainTokens: 500,
     }), { provider: MODEL, model: MODEL })
-    expect(() => resolveCompactSpec(invalidPressure, 1_000)).toThrow(/less than threshold/)
-    expect(() => resolveCompactSpec(invalidPressure, 1.5)).toThrow(/positive integer/)
-    expect(() => resolveCompactSpec(invalidPressure, 0)).toThrow(/positive integer/)
+    expect(resolveCompactSpec(invalidPressure, 1_000)).toMatchObject({
+      kind: 'invalid',
+      error: {
+        targetKey: `${MODEL}/${MODEL}`,
+        message: expect.stringMatching(/less than threshold/),
+      },
+    })
+    expect(resolveCompactSpec(invalidPressure, 1.5)).toMatchObject({
+      kind: 'invalid',
+      error: { message: expect.stringMatching(/positive integer/) },
+    })
+    expect(resolveCompactSpec(invalidPressure, 0)).toMatchObject({
+      kind: 'invalid',
+      error: { message: expect.stringMatching(/positive integer/) },
+    })
   })
 
 })
@@ -595,6 +617,21 @@ describe('pressure measurement and retention', () => {
       .rejects.toThrow(/no context capacity for unknown-context\/model/)
     await expect(compactIfNeeded(compact, session, 'context-overflow'))
       .resolves.not.toBeNull()
+  })
+
+  it('throws the explicit target configuration error returned by pressure resolution', async () => {
+    const compact = service({
+      auto: false,
+      thresholdRatio: 0.5,
+      retainTokens: 500,
+    })
+    const operation = compactIfNeeded(compact, conversation(4), 'pressure')
+
+    await expect(operation).rejects.toBeInstanceOf(TargetPressureConfigError)
+    await expect(operation).rejects.toMatchObject({
+      targetKey: `${MODEL}/${MODEL}`,
+      message: expect.stringMatching(/retainTokens \(500\) must be less than threshold tokens 500/),
+    })
   })
 
   it('declines forced overflow when the whole surface is one indivisible tool pair', async () => {
@@ -1609,7 +1646,7 @@ describe('automatic listener and loader composition', () => {
     expect(pressured.events.some(event => event.type === 'compaction/start')).toBe(false)
   })
 
-  it('warns and continues after operational failures, including non-Errors', async () => {
+  it('propagates operational preflight failures, including non-Errors', async () => {
     const ctx = createContext()
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -1621,8 +1658,8 @@ describe('automatic listener and loader composition', () => {
     compact.error = 'temporary failure'
     const session = conversation(4)
 
-    await expect(preflight(ctx, agent(session, MODEL))).resolves.toBeUndefined()
-    expect(warnings).toContainEqual(expect.stringContaining('temporary failure'))
+    await expect(preflight(ctx, agent(session, MODEL))).rejects.toBe('temporary failure')
+    expect(warnings).toEqual([])
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
   })
 
@@ -1983,26 +2020,62 @@ describe('automatic listener and loader composition', () => {
 
   it('deduplicates concurrent duplicate canonical admission', async () => {
     const ctx = createContext()
-    const compact = new TestCompactionEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
+    class GatedEngine extends TestCompactionEngine {
+      entered = 0
+      gate: Promise<void> = Promise.resolve()
+
+      override async summarize(
+        input: SummarizationInput,
+        owner: Agent,
+        signal?: AbortSignal,
+      ): Promise<SummaryResult> {
+        this.entered += 1
+        await this.gate
+        return super.summarize(input, owner, signal)
+      }
+    }
+    const compact = new GatedEngine(ctx, { thresholdRatio: 0.5, retainTokens: 180, maxTokens: 64 })
+    let release!: () => void
+    compact.gate = new Promise<void>((resolve) => { release = resolve })
     const session = conversation(4)
     const owner = agent(session, MODEL)
-    const results = await Promise.all([preflight(ctx, owner), preflight(ctx, owner)])
-    expect(results).toHaveLength(2)
+    const first = preflight(ctx, owner)
+    await vi.waitFor(() => { expect(compact.entered).toBe(1) })
+    const cancelledBeforeJoin = new AbortController()
+    const measure = ctx.tokenMeter.measure.bind(ctx.tokenMeter)
+    vi.spyOn(ctx.tokenMeter, 'measure').mockImplementationOnce((subject) => {
+      cancelledBeforeJoin.abort('cancelled before joining shared work')
+      return measure(subject)
+    })
+    await expect(preflight(ctx, owner, cancelledBeforeJoin.signal)).resolves.toBeUndefined()
+
+    const controller = new AbortController()
+    const cancelled = preflight(ctx, owner, controller.signal)
+    const joined = preflight(ctx, owner)
+    controller.abort('waiter cancelled')
+    await expect(cancelled).resolves.toBeUndefined()
+    release()
+    const results = await Promise.all([first, joined])
+    expect(results).toEqual([
+      { kind: 'retry', surfaceGeneration: 1 },
+      { kind: 'retry', surfaceGeneration: 1 },
+    ])
     expect(compact.calls).toHaveLength(1)
 
     const other = conversation(4)
     await preflight(ctx, agent(other, MODEL))
     expect(compact.calls).toHaveLength(2)
 
-    const controller = new AbortController()
-    controller.abort('waiter cancelled')
-    await expect(preflight(ctx, owner, controller.signal)).resolves.toBeUndefined()
-    expect(compact.calls).toHaveLength(2)
-
+    compact.gate = new Promise<void>((resolve) => { release = resolve })
     compact.error = new Error('retryable failure')
     const failedSession = conversation(4)
     const failedOwner = agent(failedSession, MODEL)
-    await expect(Promise.all([preflight(ctx, failedOwner), preflight(ctx, failedOwner)])).resolves.toEqual([undefined, undefined])
+    const failedFirst = preflight(ctx, failedOwner)
+    await vi.waitFor(() => { expect(compact.entered).toBe(3) })
+    const failedJoined = preflight(ctx, failedOwner)
+    release()
+    await expect(Promise.all([failedFirst, failedJoined]))
+      .rejects.toThrow('retryable failure')
     compact.error = undefined
     await expect(preflight(ctx, agent(conversation(4), MODEL))).resolves.toBeDefined()
   })
@@ -2073,12 +2146,12 @@ describe('automatic listener and loader composition', () => {
       },
       () => Promise.resolve<RequestPreflightAction>(undefined),
     )
-    await expect(second).resolves.toBeUndefined()
+    await expect(second).rejects.toThrow('compaction lock is already active')
     expect(compact.calls).toHaveLength(1)
 
     releaseSummary()
     await expect(first).resolves.toEqual({ kind: 'retry', surfaceGeneration: 1 })
-    expect(warnings).toContainEqual(expect.stringContaining('preserving the full request'))
+    expect(warnings).toEqual([])
   })
 
   it('retries admission from the pruned surface when pruning alone clears request pressure', async () => {
@@ -2121,7 +2194,7 @@ describe('automatic listener and loader composition', () => {
     expect(summarizedText(compact.calls[0]!.input)).toContain('tool result middle pruned')
   })
 
-  it('retries admission from durable prune progress when summarization fails', async () => {
+  it('propagates a summarization failure after durable prune progress', async () => {
     const ctx = createContext(2_000)
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -2139,10 +2212,10 @@ describe('automatic listener and loader composition', () => {
     })
     const generation = session.surface.replaceGeneration
 
-    const action = await preflight(ctx, agent(session, MODEL), SIGNAL, 2_000)
+    await expect(preflight(ctx, agent(session, MODEL), SIGNAL, 2_000))
+      .rejects.toThrow('summary exploded')
     expect(session.surface.replaceGeneration).toBeGreaterThan(generation)
-    expect(action).toEqual({ kind: 'retry', surfaceGeneration: session.surface.replaceGeneration })
-    expect(warnings).toContainEqual(expect.stringContaining('failed after durable surface progress'))
+    expect(warnings).toEqual([])
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
   })
 
