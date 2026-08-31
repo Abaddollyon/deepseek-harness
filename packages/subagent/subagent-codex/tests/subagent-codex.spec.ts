@@ -141,8 +141,8 @@ class ProtocolPeer {
 interface FakeChildOptions {
   readonly pid?: number
   readonly exitOnTerminate?: boolean
-  readonly doneError?: Error
-  readonly waitForExitError?: Error
+  readonly doneError?: unknown
+  readonly waitForExitError?: unknown
 }
 
 interface FakeChild {
@@ -152,7 +152,7 @@ interface FakeChild {
   readonly toChild: PassThrough
   readonly stderr: PassThrough
   readonly settle: (outcome?: SubprocessOutcome) => void
-  readonly fail: (error: Error) => void
+  readonly fail: (error: unknown) => void
   readonly setStderr: (text: string) => void
   readonly terminate: () => void
   readonly waitForExit: (signal?: AbortSignal) => Promise<boolean>
@@ -177,7 +177,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
     exited = true
     resolveDone(outcome)
   }
-  const fail = (error: Error): void => {
+  const fail = (error: unknown): void => {
     if (exited) return
     exited = true
     rejectDone(error)
@@ -2309,6 +2309,15 @@ describe('disposeCodexChild', () => {
     expect(child.waitForExit).not.toHaveBeenCalled()
   })
 
+  it('propagates a managed-tree rejection after positive-pid disposal', async () => {
+    const child = fakeChild({ doneError: new Error('managed tree failed') })
+    const wire = defaultWire(child)
+    await expect(disposeCodexChild(wire, child.handle))
+      .rejects.toThrow('managed tree failed')
+    expect(child.terminate).toHaveBeenCalledTimes(1)
+    expect(child.waitForExit).toHaveBeenCalledTimes(1)
+  })
+
   it('reports tree-wait failure with safe teardown facts', async () => {
     const child = fakeChild({
       waitForExitError: new Error('SECRET_TOKEN wait failure'),
@@ -2321,6 +2330,27 @@ describe('disposeCodexChild', () => {
       { outcome: { exitCode: 0, signal: null } },
     ))
     await expect(disposal).rejects.not.toThrow('SECRET_TOKEN')
+  })
+
+  it('normalizes a non-Error tree-wait failure and preserves the process outcome', async () => {
+    const child = fakeChild({ waitForExitError: 'wait failed as a string' })
+    child.settle({ exitCode: 17, signal: 'SIGTERM' })
+    const wire = defaultWire(child)
+    const disposal = disposeCodexChild(wire, child.handle)
+    await expect(disposal).rejects.toMatchObject({
+      name: 'CodexRunFailure',
+      facts: {
+        stage: 'teardown',
+        category: 'unknown',
+        outcome: { exitCode: 17, signal: 'SIGTERM' },
+      },
+      cause: { message: 'wait failed as a string' },
+    })
+    await expect(disposal).rejects.toThrow(expectedFailureDiagnostic(
+      'teardown',
+      'unknown',
+      { outcome: { exitCode: 17, signal: 'SIGTERM' } },
+    ))
   })
 
   it('does not wait for a pending process outcome after tree observation fails', async () => {

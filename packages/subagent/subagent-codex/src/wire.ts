@@ -13,6 +13,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import type { CodexPermissionMode } from './run.ts'
+import { thrown } from './error.ts'
 
 type JsonObject = Record<string, unknown>
 
@@ -192,11 +193,6 @@ function unattendedDiagnostic(
   reason: string,
 ): string {
   return `Codex unattended decision (mode: ${mode}; request: ${request}; decision: ${decision}): ${reason}`
-}
-
-function thrown(value: unknown): Error {
-  /* v8 ignore next -- typed protocol and stream failures reject with Error. */
-  return value instanceof Error ? value : new Error(String(value))
 }
 
 function abortError(signal: AbortSignal): Error {
