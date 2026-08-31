@@ -831,7 +831,8 @@ describe('CodexAppServerWire', () => {
   it('groups representative string errors without changing stop reasons', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens'],
-      ['sessionBudgetExceeded', 'limit', 'error', { code: 'QUOTA' }],
+      ['sessionBudgetExceeded', 'limit', 'error', undefined],
+      ['usageLimitExceeded', 'limit', 'error', { code: 'QUOTA' }],
       ['cyberPolicy', 'access-policy', 'error'],
       ['misalignmentPolicyViolation', 'access-policy', 'error'],
       ['serverOverloaded', 'service', 'error'],
@@ -1629,7 +1630,8 @@ describe('run lifecycle and quiescence', () => {
   it('preserves representative terminal categories, HTTP status, and mapping', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens', undefined],
-      ['sessionBudgetExceeded', 'limit', 'error', undefined, { code: 'QUOTA' }],
+      ['sessionBudgetExceeded', 'limit', 'error', undefined],
+      ['usageLimitExceeded', 'limit', 'error', undefined, { code: 'QUOTA' }],
       ['unauthorized', 'access-policy', 'error', undefined],
       ['internalServerError', 'service', 'error', undefined],
       [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'transport', 'error', 503],

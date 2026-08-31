@@ -220,7 +220,20 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。
+每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。`LlmFailureCodeMap` 提供已知且与提供方无关的路由值，派生的开放字符串类型则允许提供方扩展；消费方将每个未知值视为不可重试。
+
+```ts type-equiv
+/** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
+interface LlmFailureCodeMap {
+  quota: typeof QUOTA_EXCEEDED_CODE
+  rateLimit: 'RATE_LIMIT'
+}
+```
+
+```ts type-equiv
+/** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
+type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
+```
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */

@@ -173,6 +173,21 @@ describe('settleRunResult', () => {
     })
   })
 
+  it('contains provider snapshot failures after publication', async () => {
+    const { controller, onAbort } = wiring()
+    await expect(settleRunResult({
+      attempt: async () => { throw new Error('transport died') },
+      collectOutput: () => { throw new Error('output snapshot failed') },
+      collectDiagnostic: () => { throw new Error('diagnostic snapshot failed') },
+      collectFailure: () => { throw new Error('failure snapshot failed') },
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort,
+    })).resolves.toEqual({ output: [], stopReason: 'error' })
+    controller.abort()
+    expect(onAbort).not.toHaveBeenCalled()
+  })
+
   it('normalizes a successful provider diagnostic to the byte limit', async () => {
     const { controller, onAbort } = wiring()
     const result = await settleRunResult({
@@ -203,6 +218,22 @@ describe('settleRunResult', () => {
       output: [{ type: 'text', text: 'partial' }],
       stopReason: 'aborted',
     })
+  })
+
+  it('contains output snapshot failure on both cancellation races', async () => {
+    for (const attempt of [
+      async () => ({ output: [{ type: 'text' as const, text: 'late' }], stopReason: 'completed' as const }),
+      async (): Promise<never> => { throw new Error('late rejection') },
+    ]) {
+      const { controller, onAbort } = wiring()
+      await expect(settleRunResult({
+        attempt,
+        collectOutput: () => { throw new Error('output snapshot failed') },
+        cancelled: () => true,
+        signal: controller.signal,
+        onAbort,
+      })).resolves.toEqual({ output: [], stopReason: 'aborted' })
+    }
   })
 
   it('flattens a failure without a sink', async () => {

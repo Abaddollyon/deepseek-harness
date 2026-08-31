@@ -146,6 +146,7 @@ function failureInfo(turn: JsonObject): ParsedFailureInfo {
       case 'contextWindowExceeded':
         return { category: 'limit', maxTokens: true }
       case 'sessionBudgetExceeded':
+        return { category: 'limit' }
       case 'usageLimitExceeded':
         return { category: 'limit', failure: { code: QUOTA_EXCEEDED_CODE } }
       case 'serverOverloaded':

@@ -157,17 +157,31 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
 }
 
+/**
+ * Read one provider snapshot without letting provider failure reject a published run.
+ * @param collect - provider snapshot callback, when that snapshot is supported.
+ * @returns the snapshot, or `undefined` when it is absent or its callback throws.
+ */
+function collectSnapshot<T>(collect: (() => T) | undefined): T | undefined {
+  try {
+    return collect?.()
+  } catch {
+    // A provider snapshot failure omits that snapshot; the primary result still settles.
+    return undefined
+  }
+}
+
 /** Inputs to {@link settleRunResult}. */
 export interface RunResultSettlement {
   /** The turn attempt (typically racing local cancellation); returns the terminal result. */
   attempt: () => Promise<SubagentResult>
-  /** Snapshot the provider exposes when cancellation or failure wins settlement. */
+  /** Snapshot the provider exposes when cancellation or failure wins settlement; a throw yields empty output. */
   collectOutput: () => ContentBlock[]
-  /** Snapshot safe provider-authored detail when a failure wins settlement. */
+  /** Snapshot safe provider-authored detail when a failure wins settlement; a throw omits the detail. */
   collectDiagnostic?: (() => string | undefined) | undefined
   /** Whether local cancellation settled before the attempt's outcome is observed. */
   cancelled: () => boolean
-  /** Structured retry/routing facts when a failure flattened to a stop reason. */
+  /** Structured retry/routing facts when a failure flattened to a stop reason; a throw omits the facts. */
   collectFailure?: (() => SubagentFailure | undefined) | undefined
   /** Diagnostic sink for a failure flattened to a stop reason; a throw from it is contained. */
   onError?: ((error: Error, stopReason: SubagentStopReason) => void) | undefined
@@ -191,24 +205,24 @@ export async function settleRunResult(parts: RunResultSettlement): Promise<Subag
   try {
     const result = await parts.attempt()
     return parts.cancelled()
-      ? { output: parts.collectOutput(), stopReason: 'aborted' }
+      ? { output: collectSnapshot(parts.collectOutput) ?? [], stopReason: 'aborted' }
       : normalizeSubagentDiagnostic(result)
   } catch (error: unknown) {
     // Cover a rejection already queued when cancellation arrives.
-    if (parts.cancelled()) return { output: parts.collectOutput(), stopReason: 'aborted' }
+    if (parts.cancelled()) return { output: collectSnapshot(parts.collectOutput) ?? [], stopReason: 'aborted' }
     // Flatten post-publication transport failures while preserving diagnostics.
     try {
       parts.onError?.(toError(error), 'error')
     } catch {
       // The diagnostic sink cannot reject the run result.
     }
-    const collected = parts.collectDiagnostic?.()
-    const failure = parts.collectFailure?.()
+    const collected = collectSnapshot(parts.collectDiagnostic)
+    const failure = collectSnapshot(parts.collectFailure)
     const diagnostic = collected === undefined
       ? undefined
       : limitSubagentDiagnostic(collected)
     return {
-      output: parts.collectOutput(),
+      output: collectSnapshot(parts.collectOutput) ?? [],
       ...diagnostic === undefined ? {} : { diagnostic },
       ...failure === undefined ? {} : { failure },
       stopReason: 'error',

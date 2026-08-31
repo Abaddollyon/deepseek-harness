@@ -339,7 +339,8 @@ export function settlementSummary(
  */
 export function formatRetryAfter(retryAfterMs: number | undefined): string {
   if (retryAfterMs === undefined || retryAfterMs === 0) return 'before retrying'
-  return `${retryAfterMs / 1000} seconds before retrying`
+  const seconds = retryAfterMs / 1000
+  return `${seconds} second${seconds === 1 ? '' : 's'} before retrying`
 }
 
 /** Whether one settlement attempt opened the disposal transaction. */
@@ -1513,9 +1514,9 @@ export class SubagentContinuationManager {
       // during teardown would spend a model request on an Agent its host is
       // about to dispose — once per tree layer, since each layer's own notice
       // then wakes the layer above it. Injecting delivers to a parent still
-      // reading its inbox and records the account in the log either way; it
-      // does NOT survive that parent's own disposal, whose `keepInbox: false`
-      // cancel durably clears whatever it never claimed.
+      // reading its inbox and records the account in the log either way; parent
+      // teardown keeps the inbox, and its flush barrier makes the accepted
+      // notice durable for resume.
       if (this.closingTeardownFor(parent) !== undefined) {
         parent.inject(message)
         return

@@ -278,10 +278,11 @@ export function createActivationObserver(
     },
     terminal,
     settle: (failure: unknown): void => {
-      const { output, ...result } = terminal(failure)
+      const { output, stopReason, failure: typedFailure } = terminal(failure)
       emit('subagent/end', {
         ...identity,
-        ...result,
+        stopReason,
+        ...typedFailure === undefined ? {} : { failure: typedFailure },
         ...output === undefined ? {} : { lastAssistantMessage: output },
       }, parent)
     },

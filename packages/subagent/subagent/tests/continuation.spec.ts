@@ -1408,6 +1408,32 @@ describe('continuable review regressions', () => {
     )
   })
 
+  it('keeps teardown diagnostics off the public lifecycle event', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('teardown-failure-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    observer.settle(new Error('private teardown detail'))
+
+    expect(ends).toHaveLength(1)
+    expect(ends[0]).toMatchObject({
+      provider: 'spawn',
+      id: childId,
+      local: true,
+      stopReason: 'error',
+    })
+    expect(typeof ends[0]!.runId).toBe('string')
+    expect(ends[0]).not.toHaveProperty('diagnostic')
+  })
+
   it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
     const { ctx, parent } = await setup([])
     const childId = SessionId('future-reason-child')

@@ -33,7 +33,7 @@ export interface LlmFailureCodeMap {
   rateLimit: 'RATE_LIMIT'
 }
 /** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
-export type LlmFailureCode = keyof LlmFailureCodeMap extends never ? never : LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
+export type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
 
 /**
  * Canonical provider-neutral code for a response that completed normally but

@@ -4274,7 +4274,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailureCode',
-    declaration: 'export type LlmFailureCode = keyof LlmFailureCodeMap extends never ? never : LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {});',
+    declaration: 'export type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {});',
   },
   {
     name: 'LlmFailureCodeMap',
