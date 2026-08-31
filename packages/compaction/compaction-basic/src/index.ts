@@ -161,7 +161,10 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
 
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.overflowRetries.delete(agent)
+      if (status === 'idle') {
+        this.overflowRetries.delete(agent)
+        this.requestAttempts.delete(agent.session)
+      }
     })
 
     // A successful response starts a fresh overflow-recovery sequence even
@@ -169,7 +172,10 @@ export class BasicCompactionEngine extends CompactionEngine {
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'assistant/message') return
       const agent = this.overflowAgents.get(session)
-      if (agent !== undefined) this.overflowRetries.delete(agent)
+      if (agent !== undefined) {
+        this.overflowRetries.delete(agent)
+        this.requestAttempts.delete(session)
+      }
     })
 
     ctx.on('agent/request-preflight', async (

@@ -808,6 +808,7 @@ describe('Agent.cancel()', () => {
     expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(4)
   })
 
+
   it("cancel clears the turn's steering — it is not re-enqueued as a fresh turn", async () => {
     const adapter = new MockAdapter(['hang'])
     const ctx = await harness(adapter)
