@@ -1709,13 +1709,21 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
       onJobDone(snapshot: JobSnapshot): void
     }
     internals.adopted = new Map([[record.id, { record: { ...record, incarnation: 'prior-incarnation' }, membership: 'owned', decision: 'adoptable', detail: '' }]])
-    internals.onJobDone({ id: record.id, kind: 'workflow', label: record.label, status: 'killed', detail: 'cancelled', reported: true, outputLimitBytes: undefined } as JobSnapshot)
+    internals.onJobDone({
+      id: record.id, ordinal: 1, kind: 'workflow', label: record.label,
+      status: 'killed', resumable: true, incarnation: 'current-incarnation',
+      detail: 'cancelled', startedAt: 0, finishedAt: 1, reported: true,
+    })
     await flush()
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
     expect(runEvents(alice.agent.session, 'tool-workflow/run-end')).toHaveLength(1)
     const unowned = { ...record, id: JobId('workflow-unowned'), ownerSession: null }
     internals.adopted = new Map([[unowned.id, { record: { ...unowned, incarnation: 'prior-incarnation' }, membership: 'unowned', decision: 'adoptable', detail: '' }]])
-    internals.onJobDone({ id: unowned.id, kind: 'workflow', label: unowned.label, status: 'killed', detail: 'cancelled', reported: true, outputLimitBytes: undefined } as JobSnapshot)
+    internals.onJobDone({
+      id: unowned.id, ordinal: 2, kind: 'workflow', label: unowned.label,
+      status: 'killed', resumable: true, incarnation: 'current-incarnation',
+      detail: 'cancelled', startedAt: 0, finishedAt: 1, reported: true,
+    })
     await flush()
   })
 

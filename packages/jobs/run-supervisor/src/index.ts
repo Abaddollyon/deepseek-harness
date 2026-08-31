@@ -910,7 +910,7 @@ export class RunSupervisor {
    * completion notice an unreported settlement owes a live owner.
    */
   private async emitAbandoned(
-    pass: ReconcilePass,
+    pass: ReconcilePass | undefined,
     owner: SessionId,
     view: TerminalView,
     reason: RunAbandonReason,
