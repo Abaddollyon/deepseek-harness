@@ -79,6 +79,7 @@ import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 
 export * from './out-of-process.ts'
+export { subagentFailureFromLlmFailure } from './failure.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
 export type {
@@ -87,6 +88,7 @@ export type {
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
   SubagentProvider,
+  SubagentFailure,
   SubagentResult,
   SubagentRun,
   SubagentStartRequest,
@@ -215,8 +217,7 @@ export class SubagentRuntime extends TypertRemoteService {
       }, this.setupRegistry)
       this.continuations = manager
       childCtx.effect(() => () => {
-        /* v8 ignore else -- one injected binding owns the slot until its fiber disposes. */
-        if (this.continuations === manager) this.continuations = undefined
+        this.continuations = undefined
       }, 'subagents.continuationBinding()')
     })
     ctx.inject(['sessionProjections'], (projectionCtx) => {

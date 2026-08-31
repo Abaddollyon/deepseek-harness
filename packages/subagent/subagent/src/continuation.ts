@@ -50,7 +50,7 @@ import {
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
 import { seedDescriptorTurn } from './descriptor-seed.ts'
-import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentResult, SubagentStartRequest } from './types.ts'
+import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentFailure, SubagentResult, SubagentStartRequest } from './types.ts'
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SubagentError } from './error.ts'
 import type SubagentActivationSetupRegistry from './activation-setup-registry.ts'
@@ -293,10 +293,21 @@ function disposalOf(activation: Activation): Promise<void> | undefined {
  * the parent's own task vocabulary.
  * @param childId - the durable child the parent knows by id.
  * @param stopReason - how the child's last ordinary turn ended.
+ * @param diagnostic - bounded provider detail, when available.
+ * @param failure - typed provider cause, when known.
  * @returns the model-facing opening line of the settlement notice.
  */
-function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
+export function settlementSummary(
+  childId: SessionId,
+  stopReason: SubagentResult['stopReason'],
+  diagnostic?: string,
+  failure?: SubagentFailure,
+): string {
   const subject = `Background subagent ${childId}`
+  // A failure the parent cannot name is a failure it will misattribute: without
+  // this, an exhausted provider quota and a crashed child read identically, and
+  // the parent retries the route that cannot serve it.
+  const reason = diagnostic === undefined ? '' : ` Reason: ${diagnostic}`
   switch (stopReason) {
     case 'completed':
       return `${subject} finished and will do no further work unless you send it more.`
@@ -308,14 +319,28 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
     // the child had claimed, so the parent must not treat the task as done.
     case 'refusal':
       return `${subject} declined the task.`
-    case 'error':
-      return `${subject} failed before it finished.`
-    /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
-     * needs a backend that adds a variant; an unnameable ending is reported as unfinished
-     * rather than silently as success. */
+    case 'error': {
+      const classification = failure === undefined ? '' : failure.code === 'QUOTA'
+        ? " The provider's quota for this route is exhausted; do not retry this route."
+        : failure.code === 'RATE_LIMIT'
+          ? ` The provider is temporarily rate-limiting this route; wait ${formatRetryAfter(failure.retryAfterMs)}.`
+          : ''
+      return `${subject} failed before it finished.${classification}${reason}`
+    }
     default:
       return `${subject} ended abnormally (${String(stopReason)}) before it finished.`
   }
+}
+
+/**
+ * Render a known provider delay in the unit a parent should wait.
+ * @param retryAfterMs - provider-requested delay, when available.
+ * @returns a natural-language delay phrase.
+ */
+export function formatRetryAfter(retryAfterMs: number | undefined): string {
+  if (retryAfterMs === undefined || retryAfterMs === 0) return 'before retrying'
+  const seconds = retryAfterMs / 1000
+  return `${seconds} second${seconds === 1 ? '' : 's'} before retrying`
 }
 
 /** Whether one settlement attempt opened the disposal transaction. */
@@ -516,21 +541,19 @@ export class SubagentContinuationManager {
         if (activation === undefined) return this.coldResume(parent, childId, content, options)
         // A delivery that arrives after the disposal transaction began must not
         // reach a handle being torn down; wait for release, then cold-resume.
-        /* v8 ignore next 3 -- the send-versus-dispose cutoff: reaching this arm needs a
-         * delivery to observe the transaction inside the same critical section that opened it,
-         * which no test can schedule deterministically. The behavior is covered end-to-end by
-         * "cold-resumes a delivery that lost the race with final disposal". */
         if (activation.disposal !== undefined) {
-          return activation.disposal.then(() => undefined, () => undefined)
+          try {
+            await activation.disposal
+          } catch {
+            // The disposal owner reports its teardown failure; delivery only waits for release.
+          }
+          return undefined
         }
         return this.submitAdmitted(activation, content, options.source, parent, options.signal)
       })
-      /* v8 ignore start -- only the lost-cutoff arm above returns undefined, so only that
-       * race reaches the retry below, which then cold-resumes a new Activation. */
       if (live !== undefined) return live
       this.assertAdmitting(parent)
       options.signal.throwIfAborted()
-      /* v8 ignore stop */
     }
   }
 
@@ -609,7 +632,6 @@ export class SubagentContinuationManager {
    * @throws {SubagentError} when the sender is unauthorized, the parent is not
    *   live, or continuation admission is closing.
    */
-  // oxlint-disable-next-line typescript/require-await -- keep rejection semantics without yielding during admission
   async reportFrom(
     child: Agent,
     content: ContentBlock[],
@@ -618,8 +640,8 @@ export class SubagentContinuationManager {
     options.signal.throwIfAborted()
     this.assertAdmitting(child)
     const activation = this.authorizeReporter(child)
-    const parent = this.resolveReportParent(child)
-    return this.deliverReport(activation, parent, content, options.delivery)
+    const parent = this.resolveReportParent(activation)
+    return await Promise.resolve(this.deliverReport(activation, parent, content, options.delivery))
   }
 
   /** Authorize only the exact Agent of one resident Activation. */
@@ -631,8 +653,6 @@ export class SubagentContinuationManager {
         'UNAUTHORIZED',
       )
     }
-    /* v8 ignore next 6 -- only a synchronous re-entrant disposer can open this
-     * transaction between exact-agent authorization and this no-await cutoff. */
     if (activation.disposal !== undefined) {
       throw new SubagentError(
         `subagent "${child.id}" activation is being disposed; the report was not delivered`,
@@ -642,11 +662,9 @@ export class SubagentContinuationManager {
     return activation
   }
 
-  /** Resolve the reporting child's live direct parent from durable lineage. */
-  private resolveReportParent(child: Agent): Agent {
-    const parentId = child.session.header.parentSession
-    /* v8 ignore next -- every continuation-managed child has direct-parent metadata. */
-    const parent = parentId === undefined ? undefined : this.ctx.agents.get(parentId)
+  /** Resolve the reporting child's live direct parent from its resident Activation. */
+  private resolveReportParent(activation: Activation): Agent {
+    const parent = this.ctx.agents.get(activation.parentSession)
     if (parent === undefined) {
       throw new SubagentError(
         'direct parent is not live; report was not delivered',
@@ -1023,9 +1041,11 @@ export class SubagentContinuationManager {
     try {
       return this.submitAdmitted(activation, content, source, parent, signal)
     } catch (error: unknown) {
-      /* v8 ignore next -- rollback disposal failures must not mask the
-       * pre-acceptance signal, drain, or lifecycle failure. */
-      await this.dispose(activation).catch(() => undefined)
+      try {
+        await this.dispose(activation)
+      } catch {
+        // Rollback failure must not mask the admission failure that selected this path.
+      }
       throw error
     }
   }
@@ -1118,14 +1138,12 @@ export class SubagentContinuationManager {
       inputs.signal.throwIfAborted()
       this.assertAdmitting(parent)
       this.acquireOwnership(parent, childId)
-      // Every accepted id leaves the inbox exactly once, through dequeue or
-      // discard. Clearing it there is what lets `stateOf()` distinguish a truly
-      // quiet Agent from one whose accepted turn has not been admitted yet.
+      // Clear an accepted id on its first claim or discard. A pre-step abort can
+      // restore the same id to the inbox, so a later claim or teardown discard
+      // is intentionally ignored after the first deletion.
       // Registered through the child's own scoped context, so scope filtering
       // already restricts both listeners to this exact agent.
       handle.agent.ctx.on('agent/inbox/claimed', ({ message }) => {
-        /* v8 ignore next -- a claim of an id this manager never admitted needs
-         * another sender on the same child, which no current path allows. */
         if (activation.accepted.delete(message.id)) this.wake(activation)
       })
       handle.agent.ctx.on('agent/inbox/discarded', ({ message }) => {
@@ -1139,9 +1157,11 @@ export class SubagentContinuationManager {
     } catch (error: unknown) {
       // Listener exceptions are contained by the lifecycle emitter; a start
       // publication throw therefore leaves no residency edge to pair.
-      /* v8 ignore next -- rollback failure must not mask the admission failure
-       * that prevented this operation from returning an accepted message id. */
-      await this.rollbackUnpublished(activation).catch(() => undefined)
+      try {
+        await this.rollbackUnpublished(activation)
+      } catch {
+        // Rollback failure must not mask the failure that prevented publication.
+      }
       throw error
     }
     this.watchSettlement(activation)
@@ -1260,14 +1280,6 @@ export class SubagentContinuationManager {
   ): MessageId {
     signal.throwIfAborted()
     this.assertAdmitting(parent)
-    /* v8 ignore next 6 -- only a synchronous re-entrant disposer can change
-     * this field between the caller's live check and this no-await boundary. */
-    if (disposalOf(activation) !== undefined) {
-      throw new SubagentError(
-        `subagent "${activation.childId}" activation is being disposed; the message was not accepted`,
-        'ACTIVATION_CLOSING',
-      )
-    }
     this.authorizeLineage(
       parent,
       activation.childId,
@@ -1393,9 +1405,11 @@ export class SubagentContinuationManager {
       }))
       const reasons = childFailures.filter(reason => reason !== undefined)
       if (reasons.length > 0) {
+        const cause = new AggregateError(reasons, 'descendant teardown failures')
         failures.push(new SubagentError(
           `subagent "${childId}" child teardown failed: ${reasons.map(reason => errorChain(reason)).join('; ')}`,
           'ACTIVATION_TEARDOWN_FAILED',
+          { cause },
         ))
       }
       // Quiesce before the flush: a turn still running would keep
@@ -1475,13 +1489,19 @@ export class SubagentContinuationManager {
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
-      const summary = settlementSummary(activation.childId, terminal.stopReason)
+      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic, terminal.failure)
+      // The parent-facing echo relays only the closing text. The terminal
+      // output is the raw final assistant message, whose reasoning blocks are
+      // the child's private work product and whose remaining non-text blocks
+      // are not content a user-role notice can carry; a closing message
+      // without text therefore still reads as no closing message.
+      const closing = terminal.output?.filter(block => block.type === 'text')
       const message = createUserMessage({
         content: [
           { type: 'text' as const, text: summary },
-          ...terminal.output === undefined
+          ...closing === undefined || closing.length === 0
             ? [{ type: 'text' as const, text: 'It left no closing message.' }]
-            : [{ type: 'text' as const, text: 'Its closing message:' }, ...terminal.output],
+            : [{ type: 'text' as const, text: 'Its closing message:' }, ...closing],
         ],
         source: {
           kind: 'subagent-settled' as const,
@@ -1496,9 +1516,9 @@ export class SubagentContinuationManager {
       // during teardown would spend a model request on an Agent its host is
       // about to dispose — once per tree layer, since each layer's own notice
       // then wakes the layer above it. Injecting delivers to a parent still
-      // reading its inbox and records the account in the log either way; it
-      // does NOT survive that parent's own disposal, whose `keepInbox: false`
-      // cancel durably clears whatever it never claimed.
+      // reading its inbox and records the account in the log either way; parent
+      // teardown keeps the inbox, and its flush barrier makes the accepted
+      // notice durable for resume.
       if (this.closingTeardownFor(parent) !== undefined) {
         parent.inject(message)
         return

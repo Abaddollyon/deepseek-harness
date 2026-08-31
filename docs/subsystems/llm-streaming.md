@@ -218,7 +218,20 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
+Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics. `LlmFailureCodeMap` supplies known provider-neutral routing values while the derived open string type admits provider extensions; consumers treat every unknown value as non-retryable.
+
+```ts type-equiv
+/** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
+interface LlmFailureCodeMap {
+  quota: 'QUOTA'
+  rateLimit: 'RATE_LIMIT'
+}
+```
+
+```ts type-equiv
+/** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
+type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
+```
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -226,7 +239,7 @@ interface LlmFailure {
   /** Human-readable provider or transport failure. */
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
-  readonly code: string
+  readonly code: LlmFailureCode
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */

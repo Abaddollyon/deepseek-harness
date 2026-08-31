@@ -337,6 +337,30 @@ describe('SubagentModelSelectionConfig', () => {
     await withoutAgent.fiber.dispose()
   })
 
+  it('reaches the missing Agent registry guard from an injected preset scope', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SubagentModelSelectionConfig)
+    await ctx.plugin(SubagentRuntime)
+    const preset = createScope(ctx, { preset: 'standard' })
+    const scopeCtx = preset.ctx.extend({ agent: undefined })
+    let captured: unknown
+    const fiber = scopeCtx.inject(['subagents'], (runtimeCtx) => {
+      try {
+        tool.apply(runtimeCtx, {
+          provider: 'missing',
+          modelSelectionSettings: true,
+          maxDepth: 'provider-managed',
+        })
+      } catch (error: unknown) {
+        captured = error
+      }
+    })
+    await Promise.resolve()
+    expect(captured).toEqual(new Error('tool-subagent: scoped model-selection settings require the Agent registry'))
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+  })
+
   it('checks model-selectable definitions without rejecting a policy-only preset', async () => {
     const ctx = await boot()
     await ctx.plugin(InvariantRegistry, { enabled: true })

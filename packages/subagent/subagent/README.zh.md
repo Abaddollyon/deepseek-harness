@@ -52,7 +52,7 @@ kind: "package-reference"
 
 ### 失败与恢复
 
-需要所选提供方不具备的能力的请求会在启动时响亮失败，而不会被静默忽略。失败的子 agent 运行会返回停止原因，提供方后端还会附加安全诊断；被取消的请求以 `aborted` 结算。子 agent 相互隔离：崩溃或行为异常的子 agent 无法破坏父级会话。
+需要所选提供方不具备的能力的请求会在启动时响亮失败，而不会被静默忽略。失败的子 agent 运行会返回停止原因，提供方后端还会附加安全诊断；当 LLM seam 对原因完成分类时，`SubagentResult.failure` 会携带类型化的 `QUOTA` 或 `RATE_LIMIT` 事实，使路由无需解析诊断文案即可分支；缺少 `failure` 表示没有类型化原因到达该 seam。被取消的请求以 `aborted` 结算。子 agent 相互隔离：崩溃或行为异常的子 agent 无法破坏父级会话。
 
 -----
 
@@ -86,11 +86,11 @@ kind: "package-reference"
 
 ### 一次性流程
 
-请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`：创建子级时把请求字段叠加到父级最新已记录请求的提供方、模型与推理等级之上；父级还没有请求时回退到创建选项，并保留配置的 token 上限。更改路由而不显式指定推理等级时，会清除继承的路由自有等级，使所选模型解析自己的默认值。DSH SDK 也声明该能力并公开不可变的 `agentRouteDefaults`，使其实例持有的提供方／模型默认值在确切路由预检前成为基线；`start()` 仍负责直接调用方与输出上限。ACP、Codex 与 Claude Code 会拒绝 agent 路由覆盖，而不是静默忽略。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因与可选的安全诊断。
+请求先对照提供方声明的能力进行校验，随后对持久化描述符做快照，再由提供方构建子 agent。两个进程内提供方都声明 `agentOptions`：创建子级时把请求字段叠加到父级最新已记录请求的提供方、模型与推理等级之上；父级还没有请求时回退到创建选项，并保留配置的 token 上限。更改路由而不显式指定推理等级时，会清除继承的路由自有等级，使所选模型解析自己的默认值。DSH SDK 也声明该能力并公开不可变的 `agentRouteDefaults`，使其实例持有的提供方／模型默认值在确切路由预检前成为基线；`start()` 仍负责直接调用方与输出上限。ACP、Codex 与 Claude Code 会拒绝 agent 路由覆盖，而不是静默忽略。成功时运行被发布、所有权转移给调用方；失败时提供方回滚每个尚未发布的资源。结果携带子 agent 的最终输出、可选的结构化值、停止原因、可选的安全诊断与可选的类型化失败事实。发布后结果始终 resolve；提供方快照回调失败时会省略该快照，而不会让结果 reject。
 
 ### 可继续流程
 
-管理器预留子 agent 身份、解析持久化描述符、创建（或冷恢复）子 agent、把它安装进 Activation 并提交提示词。后续消息经子 agent 自己的 inbox 成为 FIFO 轮次；没有 Activation 时从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在父级自身的轮次流中告知该子级的直接父级。
+管理器预留子 agent 身份、解析持久化描述符、创建（或冷恢复）子 agent、把它安装进 Activation 并提交提示词。后续消息经子 agent 自己的 inbox 成为 FIFO 轮次；没有 Activation 时从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在父级自身的轮次流中告知该子级的直接父级。可继续结算通知只转发最终 assistant 消息中的文本块；推理内容与其他非文本块会被省略。
 
 ### 所有权与不变式
 
@@ -124,7 +124,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-一条用户角色的父级消息，开头是结果本身——`Background subagent <child-id> finished and will do no further work unless you send it more.`，或子级被停止、耗尽额度、拒绝任务或失败时的对应句子——随后是 `Its closing message:` 与子级的最终 assistant 内容；若子级没有产出内容，则是 `It left no closing message.`。这是本服务面向父级的唯一直接贡献；委派 schema、父级延续与发现以及子级作用域的 `report` 分别归 `dsh-tool-subagent`、`dsh-tool-subagent-control` 和 `dsh-tool-subagent-report` 所有。
+一条用户角色的父级消息，开头是结果本身——`Background subagent <child-id> finished and will do no further work unless you send it more.`，或子级被停止、耗尽额度、拒绝任务或失败时的对应句子——随后是 `Its closing message:` 与子级最终 assistant 消息中的文本块；若该消息没有文本，则是 `It left no closing message.`。已知配额与速率限制失败会加入路由指引及可用的重试延迟；拆卸只加入固定文本 `Reason: Subagent teardown failed.`，绝不加入基础设施异常文本。这是本服务面向父级的唯一直接贡献；委派 schema、父级延续与发现以及子级作用域的 `report` 分别归 `dsh-tool-subagent`、`dsh-tool-subagent-control` 和 `dsh-tool-subagent-report` 所有。
 
 #### Token 影响
 
@@ -162,6 +162,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 这些限制说明该 seam 何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是通用委派对比或任务积压。
 
 - **ACP 子级仍为一次性，且无法通过追踪枚举**——ACP 运行在父级会话语料中没有本地子会话，远程提供方需要 Activation 所有权约定才能支持可继续子级。
+- **类型化失败细节取决于提供方**——进程内运行与 Codex wire 会分类已知的 `QUOTA` 或 `RATE_LIMIT` 原因；通用 dsh-sdk、ACP 与 Claude Code 传输不会。其他已捕获代码可能只向可继续父级提供通用失败句；拆卸报告固定的通用细节，同时保留任何已知类型化原因。
 - **无 host-user 继续执行**——`followup()` 要求确切在线直接父级；只有 `interrupt()` 接受持久化的人类父级地址。
 - **继续执行消息绝不 steering（中途引导）**——父到子的后续消息排入后续轮次；它们绝不会重定向子级当前轮次。
 - **取消收敛期间存在唤醒缺口**——中断信号发出后、driver 进入 idle 前被接受的后续消息会保持排队，直到另一条唤醒发送到达。

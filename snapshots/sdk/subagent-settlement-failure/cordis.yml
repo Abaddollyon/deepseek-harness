@@ -1,0 +1,6 @@
+# Snapshot-only overlay fencing the background child behind its parent's
+# spawn turn, so the typed-failure settlement notice reaches an idle parent
+# as the parent's own later turn.
+- insert:
+    - id: settlement-fence
+      name: '../../../packages/test-support/session-snapshot/tests/fixtures/subagent-settlement-fence.ts'

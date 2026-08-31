@@ -399,6 +399,16 @@
     },
     {
       "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmFailureCodeMap",
+      "source": "packages/llm/llm/src/error.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmFailureCode",
+      "source": "packages/llm/llm/src/error.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
       "symbol": "LlmFailure",
       "source": "packages/llm/llm/src/types.ts"
     },
@@ -1359,6 +1369,11 @@
     {
       "doc": "docs/subsystems/subagent.md",
       "symbol": "ContinuableCreateSpec",
+      "source": "packages/subagent/subagent/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/subagent.md",
+      "symbol": "SubagentFailure",
       "source": "packages/subagent/subagent/src/types.ts"
     },
     {

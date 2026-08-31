@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage, ToolCallId, type ContentBlock, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmError, QUOTA_EXCEEDED_CODE, ToolCallId, type ContentBlock, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -255,13 +255,38 @@ describe('in-process structured output', () => {
     await run.dispose()
   })
 
-  it('an errored child keeps its honest error result (no capture expected)', async () => {
-    // Script exhaustion on the first call → the child turn errors.
-    const { ctx, parent, adapter } = await setup([])
+  it('an errored child keeps typed quota facts without a capture', async () => {
+    const { ctx, parent, adapter } = await setup([
+      () => {
+        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
+          providerRetryAfterMs: 12_000,
+        })
+      },
+    ])
     const run = await ctx.subagents.start('spawn', structuredRequest(parent))
     const result = await run.result
-    expect(result.stopReason).toBe('error')
+    expect(result).toMatchObject({
+      stopReason: 'error',
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
+    })
+    expect(result.structured).toBeUndefined()
     expect(adapter.requests.length).toBe(1)
+    await run.dispose()
+  })
+
+  it('does not retain provider failure facts when cancellation wins settlement', async () => {
+    const { ctx, parent } = await setup([
+      () => { throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE) },
+    ])
+    const controller = new AbortController()
+    const run = await ctx.subagents.start('spawn', structuredRequest(parent, { signal: controller.signal }))
+    ctx.on('session/event', (session, event) => {
+      const child = ctx.agents.get(run.id)
+      if (session === child?.session && event.type === 'turn/end') controller.abort('cancelled at turn end')
+    })
+    const result = await run.result
+    expect(result.stopReason).toBe('aborted')
+    expect(result.failure).toBeUndefined()
     await run.dispose()
   })
 

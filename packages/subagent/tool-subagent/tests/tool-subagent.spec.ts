@@ -181,6 +181,29 @@ describe('dsh-tool-subagent', () => {
     )
   })
 
+  it('preserves branchable provider failure facts through the real tool pipeline', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      diagnostic: 'rate limited',
+      failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      stopReason: 'error',
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected foreground failure')
+    expect(text(result)).toContain('Failure code: RATE_LIMIT')
+    expect(text(result)).toContain('Retry after: 12000 ms')
+  })
+
+  it('omits the retry line when the provider supplied no delay', async () => {
+    const ctx = await setup({ provider: 'mock' }, {
+      failure: { code: 'QUOTA' },
+      stopReason: 'error',
+    })
+    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
+    expect(text(result)).toContain('Failure code: QUOTA')
+    expect(text(result)).not.toContain('Retry after:')
+  })
+
   it('registers under a configurable toolName so multiple providers can coexist', async () => {
     // The defining multi-provider use case: two loads, two distinct tool names,
     // each bound to a different provider — the tool registry rejects duplicate
@@ -885,10 +908,11 @@ describe('dsh-tool-subagent background mode', () => {
     expect(text(again)).toBe('background answer\n[status: completed]')
   })
 
-  it('preserves provider diagnostics in one-shot background failure detail', async () => {
+  it('preserves provider diagnostics and routing facts in one-shot background failure detail', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' }, {
       reply: 'not background output',
       diagnostic: 'Claude Code cancelled an unattended dialog',
+      failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
       stopReason: 'error',
     })
     const parent = ownerAgent(ctx, 'sess-parent')
@@ -911,7 +935,8 @@ describe('dsh-tool-subagent background mode', () => {
     })
     expect(text(output)).toBe(
       '(no new output)\n'
-      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog]',
+      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog'
+      + '; failure code: RATE_LIMIT; retry after: 12000 ms]',
     )
   })
 
@@ -1010,14 +1035,14 @@ describe('dsh-tool-subagent background mode', () => {
     expect(replacementStart).not.toHaveBeenCalled()
   })
 
-  it('settles an asynchronous provider-start failure as a failed task', async () => {
+  it('settles an unrenderable asynchronous provider-start failure as a failed task', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' })
     const parent = ownerAgent(ctx, 'sess-parent')
     ctx.subagents.registerProvider({
       name: 'broken-start',
       capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
       inheritsParentContext: false,
-      start: async () => { throw new Error('setup failed') },
+      start: async () => { throw { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } },
     })
     tool.apply(ctx, { provider: 'broken-start', toolName: 'subagent_broken' })
 
@@ -1036,7 +1061,7 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
-    expect(text(output)).toContain('[status: failed, Error: setup failed]')
+    expect(text(output)).toContain('[status: failed, <unrenderable value>]')
   })
 
   it('kills a subagent task while provider readiness is still pending', async () => {

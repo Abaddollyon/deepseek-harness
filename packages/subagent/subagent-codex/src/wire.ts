@@ -8,10 +8,12 @@
  */
 
 import type { Readable, Writable } from 'node:stream'
+import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import type { CodexPermissionMode } from './run.ts'
+import { thrown } from './error.ts'
 
 type JsonObject = Record<string, unknown>
 
@@ -27,6 +29,8 @@ export interface CodexWireFailureFacts {
     | 'invalid-result'
     | 'unknown'
   readonly httpStatus?: number | undefined
+  /** Structured provider-neutral routing facts when the wire can prove them. */
+  readonly failure?: SubagentFailure
 }
 
 const THREAD_PERMISSION_PARAMS: Readonly<Record<CodexPermissionMode, JsonObject>> = {
@@ -80,6 +84,20 @@ interface ParsedFailureInfo {
   readonly httpStatus?: number | undefined
   readonly maxTokens?: true
   readonly sandboxFailure?: true
+  readonly failure?: SubagentFailure
+}
+
+function retryAfterMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function httpFailure(fields: JsonObject, status: number | undefined): SubagentFailure | undefined {
+  if (status !== 429) return undefined
+  const delay = retryAfterMs(fields.retryAfterMs)
+  return {
+    code: 'RATE_LIMIT',
+    ...delay === undefined ? {} : { retryAfterMs: delay },
+  }
 }
 
 function objectFailureInfo(value: JsonObject): ParsedFailureInfo {
@@ -100,9 +118,14 @@ function objectFailureInfo(value: JsonObject): ParsedFailureInfo {
     case 'responseTooManyFailedAttempts':
     {
       const httpStatus = numericHttpStatus(fields.httpStatusCode)
+      const failure = httpFailure(fields, httpStatus)
       return httpStatus === undefined
         ? { category: 'transport' }
-        : { category: 'transport', httpStatus }
+        : {
+          category: 'transport',
+          httpStatus,
+          ...failure === undefined ? {} : { failure },
+        }
     }
     case 'activeTurnNotSteerable':
       return { category: 'product-error' }
@@ -123,8 +146,9 @@ function failureInfo(turn: JsonObject): ParsedFailureInfo {
       case 'contextWindowExceeded':
         return { category: 'limit', maxTokens: true }
       case 'sessionBudgetExceeded':
-      case 'usageLimitExceeded':
         return { category: 'limit' }
+      case 'usageLimitExceeded':
+        return { category: 'limit', failure: { code: QUOTA_EXCEEDED_CODE } }
       case 'serverOverloaded':
       case 'internalServerError':
         return { category: 'service' }
@@ -142,9 +166,27 @@ function failureInfo(turn: JsonObject): ParsedFailureInfo {
         return { category: 'unknown' }
     }
   }
-  return info !== null && typeof info === 'object' && !Array.isArray(info)
-    ? objectFailureInfo(info as JsonObject)
-    : { category: 'unknown' }
+  if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+    const parsed = objectFailureInfo(info as JsonObject)
+    const fields = error as JsonObject
+    const status = parsed.httpStatus ?? numericHttpStatus(fields.httpStatusCode)
+      ?? numericHttpStatus(fields.statusCode) ?? numericHttpStatus(fields.status)
+    const failure = parsed.failure ?? httpFailure(fields, status)
+    return {
+      ...parsed,
+      ...status !== undefined && parsed.httpStatus === undefined ? { httpStatus: status } : {},
+      ...failure === undefined ? {} : { failure },
+    }
+  }
+  const fields = error as JsonObject
+  const status = numericHttpStatus(fields.httpStatusCode)
+    ?? numericHttpStatus(fields.statusCode) ?? numericHttpStatus(fields.status)
+  const failure = httpFailure(fields, status)
+  return {
+    category: 'unknown',
+    ...status === undefined ? {} : { httpStatus: status },
+    ...failure === undefined ? {} : { failure },
+  }
 }
 
 function unattendedDiagnostic(
@@ -154,11 +196,6 @@ function unattendedDiagnostic(
   reason: string,
 ): string {
   return `Codex unattended decision (mode: ${mode}; request: ${request}; decision: ${decision}): ${reason}`
-}
-
-function thrown(value: unknown): Error {
-  /* v8 ignore next -- typed protocol and stream failures reject with Error. */
-  return value instanceof Error ? value : new Error(String(value))
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -344,13 +381,12 @@ export class CodexAppServerWire {
     const status = terminal.status
     if (status !== 'completed') {
       const parsed = failureInfo(terminal)
-      this.recordFailure(parsed.httpStatus === undefined
-        ? { stage: 'turn', category: parsed.category }
-        : {
-          stage: 'turn',
-          category: parsed.category,
-          httpStatus: parsed.httpStatus,
-        })
+      this.recordFailure({
+        stage: 'turn',
+        category: parsed.category,
+        ...parsed.httpStatus === undefined ? {} : { httpStatus: parsed.httpStatus },
+        ...parsed.failure === undefined ? {} : { failure: parsed.failure },
+      })
       if (parsed.sandboxFailure) {
         this.recordDiagnostic(
           'sandbox execution',
@@ -407,10 +443,10 @@ export class CodexAppServerWire {
   /**
    * The structured failure fact observed for this published turn.
    * Call only after a non-completed return or rejection from {@link runTurn}.
-   * @returns the fixed stage/category pair and optional HTTP status.
+   * @returns the fixed stage/category pair and optional HTTP status, when a failure was observed.
    */
-  collectFailure(): CodexWireFailureFacts {
-    return this.failure as CodexWireFailureFacts
+  collectFailure(): CodexWireFailureFacts | undefined {
+    return this.failure
   }
 
   /** Detach JSON-RPC listeners and reject outstanding requests. Idempotent. */

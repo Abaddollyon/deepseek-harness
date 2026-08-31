@@ -66,6 +66,17 @@ describe('outcome mapping helpers', () => {
       status: 'failed',
       detail: 'Error: result failed; dispose failed: Error: reap failed',
     })
+
+    const unrenderable = { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } }
+    await expect(settleRun({
+      id: SessionId('child-hostile'),
+      localAgent: undefined,
+      result: (async () => { throw unrenderable })(),
+      dispose: async () => { throw unrenderable },
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: '<unrenderable value>; dispose failed: <unrenderable value>',
+    })
   })
 
   it('keeps provider diagnostics separate in failed background outcomes', async () => {
@@ -81,6 +92,22 @@ describe('outcome mapping helpers', () => {
     })).resolves.toEqual({
       status: 'failed',
       detail: 'error; diagnostic: Claude Code denied a tool request',
+    })
+  })
+
+  it('retains provider routing facts in failed background outcomes', async () => {
+    await expect(settleRun({
+      id: SessionId('child-rate-limit'),
+      localAgent: undefined,
+      result: Promise.resolve({
+        output: [],
+        stopReason: 'error',
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      }),
+      dispose: () => Promise.resolve(),
+    })).resolves.toEqual({
+      status: 'failed',
+      detail: 'error; failure code: RATE_LIMIT; retry after: 12000 ms',
     })
   })
 

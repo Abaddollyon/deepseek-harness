@@ -27,6 +27,14 @@ export const CONTEXT_WINDOW_EXCEEDED_CODE = 'CONTEXT_WINDOW_EXCEEDED'
 /** Canonical provider-neutral code for an exhausted account quota or balance. */
 export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 
+/** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
+export interface LlmFailureCodeMap {
+  quota: 'QUOTA'
+  rateLimit: 'RATE_LIMIT'
+}
+/** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
+export type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
+
 /**
  * Canonical provider-neutral code for a response that completed normally but
  * carried no content blocks at all. Providers occasionally emit a degenerate

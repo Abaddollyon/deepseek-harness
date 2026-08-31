@@ -13,7 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import {
@@ -21,7 +21,7 @@ import {
   parentAgentOptionsForDelegation,
   settleRun,
 } from '@deepseek-ai/dsh-subagent'
-import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import {
@@ -140,6 +140,19 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
+/**
+ * Render a startup failure without allowing a hostile coercion hook to escape.
+ * @param value - value rejected by provider startup.
+ * @returns ordinary JavaScript stringification or a safe fallback.
+ */
+function startupFailureDetail(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return errorChain(value)
+  }
+}
+
 /** Settle pending startup without rejecting the task producer contract. */
 async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
   try {
@@ -149,7 +162,7 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
     // must not turn a failed cleanup into a cleanly killed Job.
     return signal.aborted && !(error instanceof AggregateError)
       ? { status: 'killed' }
-      : { status: 'failed', detail: String(error) }
+      : { status: 'failed', detail: startupFailureDetail(error) }
   }
 }
 
@@ -185,6 +198,10 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const diagnostic = result.diagnostic === undefined
     ? ''
     : `\nDiagnostic: ${result.diagnostic}`
+  const failure = result.failure === undefined
+    ? ''
+    : `\nFailure code: ${result.failure.code}`
+      + (result.failure.retryAfterMs === undefined ? '' : `\nRetry after: ${result.failure.retryAfterMs} ms`)
   const text = result.output
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
     .map(block => block.text)
@@ -192,7 +209,18 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const partial = text.length === 0
     ? ''
     : `\nPartial output before the run ended:\n${text}`
-  return `${error}${diagnostic}${partial}`
+  return `${error}${diagnostic}${failure}${partial}`
+}
+
+/** Preserve branchable provider facts when a tool run fails. */
+class SubagentToolFailure extends Error {
+  readonly failure: SubagentFailure | undefined
+
+  constructor(message: string, result: SubagentResult) {
+    super(message, result.failure === undefined ? undefined : { cause: result.failure })
+    this.name = 'SubagentToolFailure'
+    this.failure = result.failure
+  }
 }
 
 type ForegroundToolResult = {
@@ -212,7 +240,7 @@ async function settleForegroundRun(run: SubagentRun): Promise<ForegroundToolResu
       if (error !== undefined) {
         // The registry converts this throw to isError; partial output is not
         // success, but the preserved partial answer still reaches the parent.
-        throw new Error(withDiagnosticAndPartialText(error, result))
+        throw new SubagentToolFailure(withDiagnosticAndPartialText(error, result), result)
       }
       return {
         kind: 'foreground',
@@ -640,7 +668,6 @@ export function apply(ctx: Context, config: Config): void {
     return
   }
   const agents = ctx.get('agents')
-  /* v8 ignore next -- Agent and preset scopes are minted only by the Agent registry. */
   if (agents === undefined) throw new Error('tool-subagent: scoped model-selection settings require the Agent registry')
   const scopedInstalls = new WeakMap<Agent, ReturnType<Context['inject']>>()
   const installing = new WeakSet<Agent>()
@@ -666,10 +693,7 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = scopedInstalls.get(candidate)
     if (fiber === undefined) return
     scopedInstalls.delete(candidate)
-    /* v8 ignore next 3 -- Cordis Fiber disposal contains registration cleanup failures; this is the final diagnostic sink. */
-    void fiber.dispose().catch((error: unknown) => {
-      ctx.logger.warn(`tool-subagent: failed to remove recomposed Agent "${candidate.id}" definitions: ${String(error)}`)
-    })
+    void fiber.dispose()
   }
   const reconcileComposedAgents = (): void => {
     // Every Agent and preset scope is minted by the Agent registry; the scope

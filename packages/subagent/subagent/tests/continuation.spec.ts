@@ -12,7 +12,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, LlmError, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,7 +22,21 @@ import SubagentRuntime, {
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
+import { settlementSummary } from '../src/continuation.ts'
+import { createActivationObserver, createLifecycleEmitter } from '../src/lifecycle.ts'
 import { TestSessionQuery } from './test-session-query.ts'
+
+declare module '@deepseek-ai/dsh-session' {
+  interface TurnEndReasonMap {
+    'test-future': { kind: 'test-future' }
+  }
+}
+
+declare module '../src/types.ts' {
+  interface SubagentStopReasonMap {
+    'test-future': 'test-future'
+  }
+}
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
@@ -721,24 +735,43 @@ describe('SubagentRuntime.followup residency routing', () => {
       .rejects.toBe(failure)
   })
 
-  it('cold-resumes a delivery that lost the race with final disposal', async () => {
-    const { ctx, parent } = await setup([textResponse('first'), textResponse('after the race')])
+  it('waits out an open disposal and cold-resumes the delivery', async () => {
+    const releaseResponse = Promise.withResolvers<undefined>()
+    const releaseFlush = Promise.withResolvers<undefined>()
+    const atFlush = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first'), gate: releaseResponse.promise },
+      { chunks: textResponse('after the race') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
     const started = await ctx.subagents.startContinuable(startSpec(parent))
-    const child = await vi.waitFor(() => {
-      const found = ctx.agents.get(started.childId)
-      expect(found).toBeDefined()
-      return found!
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    let held = false
+    ctx.on('session/flush', async (session) => {
+      if (session.header.id !== started.childId || held) return
+      held = true
+      atFlush.resolve(undefined)
+      await releaseFlush.promise
     })
-    // Deliver in the same tick the settlement watcher opens its transaction:
-    // exactly one side wins the cutoff. A delivery that loses awaits release and
-    // cold-resumes rather than reaching a handle being torn down.
-    const delivery = child.whenIdle().then(() =>
-      followup(ctx, parent, started.childId, message('raced')))
 
-    await expect(delivery).resolves.toBeTypeOf('string')
+    releaseResponse.resolve(undefined)
+    await atFlush.promise
+    const delivery = followup(ctx, parent, started.childId, message('raced'))
+    let settled = false
+    const observed = delivery.then(
+      (messageId) => { settled = true; return messageId },
+      (error: unknown) => { settled = true; throw error },
+    )
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    releaseFlush.resolve(undefined)
+    await expect(observed).resolves.toBeTypeOf('string')
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
     expect(hasUserText(loaded.events, 'raced')).toBe(true)
+    expect(adapter.requests.filter(request => request.sessionId === started.childId)).toHaveLength(2)
   })
 })
 
@@ -1350,6 +1383,82 @@ describe('continuable review regressions', () => {
     expect(ends[0]!.stopReason).toBe('max-tokens')
   })
 
+  it('carries typed quota facts through the continuable lifecycle and parent notice', async () => {
+    const { ctx, parent } = await setup([
+      () => {
+        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
+          providerRetryAfterMs: 12_000,
+        })
+      },
+      textResponse('parent ack'),
+    ])
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+    expect(ends[0]).toMatchObject({
+      stopReason: 'error',
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
+    })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
+  })
+
+  it('keeps teardown diagnostics off the public lifecycle event', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('teardown-failure-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    observer.settle(new Error('private teardown detail'))
+
+    expect(ends).toHaveLength(1)
+    expect(ends[0]).toMatchObject({
+      provider: 'spawn',
+      id: childId,
+      local: true,
+      stopReason: 'error',
+    })
+    expect(typeof ends[0]!.runId).toBe('string')
+    expect(ends[0]).not.toHaveProperty('diagnostic')
+  })
+
+  it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('future-reason-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    child.session.append('turn/start', { turn: 1 })
+    child.session.append('step/start', { turn: 1, step: 1 })
+    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } })
+    observer.capture(child)
+
+    expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
+  })
+
+  it('renders a future backend stop reason as an abnormal settlement', () => {
+    expect(settlementSummary(SessionId('future-child'), 'test-future')).toBe(
+      'Background subagent future-child ended abnormally (test-future) before it finished.',
+    )
+  })
+
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
     const releaseFirst = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('working'), gate: releaseFirst.promise }])
@@ -1735,6 +1844,35 @@ describe('continuable report delivery', () => {
       expect(adapter.requests.filter(request => request.sessionId === parent.id)).toHaveLength(2)
     })
   })
+
+  it('rejects a report whose own activation is being disposed', async () => {
+    const releaseResponse = Promise.withResolvers<undefined>()
+    const releaseFlush = Promise.withResolvers<undefined>()
+    const atFlush = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child answer'), gate: releaseResponse.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)!
+    ctx.on('session/flush', async (session) => {
+      if (session.header.id !== started.childId) return
+      atFlush.resolve(undefined)
+      await releaseFlush.promise
+    })
+
+    releaseResponse.resolve(undefined)
+    await atFlush.promise
+    await expect(ctx.subagents.reportFrom(child, message('too late'), {
+      delivery: 'quiet',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'ACTIVATION_CLOSING' })
+
+    releaseFlush.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
 })
 
 describe('continuable settlement delivery', () => {
@@ -1785,6 +1923,56 @@ describe('continuable settlement delivery', () => {
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} ran out of room before it finished.`
       + '\nIts closing message:\nhalf an ans',
+    )
+  })
+
+  it('echoes only the text of a closing message that also carries reasoning', async () => {
+    // A reasoning model's closing message carries its private reasoning blocks
+    // alongside the visible answer; the parent's notice must relay the answer
+    // without adopting the child's reasoning as user-message content.
+    const reasoningThenText: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'child private reasoning' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'child private reasoning' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'text-delta', index: 1, text: 'the answer' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: 'the answer' } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const { ctx, parent } = await setup([reasoningThenText, textResponse('parent ack')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    const notice = settlementNotices(parent)[0]!
+    expect(notice.text).toBe(
+      `Background subagent ${started.childId} finished and will do no further work unless you send it more.`
+      + '\nIts closing message:\nthe answer',
+    )
+    // The flat-text helper above would hide a leaked reasoning block; inspect
+    // the raw notice content so only text blocks may reach the parent.
+    const raw = parent.session.events.flatMap(event => event.type === 'user/message'
+      && event.data.source.kind === 'subagent-settled' ? [event.data] : [])[0]
+    expect(raw?.content.map(block => block.type)).toEqual(['text', 'text', 'text'])
+  })
+
+  it('reads a closing message without text as no closing message', async () => {
+    const reasoningOnly: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'cut off mid-thought' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'cut off mid-thought' } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    const { ctx, parent } = await setup([reasoningOnly, textResponse('parent ack')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toBe(
+      `Background subagent ${started.childId} ran out of room before it finished.`
+      + '\nIt left no closing message.',
     )
   })
 
@@ -1989,9 +2177,14 @@ describe('continuable settlement delivery', () => {
 
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    // Infrastructure exceptions stay out of parent model context; typed facts,
+    // when present, carry the retry decision separately.
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.\nIt left no closing message.`,
+      `Background subagent ${started.childId} failed before it finished.`
+      + ' Reason: Subagent teardown failed.'
+      + '\nIt left no closing message.',
     )
+    expect(settlementNotices(parent)[0]!.text).not.toContain('scope unwind failed')
   })
 
   it('gives an idle parent one ordinary turn on the notice', async () => {
@@ -2117,6 +2310,86 @@ describe('continuable settlement delivery', () => {
     // Still owned at delivery: the parent is structurally unable to settle in
     // the window the notice crosses, rather than winning a race against it.
     expect(ownedAtDelivery).toEqual([inner.childId])
+    await waitNoActivation(ctx, outer.childId)
+  })
+
+  it('preserves nested descendant routing facts through ancestor teardown', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('outer') },
+      { chunks: textResponse('inner'), gate: releaseChild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const outer = await ctx.subagents.startContinuable(startSpec(parent))
+    const middle = await vi.waitFor(() => {
+      const live = ctx.agents.get(outer.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const inner = await ctx.subagents.startContinuable(startSpec(middle))
+    const manager = (ctx.subagents as unknown as {
+      continuations: { activations: Map<SessionId, { handle: { dispose(): Promise<void> } }> }
+    }).continuations
+    const activation = await vi.waitFor(() => {
+      const live = manager.activations.get(inner.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const dispose = activation.handle.dispose.bind(activation.handle)
+    activation.handle.dispose = async () => {
+      await dispose()
+      throw Object.assign(new Error('private provider failure'), {
+        failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
+      })
+    }
+
+    const drained = ctx.subagents.drainContinuableDescendants([parent])
+    releaseChild.resolve(undefined)
+    await expect(drained).rejects.toThrow('child teardown failed')
+    await waitNoActivation(ctx, outer.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      'The provider is temporarily rate-limiting this route; wait 12 seconds before retrying.',
+    )
+    expect(settlementNotices(parent)[0]!.text).toContain('Reason: Subagent teardown failed.')
+    expect(settlementNotices(parent)[0]!.text).not.toContain('private provider failure')
+  })
+
+  it('releases nested ownership after a hostile teardown rejection', async () => {
+    const releaseChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('outer') },
+      { chunks: textResponse('inner'), gate: releaseChild.promise },
+      { chunks: textResponse('outer reacts') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const outer = await ctx.subagents.startContinuable(startSpec(parent))
+    const middle = await vi.waitFor(() => {
+      const live = ctx.agents.get(outer.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const inner = await ctx.subagents.startContinuable(startSpec(middle))
+    const manager = (ctx.subagents as unknown as {
+      continuations: { activations: Map<SessionId, { handle: { dispose(): Promise<void> } }> }
+    }).continuations
+    const activation = await vi.waitFor(() => {
+      const live = manager.activations.get(inner.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const dispose = activation.handle.dispose.bind(activation.handle)
+    const rejected = Proxy.revocable({}, {})
+    rejected.revoke()
+    activation.handle.dispose = async () => {
+      await dispose()
+      throw rejected.proxy
+    }
+
+    releaseChild.resolve(undefined)
+    await waitNoActivation(ctx, inner.childId)
+    await vi.waitFor(() => { expect(settlementNotices(middle)).toHaveLength(1) })
+    expect(settlementNotices(middle)[0]!.text).toContain('Reason: Subagent teardown failed.')
     await waitNoActivation(ctx, outer.childId)
   })
 
@@ -2725,6 +2998,11 @@ describe('SubagentRuntime.interrupt', () => {
     expect(cancelSpy).not.toHaveBeenCalled()
     await run.result
     await run.dispose()
+  })
+
+  it('ignores absent ids during selected child teardown', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    await expect(ctx.subagents.drainContinuableChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
   })
 
   it('accepts an interrupt after natural completion', async () => {
