@@ -43,9 +43,6 @@
     },
     {
       "path": "../jobs-store-domain"
-    },
-    {
-      "path": "../../runtime-diagnostics/invariants"
     }
   ]
 }

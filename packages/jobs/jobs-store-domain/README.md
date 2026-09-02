@@ -67,4 +67,6 @@ No direct invalidation; the named consumers own any request-prefix changes.
 
 None.
 
+No runtime invariant companion is published because this plugin exposes durable storage and reconciliation behavior through its public service seam; package tests cover the lifecycle directly.
+
 </details>

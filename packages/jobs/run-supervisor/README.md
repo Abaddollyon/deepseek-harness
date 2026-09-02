@@ -96,4 +96,6 @@ No direct invalidation; the appended events and one notice per unreported settle
 
 None.
 
+No runtime invariant companion is published because this plugin exposes durable storage and reconciliation behavior through its public service seam; package tests cover the lifecycle directly.
+
 </details>
