@@ -84,6 +84,8 @@ class LocalSendOperation implements TerminalSendOperation {
   private readonly promise: PromiseWithResolvers<TerminalSendResult>
   private finished = false
   private cancellationRequested = false
+  private outputSeen = false
+  private pwshSilenceDeferred = false
   private initialForegroundLeftWait: boolean
   private initialForegroundPgid: number | undefined
 
@@ -109,8 +111,16 @@ class LocalSendOperation implements TerminalSendOperation {
     return this.cancellationRequested
   }
 
+  get hasOutput(): boolean {
+    return this.outputSeen
+  }
+
   append(text: string): void {
-    if (!this.finished) this.output.append(text)
+    if (!this.finished) {
+      this.outputSeen ||= text.length > 0
+      this.pwshSilenceDeferred = false
+      this.output.append(text)
+    }
   }
 
   settle(waitReason: TerminalWaitReason, sessionStatus: TerminalSessionStatus, inheritedTruncation: boolean): void {
@@ -133,6 +143,12 @@ class LocalSendOperation implements TerminalSendOperation {
 
   readOutput(): TerminalSendRead {
     return this.output.consume()
+  }
+
+  deferPwshSilenceOnce(): boolean {
+    if (this.pwshSilenceDeferred) return false
+    this.pwshSilenceDeferred = true
+    return true
   }
 
   setInitialForeground(foreground: SubprocessTerminalForeground | undefined): void {
@@ -506,8 +522,12 @@ export class LocalPtySession implements TerminalBackendSession {
       // child also inherits PROMPT_COMMAND. Silence therefore remains the bound
       // on waiting for shell ownership instead of letting a child marker suppress
       // readiness until the absolute timeout.
-      const handoffGrace = this.promptSeen ? this.config.handoffGraceMs : 0
+      const pwshRendering = this.config.shellDialect === 'pwsh' && operation.hasOutput
+      const handoffGrace = pwshRendering
+        ? this.config.idleSilenceMs + this.config.handoffGraceMs
+        : this.promptSeen ? this.config.handoffGraceMs : 0
       if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace) {
+        if (pwshRendering && operation.deferPwshSilenceOnce()) return
         this.settleActive('inferred_idle')
       }
     } catch (error: unknown) {
