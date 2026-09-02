@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -11,6 +11,7 @@ import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import type { JobHooks, JobOutcome, JobSnapshot, JobStart } from '@deepseek-ai/dsh-jobs'
+import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import { statusLine } from '@deepseek-ai/dsh-tool-jobs'
 
@@ -70,11 +71,21 @@ async function disposeAgentScope(agent: Agent): Promise<void> {
   await fiber.dispose()
 }
 
+/**
+ * Per-kind deterministic idHint counters: the registry mints uuid ids when no
+ * hint is supplied, and hint-stable `<kind>-<n>` ids keep this suite's many
+ * id-addressed calls readable. Reset per test so every test starts at 1.
+ */
+const idCounters = new Map<string, number>()
+beforeEach(() => { idCounters.clear() })
+
 /** A controllable producer start-spec (settle `done` on demand, record cancels). */
 function producer(overrides: Partial<Omit<JobStart, 'run'> & JobHooks> = {}) {
   let settle!: (outcome: JobOutcome) => void
   const cancels: (string | undefined)[] = []
   const { kind = 'bash', label = 'sleep 60', owner, outputLimitBytes, ...hookOverrides } = overrides
+  const count = (idCounters.get(kind) ?? 0) + 1
+  idCounters.set(kind, count)
   const hooks: JobHooks = {
     cancel(reason) { cancels.push(reason) },
     done: new Promise<JobOutcome>((res) => { settle = res }),
@@ -83,6 +94,7 @@ function producer(overrides: Partial<Omit<JobStart, 'run'> & JobHooks> = {}) {
   const spec: JobStart = {
     kind,
     label,
+    idHint: String(count),
     ...owner !== undefined ? { owner } : {},
     ...outputLimitBytes !== undefined ? { outputLimitBytes } : {},
     run: () => hooks,
@@ -250,6 +262,22 @@ describe('job_output', () => {
     expect(text(result)).not.toContain('[status: running]')
   })
 
+  it('reuses an existing truncation marker instead of duplicating it', async () => {
+    const { ctx } = await setup()
+    ctx.jobs.start(producer({ outputLimitBytes: 64 }).spec)
+    ctx.on('tools/post-execute', (exec, _result, next) => {
+      if (exec.name !== 'job_output') return next()
+      return Promise.resolve({
+        kind: 'accept',
+        content: [{ type: 'text', text: `${'p'.repeat(200)}\n[result truncated]` }],
+      })
+    })
+
+    const result = await call(ctx, 'job_output', { job_id: 'bash-1' })
+    expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(64)
+    expect(text(result).match(/\[result truncated\]/g)).toHaveLength(1)
+  })
+
   it('applies a producer limit to a normalized read failure', async () => {
     const { ctx } = await setup()
     ctx.jobs.start(producer({
@@ -283,7 +311,7 @@ describe('job_output', () => {
           value: {
             text: 'a'.repeat(1_000),
             job: {
-              id: 'bash-2', kind: 'bash', label: 'sleep 60', status: 'running', startedAt: 0,
+              id: 'bash-2', ordinal: 2, kind: 'bash', label: 'sleep 60', status: 'running', startedAt: 0,
             },
           },
         }
@@ -365,20 +393,22 @@ describe('job_list', () => {
     if (listed.isError) throw new Error('expected job_list success')
     const listedValue = listed.value as Array<Record<string, unknown>>
     expect(listedValue).toHaveLength(3)
-    expect(listedValue[0]).toMatchObject({ id: 'bash-1', kind: 'bash', label: 'pnpm test', status: 'running' })
-    expect(listedValue[2]).toMatchObject({ id: 'bash-2', kind: 'bash', label: 'build', status: 'completed', detail: 'exit code: 0' })
+    expect(listedValue[0]).toMatchObject({ id: 'bash-1', ordinal: 1, kind: 'bash', label: 'pnpm test', status: 'running' })
+    expect(listedValue[2]).toMatchObject({ id: 'bash-2', ordinal: 2, kind: 'bash', label: 'build', status: 'completed', detail: 'exit code: 0' })
     for (const job of listedValue) {
       expect(job).not.toHaveProperty('ownerSession')
       expect(job).not.toHaveProperty('reported')
     }
+    // The short per-owner ordinal leads each row; the durable id — what the
+    // other job tools accept — stays present.
     expect(text(listed)).toBe([
-      'bash-1 [bash] running — pnpm test',
-      'subagent-1 [subagent] running — open research',
-      'bash-2 [bash] completed — build',
+      '#1 [bash] running — pnpm test (id: bash-1)',
+      '#1 [subagent] running — open research (id: subagent-1)',
+      '#2 [bash] completed — build (id: bash-2)',
     ].join('\n'))
     // A different caller sees only the unowned job.
     const bob = fakeAgent(ctx, 'sess-bob')
-    expect(text(await call(ctx, 'job_list', {}, bob))).toBe('subagent-1 [subagent] running — open research')
+    expect(text(await call(ctx, 'job_list', {}, bob))).toBe('#1 [subagent] running — open research (id: subagent-1)')
   })
 })
 
@@ -886,5 +916,64 @@ describe('completion notices', () => {
     p2.settle({ status: 'failed' })
     await tick()
     expect(inject).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('completion notice gating across restart', () => {
+  /** Minimal durable-store double over one shared record map. */
+  function memoryStore(records: Map<string, JobRecord>): JobStore {
+    return {
+      incarnation: 'test-store',
+      list: () => [...records.values()],
+      get: (id: string) => records.get(id),
+      put: (record: JobRecord): Promise<void> => {
+        records.set(record.id, record)
+        return Promise.resolve()
+      },
+      delete: (id: string): Promise<boolean> => Promise.resolve(records.delete(id)),
+    } as unknown as JobStore
+  }
+
+  /** Boot the full tool-jobs composition over a persisting registry. */
+  async function persistedSetup(records: Map<string, JobRecord>) {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('jobStore', memoryStore(records))
+    await ctx.plugin(LocalJobRegistry, { persist: true })
+    await ctx.plugin(ToolTasks)
+    await tick()
+    return ctx
+  }
+
+  it('a persisted reported record produces no duplicate notice on later reads', async () => {
+    const records = new Map<string, JobRecord>()
+    const before = await persistedSetup(records)
+    const inject = vi.fn()
+    const owner = fakeAgent(before, 'sess-durable', { inject })
+    const p = producer({ owner, label: 'durable build' })
+    const id = before.jobs.start(p.spec)
+    p.settle({ status: 'completed', detail: 'exit code: 0' })
+    await tick()
+    // The one legitimate notice, before the model collects the output.
+    expect(inject).toHaveBeenCalledTimes(1)
+    await call(before, 'job_output', { job_id: id }, owner)
+    await tick()
+    expect(records.get(id)).toMatchObject({ reported: true })
+
+    // "Restart": a fresh composition over the same persisted records. The
+    // restored record is already reported, so nothing may announce it again.
+    const after = await persistedSetup(records)
+    const injectAfter = vi.fn()
+    const followupAfter = vi.fn()
+    const replacement = fakeAgent(after, 'sess-durable', { inject: injectAfter, followup: followupAfter, status: 'idle' })
+    const listed = await call(after, 'job_list', {}, replacement)
+    expect(text(listed)).toContain(`(id: ${id})`)
+    expect(text(await call(after, 'job_output', { job_id: id }, replacement))).toContain('[status: completed')
+    await call(after, 'job_output', { job_id: id }, replacement)
+    await tick()
+    expect(injectAfter).not.toHaveBeenCalled()
+    expect(followupAfter).not.toHaveBeenCalled()
   })
 })

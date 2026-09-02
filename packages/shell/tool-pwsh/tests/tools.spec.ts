@@ -670,7 +670,7 @@ describe('sandbox escalation through ctx.approval', () => {
     })
     expect(foreground.isError).toBe(false)
     const background = await call(ctx, 'pwsh', { ...escalate, run_in_background: true }, agent)
-    expect(text(background)).toBe('started background job pwsh-1')
+    expect(text(background)).toMatch(/^started background job pwsh-/)
     expect(bash.modes).toEqual(['workspace-write', 'workspace-write'])
   })
 
@@ -738,26 +738,29 @@ describe('background execution through the job runtime', () => {
     const started = await call(ctx, 'pwsh', { command: 'Write-Output bg-ok', description: 'test command', run_in_background: true })
     expect(started.isError).toBe(false)
     if (started.isError) throw new Error('expected background pwsh success')
-    expect(started.value).toEqual({ kind: 'background', jobId: 'pwsh-1' })
-    expect(text(started)).toBe('started background job pwsh-1')
+    const { jobId } = started.value as { jobId: string }
+    expect(jobId).toMatch(/^pwsh-/)
+    expect(started.value).toEqual({ kind: 'background', jobId })
+    expect(text(started)).toBe(`started background job ${jobId}`)
 
-    const read = await callUntilText(ctx, 'job_output', { job_id: 'pwsh-1' }, 'bg-ok')
+    const read = await callUntilText(ctx, 'job_output', { job_id: jobId }, 'bg-ok')
     expect(text(read)).toContain('bg-ok')
     // A later read reports the terminal outcome in the generic status line.
-    const final = await callUntilText(ctx, 'job_output', { job_id: 'pwsh-1' }, '[status: completed, exit code: 0]')
+    const final = await callUntilText(ctx, 'job_output', { job_id: jobId }, '[status: completed, exit code: 0]')
     expect(final.isError).toBe(false)
   })
 
   it('a running background job is killable through the REAL job_kill tool', async () => {
     const { ctx, bash } = await setupWithTasks()
     bash.backgroundHandler = () => killableProcess()
-    await call(ctx, 'pwsh', { command: 'Start-Sleep -Seconds 60', description: 'test command', run_in_background: true })
+    const started = await call(ctx, 'pwsh', { command: 'Start-Sleep -Seconds 60', description: 'test command', run_in_background: true })
+    const jobId = (started.value as { jobId: string }).jobId
 
-    const killed = await call(ctx, 'job_kill', { job_id: 'pwsh-1' })
-    expect(text(killed)).toBe('requested cancellation of job pwsh-1')
+    const killed = await call(ctx, 'job_kill', { job_id: jobId })
+    expect(text(killed)).toBe(`requested cancellation of job ${jobId}`)
     // The cancel reached the process handle; the task settles as killed with
     // the signal detail mapped by processOutcome.
-    const final = await call(ctx, 'job_output', { job_id: 'pwsh-1', wait: true })
+    const final = await call(ctx, 'job_output', { job_id: jobId, wait: true })
     expect(text(final)).toContain('[status: killed, signal: SIGTERM]')
   })
 
@@ -765,15 +768,16 @@ describe('background execution through the job runtime', () => {
     const { ctx } = await setupWithTasks()
     const agent = registerFakeAgent(ctx, 'sess-owner')
     const started = await call(ctx, 'pwsh', { command: 'Start-Sleep -Seconds 60', description: 'test command', run_in_background: true }, agent)
-    expect(text(started)).toBe('started background job pwsh-1')
+    const jobId = (started.value as { jobId: string }).jobId
+    expect(text(started)).toBe(`started background job ${jobId}`)
 
-    const anon = await call(ctx, 'job_output', { job_id: 'pwsh-1' })
+    const anon = await call(ctx, 'job_output', { job_id: jobId })
     expect(anon.isError).toBe(true)
     expect(text(anon)).toMatch(/belongs to another session/)
 
-    const killed = await call(ctx, 'job_kill', { job_id: 'pwsh-1' }, agent)
+    const killed = await call(ctx, 'job_kill', { job_id: jobId }, agent)
     expect(killed.isError).toBe(false)
-    await call(ctx, 'job_output', { job_id: 'pwsh-1', wait: true }, agent) // await settlement — no orphan
+    await call(ctx, 'job_output', { job_id: jobId, wait: true }, agent) // await settlement — no orphan
   })
 
   it('fails loud when the job runtime is not loaded', async () => {

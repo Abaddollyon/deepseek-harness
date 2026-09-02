@@ -229,12 +229,13 @@
       name: '@deepseek-ai/dsh-workflow-worker-thread'
       config:
         provider: spawn
+        maxRunWallMs: 3600000
 
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
-      # Keep the engine above for `ralph`, but do not publish a second
-      # model-authored orchestration surface beside `run_code` in PTC mode.
       disabled: true
+      config:
+        ownership: supervisor
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'

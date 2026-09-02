@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-29-durable-jobs-registry.md
+2026-08-29-durable-jobs-registry.md: 31b5ce521d27e5cff7f77877a333da12491aa6c5
+2026-08-29-durable-jobs-registry.zh.md: 4cb888abfe9fa0db3b1298cb3ae7c8d7c9a42417
