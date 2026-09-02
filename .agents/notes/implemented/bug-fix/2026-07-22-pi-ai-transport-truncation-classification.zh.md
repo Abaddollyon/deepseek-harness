@@ -8,7 +8,7 @@ Status: implemented
 
 一次 TUI 运行的模型连接在流式输出中途断开，只浮现出一条 `terminated` 通知，而一个被截断的 Anthropic 响应则浮现出 `Anthropic stream ended before message_stop`。两者都是传输层截断——连接在提供方的终止 SSE（Server-Sent Events）事件之前就已断开——然而 `dsh-llm-pi-ai` 中的 `classifyPiAiError` 对两者都不匹配，最终落入兜底的 `PI_AI_ERROR`。由于 `PI_AI_ERROR` 不在 `llm-retry` 的 `DEFAULT_RETRYABLE_CODES`（`RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`）中，一次可恢复的断开被当作永久性失败处理，从未被重试。
 
-细节丢失发生在上游，且在适配器内无法恢复：pi-ai 在推送终止 `error` 事件之前，把捕获到的错误缩减为 `error.message`（`api/anthropic-messages.js`：`errorMessage = error instanceof Error ? error.message : JSON.stringify(error)`），丢弃了原始的 `Error` 及其 `cause` 链。undici 将可据以采取行动的 `SocketError` 放在 `cause` 上，却只交给 fetch 包装层一个裸的 `terminated`；pi-ai 只保留了这个词。pi-ai 的 `SimpleStreamOptions` 没有暴露任何 fetch/dispatcher/client 钩子，让我们能在细节被扁平化之前自行捕获 `cause`。
+细节丢失发生在上游，且在适配器内无法恢复：pi-ai 在推送终止 `error` 事件之前，把捕获到的错误缩减为 `error.message`（`api/anthropic-messages.js`：`errorMessage = error instanceof Error ? error.message : JSON.stringify(error)`），丢弃了原始的 `Error` 及其 `cause` 链。undici 将可据以采取行动的 `SocketError` 放在 `cause` 上，却只交给 fetch 包装层一个裸的 `terminated`；pi-ai 只保留了这个词。要在细节被扁平化之前捕获 `cause` 需要一个传输层钩子；当前 pi-ai 提供的那个钩子在“考虑过的替代方案”中评估并被否决。
 
 ## 决策
 
@@ -18,11 +18,11 @@ Status: implemented
 - 该分类器带有一条 `XXX(pi-ai upstream)` 注记，点名扁平化发生的位置并说明期望的修复方式：如果 pi-ai 有朝一日转发原始的 `Error` 或提供一个让我们捕获 `cause` 的钩子，就改为基于 `code`/`cause` 分类。在此之前分类仍是尽力而为的文本匹配。
 - `llm-pi-ai/README.md` 新增一条 Known-Limitations 条目，记录 pi-ai 会扁平化 cause 链，因此 harness code 是从消息文本中分类出来的。
 
-分类仍然基于消息文本，因为那是 pi-ai 唯一交付的信号；`XXX` 标明它是一个权宜之计，而非期望的最终状态。
+分类仍然基于消息文本，因为那是 pi-ai 唯一交付的信号；`XXX` 标明它是一个权宜之计，而非期望的最终状态。[HTTP/2 流重置分类](2026-08-25-pi-ai-http2-stream-reset-classification.zh.md)后来用重置签名扩展了同一套措辞。
 
 ## 考虑过的替代方案
 
-**通过 pi-ai 的 fetch/dispatcher/client 钩子捕获 `cause`。** 否决：pi-ai 0.81.1 一个都没暴露。`StreamOptions` 只提供 `onPayload`/`onResponse`；`onResponse` 在响应体流被消费之前触发，因此无法观察到流式输出中途的断开。Anthropic 路径接受一个 `client` 对象，但为拦截传输错误而为每个请求构造并注入一个提供方 SDK client，只为一个诊断字符串就越过了适配器的服务边界。
+**通过 pi-ai 的传输层钩子捕获 `cause`。** 否决。当前 pi-ai 的 `StreamOptions`（经由 `ProviderRequestOptions`）暴露三个钩子：`onPayload` 只能检查或改写出站载荷，`onResponse` 在响应体流被消费之前触发，两者都无法观察流式输出中途的断开。自定义 `fetch` 实现确实能在传输层捕获 undici 的 `cause`，但捕获到的值随后必须经由适配器自有的按请求侧状态，从包装层传到终止事件映射，并跨并发流与 pi-ai 自身的客户端重试（`maxRetries`）正确归键——这条侧信道可能把失败归到错误的请求上——而 pi-ai 仍会把终止事件扁平化为 `error.message`，使分类权威被拆到两处。该钩子也不覆盖 WebSocket 传输，且 pi-ai 明确警告提供方适配器可能拒绝自定义 `fetch`。在 pi-ai 转发原始 `Error` 之前，文本分类仍是唯一的尽力而为权威。
 
 **把两者都保留为 `PI_AI_ERROR`，并放宽 `llm-retry` 的可重试集合。** 否决：`PI_AI_ERROR` 是真正未分类失败的兜底，其中包括不可重试的失败（畸形的提供方响应、意料之外的 SDK bug）。让兜底可重试会重试那些永远不会成功的失败；修复之道是分类出可恢复的那种情况，而不是模糊这个类别。
 

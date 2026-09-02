@@ -93,6 +93,7 @@ type StubMode =
   | 'end-only'
   | 'init-exit'
   | 'init-timeout'
+  | 'init-idle-then-prompt'
   | 'spawn-error'
   | 'send-error'
   | 'prompt-after-idle'
@@ -100,11 +101,23 @@ type StubMode =
   | 'empty-page-after-latest'
   | 'paged-scrollback'
   | 'with-echo'
+  | 'with-wrapped-echo'
+  | 'wrapped-echo-then-normal'
+  | 'wrapped-echo-prompt'
+  | 'wrapped-echo-marker-partial'
   | 'exit-after-send'
   | 'prompt-collision'
 
 const START_PATTERN = /__DSH_PERSISTENT_PWSH_START_[^_]+(?:-[^_]+)*__/
 const END_PATTERN = /__DSH_PERSISTENT_PWSH_END_[^:]+:/
+
+function wrapPhysicalLines(value: string, width: number): string {
+  const lines: string[] = []
+  for (let offset = 0; offset < value.length; offset += width) {
+    lines.push(value.slice(offset, offset + width))
+  }
+  return lines.join('\n')
+}
 
 class StubTerminalSession implements TerminalBackendSession {
   readonly motd = '__DSH_PERSISTENT_PWSH_PROMPT__ '
@@ -115,8 +128,10 @@ class StubTerminalSession implements TerminalBackendSession {
   mode: StubMode
   sends = 0
   pendingText = ''
+  latestOutput = ''
   historyTruncated = false
   throwOnSend = false
+  partialBody = 'partial data'
 
   constructor(mode: StubMode) {
     this.mode = mode
@@ -131,6 +146,10 @@ class StubTerminalSession implements TerminalBackendSession {
       }
       if (this.mode === 'init-timeout') {
         return this.operation(Promise.resolve(this.result('', 'timeout')))
+      }
+      if (this.mode === 'init-idle-then-prompt') {
+        this.mode = 'normal'
+        return this.operation(Promise.resolve(this.result(this.motd, 'inferred_idle')))
       }
       return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')))
     }
@@ -176,10 +195,31 @@ class StubTerminalSession implements TerminalBackendSession {
     this.pendingText = ''
     const start = START_PATTERN.exec(sent)?.[0]
     const end = END_PATTERN.exec(sent)?.[0]
-    if (this.mode === 'with-echo') {
+    if (this.mode === 'wrapped-echo-then-normal' && request.text.length > 0) {
+      this.mode = 'normal'
+      this.pendingText = request.text
+      const output = `${wrapPhysicalLines(request.text, 37)}\n${this.motd}`
+      this.scrollback += output
+      return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'wrapped-echo-prompt') {
+      const output = `${wrapPhysicalLines(sent, 29)}\npwsh: syntax error\n${this.motd}`
+      this.scrollback += output
+      return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'wrapped-echo-marker-partial') {
+      // The incremental delta carries the wrapped echo, the real START marker,
+      // and partial output while the scrollback retains none of it: extraction
+      // must anchor on the fallback's real marker, whose framing has to
+      // survive the fallback cap.
+      const delta = `${wrapPhysicalLines(sent, 29)}\n${start ?? ''}\n${this.partialBody}\n${this.motd}`
+      return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')), delta)
+    }
+    if (this.mode === 'with-echo' || this.mode === 'with-wrapped-echo') {
       // The PSReadLine echo renders the submitted wrapper before the real
       // markers; the tool must strip it from the captured result.
-      const output = `${sent}\n${start ?? ''}\nhello from stub\n${end ?? ''}0\n${this.motd}`
+      const echoed = this.mode === 'with-wrapped-echo' ? wrapPhysicalLines(sent, 31) : sent
+      const output = `${echoed}\n${start ?? ''}\nhello from stub\n${end ?? ''}0\n${this.motd}`
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
     }
@@ -283,13 +323,14 @@ class StubTerminalSession implements TerminalBackendSession {
   }
 
   private result(viewport: string, waitReason: TerminalWaitReason) {
+    this.latestOutput = viewport
     return { viewport, waitReason, sessionStatus: this.statusValue, truncated: false }
   }
 
-  private operation(done: Promise<ReturnType<StubTerminalSession['result']>>, delta = ''): TerminalSendOperation {
+  private operation(done: Promise<ReturnType<StubTerminalSession['result']>>, delta?: string): TerminalSendOperation {
     return {
       done,
-      readOutput: () => ({ delta, truncated: false }),
+      readOutput: () => ({ delta: delta ?? this.latestOutput, truncated: false }),
       cancel: () => false,
     }
   }
@@ -364,6 +405,78 @@ describe('tool-pwsh-persistent', () => {
     expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
     expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
     expect(result).not.toContain('Invoke-Expression')
+  })
+
+  it('strips a wrapper echo split across physical terminal lines', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'with-wrapped-echo'
+
+    const result = text(await call(ctx, owner, 'Write-Output hi'))
+    expect(result).toBe('hello from stub')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
+    expect(result).not.toContain('Invoke-Expression')
+  })
+
+  it('keeps polling when wrapped echo is followed by stale readiness', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-then-normal'
+
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+    expect(stub.sessions[0]!.sends).toBe(4)
+  })
+
+  it('removes wrapped echo from prompt fallback diagnostics', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-prompt'
+
+    const result = text(await call(ctx, owner, 'bad syntax'))
+    expect(result).toContain('pwsh: syntax error')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START_')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_END_')
+    expect(result).not.toContain('Invoke-Expression')
+  })
+
+  it('retains partial diagnostics with a long wrapped echo and tiny cap', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'wrapped-echo-prompt'
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('pwsh:')
+    expect(result).toContain('<response clipped>')
+  })
+
+  it('anchors fallback diagnostics on the real start marker behind a wrapped echo', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'wrapped-echo-marker-partial'
+    session.scrollback = ''
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('partial')
+    expect(result).toContain('<response clipped>')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START')
+    expect(result).not.toContain('beginning of this command output was dropped')
+  })
+
+  it('bounds the retained fallback diagnostic when partial output overflows the cap', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 8 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'wrapped-echo-marker-partial'
+    session.partialBody = 'y'.repeat(100_000)
+    session.scrollback = ''
+
+    const result = text(await call(ctx, owner, 'x'.repeat(2_000)))
+    expect(result).toContain('yyyyyyyy')
+    expect(result).toContain('<response clipped>')
+    expect(result).not.toContain('__DSH_PERSISTENT_PWSH_START')
+    expect(result.length).toBeLessThan(1_000)
   })
 
   it('preserves command output that equals the private shell prompt', async () => {
@@ -553,6 +666,12 @@ describe('tool-pwsh-persistent', () => {
       expect(stub.sessions).toHaveLength(2)
     },
   )
+
+  it('retries init-idle-then-prompt with an empty observation', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-idle-then-prompt')
+    expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
+    expect(stub.sessions[0]?.sends).toBe(3)
+  })
 
   it.each(['init-exit', 'init-timeout'] as const)(
     'fails initialization and closes the unusable shell for %s',
