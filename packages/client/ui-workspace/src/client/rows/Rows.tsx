@@ -413,7 +413,7 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @returns the session row.
  */
 function SessionNodeItemView({
-  node, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned,
+  node, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned = () => {},
   drag, flat = false, pinned = false, userPinned = false, t,
 }: {
   node: SessionNode
@@ -446,7 +446,7 @@ function SessionNodeItemView({
    */
   userPinned?: boolean | undefined
   /** Pin/unpin this session (row menu action; browser-local, survives reloads). */
-  onTogglePinned: (id: SessionNode['id']) => void
+  onTogglePinned?: (id: SessionNode['id']) => void
   t: RowTranslate
 }) {
   const row = node

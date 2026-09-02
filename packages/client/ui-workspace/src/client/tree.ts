@@ -60,6 +60,8 @@ export interface SessionNode {
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
   completed: boolean
   updatedAt: number
+  /** Whether a durable active schedule targets this session. */
+  hasActiveSchedule?: boolean
 }
 
 /** Session order selected by the Workspace browser. */
@@ -107,6 +109,8 @@ export interface SearchResultNode {
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
   completed: boolean
   snippet?: string
+  /** Whether a durable active schedule targets this session. */
+  hasActiveSchedule?: boolean
 }
 
 /** Bounded merged search projection plus the refine-query hint bit. */
