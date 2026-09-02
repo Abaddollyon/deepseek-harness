@@ -75,6 +75,14 @@ JSON 校验器使用显式工作栈，并只跟踪当前祖先链，因此深层
 
 -----
 
+## 模型体验
+
+没有直接影响，因为此 JSON 工具不会注册任何面向模型的内容。
+
+#### KV Cache effect
+
+这里的内容不会进入模型请求，因此不会影响 provider 缓存复用。
+
 ## 已知限制与延期工作
 
 <a id="known-limitations-and-deferred-work"></a>

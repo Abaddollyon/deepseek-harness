@@ -75,6 +75,14 @@ The JSON validator uses an explicit work stack and tracks only the active ancest
 
 -----
 
+## Model Experience
+
+None, as this JSON utility registers nothing model-facing.
+
+#### KV Cache effect
+
+Nothing here enters a model request, so provider cache reuse is unaffected.
+
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>
