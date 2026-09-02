@@ -25,6 +25,40 @@ export interface WebSearchRequest {
   readonly maxResults?: number
 }
 
+/** Provider-neutral search freshness mode. */
+export type WebSearchMode = 'cached' | 'indexed' | 'live'
+
+/** Optional end-user location supplied to providers that support local results. */
+export interface WebSearchLocation {
+  readonly country?: string
+  readonly region?: string
+  readonly city?: string
+  readonly timezone?: string
+}
+
+/** One ordered multi-query request resolved through a single selected provider. */
+export interface WebSearchBatchRequest {
+  readonly queries: readonly string[]
+  readonly maxResults?: number
+  readonly mode?: WebSearchMode
+  readonly allowedDomains?: readonly string[]
+  readonly blockedDomains?: readonly string[]
+  readonly location?: WebSearchLocation
+}
+
+/** Safe machine-routable failure for one query in a batch. */
+export interface WebSearchBatchError {
+  readonly code: string
+  readonly message: string
+}
+
+/** Exactly one result or error corresponding to one input query. */
+export interface WebSearchBatchOutcome {
+  readonly query: string
+  readonly result?: WebSearchResult
+  readonly error?: WebSearchBatchError
+}
+
 /**
  * Normalized search outcome. `content` is optional provider-generated answer
  * text or summary (Exa and DeepSeek return none; Perplexity returns a
@@ -101,10 +135,17 @@ export type WebFetchBody =
  */
 export interface WebSearchProvider {
   readonly id: string
-  /** Cheap local usability check; must not make network calls. */
-  available(): boolean
+  /** Cheap usability check that must not spend a search request. */
+  available(): boolean | Promise<boolean>
   /** Run one search; honor `signal` for cancellation. */
   search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+  /**
+   * Run every request query in one native provider session when supported.
+   * Return exactly one outcome per input in input order; each outcome echoes the
+   * exact query and contains exactly one of `result` or `error`. Honor `signal`
+   * and settle only after cancellation has stopped the provider's process/network work.
+   */
+  searchMany?(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]>
 }
 
 /**

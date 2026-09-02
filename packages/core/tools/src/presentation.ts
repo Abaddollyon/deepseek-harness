@@ -346,11 +346,16 @@ export interface WebSource {
  */
 export type WebResultView = WebSearchResultView | WebFetchResultView
 
+/** One safe failed query shown beside successful web-search results. */
+export interface WebSearchFailureView {
+  query: string
+  code: string
+  message: string
+}
+
 /**
- * The completed state of a `web_search` call: the structured sources the model
- * cited, an optional provider answer, and whether the source list was cut to the
- * result cap. A capable UI renders the sources as a citation list; a UI without
- * the `web` capability falls back to the raw `tool/result` content.
+ * The completed state of a `web_search` call: structured sources, an optional
+ * provider answer, safe partial failures, and source-list truncation state.
  */
 export interface WebSearchResultView {
   card: 'web'
@@ -361,6 +366,8 @@ export interface WebSearchResultView {
   sources: WebSource[]
   /** The provider-generated answer text, when any. */
   answer?: string
+  /** Safe failed queries retained when the same batch produced successful results. */
+  failures?: WebSearchFailureView[]
   /** True when the web service cut the source list to honor the result cap. */
   truncated: boolean
 }

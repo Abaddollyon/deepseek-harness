@@ -45,6 +45,9 @@ export function webCardModel(block: ToolCallBlock): WebBlockProps | null {
     return {
       kind: 'search',
       answer: result.answer,
+      ...result.failures !== undefined
+        ? { failures: result.failures.map(failure => ({ ...failure })) }
+        : {},
       sources: result.sources.map(source => ({
         url: source.url,
         title: source.title,

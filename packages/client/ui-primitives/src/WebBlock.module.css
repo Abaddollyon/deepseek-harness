@@ -128,3 +128,14 @@
 .fetch .truncated {
   margin-top: 0;
 }
+
+.failures {
+  margin-top: 10px;
+  color: var(--dsw-alias-state-warn-label);
+  font: var(--dsw-font-xs-13);
+}
+
+.failures ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}

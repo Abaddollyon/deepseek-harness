@@ -22,7 +22,13 @@ const SNAPSHOT_DIR = fileURLToPath(new URL('./snapshots/web-search-round', impor
 const FIXTURE = fileURLToPath(new URL('./snapshots/web-search-round/session.jsonl', import.meta.url))
 const UI_EXPECTED = fileURLToPath(new URL('./snapshots/web-search-round/ui.expected.md', import.meta.url))
 const MODE = webSnapshotMode()
-const QUERIES = ['DeepSeek Harness snapshot search', 'DeepSeek Harness multi-query search'] as const
+const QUERIES = [
+  'DeepSeek Harness snapshot search',
+  'DeepSeek Harness partial failure search',
+  'DeepSeek Harness multi-query search',
+] as const
+const FAILED_QUERY_INDEX = 1
+const SUCCESSFUL_QUERY_INDEXES = [0, 2] as const
 const PROMPT = `Use web_search once with queries ${JSON.stringify(QUERIES)}. Then reply exactly SEARCH_DONE and stop.`
 const SEARCH_CREDENTIAL_REF = credentialRef('DSH_WEB_SEARCH_E2E_KEY')
 const SEARCH_CREDENTIAL = 'snapshot-search-key'
@@ -59,7 +65,7 @@ function resultPageAge(ordinal: number): string {
 const RESULT_ORDINALS = Array.from({ length: PROVIDER_RESULT_COUNT }, (_value, index) => index + 1)
 
 /** Sources kept after round-robin merging reaches the shipped combined cap. */
-const KEPT_SOURCES = RESULT_ORDINALS.flatMap(ordinal => QUERIES.map((_query, queryIndex) => ({
+const KEPT_SOURCES = RESULT_ORDINALS.flatMap(ordinal => SUCCESSFUL_QUERY_INDEXES.map(queryIndex => ({
   url: resultUrl(queryIndex, ordinal),
   title: resultTitle(queryIndex, ordinal),
   snippet: resultSnippet(queryIndex, ordinal),
@@ -67,8 +73,8 @@ const KEPT_SOURCES = RESULT_ORDINALS.flatMap(ordinal => QUERIES.map((_query, que
 }))).slice(0, WEB_SEARCH_MAX_RESULTS)
 
 /** URLs omitted after the combined source cap is reached. */
-const DROPPED_SOURCE_URLS = RESULT_ORDINALS.flatMap(ordinal => QUERIES.map(
-  (_query, queryIndex) => resultUrl(queryIndex, ordinal),
+const DROPPED_SOURCE_URLS = RESULT_ORDINALS.flatMap(ordinal => SUCCESSFUL_QUERY_INDEXES.map(
+  queryIndex => resultUrl(queryIndex, ordinal),
 )).slice(WEB_SEARCH_MAX_RESULTS)
 
 interface CapturedSearchRequest {
@@ -95,6 +101,11 @@ async function startSearchServer(captured: CapturedSearchRequest[]): Promise<{ s
       if (queryIndex < 0) {
         response.writeHead(400, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: 'unknown fixture query' }))
+        return
+      }
+      if (queryIndex === FAILED_QUERY_INDEX) {
+        response.writeHead(503, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'private upstream fixture detail' }))
         return
       }
       response.writeHead(200, { 'content-type': 'application/json' })
@@ -252,9 +263,13 @@ describe('web e2e: shipped default web search', () => {
     expect(rendered).toContain(
       `(Showing the first ${WEB_SEARCH_MAX_RESULTS} sources. Refine the query for more.)`,
     )
+    expect(rendered).toContain('### Partial failures')
+    expect(rendered).toContain(QUERIES[FAILED_QUERY_INDEX])
+    expect(rendered).not.toContain('private upstream fixture detail')
     expect(searchResult.data.meta).toMatchObject({
       sources: KEPT_SOURCES,
       truncated: true,
+      failures: [{ query: QUERIES[FAILED_QUERY_INDEX] }],
     })
   })
 

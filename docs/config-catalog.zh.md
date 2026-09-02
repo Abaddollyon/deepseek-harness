@@ -3100,10 +3100,25 @@ export interface WebRuntimeConfig {
   readonly searchProvider?: string
   /** Explicit fetch provider id. Omitted = auto-select when exactly one usable. */
   readonly fetchProvider?: string
+  /** Maximum concurrent calls used for a legacy provider without native batching. */
+  readonly legacySearchConcurrency?: number
+  /** Freshness mode applied when a caller omits one. */
+  readonly searchMode?: WebSearchMode
+  /** Success-cache lifetime for cached and indexed searches. */
+  readonly searchCacheTtlMs?: number
+  /** Success-cache lifetime for live searches; zero disables settled-result caching. */
+  readonly liveSearchCacheTtlMs?: number
+  /** Maximum successful per-query results retained in the Host-scoped cache. */
+  readonly searchCacheMaxEntries?: number
+  /** Maximum active native provider batches; constrained to one or two. */
+  readonly nativeBatchConcurrency?: number
 }
+
+/** Provider-neutral search freshness mode. */
+export type WebSearchMode = 'cached' | 'indexed' | 'live'
 ```
 
-来源：[`packages/web/web/src/index.ts:55`](../packages/web/web/src/index.ts)
+来源：[`packages/web/web/src/index.ts:74`](../packages/web/web/src/index.ts)
 
 <a id="deepseek-aidsh-web-app"></a>
 
@@ -3157,6 +3172,44 @@ export interface Config {
 ```
 
 来源：[`packages/web/web-fetch-http/src/index.ts:34`](../packages/web/web-fetch-http/src/index.ts)
+
+<a id="deepseek-aidsh-web-search-claude-code"></a>
+
+## `@deepseek-ai/dsh-web-search-claude-code`
+
+需要：`web` · `subprocess`
+
+```ts config-catalog
+/** Claude Code native web-search deployment config. */
+export interface Config {
+  /** Working directory passed to the official Agent SDK. */
+  cwd?: string
+  /** Managed process-tree termination grace. */
+  graceMs?: number
+  /** Maximum SDK conversation turns for one batch. */
+  maxTurns?: number
+}
+```
+
+来源：[`packages/web/web-search-claude-code/src/index.ts:32`](../packages/web/web-search-claude-code/src/index.ts)
+
+<a id="deepseek-aidsh-web-search-codex"></a>
+
+## `@deepseek-ai/dsh-web-search-codex`
+
+需要：`web` · `subprocess`
+
+```ts config-catalog
+/** Codex native web-search deployment config. */
+export interface Config {
+  /** Working directory passed to the official app-server thread. */
+  cwd?: string
+  /** Managed process-tree termination grace. */
+  graceMs?: number
+}
+```
+
+来源：[`packages/web/web-search-codex/src/index.ts:30`](../packages/web/web-search-codex/src/index.ts)
 
 <a id="deepseek-aidsh-web-search-deepseek"></a>
 

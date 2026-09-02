@@ -39,13 +39,22 @@ export interface WebSourceView {
   publishedAt?: string | undefined
 }
 
-/** A `web_search` card: an optional answer over a capped citation list. */
+/** One safe failed query retained beside successful search results. */
+export interface WebSearchFailureView {
+  query: string
+  code: string
+  message: string
+}
+
+/** A `web_search` card: an optional answer and failures over a capped citation list. */
 export interface WebSearchBlockProps {
   kind: 'search'
   /** The provider-generated answer, rendered as markdown above the sources. */
   answer?: string | undefined
   /** The cited sources, in provider order. */
   sources: WebSourceView[]
+  /** Safe failed queries from the same provider batch. */
+  failures?: WebSearchFailureView[] | undefined
   /** True when the tool cut the source list to its result cap. */
   truncated: boolean
   /** Extra class merged onto the wrapper (callers position; this component draws). */
@@ -153,7 +162,7 @@ function SourceItem({ source, ordinal }: { source: WebSourceView; ordinal: numbe
  * @param props - see {@link WebSearchBlockProps}.
  * @returns the search card element.
  */
-function WebSearchBlock({ answer, sources, truncated, className }: WebSearchBlockProps) {
+function WebSearchBlock({ answer, sources, failures, truncated, className }: WebSearchBlockProps) {
   // A provider may legitimately return no answer and no sources; the chat WebRow
   // does not show the raw result content, so without this the user would see an
   // empty card. Mirror the backend's `No results found.` render text.
@@ -169,6 +178,18 @@ function WebSearchBlock({ answer, sources, truncated, className }: WebSearchBloc
         <ol className={css.sources}>
           {sources.map((source, index) => <SourceItem key={index} source={source} ordinal={index + 1} />)}
         </ol>
+      )}
+      {failures !== undefined && failures.length > 0 && (
+        <div className={css.failures}>
+          <div>部分查询失败（{failures.length}）</div>
+          <ul>
+            {failures.map(failure => (
+              <li key={`${failure.query}\0${failure.code}`}>
+                {failure.query}：[{failure.code}] {failure.message}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {truncated && <div className={css.truncated}>来源列表已截断</div>}
     </div>

@@ -1372,6 +1372,31 @@
     },
     {
       "doc": "docs/subsystems/web.md",
+      "symbol": "WebSearchMode",
+      "source": "packages/web/web/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/web.md",
+      "symbol": "WebSearchLocation",
+      "source": "packages/web/web/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/web.md",
+      "symbol": "WebSearchBatchRequest",
+      "source": "packages/web/web/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/web.md",
+      "symbol": "WebSearchBatchError",
+      "source": "packages/web/web/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/web.md",
+      "symbol": "WebSearchBatchOutcome",
+      "source": "packages/web/web/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/web.md",
       "symbol": "WebSearchResult",
       "source": "packages/web/web/src/types.ts"
     },

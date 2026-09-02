@@ -20,7 +20,7 @@ import type { ToolResultView } from '@deepseek-ai/dsh-api-remotes/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SelectionTarget } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ToolCallOwnerProps } from '@deepseek-ai/dsh-client-ui-tool/client'
-import { IconGlobeOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconGlobeOutline14, WebBlock } from '@deepseek-ai/dsh-client-ui-primitives'
 import { webCardModel } from '../src/client/tool/models/web-card-model.ts'
 import { createChatStore } from '@deepseek-ai/dsh-client-ui-conversation/src/client/stores.ts'
 import { GenericToolCard } from '../src/client/tool/toolviews/GenericToolCard.tsx'
@@ -94,6 +94,16 @@ describe('webCardModel', () => {
   it('carries the search truncation flag and an absent answer', () => {
     const model = webCardModel(settledSearch({ resultView: { card: 'web', kind: 'search', truncated: true, sources: [] } }))
     expect(model).toEqual({ kind: 'search', answer: undefined, truncated: true, sources: [] })
+  })
+
+  it('projects and renders safe partial failures', () => {
+    const failures = [{ query: 'failed query', code: 'WEB_PARTIAL', message: 'safe failure' }]
+    const model = webCardModel(settledSearch({ resultView: resultSearch({ failures }) }))
+    expect(model).toMatchObject({ kind: 'search', failures })
+    if (model === null || model.kind !== 'search') throw new Error('expected search model')
+    const view = render(<WebBlock {...model} />)
+    expect(view.getByText('部分查询失败（1）')).toBeTruthy()
+    expect(view.getByText('failed query：[WEB_PARTIAL] safe failure')).toBeTruthy()
   })
 
   it('derives a fetch card from the result view', () => {

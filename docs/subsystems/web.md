@@ -2,7 +2,7 @@
 
 English | [中文](web.zh.md)
 
-The web access seam — a [capability seam](../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.md) that spans **two operations** (search and fetch) on one `ctx.web` service, split across packages: Service Definition ([dsh-web](../../packages/web/web), `ctx.web` + the provider registries), Service Providers ([dsh-web-search-exa](../../packages/web/web-search-exa), [dsh-web-search-perplexity](../../packages/web/web-search-perplexity), [dsh-web-search-deepseek](../../packages/web/web-search-deepseek), [dsh-web-fetch-http](../../packages/web/web-fetch-http)), and Consumer ([dsh-tool-web](../../packages/web/tool-web), the `web_search`/`web_fetch` tool schemas). Web is **one optional capability**, not part of the agent-loop spine — so its vocabulary lives here, not in [core.md](core.md). A search-provider swap does not change how the model asks for a query, and a fetch-provider swap does not change how the model asks for a URL.
+The web access seam — a [capability seam](../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.md) that spans **two operations** (search and fetch) on one `ctx.web` service, split across packages: Service Definition ([dsh-web](../../packages/web/web), `ctx.web` + the provider registries), Service Providers ([dsh-web-search-codex](../../packages/web/web-search-codex), [dsh-web-search-claude-code](../../packages/web/web-search-claude-code), [dsh-web-search-exa](../../packages/web/web-search-exa), [dsh-web-search-perplexity](../../packages/web/web-search-perplexity), [dsh-web-search-deepseek](../../packages/web/web-search-deepseek), [dsh-web-fetch-http](../../packages/web/web-fetch-http)), and Consumer ([dsh-tool-web](../../packages/web/tool-web), the `web_search`/`web_fetch` tool schemas). Web is **one optional capability**, not part of the agent-loop spine — so its vocabulary lives here, not in [core.md](core.md). A search-provider swap does not change how the model asks for a query, and a fetch-provider swap does not change how the model asks for a URL.
 
 Source: [`packages/web/web/src/types.ts`](../../packages/web/web/src/types.ts)
 
@@ -12,7 +12,7 @@ Search and fetch share no request schema and no business logic, but they are del
 
 ## Search request and result
 
-Each seam request carries exactly one `query`. The `dsh-tool-web` consumer accepts a required `queries` array and fans it out into separate seam requests; a one-item array performs one search. `maxResults` is a consumer-owned bound (`dsh-tool-web`'s `searchMaxResults` config, default `8`) passed through the seam and enforced on the way back — if a provider over-returns, the seam truncates `sources[]` and sets `truncated`.
+`dsh-tool-web` accepts one to four ordered `queries` and calls `searchMany()` once. The Host-scoped coordinator resolves one provider for the batch, serves per-query success-only cache hits, singleflights overlapping misses across agents, and schedules at most two native batches concurrently. Legacy single-query providers receive bounded parallel calls; subscription-native Codex and Claude providers receive all misses in one official process/session. Each ordered outcome contains exactly one result or safe error, so successful queries survive a partial failure. `maxResults` remains a consumer-owned bound (default `8`) that the seam enforces on every result.
 
 ```ts type-equiv
 /**
@@ -31,6 +31,50 @@ interface WebSearchRequest {
    * regardless.
    */
   readonly maxResults?: number
+}
+```
+
+```ts type-equiv
+/** Provider-neutral search freshness mode. */
+type WebSearchMode = 'cached' | 'indexed' | 'live'
+```
+
+```ts type-equiv
+/** Optional end-user location supplied to providers that support local results. */
+interface WebSearchLocation {
+  readonly country?: string
+  readonly region?: string
+  readonly city?: string
+  readonly timezone?: string
+}
+```
+
+```ts type-equiv
+/** One ordered multi-query request resolved through a single selected provider. */
+interface WebSearchBatchRequest {
+  readonly queries: readonly string[]
+  readonly maxResults?: number
+  readonly mode?: WebSearchMode
+  readonly allowedDomains?: readonly string[]
+  readonly blockedDomains?: readonly string[]
+  readonly location?: WebSearchLocation
+}
+```
+
+```ts type-equiv
+/** Safe machine-routable failure for one query in a batch. */
+interface WebSearchBatchError {
+  readonly code: string
+  readonly message: string
+}
+```
+
+```ts type-equiv
+/** Exactly one result or error corresponding to one input query. */
+interface WebSearchBatchOutcome {
+  readonly query: string
+  readonly result?: WebSearchResult
+  readonly error?: WebSearchBatchError
 }
 ```
 
@@ -120,7 +164,7 @@ type WebFetchBody =
 
 ## Provider availability
 
-A provider's `available(): boolean` is a cheap LOCAL check (credential presence, parseable config) and **must not make network calls**. It is an input to execution-time selection, not a health system: `search()`/`fetch()` read it to pick a usable provider, and a selection failure surfaces as the structured `WebError` the caller routes on — which carries the branchable detail (the missing id or ambiguous candidate set) in its code and message.
+A provider's `available(): boolean` is a cheap local check and **must not make network calls or probe subscription authentication**. Official subscription providers leave authentication inside their SDK or CLI when execution begins. Availability is an input to execution-time selection, not a health system; selection failure surfaces as a structured `WebError`.
 
 Selection never depends on registration, config, or HMR order: a capability has an explicit provider id (config `searchProvider`/`fetchProvider`, or the matching env var feeding the same field), or auto-selects when exactly one usable provider is registered; multiple usable providers with no configured id is `WEB_PROVIDER_AMBIGUOUS`, not first-wins.
 
@@ -130,7 +174,7 @@ Selection never depends on registration, config, or HMR order: a capability has 
 
 ## The service
 
-`WebRuntime` registers search and fetch providers, rejects duplicate ids with `WEB_DUPLICATE_PROVIDER`, and resolves providers at execution time with structured selection errors. The local fetch backend accepts only HTTP(S), rejects credentials, caps redirects, bytes, characters, and time, revalidates every same-origin redirect hop, and decodes the body; the tool owns presentation. The local backend does not block private-network targets; do not enable `web_fetch` where it can reach sensitive internal ones.
+`WebRuntime` registers search and fetch providers, rejects duplicate ids with `WEB_DUPLICATE_PROVIDER`, resolves one provider per search batch, and owns the Host-scoped cache, singleflight, two-batch scheduler, waiter cancellation, URL normalization, and privacy-safe aggregate telemetry. The local fetch backend accepts only HTTP(S), rejects credentials, caps redirects, bytes, characters, and time, revalidates every same-origin redirect hop, and decodes the body; the tool owns presentation. The local backend does not block private-network targets; do not enable `web_fetch` where it can reach sensitive internal ones.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -180,10 +224,22 @@ registerFetchProvider(provider: WebFetchProvider): () => void
  * capability cannot run. The seam enforces `request.maxResults` on the result:
  * if the provider over-returns, `sources[]` is truncated and `truncated` set.
  * @param request - the query and optional result limit.
- * @param signal - optional cancellation signal forwarded to the provider.
+ * @param signal - optional caller cancellation linked to shared provider work.
  * @returns the provider's results, capped to `request.maxResults`.
  */
-async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+
+/**
+ * Run an ordered query batch after selecting one provider. Native batch
+ * providers receive one call; legacy providers use bounded parallel search.
+ * Host-scoped cache, singleflight, and a two-batch native scheduler coordinate
+ * concurrent callers. Provider failures become per-query safe outcomes while caller cancellation
+ * remains a thrown `WEB_ABORTED` error.
+ * @param request - ordered queries and provider-neutral search controls.
+ * @param signal - optional caller cancellation signal.
+ * @returns one normalized outcome for every input query in input order.
+ */
+async searchMany(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]>
 
 /**
  * Retrieve one URL through the selected provider. Resolves the provider at

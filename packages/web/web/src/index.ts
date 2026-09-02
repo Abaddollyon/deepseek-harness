@@ -8,24 +8,43 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { searchOneThroughBatch } from './provider-utils.ts'
 import type {
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebSearchBatchOutcome,
+  WebSearchBatchRequest,
+  WebSearchMode,
   WebSearchProvider,
   WebSearchRequest,
   WebSearchResult,
 } from './types.ts'
+import { SearchCoordinator, type SearchCoordinatorTelemetry } from './search-coordinator.ts'
 import { WebError } from './types.ts'
 
 export {
   WebError,
 } from './types.ts'
+export {
+  createNativeProviderAbortScope,
+  filterWebSearchSourcesByDomains,
+  NativeBatchSearchProvider,
+  nonEmptyConfigString,
+  positiveSafeIntegerConfig,
+  searchOneThroughBatch,
+} from './provider-utils.ts'
+export type { NativeProviderAbortScope } from './provider-utils.ts'
 export type {
   WebFetchBody,
   WebFetchProvider,
   WebFetchRequest,
   WebFetchResult,
+  WebSearchBatchError,
+  WebSearchBatchOutcome,
+  WebSearchBatchRequest,
+  WebSearchLocation,
+  WebSearchMode,
   WebSearchProvider,
   WebSearchRequest,
   WebSearchResult,
@@ -57,6 +76,45 @@ export interface WebRuntimeConfig {
   readonly searchProvider?: string
   /** Explicit fetch provider id. Omitted = auto-select when exactly one usable. */
   readonly fetchProvider?: string
+  /** Maximum concurrent calls used for a legacy provider without native batching. */
+  readonly legacySearchConcurrency?: number
+  /** Freshness mode applied when a caller omits one. */
+  readonly searchMode?: WebSearchMode
+  /** Success-cache lifetime for cached and indexed searches. */
+  readonly searchCacheTtlMs?: number
+  /** Success-cache lifetime for live searches; zero disables settled-result caching. */
+  readonly liveSearchCacheTtlMs?: number
+  /** Maximum successful per-query results retained in the Host-scoped cache. */
+  readonly searchCacheMaxEntries?: number
+  /** Maximum active native provider batches; constrained to one or two. */
+  readonly nativeBatchConcurrency?: number
+}
+
+/** Default bounded fan-out for providers that implement only one-query search. */
+export const DEFAULT_LEGACY_SEARCH_CONCURRENCY = 4
+/** Default provider-neutral freshness for callers that omit a mode. */
+export const DEFAULT_SEARCH_MODE: WebSearchMode = 'cached'
+/** Default success-cache lifetime for cached and indexed searches. */
+export const DEFAULT_SEARCH_CACHE_TTL_MS = 300_000
+/** Live searches do not retain settled results by default. */
+export const DEFAULT_LIVE_SEARCH_CACHE_TTL_MS = 0
+/** Default Host-scoped successful per-query cache bound. */
+export const DEFAULT_SEARCH_CACHE_MAX_ENTRIES = 512
+/** Default and hard maximum active native provider batches. */
+export const DEFAULT_NATIVE_BATCH_CONCURRENCY = 2
+
+function positiveInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new WebError(`${name} must be a positive safe integer`, 'WEB_INVALID_CONFIG')
+  }
+  return value
+}
+
+function nonnegativeInteger(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new WebError(`${name} must be a nonnegative safe integer`, 'WEB_INVALID_CONFIG')
+  }
+  return value
 }
 
 /**
@@ -80,17 +138,58 @@ export class WebRuntime extends Service {
   static Config: z<WebRuntimeConfig> = z.object({
     searchProvider: z.string(),
     fetchProvider: z.string(),
+    legacySearchConcurrency: z.natural().min(1).default(DEFAULT_LEGACY_SEARCH_CONCURRENCY),
+    searchMode: z.union(['cached', 'indexed', 'live'] as const).default(DEFAULT_SEARCH_MODE),
+    searchCacheTtlMs: z.natural().default(DEFAULT_SEARCH_CACHE_TTL_MS),
+    liveSearchCacheTtlMs: z.natural().default(DEFAULT_LIVE_SEARCH_CACHE_TTL_MS),
+    searchCacheMaxEntries: z.natural().min(1).default(DEFAULT_SEARCH_CACHE_MAX_ENTRIES),
+    nativeBatchConcurrency: z.natural().min(1).max(2).default(DEFAULT_NATIVE_BATCH_CONCURRENCY),
   })
 
   private searchProviders = new Map<string, WebSearchProvider>()
   private fetchProviders = new Map<string, WebFetchProvider>()
   private readonly searchProviderId: string | undefined
   private readonly fetchProviderId: string | undefined
+  private readonly legacySearchConcurrency: number
+  private readonly searchMode: WebSearchMode
+  private readonly coordinator: SearchCoordinator
 
   constructor(ctx: Context, config: WebRuntimeConfig = {}) {
     super(ctx, 'web')
     this.searchProviderId = config.searchProvider ?? process.env.DSH_WEB_SEARCH_PROVIDER
     this.fetchProviderId = config.fetchProvider ?? process.env.DSH_WEB_FETCH_PROVIDER
+    const legacySearchConcurrency = config.legacySearchConcurrency ?? DEFAULT_LEGACY_SEARCH_CONCURRENCY
+    if (!Number.isInteger(legacySearchConcurrency) || legacySearchConcurrency < 1) {
+      throw new WebError('legacySearchConcurrency must be a positive integer', 'WEB_INVALID_CONFIG')
+    }
+    this.legacySearchConcurrency = legacySearchConcurrency
+    this.searchMode = config.searchMode ?? DEFAULT_SEARCH_MODE
+    const searchCacheTtlMs = nonnegativeInteger(
+      'searchCacheTtlMs',
+      config.searchCacheTtlMs ?? DEFAULT_SEARCH_CACHE_TTL_MS,
+    )
+    const liveSearchCacheTtlMs = nonnegativeInteger(
+      'liveSearchCacheTtlMs',
+      config.liveSearchCacheTtlMs ?? DEFAULT_LIVE_SEARCH_CACHE_TTL_MS,
+    )
+    const searchCacheMaxEntries = positiveInteger(
+      'searchCacheMaxEntries',
+      config.searchCacheMaxEntries ?? DEFAULT_SEARCH_CACHE_MAX_ENTRIES,
+    )
+    const nativeBatchConcurrency = positiveInteger(
+      'nativeBatchConcurrency',
+      config.nativeBatchConcurrency ?? DEFAULT_NATIVE_BATCH_CONCURRENCY,
+    )
+    if (nativeBatchConcurrency > 2) {
+      throw new WebError('nativeBatchConcurrency must be at most 2', 'WEB_INVALID_CONFIG')
+    }
+    this.coordinator = new SearchCoordinator({
+      cacheTtlMs: searchCacheTtlMs,
+      liveCacheTtlMs: liveSearchCacheTtlMs,
+      cacheMaxEntries: searchCacheMaxEntries,
+      nativeBatchConcurrency,
+    }, (telemetry) => { this.observeSearch(telemetry) })
+    ctx.effect(() => () => this.coordinator.dispose(), 'web.searchCoordinator()')
   }
 
   /**
@@ -134,16 +233,60 @@ export class WebRuntime extends Service {
    * capability cannot run. The seam enforces `request.maxResults` on the result:
    * if the provider over-returns, `sources[]` is truncated and `truncated` set.
    * @param request - the query and optional result limit.
-   * @param signal - optional cancellation signal forwarded to the provider.
+   * @param signal - optional caller cancellation linked to shared provider work.
    * @returns the provider's results, capped to `request.maxResults`.
    */
-  async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
-    const provider = resolveProvider({
+  search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
+    return searchOneThroughBatch(request, signal, (batch, batchSignal) => this.searchMany(batch, batchSignal))
+  }
+
+  /**
+   * Run an ordered query batch after selecting one provider. Native batch
+   * providers receive one call; legacy providers use bounded parallel search.
+   * Host-scoped cache, singleflight, and a two-batch native scheduler coordinate
+   * concurrent callers. Provider failures become per-query safe outcomes while caller cancellation
+   * remains a thrown `WEB_ABORTED` error.
+   * @param request - ordered queries and provider-neutral search controls.
+   * @param signal - optional caller cancellation signal.
+   * @returns one normalized outcome for every input query in input order.
+   */
+  async searchMany(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]> {
+    throwIfAborted(signal)
+    const provider = await resolveProvider({
       providers: this.searchProviders,
       ...this.searchProviderId !== undefined ? { configuredId: this.searchProviderId } : {},
     })
-    const result = await provider.search(request, signal)
-    return capSources(result, request.maxResults)
+    throwIfAborted(signal)
+    const resolvedRequest = { ...request, mode: request.mode ?? this.searchMode }
+    if (hasNativeBatch(provider)) {
+      return this.coordinator.search({
+        providerId: provider.id,
+        native: true,
+        request: resolvedRequest,
+        run: async (batch, sharedSignal) => normalizeBatchOutcomes(
+          batch,
+          await callNativeMany(provider, batch, sharedSignal),
+        ),
+      }, signal)
+    }
+    return this.coordinator.search({
+      providerId: provider.id,
+      native: false,
+      request: resolvedRequest,
+      run: async (batch, sharedSignal) => normalizeBatchOutcomes(
+        batch,
+        await searchLegacyMany(provider, batch, this.legacySearchConcurrency, sharedSignal),
+      ),
+    }, signal)
+  }
+
+  private observeSearch(telemetry: SearchCoordinatorTelemetry): void {
+    this.ctx.logger.debug(
+      `web search provider=${telemetry.providerId} queries=${telemetry.queryCount} cache_hits=${telemetry.cacheHits} `
+      + `singleflight_hits=${telemetry.singleflightHits} submitted=${telemetry.submittedQueries} `
+      + `succeeded=${telemetry.succeeded} failed=${telemetry.failed} aborted=${telemetry.aborted} `
+      + `duration_ms=${telemetry.durationMs}`,
+    )
   }
 
   /**
@@ -155,7 +298,7 @@ export class WebRuntime extends Service {
    * @returns the retrieval outcome; non-2xx responses resolve descriptively.
    */
   async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult> {
-    const provider = resolveProvider({
+    const provider = await resolveProvider({
       providers: this.fetchProviders,
       ...this.fetchProviderId !== undefined ? { configuredId: this.fetchProviderId } : {},
     })
@@ -165,23 +308,27 @@ export class WebRuntime extends Service {
 
 interface ResolvableProvider {
   readonly id: string
-  available(): boolean
+  available(): boolean | Promise<boolean>
 }
 
 /** Resolve the selected provider or throw the matching {@link WebError}. */
-function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>): P {
+async function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>): Promise<P> {
   const { configuredId, providers } = selection
   if (configuredId !== undefined) {
     const provider = providers.get(configuredId)
     if (!provider) {
       throw new WebError(`configured web provider "${configuredId}" is not registered`, 'WEB_PROVIDER_CONFIGURED_MISSING')
     }
-    if (!provider.available()) {
+    if (!await provider.available()) {
       throw new WebError(`configured web provider "${configuredId}" is registered but unavailable`, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
     }
     return provider
   }
-  const usable = [...providers.values()].filter(provider => provider.available())
+  const usability = await Promise.all([...providers.values()].map(async provider => ({
+    provider,
+    available: await provider.available(),
+  })))
+  const usable = usability.filter(entry => entry.available).map(entry => entry.provider)
   const [single] = usable
   if (single === undefined) {
     throw new WebError('no usable web provider is registered', 'WEB_PROVIDER_UNAVAILABLE')
@@ -193,10 +340,141 @@ function resolveProvider<P extends ResolvableProvider>(selection: Selection<P>):
   return single
 }
 
-/** Enforce `maxResults` on a search result: truncate `sources[]` and flag it. */
-function capSources(result: WebSearchResult, maxResults: number | undefined): WebSearchResult {
-  if (maxResults === undefined || result.sources.length <= maxResults) return result
-  return { ...result, sources: result.sources.slice(0, maxResults), truncated: true }
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new WebError('web search was cancelled', 'WEB_ABORTED', { cause: signal.reason })
+  }
+}
+
+function batchError(error: unknown): { code: string; message: string } {
+  if (error instanceof WebError && error.code !== 'WEB_PROVIDER_ERROR') {
+    return { code: error.code, message: error.message }
+  }
+  return { code: 'WEB_PROVIDER_ERROR', message: 'web search provider failed' }
+}
+
+interface NativeBatchProvider extends WebSearchProvider {
+  searchMany: NonNullable<WebSearchProvider['searchMany']>
+}
+
+function hasNativeBatch(provider: WebSearchProvider): provider is NativeBatchProvider {
+  return provider.searchMany !== undefined
+}
+
+async function callNativeMany(
+  provider: NativeBatchProvider,
+  request: WebSearchBatchRequest,
+  signal: AbortSignal | undefined,
+): Promise<readonly WebSearchBatchOutcome[]> {
+  try {
+    return await provider.searchMany(request, signal)
+  } catch (error: unknown) {
+    throwIfAborted(signal)
+    const normalized = batchError(error)
+    return request.queries.map(query => ({ query, error: normalized }))
+  }
+}
+
+async function searchLegacyMany(
+  provider: WebSearchProvider,
+  request: WebSearchBatchRequest,
+  concurrency: number,
+  signal: AbortSignal | undefined,
+): Promise<readonly WebSearchBatchOutcome[]> {
+  const outcomes: WebSearchBatchOutcome[] = Array.from({ length: request.queries.length })
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < request.queries.length) {
+      const index = cursor
+      cursor += 1
+      const query = request.queries[index]
+      if (query === undefined) return
+      throwIfAborted(signal)
+      try {
+        const searchRequest = {
+          query,
+          ...request.maxResults === undefined ? {} : { maxResults: request.maxResults },
+        }
+        const result = await provider.search(searchRequest, signal)
+        outcomes[index] = { query, result }
+      } catch (error: unknown) {
+        throwIfAborted(signal)
+        outcomes[index] = { query, error: batchError(error) }
+      }
+    }
+  }
+  const workerCount = Math.min(concurrency, request.queries.length)
+  const workers = Array.from({ length: workerCount }, () => worker())
+  const settled = await Promise.allSettled(workers)
+  throwIfAborted(signal)
+  const rejected = settled.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected')
+  if (rejected !== undefined) throw rejected.reason
+  return outcomes
+}
+
+function protocolFailure(query: string): WebSearchBatchOutcome {
+  return {
+    query,
+    error: {
+      code: 'WEB_PROVIDER_PROTOCOL',
+      message: 'web search provider returned an invalid batch outcome',
+    },
+  }
+}
+
+function normalizeBatchOutcomes(
+  request: WebSearchBatchRequest,
+  outcomes: readonly WebSearchBatchOutcome[],
+): readonly WebSearchBatchOutcome[] {
+  return request.queries.map((query, index) => {
+    const outcome = outcomes[index]
+    if (outcome === undefined || outcome.query !== query) return protocolFailure(query)
+    if ((outcome.result === undefined) === (outcome.error === undefined)) return protocolFailure(query)
+    if (outcome.result !== undefined) {
+      return { query, result: normalizeSearchResult(outcome.result, request.maxResults) }
+    }
+    if (outcome.error !== undefined) return { query, error: outcome.error }
+    return protocolFailure(query)
+  })
+}
+
+interface NormalizedHttpUrl {
+  readonly key: string
+  readonly url: string
+}
+
+function normalizedHttpUrl(value: string): NormalizedHttpUrl | undefined {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined
+    parsed.hash = ''
+    const key = parsed.href
+    const url = parsed.pathname === '/' && parsed.search.length === 0
+      && /^https?:\/\/[^/?#]+(?:[?#]|$)/iu.test(value)
+      ? parsed.origin
+      : key
+    return { key, url }
+  } catch {
+    return undefined
+  }
+}
+
+/** Normalize citeable URLs, deduplicate sources, and enforce `maxResults`. */
+function normalizeSearchResult(result: WebSearchResult, maxResults: number | undefined): WebSearchResult {
+  const seen = new Set<string>()
+  const sources = []
+  for (const source of result.sources) {
+    const normalized = normalizedHttpUrl(source.url)
+    if (normalized === undefined || seen.has(normalized.key)) continue
+    seen.add(normalized.key)
+    sources.push({ ...source, url: normalized.url })
+  }
+  const capped = maxResults === undefined ? sources : sources.slice(0, maxResults)
+  return {
+    ...result,
+    sources: capped,
+    truncated: result.truncated || capped.length < sources.length,
+  }
 }
 
 export default WebRuntime

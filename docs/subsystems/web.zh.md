@@ -2,7 +2,7 @@
 
 [English](web.md) | 中文
 
-Web 访问 seam 是一个[能力 seam](../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.zh.md)，在同一个 `ctx.web` 服务上横跨**两项操作**（search 与 fetch），并拆分到多个包：Service Definition（[dsh-web](../../packages/web/web)，`ctx.web` + 提供方注册表）、Service Provider（[dsh-web-search-exa](../../packages/web/web-search-exa)、[dsh-web-search-perplexity](../../packages/web/web-search-perplexity)、[dsh-web-search-deepseek](../../packages/web/web-search-deepseek)、[dsh-web-fetch-http](../../packages/web/web-fetch-http)）与 Consumer（[dsh-tool-web](../../packages/web/tool-web)，即 `web_search`/`web_fetch` 工具 schema）。Web 是**一项可选能力**，不属于 agent loop（智能体循环）主干，因此其词汇定义在此而非 [core.md](core.zh.md) 中。更换 search 提供方不会改变模型提交查询的方式，更换 fetch 提供方也不会改变模型请求 URL 的方式。
+Web 访问 seam 是一个[能力 seam](../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.zh.md)，在同一个 `ctx.web` 服务上横跨**两项操作**（search 与 fetch），并拆分到多个包：Service Definition（[dsh-web](../../packages/web/web)，`ctx.web` + 提供方注册表）、Service Provider（[dsh-web-search-codex](../../packages/web/web-search-codex)、[dsh-web-search-claude-code](../../packages/web/web-search-claude-code)、[dsh-web-search-exa](../../packages/web/web-search-exa)、[dsh-web-search-perplexity](../../packages/web/web-search-perplexity)、[dsh-web-search-deepseek](../../packages/web/web-search-deepseek)、[dsh-web-fetch-http](../../packages/web/web-fetch-http)）与 Consumer（[dsh-tool-web](../../packages/web/tool-web)，即 `web_search`/`web_fetch` 工具 schema）。Web 是**一项可选能力**，不属于 agent loop（智能体循环）主干，因此其词汇定义在此而非 [core.md](core.zh.md) 中。更换 search 提供方不会改变模型提交查询的方式，更换 fetch 提供方也不会改变模型请求 URL 的方式。
 
 源码：[`packages/web/web/src/types.ts`](../../packages/web/web/src/types.ts)
 
@@ -12,7 +12,7 @@ Web 访问 seam 是一个[能力 seam](../../.agents/notes/implemented/architect
 
 ## 搜索请求与结果
 
-每个 seam 请求只携带一个 `query`。消费方 `dsh-tool-web` 接受必填的 `queries` 数组，并把它扇出为多个独立 seam 请求；单元素数组执行一次搜索。`maxResults` 是消费方自有的上限（`dsh-tool-web` 的 `searchMaxResults` 配置，默认 `8`），通过 seam 传递并在返回时强制执行——如果提供方返回超量，seam 截断 `sources[]` 并设置 `truncated`。
+`dsh-tool-web` 接受一到四个有序 `queries`，并且只调用一次 `searchMany()`。Host 作用域协调器为整个批次解析一个提供方，按查询返回仅成功结果的缓存命中，在智能体之间对重叠 miss 执行 singleflight，并且最多同时调度两个原生批次。旧式单查询提供方接收有界并行调用；订阅原生的 Codex 与 Claude 提供方则在一个官方进程／会话中接收全部 miss。每个有序 outcome 恰好包含一个结果或安全错误，因此单个查询失败不会丢弃其他成功查询。`maxResults` 仍是消费方自有上限（默认 `8`），由 seam 对每个结果强制执行。
 
 ```ts type-equiv
 /**
@@ -31,6 +31,50 @@ interface WebSearchRequest {
    * regardless.
    */
   readonly maxResults?: number
+}
+```
+
+```ts type-equiv
+/** Provider-neutral search freshness mode. */
+type WebSearchMode = 'cached' | 'indexed' | 'live'
+```
+
+```ts type-equiv
+/** Optional end-user location supplied to providers that support local results. */
+interface WebSearchLocation {
+  readonly country?: string
+  readonly region?: string
+  readonly city?: string
+  readonly timezone?: string
+}
+```
+
+```ts type-equiv
+/** One ordered multi-query request resolved through a single selected provider. */
+interface WebSearchBatchRequest {
+  readonly queries: readonly string[]
+  readonly maxResults?: number
+  readonly mode?: WebSearchMode
+  readonly allowedDomains?: readonly string[]
+  readonly blockedDomains?: readonly string[]
+  readonly location?: WebSearchLocation
+}
+```
+
+```ts type-equiv
+/** Safe machine-routable failure for one query in a batch. */
+interface WebSearchBatchError {
+  readonly code: string
+  readonly message: string
+}
+```
+
+```ts type-equiv
+/** Exactly one result or error corresponding to one input query. */
+interface WebSearchBatchOutcome {
+  readonly query: string
+  readonly result?: WebSearchResult
+  readonly error?: WebSearchBatchError
 }
 ```
 
@@ -120,7 +164,7 @@ type WebFetchBody =
 
 ## 提供方可用性
 
-提供方的 `available(): boolean` 是一个廉价的本地检查（凭证是否存在、配置是否可解析），**禁止发起网络调用**。它是执行时选择提供方的输入，而不是健康检查系统：`search()`／`fetch()` 会读取它来选择可用的提供方。选择失败时，调用方会收到可据以分支处理的结构化 `WebError`；其错误代码和消息会说明缺失的 id 或存在歧义的候选集。
+提供方的 `available(): boolean` 是一个廉价的本地检查，**禁止发起网络调用或探测订阅认证**。官方订阅提供方在执行开始时把认证留在其 SDK 或 CLI 内部。可用性只是执行时选择的输入，而不是健康检查系统；选择失败会表现为结构化 `WebError`。
 
 选择从不依赖注册顺序、配置顺序或 HMR（热模块替换）顺序：一项能力要么有显式的提供方 id（配置 `searchProvider`／`fetchProvider`，或填充同一字段的对应环境变量），要么在恰好只有一个可用提供方注册时自动选择；如果存在多个可用提供方却未配置 id，则抛出 `WEB_PROVIDER_AMBIGUOUS`，而不会选用最先注册的提供方。
 
@@ -130,7 +174,7 @@ type WebFetchBody =
 
 ## 服务
 
-`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，并在执行时以结构化的选择错误解析提供方。本地抓取后端仅接受 HTTP(S)、拒绝凭证、限制重定向次数、字节数、字符数和时间、对每一次同源重定向跳转重新进行安全校验，并解码正文；展示由工具负责。本地后端不会拦截私有网络目标；在能够触及敏感内部目标的环境中，禁止启用 `web_fetch`。
+`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，为每个搜索批次解析一个提供方，并拥有 Host 作用域缓存、singleflight、双批次调度器、等待者取消、URL 归一化和隐私安全的聚合遥测。本地抓取后端仅接受 HTTP(S)、拒绝凭证、限制重定向次数、字节数、字符数和时间、对每一次同源重定向跳转重新进行安全校验，并解码正文；展示由工具负责。本地后端不会拦截私有网络目标；在能够触及敏感内部目标的环境中，禁止启用 `web_fetch`。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -180,10 +224,22 @@ registerFetchProvider(provider: WebFetchProvider): () => void
  * capability cannot run. The seam enforces `request.maxResults` on the result:
  * if the provider over-returns, `sources[]` is truncated and `truncated` set.
  * @param request - the query and optional result limit.
- * @param signal - optional cancellation signal forwarded to the provider.
+ * @param signal - optional caller cancellation linked to shared provider work.
  * @returns the provider's results, capped to `request.maxResults`.
  */
-async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>
+
+/**
+ * Run an ordered query batch after selecting one provider. Native batch
+ * providers receive one call; legacy providers use bounded parallel search.
+ * Host-scoped cache, singleflight, and a two-batch native scheduler coordinate
+ * concurrent callers. Provider failures become per-query safe outcomes while caller cancellation
+ * remains a thrown `WEB_ABORTED` error.
+ * @param request - ordered queries and provider-neutral search controls.
+ * @param signal - optional caller cancellation signal.
+ * @returns one normalized outcome for every input query in input order.
+ */
+async searchMany(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]>
 
 /**
  * Retrieve one URL through the selected provider. Resolves the provider at

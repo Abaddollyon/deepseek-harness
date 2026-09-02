@@ -2249,10 +2249,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the disposer that unregisters the provider.',
       },
       {
-        signature: 'async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>',
+        signature: 'search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>',
         description: 'Run one search through the selected provider. Resolves the provider at call time with the selection rules above; throws WebError when the capability cannot run. The seam enforces `request.maxResults` on the result: if the provider over-returns, `sources[]` is truncated and `truncated` set.',
-        parameters: [{ name: 'request', description: 'the query and optional result limit.' }, { name: 'signal', description: 'optional cancellation signal forwarded to the provider.' }],
+        parameters: [{ name: 'request', description: 'the query and optional result limit.' }, { name: 'signal', description: 'optional caller cancellation linked to shared provider work.' }],
         returns: 'the provider\'s results, capped to `request.maxResults`.',
+      },
+      {
+        signature: 'async searchMany(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]>',
+        description: 'Run an ordered query batch after selecting one provider. Native batch providers receive one call; legacy providers use bounded parallel search. Host-scoped cache, singleflight, and a two-batch native scheduler coordinate concurrent callers. Provider failures become per-query safe outcomes while caller cancellation remains a thrown `WEB_ABORTED` error.',
+        parameters: [{ name: 'request', description: 'ordered queries and provider-neutral search controls.' }, { name: 'signal', description: 'optional caller cancellation signal.' }],
+        returns: 'one normalized outcome for every input query in input order.',
       },
       {
         signature: 'async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>',
@@ -5014,8 +5020,32 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WebRouteKind = \'exact\' | \'prefix\';',
   },
   {
+    name: 'WebSearchBatchError',
+    declaration: 'export interface WebSearchBatchError {\n    readonly code: string;\n    readonly message: string;\n}',
+  },
+  {
+    name: 'WebSearchBatchOutcome',
+    declaration: 'export interface WebSearchBatchOutcome {\n    readonly query: string;\n    readonly result?: WebSearchResult;\n    readonly error?: WebSearchBatchError;\n}',
+  },
+  {
+    name: 'WebSearchBatchRequest',
+    declaration: 'export interface WebSearchBatchRequest {\n    readonly queries: readonly string[];\n    readonly maxResults?: number;\n    readonly mode?: WebSearchMode;\n    readonly allowedDomains?: readonly string[];\n    readonly blockedDomains?: readonly string[];\n    readonly location?: WebSearchLocation;\n}',
+  },
+  {
+    name: 'WebSearchFailureView',
+    declaration: 'export interface WebSearchFailureView {\n    query: string;\n    code: string;\n    message: string;\n}',
+  },
+  {
+    name: 'WebSearchLocation',
+    declaration: 'export interface WebSearchLocation {\n    readonly country?: string;\n    readonly region?: string;\n    readonly city?: string;\n    readonly timezone?: string;\n}',
+  },
+  {
+    name: 'WebSearchMode',
+    declaration: 'export type WebSearchMode = \'cached\' | \'indexed\' | \'live\';',
+  },
+  {
     name: 'WebSearchProvider',
-    declaration: 'export interface WebSearchProvider {\n    readonly id: string;\n    available(): boolean;\n    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>;\n}',
+    declaration: 'export interface WebSearchProvider {\n    readonly id: string;\n    available(): boolean | Promise<boolean>;\n    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>;\n    searchMany?(request: WebSearchBatchRequest, signal?: AbortSignal): Promise<readonly WebSearchBatchOutcome[]>;\n}',
   },
   {
     name: 'WebSearchRequest',
@@ -5027,7 +5057,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WebSearchResultView',
-    declaration: 'export interface WebSearchResultView {\n    card: \'web\';\n    kind: \'search\';\n    title?: string;\n    sources: WebSource[];\n    answer?: string;\n    truncated: boolean;\n}',
+    declaration: 'export interface WebSearchResultView {\n    card: \'web\';\n    kind: \'search\';\n    title?: string;\n    sources: WebSource[];\n    answer?: string;\n    failures?: WebSearchFailureView[];\n    truncated: boolean;\n}',
   },
   {
     name: 'WebSearchSource',

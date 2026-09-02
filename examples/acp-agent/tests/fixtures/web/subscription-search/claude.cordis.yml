@@ -1,0 +1,9 @@
+# Test-only Host composition; the provider under test arrives through its real Bundle patch.
+- id: fixture-subprocess
+  name: './fixture.ts'
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: codex
+- id: web-search-codex
+  name: '@deepseek-ai/dsh-web-search-codex'

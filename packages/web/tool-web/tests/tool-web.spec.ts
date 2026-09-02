@@ -150,6 +150,7 @@ describe('web_search presentation meta and result view', () => {
     const meta = searchMetaFromValue({
       content: 'an answer', truncated: true,
       sources: [{ url: 'https://a.test', title: 'A', snippet: 'snip', publishedAt: '2026-07-20' }],
+      failures: [{ query: 'failed query', code: 'WEB_PARTIAL', message: 'safe failure' }],
     })
     expect(presentSearchResult({ queries: ['q'] }, toolResult(meta, 'rendered'))).toEqual({
       card: 'web',
@@ -158,6 +159,7 @@ describe('web_search presentation meta and result view', () => {
       answer: 'an answer',
       truncated: true,
       sources: [{ url: 'https://a.test', title: 'A', snippet: 'snip', publishedAt: '2026-07-20' }],
+      failures: [{ query: 'failed query', code: 'WEB_PARTIAL', message: 'safe failure' }],
     })
   })
 
@@ -593,36 +595,54 @@ describe('tool-web execution through the real registry', () => {
     await fiber.dispose()
   })
 
-  it('aborts sibling searches and waits for them to settle before reporting a batch failure', async () => {
-    let siblingAborted = false
-    let releaseSibling: (() => void) | undefined
+  it('uses one native batch and preserves successful queries beside partial failures', async () => {
+    let batches = 0
     const provider: WebSearchProvider = {
       id: 'stub-search',
       available: () => available,
-      search: (request, signal) => {
-        if (request.query === 'one') return Promise.reject(new Error('first search failed'))
-        return new Promise((_resolve, reject) => {
-          releaseSibling = () => { reject(new Error('sibling search stopped')) }
-          signal?.addEventListener('abort', () => {
-            siblingAborted = true
-          }, { once: true })
-        })
+      search: () => Promise.reject(new Error('single search must not run')),
+      searchMany: (request) => {
+        batches += 1
+        return Promise.resolve([
+          { query: request.queries[0]!, error: { code: 'WEB_UPSTREAM', message: 'first search failed' } },
+          {
+            query: request.queries[1]!,
+            result: { content: 'answer two', sources: [{ url: 'https://two.test' }], truncated: false },
+          },
+        ])
       },
     }
     const { fiber, call } = await mountTools({ webConfig: { searchProvider: 'stub-search' }, search: provider })
-    const pending = call('web_search', { queries: ['one', 'two'] })
-    let callSettled = false
-    void pending.then(() => { callSettled = true })
-    try {
-      await vi.waitFor(() => { expect(siblingAborted).toBe(true) })
-      await Promise.resolve()
-      expect(callSettled).toBe(false)
-    } finally {
-      releaseSibling?.()
+    const out = await call('web_search', { queries: ['one', 'two'] })
+    expect(batches).toBe(1)
+    expect(out.isError).toBe(false)
+    expect(out.value).toEqual({
+      content: '### two\n\nanswer two',
+      sources: [{ url: 'https://two.test' }],
+      truncated: false,
+      failures: [{ query: 'one', code: 'WEB_UPSTREAM', message: 'first search failed' }],
+    })
+    expect(out.meta).toMatchObject({
+      failures: [{ query: 'one', code: 'WEB_UPSTREAM', message: 'first search failed' }],
+    })
+    await fiber.dispose()
+  })
+
+  it('returns an error result when every query in a batch fails', async () => {
+    const provider: WebSearchProvider = {
+      id: 'stub-search',
+      available: () => available,
+      search: () => Promise.reject(new Error('single search must not run')),
+      searchMany: request => Promise.resolve(request.queries.map(query => ({
+        query,
+        error: { code: 'WEB_ALL_FAILED', message: 'safe total failure' },
+      }))),
     }
-    const out = await pending
+    const { fiber, call } = await mountTools({ webConfig: { searchProvider: 'stub-search' }, search: provider })
+    const out = await call('web_search', { queries: ['one', 'two'] })
     expect(out.isError).toBe(true)
-    expect(out.content).toEqual([{ type: 'text', text: 'Error: first search failed' }])
+    expect(out.content).toEqual([{ type: 'text', text: 'Error: safe total failure' }])
+    expect(out.error).toMatchObject({ info: { code: 'WEB_ALL_FAILED' } })
     await fiber.dispose()
   })
 
@@ -763,7 +783,7 @@ describe('tool-web execution through the real registry', () => {
     await fiber.dispose()
   })
 
-  it('executes web_search, forwarding the abort signal to the seam', async () => {
+  it('executes web_search with a coordinator-owned provider signal', async () => {
     const seen: { signal?: AbortSignal | undefined } = {}
     const provider: WebSearchProvider = {
       id: 'stub-search',
@@ -773,11 +793,12 @@ describe('tool-web execution through the real registry', () => {
     const { ctx, fiber } = await mountTools({ webConfig: { searchProvider: 'stub-search' }, search: provider })
     const controller = new AbortController()
     await ctx.tools.execute({ callId: CallId('search-1'), name: 'web_search', arguments: { queries: ['q'] }, signal: controller.signal })
-    expect(seen.signal).toBe(controller.signal)
+    expect(seen.signal).toBeDefined()
+    expect(seen.signal).not.toBe(controller.signal)
     await fiber.dispose()
   })
 
-  it('cascades caller cancellation to every multi-query search', async () => {
+  it('links caller cancellation to one shared legacy batch signal', async () => {
     const signals: (AbortSignal | undefined)[] = []
     const provider: WebSearchProvider = {
       id: 'stub-search',
