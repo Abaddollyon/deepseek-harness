@@ -6,6 +6,7 @@
  * @module @deepseek-ai/dsh-subagent/run-settlement
  */
 
+import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { SubagentResult, SubagentRun } from './types.ts'
@@ -63,13 +64,13 @@ export async function settleRun(run: SubagentRun): Promise<JobOutcome> {
   try {
     outcome = runOutcome(await run.result)
   } catch (error: unknown) {
-    outcome = { status: 'failed', detail: String(error) }
+    outcome = { status: 'failed', detail: errorChain(error) }
   }
   try {
     await run.dispose()
   } catch (error: unknown) {
     const prefix = outcome.detail === undefined ? '' : `${outcome.detail}; `
-    return { status: 'failed', detail: `${prefix}dispose failed: ${String(error)}` }
+    return { status: 'failed', detail: `${prefix}dispose failed: ${errorChain(error)}` }
   }
   return outcome
 }

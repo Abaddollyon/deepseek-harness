@@ -155,7 +155,7 @@ describe('settleRunResult', () => {
       attempt: async () => { throw 'provider exploded' },
       collectOutput: () => [{ type: 'text', text: 'partial output' }],
       collectDiagnostic: () => 'provider diagnostic',
-      collectFailure: () => ({ code: 'RATE_LIMIT' }),
+      collectFailure: () => ({ code: 'PROVIDER_FAILED' }),
       cancelled: () => false,
       onError: (error, stopReason) => {
         expect(stopReason).toBe('error')

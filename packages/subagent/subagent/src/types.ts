@@ -11,7 +11,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailureCode } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
@@ -225,7 +225,7 @@ export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonM
 
 /** Typed provider facts safe to expose to a parent agent. */
 export interface SubagentFailure {
-  readonly code: 'QUOTA' | 'RATE_LIMIT'
+  readonly code: LlmFailureCode
   readonly retryAfterMs?: number
 }
 

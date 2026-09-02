@@ -8,6 +8,9 @@
 - id: tools
   name: '@deepseek-ai/dsh-tools'
 
+- id: session-projection
+  name: '@deepseek-ai/dsh-session-projection'
+
 - id: subagent
   name: '@deepseek-ai/dsh-subagent'
 

@@ -313,6 +313,8 @@ function continuableInitialPrompt(parentId: SessionId, prompt: ContentBlock[]): 
  * the parent's own task vocabulary.
  * @param childId - the durable child the parent knows by id.
  * @param stopReason - how the child's last ordinary turn ended.
+ * @param diagnostic - bounded provider or teardown detail, when available.
+ * @param failure - validated provider routing facts, when available.
  * @returns the model-facing opening line of the settlement notice.
  */
 export function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason'], diagnostic?: string, failure?: { readonly code: string; readonly retryAfterMs?: number }): string {
@@ -329,12 +331,12 @@ export function settlementSummary(childId: SessionId, stopReason: SubagentResult
     case 'refusal':
       return `${subject} declined the task.`
     case 'error':
-      if (failure?.code === 'QUOTA') return `${subject} failed before it finished: the provider's quota for this route is exhausted; do not retry this route.`
+      if (failure?.code === 'QUOTA') return "The provider's quota for this route is exhausted; do not retry this route."
       if (failure?.code === 'RATE_LIMIT') {
         const wait = failure.retryAfterMs === undefined ? 'wait before retrying' : `wait ${Math.ceil(failure.retryAfterMs / 1000)} seconds before retrying`
-        return `${subject} failed before it finished: the provider is rate-limited; ${wait}.`
+        return `The provider is rate-limited; ${wait}.`
       }
-      return diagnostic === undefined ? `${subject} failed before it finished.` : `${subject} failed before it finished. Reason: ${diagnostic}`
+      return diagnostic === undefined || diagnostic.startsWith('SubagentError:') ? `${subject} failed before it finished.` : `${subject} failed before it finished. Reason: ${diagnostic}`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */
@@ -1542,7 +1544,7 @@ export class SubagentContinuationManager {
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
-      const summary = settlementSummary(activation.childId, terminal.stopReason)
+      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic, terminal.failure)
       const message = createUserMessage({
         content: [
           { type: 'text' as const, text: summary },

@@ -352,11 +352,12 @@ describe('SubagentModelSelectionConfig', () => {
   it('reaches the missing Agent registry guard from an injected preset scope', async () => {
     const ctx = new Context()
     await ctx.plugin(SubagentModelSelectionConfig)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     const preset = createScope(ctx, { preset: 'standard' })
     const scopeCtx = preset.ctx.extend({ agent: undefined })
     let captured: unknown
-    const fiber = scopeCtx.inject(['subagents'], (runtimeCtx) => {
+    const fiber = scopeCtx.inject(['subagents', 'sessionProjections'], (runtimeCtx) => {
       try {
         tool.apply(runtimeCtx, {
           provider: 'missing',
