@@ -241,7 +241,7 @@ interface ToolArgsMap {
     /** Required search queries; accepts 1–4 items and merges their results. */
     queries: string[];
   } & Record<string, JsonValue>;
-  /** Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn. The workflow's identity rides the `meta` parameter as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?}`). The `script` parameter is the plain JavaScript body ONLY (NOT TypeScript, and NO `export const meta` statement — meta is a parameter, not code), running with top-level await; end with `return <value>` — the value must be JSON-serializable and is this tool's result. Script-body hooks: - `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and independent `provider`/`model` LLM target overrides (either may be provided alone). Anything else (`effort`/`isolation`/`agentType`) is rejected loudly. - `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives `(prev, item, index)`. An ordinary stage throw drops that ITEM to `null` and skips its remaining stages. - `parallel(thunks): Promise<any[]>` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to `null`. - `phase(title)` — start a progress phase; `log(message)` — narrate progress; `args` — the tool call's `args` input, verbatim. Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`. Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes. */
+  /** Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn. The workflow's identity rides the `meta` parameter as JSON: required `name` (short kebab-case) and `description` strings, optional `whenToUse` string and `phases` array (`{title, detail?, provider?, model?, reasoningEffort?}`). The `script` parameter is the plain JavaScript body ONLY (NOT TypeScript, and NO `export const meta` statement — meta is a parameter, not code), running with top-level await; end with `return <value>` — the value must be JSON-serializable and is this tool's result. Script-body hooks: - `agent(prompt, opts?): Promise<any>` — run one subagent to completion. Without `opts.schema` it resolves to the child's final text; with `opts.schema` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf — no pattern/format/numeric bounds) it resolves to the validated object. Resolves `null` when the child fails (filter with `.filter(Boolean)`). Other opts: `label` (display), `phase` (progress group), and the LLM target — `provider`, `model`, and `reasoningEffort` — which you may set to any registered provider, any model that provider serves, and any reasoning effort that model offers. Each of the three is independent: pass only the ones you want changed and the rest stay as this conversation's. A reasoning effort the selected model does not offer is refused before the child runs, never quietly lowered. Anything else (`isolation`/`agentType`) is rejected loudly. - `pipeline(items, ...stages): Promise<any[]>` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives `(prev, item, index)`. An ordinary stage throw drops that ITEM to `null` and skips its remaining stages. - `parallel(thunks): Promise<any[]>` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to `null`. - `phase(title)` — start a progress phase; `log(message)` — narrate progress; `args` — the tool call's `args` input, verbatim. Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`. Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes. */
   workflow: {
     /** The plain-JS workflow script body (top-level await allowed; NO `export const meta` statement; end with `return <json-value>`). */
     script: string;
@@ -263,6 +263,8 @@ interface ToolArgsMap {
         provider?: string;
         /** Optional model override this phase is expected to use. */
         model?: string;
+        /** Optional reasoning effort this phase is expected to use. */
+        reasoningEffort?: string;
       } & Record<string, JsonValue>)[];
     } & Record<string, JsonValue>;
     /** Optional JSON input exposed to the script as the `args` global (wrap a bare list as a field, e.g. {"files": [...]}). */
@@ -369,6 +371,7 @@ interface ToolOutputMap {
     outcome: "cancellation-requested" | "already-finished";
     job: {
       id: string;
+      ordinal: number;
       kind: string;
       label: string;
       status: "running" | "stopping" | "completed" | "killed" | "failed";
@@ -379,6 +382,7 @@ interface ToolOutputMap {
   };
   job_list: ({
     id: string;
+    ordinal: number;
     kind: string;
     label: string;
     status: "running" | "stopping" | "completed" | "killed" | "failed";
@@ -390,6 +394,7 @@ interface ToolOutputMap {
     text: string;
     job: {
       id: string;
+      ordinal: number;
       kind: string;
       label: string;
       status: "running" | "stopping" | "completed" | "killed" | "failed";

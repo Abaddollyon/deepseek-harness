@@ -861,7 +861,7 @@ describe('dsh-tool-subagent background mode', () => {
       agent: parent,
     })
 
-    expect(text(started)).toBe('started background subagent job subagent-1')
+    expect(text(started)).toMatch(/^started background subagent job subagent-[0-9a-f-]{36}$/)
     expect(prepareCalls).toBe(0)
   })
 
@@ -872,14 +872,15 @@ describe('dsh-tool-subagent background mode', () => {
     const start = await callSubagent(ctx, { description: 'deep research', prompt: 'dig in', run_in_background: true }, { agent: parent })
     expect(start.isError).toBe(false)
     if (start.isError) throw new Error('expected background subagent success')
-    expect(start.value).toEqual({ kind: 'background', jobId: 'subagent-1' })
-    expect(text(start)).toBe('started background subagent job subagent-1')
+    const jobId = (start.value as { jobId: string }).jobId
+    expect(start.value).toEqual({ kind: 'background', jobId })
+    expect(text(start)).toBe(`started background subagent job ${jobId}`)
 
     const collected = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('collect-1'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: parent,
     })
     expect(text(collected)).toBe('background answer\n[status: completed]')
@@ -889,7 +890,7 @@ describe('dsh-tool-subagent background mode', () => {
       signal: testToolSignal,
       callId: ToolCallId('collect-2'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1' },
+      arguments: { job_id: jobId },
       agent: parent,
     })
     expect(text(again)).toBe('background answer\n[status: completed]')
@@ -911,13 +912,14 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { description: 'd', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    expect(text(started)).toBe('started background subagent job subagent-1')
+    const jobId = text(started).split(' ').at(-1)!
+    expect(text(started)).toMatch(/^started background subagent job subagent-[0-9a-f-]{36}$/)
 
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('diagnostic-background-output'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: parent,
     })
     expect(text(output)).toBe(
@@ -1039,12 +1041,13 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { description: 'broken', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    expect(text(started)).toBe('started background subagent job subagent-1')
+    const jobId = text(started).split(' ').at(-1)!
+    expect(text(started)).toMatch(/^started background subagent job subagent-[0-9a-f-]{36}$/)
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-output'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: parent,
     })
     expect(text(output)).toContain('[status: failed, Error: setup failed]')
@@ -1063,25 +1066,26 @@ describe('dsh-tool-subagent background mode', () => {
     })
     tool.apply(ctx, { provider: 'pending-start', toolName: 'subagent_pending' })
 
-    await ctx.tools.execute({
+    const started = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-start'),
       name: 'subagent_pending',
       arguments: { description: 'pending', prompt: 'p', run_in_background: true },
       agent: parent,
     })
+    const jobId = text(started).split(' ').at(-1)!
     await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-kill'),
       name: 'job_kill',
-      arguments: { job_id: 'subagent-1', reason: 'no longer needed' },
+      arguments: { job_id: jobId, reason: 'no longer needed' },
       agent: parent,
     })
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-output'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: parent,
     })
     expect(text(output)).toBe('(no new output)\n[status: killed]')
@@ -1105,25 +1109,26 @@ describe('dsh-tool-subagent background mode', () => {
     })
     tool.apply(ctx, { provider: 'broken-start-rollback', toolName: 'subagent_broken_rollback' })
 
-    await ctx.tools.execute({
+    const started = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-start'),
       name: 'subagent_broken_rollback',
       arguments: { description: 'broken rollback', prompt: 'p', run_in_background: true },
       agent: parent,
     })
+    const jobId = text(started).split(' ').at(-1)!
     await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-kill'),
       name: 'job_kill',
-      arguments: { job_id: 'subagent-1' },
+      arguments: { job_id: jobId },
       agent: parent,
     })
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-output'),
       name: 'job_output',
-      arguments: { job_id: 'subagent-1', wait: true },
+      arguments: { job_id: jobId, wait: true },
       agent: parent,
     })
     expect(text(output)).toContain('[status: failed, AggregateError: startup failed and cleanup also failed]')
@@ -1160,17 +1165,17 @@ describe('dsh-tool-subagent background mode', () => {
 
     const startOne = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('h1'), name: 'subagent_hang', arguments: { description: 'one', prompt: 'p', run_in_background: true }, agent: parent })
     const startTwo = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('h2'), name: 'subagent_hang', arguments: { description: 'two', prompt: 'p', run_in_background: true }, agent: parent })
-    expect(text(startOne)).toBe('started background subagent job subagent-1')
-    expect(text(startTwo)).toBe('started background subagent job subagent-2')
+    expect(text(startOne)).toMatch(/^started background subagent job subagent-[0-9a-f-]{36}$/)
+    expect(text(startTwo)).toMatch(/^started background subagent job subagent-[0-9a-f-]{36}$/)
 
-    const withReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k1'), name: 'job_kill', arguments: { job_id: 'subagent-1', reason: 'superseded' }, agent: parent })
-    const withoutReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k2'), name: 'job_kill', arguments: { job_id: 'subagent-2' }, agent: parent })
-    expect(text(withReason)).toBe('requested cancellation of job subagent-1')
-    expect(text(withoutReason)).toBe('requested cancellation of job subagent-2')
+    const withReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k1'), name: 'job_kill', arguments: { job_id: text(startOne).split(' ').at(-1)!, reason: 'superseded' }, agent: parent })
+    const withoutReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k2'), name: 'job_kill', arguments: { job_id: text(startTwo).split(' ').at(-1)! }, agent: parent })
+    expect(text(withReason)).toBe(`requested cancellation of job ${text(startOne).split(' ').at(-1)!}`)
+    expect(text(withoutReason)).toBe(`requested cancellation of job ${text(startTwo).split(' ').at(-1)!}`)
     expect(cancels).toEqual(['superseded', 'background subagent task killed'])
 
     // The aborted children settle as killed tasks.
-    const killed = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('w1'), name: 'job_output', arguments: { job_id: 'subagent-1', wait: true }, agent: parent })
+    const killed = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('w1'), name: 'job_output', arguments: { job_id: text(startOne).split(' ').at(-1)!, wait: true }, agent: parent })
     expect(text(killed)).toBe('(no new output)\n[status: killed]')
   })
 

@@ -9,17 +9,26 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  JobDoneListener, JobId, JobRead, JobSnapshot, JobStart, JobsChangedListener,
+  JobAdoptedListener, JobDoneListener, JobId, JobKind, JobRead, JobResumer, JobSnapshot, JobStart, JobsChangedListener,
 } from './types.ts'
 
 export { JobId } from './types.ts'
+export { PROCESS_INCARNATION } from './incarnation.ts'
+
+/** Terminal detail proving a committed adoption marker never reached producer start. */
+export const JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL = 'resume adoption could not be accounted durably'
 export type {
+  JobAdoptedListener,
   JobDoneListener,
+  JobDurability,
   JobHooks,
   JobKind,
   JobKindMap,
   JobOutcome,
   JobRead,
+  JobResumeCandidate,
+  JobResumePlan,
+  JobResumer,
   JobSnapshot,
   JobStart,
   JobStatus,
@@ -77,9 +86,19 @@ export abstract class JobRegistry extends Service {
    * leaves nothing registered; after it returns, registration cannot fail.
    * Settlement records the outcome, notifies listeners, and releases waiters.
    * @param spec - job identity, owner, and synchronous starter.
-   * @returns the registry-issued `<kind>-N` id.
+   * @returns the registry-issued `<kind>-<uuid>` (or `<kind>-<idHint>`) id.
    */
   abstract start(spec: JobStart): JobId
+
+  /**
+   * Register durable work only after its initial record reaches the mounted
+   * `ctx.jobStore`; the producer's {@link JobStart.run} is not invoked
+   * before that commit. A missing or rejecting store fails without starting
+   * producer work.
+   * @param spec - producer declaration; the implementation requires durable persistence.
+   * @returns the registered id after the initial record is durable and work has started.
+   */
+  abstract startDurable(spec: JobStart): Promise<JobId>
 
   /**
    * List caller-owned and unowned jobs in registration order without exposing
@@ -165,6 +184,40 @@ export abstract class JobRegistry extends Service {
    * @returns disposer that unregisters the listener.
    */
   abstract onJobsChanged(listener: JobsChangedListener): () => void
+
+  /**
+   * Register an observer of durable adoptions. It fires once per restored
+   * record a producer resumer adopts, after the registry commits the
+   * re-stamped record — this process incarnation plus the prior one as the
+   * adoption marker — to the durable store, so an observer that crashes
+   * afterwards still finds the marker on the next boot. Delivery is global:
+   * every listener sees every adoption regardless of owner scope. A returned
+   * promise is awaited before the registry attaches the producer's
+   * completion wiring, so the observer's account lands before any settlement
+   * it must recognize. `true` confirms a durable account and lets later
+   * registry mirrors omit the marker; `false` rejects ownership, and `void`
+   * remains observational. Every listener runs, and failures are contained
+   * and logged only after all of them settle.
+   * @param listener - receives the adopted snapshot and the prior process
+   *   incarnation that wrote the record before the restart.
+   * @returns disposer that unregisters the listener.
+   */
+  abstract onJobAdopted(listener: JobAdoptedListener): () => void
+
+  /**
+   * Register a resume handler for one job kind. On boot the registry replays
+   * every persisted `running` record of this kind that a previous process
+   * incarnation wrote; restored `stopping` records terminalize as killed and
+   * never enter a resumer. A handler that returns hooks adopts the record under
+   * its original id; `undefined` settles it honestly as `failed` with detail
+   * `'not resumable after host restart'`. Registration is an effect scoped to
+   * the registering context; at most one resumer may serve a kind at a time,
+   * and a duplicate registration fails loudly.
+   * @param kind - producer kind whose persisted records the handler serves.
+   * @param resume - decides adoption per record; see {@link JobResumer}.
+   * @returns disposer that unregisters the handler.
+   */
+  abstract registerResumer(kind: JobKind, resume: JobResumer): () => void
 
   /**
    * Attach an effect-scoped controller that can read and stop jobs. It serves the

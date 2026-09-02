@@ -82,6 +82,25 @@ describe('session snapshot identity redaction', () => {
     expect(redacted?.endsWith('\n')).toBe(false)
   })
 
+  it('redacts typed durable job ids without touching unrelated UUID prose', () => {
+    const jobId = 'pty-send-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const source = [
+      JSON.stringify({
+        type: 'tool/result',
+        data: { text: `started background subagent job ${jobId}` },
+      }),
+      JSON.stringify({
+        type: 'user/message',
+        data: { text: `background job ${jobId} finished; keep ${proseUuid}` },
+      }),
+    ].join('\n')
+
+    const [redacted] = redactSessionSnapshotIds([source])
+    expect(redacted?.match(/\{\{job:1\}\}/g)).toHaveLength(2)
+    expect(redacted).toContain(proseUuid)
+    expect(redactSessionSnapshotIds([redacted ?? ''])).toEqual([redacted])
+  })
+
   it('keeps a canonical token first seen through a generic id key', () => {
     const canonical = '{{message:7}}'
     const nextMessage = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'

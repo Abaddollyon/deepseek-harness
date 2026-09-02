@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-workflow` gives the model the `workflow` tool: call it with a JavaScript orchestration script, an identity block, and optional arguments, and it runs the script over `ctx.workflowEngine`, fanning work out across subagents until the script's final value returns. The tool owns the model-facing schema, the usage guidance in the system prompt, and the result envelope; script parsing, execution, caps, and cancellation live behind the engine. Execution is foreground: the parent turn blocks until the whole workflow settles, and a non-clean finish is an error, never partial output. Choose it when the user explicitly asks for workflow-style or large multi-agent orchestration; prefer plain subagent calls for one or two delegations.
+`dsh-tool-workflow` gives the model the `workflow` tool: a JavaScript orchestration script fans work out across subagents through `ctx.workflowEngine`. Under caller ownership, the parent turn waits for the final value. Under supervisor ownership, the tool durably registers the run, records `run/detached`, and returns its job id immediately while bounded execution continues. Choose it for explicitly requested workflows or large multi-agent orchestration; prefer plain subagent calls for one or two delegations.
 
 ## Table of Contents
 
@@ -31,11 +31,11 @@ The `workflow` tool runs a model-authored orchestration script that fans work ou
 
 The model submits three parameters: `meta` (required identity data: `name`, `description`, and optional `whenToUse` and `phases`), `script` (required plain JavaScript body — no `export const meta` statement; the tool description carries the complete authoring contract), and `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest).
 
-Success returns the canonical envelope `{ runId, agentsStarted, result }`, rendered to the model as `workflow "<name>" completed (<count> agent<optional-s>).` followed by `Return value:` and the pretty-printed JSON. A workflow that cannot start — a script parse or meta validation failure — returns an error the model can correct from. Cancellation and execution failures return `Error: workflow run was cancelled` or `Error: workflow run failed: <error>`; partial output is never reported as success.
+Caller ownership returns `{ runId, agentsStarted, result }` after settlement and renders the final JSON. Supervisor ownership returns `{ runId, jobId, status: 'running' }` only after the initial job record is durable and `run/detached` is recorded; completion arrives through the background-job notice and `job_output`. Parse, validation, cancellation, execution, and cleanup failures remain explicit errors rather than partial success.
 
 ### What to expect during a run
 
-While the script runs, the parent turn waits: the tool starts the run, awaits its result, and always disposes it, so the script and its children reach quiescence on every path — including cancellation, which is bridged from the parent step's abort signal. The model sees one final outcome, never intermediate child messages; the children's own work stays out of the parent conversation.
+With `ownership: caller`, the tool awaits the result, bridges the parent step's abort signal, and disposes the run before returning. With `ownership: supervisor`, a finite `workflowEngine.maxRunWallMs`, `ctx.jobs`, and a durable store are required; the parent signal is not retained after handoff, while job cancellation stops the run and settlement disposes it. Child messages remain outside the parent conversation in both modes.
 
 ### Config
 
@@ -43,6 +43,7 @@ While the script runs, the parent turn waits: the tool starts the run, awaits it
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
 | `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
+| `ownership` | `caller` | `caller` waits in the tool call; `supervisor` durably hands the bounded run to `ctx.jobs`. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
 
@@ -156,7 +157,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits define what the tool does not yet support. They are current constraints, not a task backlog.
 
-- **The parent turn blocks until the whole workflow settles** — there is no background start/poll API, and cancellation discards partial output as an error.
+- **Supervisor ownership is durable accounting, not workflow resumption** — the current workflow record is non-resumable after host death and is honestly settled on restart; live supervised runs continue only while the host process remains alive.
 - **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays and scalars in a field; the canonical workflow result stays complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
 - **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
 - **Durable records are top-level and observational** — nested PTC mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
@@ -169,6 +170,6 @@ These limits define what the tool does not yet support. They are current constra
 
 This Dev Note is working context for maintainers: open directions that are not decided. It is explicitly non-authoritative — shipped behavior, limits, and accepted rationale live in the sections above, the package code, and the linked Agent Notes.
 
-Open directions: a background start/poll route so the parent turn does not block; storing truncated JSON behind a retrieval handle instead of clipping the projection; recording nested dispatches beyond the top level.
+Open directions: resumable workflow producers; storing truncated JSON behind a retrieval handle instead of clipping the projection; recording nested dispatches beyond the top level.
 
 </details>
