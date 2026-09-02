@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-24-pi-ai-auth-recovery.md
+2026-08-24-pi-ai-auth-recovery.md: 0d99dfc686a80e88ac631f3b1f7d4e5afba5347e
+2026-08-24-pi-ai-auth-recovery.zh.md: 62818edae473da0523b1efff2f88652283a7b25c

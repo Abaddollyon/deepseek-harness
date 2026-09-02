@@ -1129,6 +1129,15 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Recovery from a provider auth rejection (HTTP 401/403) that arrives before
+   * any content: the adapter refreshes the route's stored OAuth credential
+   * once, then retries after {@link PiAiAuthRecovery.delayMs}. Only a failure
+   * with nothing emitted is eligible — once content has streamed, the turn
+   * owns recovery. Omission enables one recovery attempt; `retries: 0`
+   * disables it.
+   */
+  authRecovery?: PiAiAuthRecovery
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1268,6 +1277,14 @@ export interface PiAiCompatProfile {
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
 
+/** Adapter-level recovery from a pre-content provider auth rejection. */
+export interface PiAiAuthRecovery {
+  /** Additional attempts after an auth-classified failure (default 1). */
+  retries?: number
+  /** Delay before each additional attempt in milliseconds (default 1000). */
+  delayMs?: number
+}
+
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling dispatch
@@ -1284,7 +1301,7 @@ export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFo
 
 Depends on: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`)
 
-Source: [`packages/llm/llm-pi-ai/src/config.ts:216`](../packages/llm/llm-pi-ai/src/config.ts)
+Source: [`packages/llm/llm-pi-ai/src/config.ts:252`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 
