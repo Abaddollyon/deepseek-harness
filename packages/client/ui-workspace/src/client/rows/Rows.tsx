@@ -2,10 +2,10 @@
  * Workspace browser tree row components (figma Cell set 14:3080): pure presentational —
  * all data and callbacks arrive via props. Hover swaps (folder->chevron,
  * time->ellipsis, action buttons) are CSS-only. Row ... menus are visual-only
- * except workspace Rename/Delete and session Rename/Fork/Archive; the session
+ * except workspace Rename/Delete and session Rename/Fork/Pin/Archive; the session
  * and workspace hover cards are suppressed while a menu is open.
  */
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import clsx from 'clsx'
 import {
   HoverCard, IconAlarmClockOutline16, IconArchiveOutline20, IconBranchOutline16,
@@ -22,9 +22,23 @@ import css from './Rows.module.css'
 /** The standard locale seat, prop-passed from the browser root. */
 type RowTranslate = WorkspaceBrowserProps['t']
 
-/** Row display title: blank rows show the localized New Session label. */
+/**
+ * Row display title: blank rows show the localized New Session label. An
+ * untitled row's stored title is only the runtime's directory-basename
+ * fallback — identical for every session sharing the workspace cwd — so it
+ * shows a dated New Session label until the host projects a durable title;
+ * same-minute collisions carry the derivation's ordinal, keeping every
+ * label in one list distinct.
+ */
 function displayTitle(node: SessionNode, t: RowTranslate): string {
-  return node.blank ? t('session.new') : node.title
+  if (node.blank) return t('session.new')
+  if (node.untitled) {
+    const time = dateTimeLabel(node.updatedAt, t)
+    return node.untitledNumber === undefined
+      ? t('session.untitled', { time })
+      : t('session.untitledNumbered', { time, n: node.untitledNumber })
+  }
+  return node.title
 }
 
 /** Localized compact relative time ("刚刚"/"5分钟" in zh, "now"/"5min" in en). */
@@ -40,15 +54,21 @@ function hoverTimeLabel(updatedAt: number, now: number, t: RowTranslate): string
 }
 
 /**
- * Absolute creation time through the dictionary's date template (the message
- * clock pattern): `toLocaleString` would follow the browser language, not the
- * app locale, and produce mixed-language text after a switch.
+ * Absolute date-plus-minute stamp through the dictionary's date template
+ * (the message clock pattern): `toLocaleString` would follow the browser
+ * language, not the app locale, and produce mixed-language text after a
+ * switch.
  */
-function createdLabel(createdAt: number, t: RowTranslate): string {
-  const d = new Date(createdAt)
+function dateTimeLabel(epochMs: number, t: RowTranslate): string {
+  const d = new Date(epochMs)
   const pad2 = (v: number): string => String(v).padStart(2, '0')
   const date = t('date.ymd', { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() })
-  return t('hover.created', { time: `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` })
+  return `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+/** Hover-card creation line: the absolute stamp inside the created template. */
+function createdLabel(createdAt: number, t: RowTranslate): string {
+  return t('hover.created', { time: dateTimeLabel(createdAt, t) })
 }
 
 /** Hover-card body: workspace title, display directory path, absolute creation time. */
@@ -214,7 +234,20 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home,
   )
 }
 
-/* v8 ignore next 3 -- closed-union backstop; only reached if the status is forged */
+/**
+ * Pin glyph for the session row menu's Pin/Unpin entry. ui-primitives has no
+ * pin icon; like the other one-off glyphs in feature packages, this one stays
+ * local instead of widening the shared icon set for a single consumer.
+ */
+function IconPinOutline16() {
+  return (
+    <svg aria-hidden="true" width={16} height={16} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.22 2.03 L12.47 5.29 L9.01 7.19 L7.31 5.49 Z" />
+      <path d="M8.16 6.34 L2.9 12.3" />
+    </svg>
+  )
+}
+
 function assertNever(value: never): never {
   throw new Error(`unknown pending interaction: ${String(value)}`)
 }
@@ -255,7 +288,6 @@ function sessionStatuses(
       pending = { state: 'warning', label: t('status.waitingAnswer') }
       break
     case undefined: break
-    /* v8 ignore next -- closed PendingInteractionStatus union */
     default: return assertNever(node.pendingInteraction)
   }
   if (pending !== undefined) return subagents === undefined ? [pending] : [pending, subagents]
@@ -372,10 +404,16 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
  * @param props.onArchive - archive a session by id.
  * @param props.drag - optional draggable-row wiring.
  * @param props.flat - omit the empty status slot in the hierarchy-free flat list.
+ * @param props.pinned - the row survives its group's collapse; indent it under the folded header.
+ * @param props.userPinned - the row is user-pinned; the menu offers Unpin instead of Pin.
+ * @param props.onTogglePinned - pin/unpin this session (row menu action; browser-local, persists across reloads).
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }: {
+function SessionNodeItemView({
+  node, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned = () => {},
+  drag, flat = false, pinned = false, userPinned = false, t,
+}: {
   node: SessionNode
   currentId: string | undefined
   now: number
@@ -390,6 +428,23 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   drag?: RowDragProps | undefined
   /** The row is rendered without a parent Workspace header. */
   flat?: boolean | undefined
+  /**
+   * The row is a live session held visible under its own folded Workspace
+   * header. The indent keeps a folded group from reading as an expanded one.
+   * This is the AUTOMATIC folded-group holdout — do not confuse it with
+   * {@link SessionNodeItem}'s userPinned prop, the explicit user pin rendered
+   * in the sidebar's Pinned section. No row ever carries both: the derivation
+   * excludes user-pinned sessions from the folded holdout.
+   */
+  pinned?: boolean | undefined
+  /**
+   * The session is user-pinned (explicit pin, survives reloads): the row menu
+   * offers Unpin. Distinct from the `pinned` prop above, which marks the
+   * automatic live-row holdout of a folded group.
+   */
+  userPinned?: boolean | undefined
+  /** Pin/unpin this session (row menu action; browser-local, survives reloads). */
+  onTogglePinned?: (id: SessionNode['id']) => void
   t: RowTranslate
 }) {
   const row = node
@@ -405,6 +460,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const sessionMenuItems = [
     { id: 'rename', label: t('rename'), icon: <IconEditOutline16 /> },
     { id: 'fork', label: t('menu.fork'), icon: <IconBranchOutline16 /> },
+    { id: 'pin', label: userPinned ? t('menu.unpin') : t('menu.pin'), icon: <IconPinOutline16 /> },
     // 20-native glyph in the menu's 16px icon slot (Menu.module.css .itemIcon).
     { id: 'archive', label: t('menu.archiveSession'), icon: <IconArchiveOutline20 size={16} /> },
   ]
@@ -413,6 +469,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
     <div
       className={clsx(
         css.sessionRow, selected && css.selected, menuOpen && css.menuOpen,
+        pinned && css.pinnedSessionRow,
         flat && !showStatus && css.flatSessionRowWithoutStatus,
         drag?.marker === 'before' && css.dropBefore, drag?.marker === 'after' && css.dropAfter,
       )}
@@ -469,6 +526,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
               setMenuOpen(false)
               if (id === 'rename') onRename(node.id, row.title)
               if (id === 'fork') onFork(node.id)
+              if (id === 'pin') onTogglePinned(node.id)
               if (id === 'archive') onArchive(node.id)
             }}
             portal
@@ -499,3 +557,37 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
     />
   )
 }
+
+type SessionNodeItemProps = Parameters<typeof SessionNodeItemView>[0]
+
+/**
+ * Compare only render facts. Command callbacks are intentionally omitted: the
+ * browser creates id-keyed commands while deriving the row, and retaining the
+ * previous command is safe as long as these facts are unchanged. Time compares
+ * by its visible bucket so republishing the list does not repaint every row.
+ */
+function areSessionNodeItemPropsEqual(
+  previous: SessionNodeItemProps,
+  next: SessionNodeItemProps,
+): boolean {
+  const a = previous.node
+  const b = next.node
+  if (a.id !== b.id || a.title !== b.title || a.untitled !== b.untitled
+    || a.untitledNumber !== b.untitledNumber || a.blank !== b.blank
+    || a.pendingInteraction !== b.pendingInteraction || a.running !== b.running
+    || a.runningSubagentCount !== b.runningSubagentCount || a.completed !== b.completed
+    || a.hasActiveSchedule !== b.hasActiveSchedule || a.updatedAt !== b.updatedAt
+    || (previous.node.id === previous.currentId) !== (next.node.id === next.currentId)
+    || previous.flat !== next.flat || previous.pinned !== next.pinned
+    || previous.userPinned !== next.userPinned || previous.t !== next.t) return false
+  const before = relativeTime(a.updatedAt, previous.now)
+  const after = relativeTime(b.updatedAt, next.now)
+  if (before.unit !== after.unit || before.n !== after.n) return false
+  if (previous.drag?.active === true || next.drag?.active === true) return previous.drag === next.drag
+  return previous.drag?.active === next.drag?.active
+    && previous.drag?.marker === next.drag?.marker
+    && (previous.drag === undefined) === (next.drag === undefined)
+}
+
+/** Memoized session row; unchanged list republish must not rebuild its subtree. */
+export const SessionNodeItem = memo(SessionNodeItemView, areSessionNodeItemPropsEqual)

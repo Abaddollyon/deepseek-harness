@@ -24,6 +24,8 @@ export interface UiWorkspace {
    * @param workspaceId - explicit target; absent inherits the current or most recent Workspace.
    */
   startSession(workspaceId?: WorkspaceId): void
+  /** Create and open a session without Workspace attachment. */
+  createLooseSession(): void
   /**
    * Archive a Session and clear it when it is the current selection.
    * @param sessionId - Session to archive.
@@ -129,6 +131,13 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     void this.connectWorkspace(target).then(
       (sessionId) => { this.sessions.open(sessionId) },
       (reason: unknown) => { console.warn('new session failed:', reason) },
+    )
+  }
+
+  createLooseSession(): void {
+    void this.sessions.create({}).then(
+      (sessionId) => { this.sessions.open(sessionId) },
+      (reason: unknown) => { console.warn('loose session failed:', reason) },
     )
   }
 
