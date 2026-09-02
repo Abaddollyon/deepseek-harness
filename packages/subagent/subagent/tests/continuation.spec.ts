@@ -13,7 +13,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { ContentBlock, GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId, LlmError, QUOTA_EXCEEDED_CODE, errorChain } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,7 +22,7 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
-import { createActivationObserver, createLifecycleEmitter } from '../src/lifecycle.ts'
+import { createActivationObserver, createLifecycleEmitter, terminalDiagnostic } from '../src/lifecycle.ts'
 import { settlementSummary } from '../src/continuation.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
@@ -1151,24 +1151,38 @@ describe('continuable durability and teardown', () => {
 
   it('reports selected-child disposal failures after releasing the child', async () => {
     const hold = Promise.withResolvers<undefined>()
-    const adapter = new GatedAdapter([{ chunks: textResponse('target'), gate: hold.promise }])
+    const holdChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('target'), gate: hold.promise },
+      { chunks: textResponse('child'), gate: holdChild.promise },
+    ])
     const { ctx, parent } = await setupWith(adapter)
     const target = await ctx.subagents.startContinuable(startSpec(parent))
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const targetAgent = ctx.agents.get(target.childId)!
+    const descendant = await ctx.subagents.startContinuable(startSpec(targetAgent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
     const manager = (ctx.subagents as unknown as {
       continuations: { activations: Map<SessionId, { handle: { dispose: () => Promise<void> } }> }
     }).continuations
-    const activation = manager.activations.get(target.childId)!
+    const activation = manager.activations.get(descendant.childId)!
     const realDispose = activation.handle.dispose.bind(activation.handle)
     activation.handle.dispose = async () => {
       await realDispose()
-      throw new Error('selected cleanup failed')
+      throw new Error('selected cleanup failed', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 2_000 }) })
     }
 
     const drained = ctx.subagents.drainContinuableChildren(parent, [target.childId])
     hold.resolve(undefined)
+    holdChild.resolve(undefined)
 
-    await expect(drained).rejects.toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    const failure = await drained.catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    expect(errorChain(failure)).toContain('descendant teardown failures')
+    const graph = new SubagentError('aggregate', 'ACTIVATION_TEARDOWN_FAILED', {
+      cause: new AggregateError([new Error('nested', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 2_000 }) })]),
+    })
+    expect(terminalDiagnostic(graph)).toMatchObject({ failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 2_000 } })
     expect(ctx.agents.get(target.childId)).toBeUndefined()
   })
 

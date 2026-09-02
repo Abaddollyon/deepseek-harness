@@ -106,8 +106,9 @@ function collectFailureCause(failure: unknown): SubagentFailure | undefined {
       if (direct !== undefined) return direct
       const cause = visit(ownDataProperty(current, 'cause'), depth + 1)
       if (cause !== undefined) return cause
-      if (current instanceof AggregateError) {
-        for (const member of current.errors) {
+      const members = ownDataProperty(current, 'errors') ?? (current instanceof AggregateError ? current.errors : undefined)
+      if (Array.isArray(members)) {
+        for (const member of members) {
           const found = visit(member, depth + 1)
           if (found !== undefined) return found
         }

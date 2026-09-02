@@ -8,7 +8,7 @@ import * as yaml from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { settleRunResult, settlementSummary } from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type {
@@ -855,6 +855,29 @@ describe('CodexAppServerWire', () => {
       expect(JSON.stringify(wire.collectFailure())).not.toContain('/private/secret.txt')
       wire.close()
     }
+  })
+
+  it('carries a Codex 429 fact through settlement into the parent notice', async () => {
+    const { child, wire } = await initializeWire()
+    const pending = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+      message: 'rate limited',
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429, retryAfterMs: 12_000 } },
+    }))
+    const result = await settleRunResult({
+      attempt: () => pending,
+      collectOutput: () => [],
+      collectFailure: () => wire.collectFailure()?.failure,
+      cancelled: () => false,
+      signal: new AbortController().signal,
+      onAbort: () => {},
+    })
+    expect(result.failure).toEqual({ code: 'RATE_LIMIT', retryAfterMs: 12_000 })
+    expect(settlementSummary('codex-child' as never, result.stopReason, result.diagnostic, result.failure))
+      .toContain('wait 12 seconds before retrying')
+    wire.close()
   })
 
   it('groups object errors and retains only numeric HTTP status', async () => {
