@@ -69,8 +69,10 @@ describe('outcome mapping helpers', () => {
     const hostile = { toString(): never { throw new Error('coercion') } }
     await expect(settleRun({
       id: SessionId('child-hostile'), localAgent: undefined,
-      result: Promise.reject(hostile), // oxlint-disable-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
-      dispose: () => Promise.reject(hostile), // oxlint-disable-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
+      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
+      result: Promise.reject(hostile),
+      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
+      dispose: () => Promise.reject(hostile),
     })).resolves.toEqual({ status: 'failed', detail: '<unrenderable value>; dispose failed: <unrenderable value>' })
   })
 
