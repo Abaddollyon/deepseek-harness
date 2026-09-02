@@ -53,6 +53,11 @@ function runOutcome(result: SubagentResult): JobOutcome {
   }
 }
 
+/** Render a rejection while containing hostile coercion hooks. */
+function rejectionDetail(value: unknown): string {
+  try { return String(value) } catch { return errorChain(value) }
+}
+
 /**
  * Await the child result, dispose the run, then return its task outcome. Result
  * and disposal failures become `failed`; when both fail, both details survive.
@@ -64,13 +69,13 @@ export async function settleRun(run: SubagentRun): Promise<JobOutcome> {
   try {
     outcome = runOutcome(await run.result)
   } catch (error: unknown) {
-    outcome = { status: 'failed', detail: errorChain(error) }
+    outcome = { status: 'failed', detail: rejectionDetail(error) }
   }
   try {
     await run.dispose()
   } catch (error: unknown) {
     const prefix = outcome.detail === undefined ? '' : `${outcome.detail}; `
-    return { status: 'failed', detail: `${prefix}dispose failed: ${errorChain(error)}` }
+    return { status: 'failed', detail: `${prefix}dispose failed: ${rejectionDetail(error)}` }
   }
   return outcome
 }

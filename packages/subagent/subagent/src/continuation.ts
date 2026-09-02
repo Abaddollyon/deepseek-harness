@@ -1462,9 +1462,11 @@ export class SubagentContinuationManager {
       }))
       const reasons = childFailures.filter(reason => reason !== undefined)
       if (reasons.length > 0) {
+        const cause = new AggregateError(reasons, 'descendant teardown failures')
         failures.push(new SubagentError(
           `subagent "${childId}" child teardown failed: ${reasons.map(reason => errorChain(reason)).join('; ')}`,
           'ACTIVATION_TEARDOWN_FAILED',
+          { cause },
         ))
       }
       // Quiesce before the flush: a turn still running would keep

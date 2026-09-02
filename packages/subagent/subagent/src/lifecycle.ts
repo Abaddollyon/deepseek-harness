@@ -50,6 +50,12 @@ export interface ActivationTerminal {
 
 /** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
 const TERMINAL_DIAGNOSTIC_LIMIT = 4096
+const FAILURE_GRAPH_DEPTH_LIMIT = 16
+
+/** Convert hostile thrown values into stable diagnostic text. */
+function thrownText(failure: unknown): string {
+  try { return String(failure) } catch { return '[unprintable thrown value]' }
+}
 
 /**
  * Render a teardown failure as bounded diagnostic text.
@@ -57,7 +63,7 @@ const TERMINAL_DIAGNOSTIC_LIMIT = 4096
  * @returns the diagnostic member, omitted when the failure carries no text.
  */
 export function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
-  const text = String(failure)
+  const text = thrownText(failure)
   if (text.length === 0) return {}
   const bounded = truncateDiagnostic(text)
   const structured = collectFailureCause(failure)
@@ -89,17 +95,27 @@ function truncateDiagnostic(text: string): string {
  * @returns known typed facts, or undefined when no cause is classified.
  */
 function collectFailureCause(failure: unknown): SubagentFailure | undefined {
-  let current: unknown = failure
   const seen = new Set<unknown>()
-  while (current instanceof Error && !seen.has(current)) {
+  const visit = (current: unknown, depth: number): SubagentFailure | undefined => {
+    if (depth > FAILURE_GRAPH_DEPTH_LIMIT || current === null || (typeof current !== 'object' && typeof current !== 'function') || seen.has(current)) return undefined
     seen.add(current)
-    const nestedFailure = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
-    if (nestedFailure !== undefined) return nestedFailure
-    const directFailure = subagentFailureFromUnknown(current)
-    if (directFailure !== undefined) return directFailure
-    current = ownDataProperty(current, 'cause')
+    try {
+      const nested = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
+      if (nested !== undefined) return nested
+      const direct = subagentFailureFromUnknown(current)
+      if (direct !== undefined) return direct
+      const cause = visit(ownDataProperty(current, 'cause'), depth + 1)
+      if (cause !== undefined) return cause
+      if (current instanceof AggregateError) {
+        for (const member of current.errors) {
+          const found = visit(member, depth + 1)
+          if (found !== undefined) return found
+        }
+      }
+    } catch { /* hostile getters are not allowed to break settlement */ }
+    return undefined
   }
-  return undefined
+  return visit(failure, 0)
 }
 
 /**
@@ -218,7 +234,6 @@ export function observeRun(
         stopReason: result.stopReason,
         // Omit the field when no output exists, matching continuable epochs.
         ...result.output.length === 0 ? {} : { lastAssistantMessage: result.output },
-        /* v8 ignore next -- optional failure is a merge-extensible field. */
         ...result.failure === undefined ? {} : { failure: result.failure },
       }, parent)
     },
@@ -327,9 +342,6 @@ function epochStopReason(events: readonly SessionEvent[]): SubagentResult['stopR
     case undefined:
     case 'completed':
       return droppedUnrun ? 'aborted' : 'completed'
-    /* v8 ignore next 3 -- `TurnEndReason` is merge-extensible, so this arm needs a
-     * backend that adds a variant; treating an unnameable reason as success would
-     * report failed work as completed. */
     default:
       return 'error'
   }

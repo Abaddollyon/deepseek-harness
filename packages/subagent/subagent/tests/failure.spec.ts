@@ -66,5 +66,12 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(multibyte).toBe('🙂'.repeat(1_024))
     expect(terminalDiagnostic('')).toEqual({})
     expect(terminalDiagnostic({})).toEqual({ diagnostic: '[object Object]' })
+    const hostile = { toString(): never { throw new Error('coercion') } }
+    expect(terminalDiagnostic(hostile)).toEqual({ diagnostic: '[unprintable thrown value]' })
+    const aggregate = new AggregateError([new Error('outer', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 1_000 }) })])
+    expect(terminalDiagnostic(aggregate).failure).toEqual({ code: QUOTA_EXCEEDED_CODE, retryAfterMs: 1_000 })
+    const cyclic = new AggregateError([])
+    Object.defineProperty(cyclic, 'errors', { value: [cyclic] })
+    expect(terminalDiagnostic(cyclic).failure).toBeUndefined()
   })
 })
