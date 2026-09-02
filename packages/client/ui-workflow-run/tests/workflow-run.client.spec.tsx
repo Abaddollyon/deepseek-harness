@@ -691,6 +691,10 @@ describe('WorkflowRunPanel', () => {
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     member.focus()
 
+    // Navigability ends when the child rows leave the ordinary list (terminal
+    // status alone no longer removes it), so the completion arrives with the
+    // children gone to keep exercising the focused-retention path.
+    const settled = listState({ ids: [PARENT_ID] })
     view.rerender(<WorkflowRunPanel {...panelProps({
       name: 'audit', status: 'completed',
       phases: [phase({
@@ -699,7 +703,7 @@ describe('WorkflowRunPanel', () => {
           { seq: 2, label: 'second', childId: SECOND_ID, status: 'completed' },
         ],
       })],
-    }, sessions)} />)
+    }, settled)} />)
     expect(runHeader.getAttribute('aria-expanded')).toBe('true')
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     const retained = screen.getByRole('button', { name: 'worker' })
@@ -731,7 +735,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    })} />)
+    }, listState({ ids: [PARENT_ID] }))} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -760,7 +764,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    })} />)
+    }, listState({ ids: [PARENT_ID] }))} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -816,7 +820,7 @@ describe('WorkflowRunPanel', () => {
     expect(screen.getByRole('button', { name: /未分阶段/ }).getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('opens only a running ordinary-list subagent proven to have this parent', () => {
+  it('opens a running ordinary-list subagent proven to have this parent', () => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running', phases: [phase()],
     }
@@ -824,6 +828,41 @@ describe('WorkflowRunPanel', () => {
     render(<WorkflowRunPanel {...panelProps(data, listState(), openSession)} />)
     fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
     expect(openSession).toHaveBeenCalledWith('child-1')
+  })
+
+  it('opens completed and interrupted members while their child Session row exists', () => {
+    const sessions = listState({
+      ids: [PARENT_ID, CHILD_ID, SECOND_ID],
+      byId: {
+        ...listState().byId,
+        // Both child rows are settled: the row's own lifecycle must not gate
+        // navigation once the member's Session exists.
+        [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
+        [SECOND_ID]: {
+          id: SECOND_ID, displayTitle: 'second', parentId: PARENT_ID, origin: 'subagent',
+          running: false, blank: false, updatedAt: 0,
+        },
+      },
+    })
+    const data: WorkflowRunChatData = {
+      name: 'audit', status: 'interrupted',
+      phases: [phase({
+        members: [
+          { seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' },
+          { seq: 2, label: 'second', childId: SECOND_ID, status: 'interrupted' },
+          { seq: 3, label: 'ghost', childId: 'child-3' as SessionId, status: 'completed' },
+        ],
+      })],
+    }
+    const openSession = vi.fn()
+    render(<WorkflowRunPanel {...panelProps(data, sessions, openSession)} />)
+    fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开 second' }))
+    expect(openSession).toHaveBeenCalledWith('child-1')
+    expect(openSession).toHaveBeenCalledWith('child-2')
+    // A member whose child Session summary is gone stays a static row.
+    expect(screen.queryByRole('button', { name: '打开 ghost' })).toBeNull()
+    expect(screen.getByText('ghost')).toBeTruthy()
   })
 
   it('promotes a running member when its ordinary Session row arrives', () => {
@@ -846,11 +885,10 @@ describe('WorkflowRunPanel', () => {
       ...listState().byId,
       [CHILD_ID]: { ...listState().byId[CHILD_ID]!, parentId: 'other' as SessionId },
     } }), 'running'],
-    ['list terminal', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
-    } }), 'running'],
-    ['member terminal', listState(), 'completed'],
+    ['no child Session row', listState({
+      ids: [PARENT_ID],
+      byId: { [PARENT_ID]: listState().byId[PARENT_ID]! },
+    }), 'completed'],
   ] as const)('does not navigate when %s', (_name, sessions, memberStatus) => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running',

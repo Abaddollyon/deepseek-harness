@@ -401,6 +401,9 @@ export class WorkerRun implements WorkflowRun {
         prompt: [{ type: 'text', text: request.prompt }],
         parent: this.parent,
         signal: this.controller.signal,
+        // An explicit label persists on the child's descriptor, which is what
+        // the session sidebar projection reads for the row's display title.
+        ...request.label !== undefined ? { label: request.label } : {},
         ...request.schema !== undefined ? { outputSchema: request.schema } : {},
         ...request.provider !== undefined || request.model !== undefined || request.reasoningEffort !== undefined
           ? {
