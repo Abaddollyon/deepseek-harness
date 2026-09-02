@@ -77,18 +77,18 @@ function capturingCredentialStore(
   provider: string,
   capture: AttemptCredentialCapture,
 ): CredentialStore {
+  // Request auth only reads and conditionally modifies the route credential.
+  // Do not manufacture list/delete stubs for operations this proxy cannot serve.
   return {
     read: (_id, options) => source.read(provider, options).then((credential) => {
       capture.credential = credential
       return credential
     }),
-    list: source.list.bind(source),
     modify: (_id, mutate, options) => source.modify(provider, mutate, options).then((credential) => {
       capture.credential = credential
       return credential
     }),
-    delete: source.delete.bind(source),
-  }
+  } as unknown as CredentialStore
 }
 
 interface PiAiSnapshot {
