@@ -55,8 +55,12 @@
    measurement/mount unit for a virtualizer without changing the column gap. */
 .flowItem {
   min-width: 0;
-  /* Keep offscreen markdown and tool subtrees out of layout work while retaining
-     their intrinsic heights for stable scrolling and prepend anchoring. */
+}
+
+/* Keep offscreen markdown and tool subtrees out of layout work only when
+   ChatView owns the scrollport. The composed conversation host scrolls above
+   this subtree, where skip heuristics break row geometry and until-found rows. */
+.root:not(:global([data-conversation-scroll] *)) .flowItem {
   content-visibility: auto;
   contain-intrinsic-size: auto 240px;
 }
