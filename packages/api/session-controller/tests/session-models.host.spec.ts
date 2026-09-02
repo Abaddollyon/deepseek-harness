@@ -66,6 +66,10 @@ class CatalogAdapter extends LlmAdapter {
       id: model,
       name: model,
       ...this.reasoning === undefined ? {} : { reasoning: this.reasoning },
+      ...(() => {
+        const listed = this.models instanceof Error ? undefined : this.models.find(item => item.id === model)
+        return listed?.inputModalities === undefined ? {} : { inputModalities: [...listed.inputModalities] }
+      })(),
     })
   }
 
@@ -99,7 +103,7 @@ async function harness(logged?: {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(AgentRegistry)
   ctx.llm.registerAdapter(['deepseek-official'], new CatalogAdapter('DeepSeek', [
-    { provider: 'deepseek-official', id: 'deepseek-chat', name: 'DeepSeek Chat' },
+    { provider: 'deepseek-official', id: 'deepseek-chat', name: 'DeepSeek Chat', inputModalities: ['text', 'image'] },
     { provider: 'deepseek-official', id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', description: 'Reasoning model' },
   ], REASONING))
   ctx.llm.registerAdapter(['broken'], new CatalogAdapter('Broken Provider', new Error('catalog offline')))
@@ -365,7 +369,7 @@ describe('Web session model selection', () => {
       id: 'deepseek-official',
       name: 'DeepSeek',
       models: [
-        { id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: REASONING },
+        { id: 'deepseek-chat', name: 'DeepSeek Chat', reasoning: REASONING, inputModalities: ['text', 'image'] },
         {
           id: 'deepseek-reasoner',
           name: 'DeepSeek Reasoner',
