@@ -1134,7 +1134,6 @@ export class SubagentContinuationManager {
         appendDelegatedPolicyOverrides((childCtx.agent as Agent).session, create.delegatedPolicies)
       }
       applyChildComposition(childCtx, parent, inputs.composition)
-      return this.setupRegistry.apply(childCtx)
     }
     const observer = this.host.observeActivation(provider, childId, parent)
     // Agent creation owns rollback before handle transfer. A rejection leaves
