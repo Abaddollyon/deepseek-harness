@@ -1383,21 +1383,20 @@ describe('manual web performance: complex workspace and history', () => {
         await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBeGreaterThan(0)
         return logicalTrajectoryRows()
       })
-      expect(coldTrajectory.value).toBeGreaterThan(0)
-      expect(coldTrajectory.value).toBeLessThan(EXPECTED_TRAJECTORY_ROWS)
+      expect(coldTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
 
       const collapseTurns = await measure(cdp, async () => {
         await page.getByRole('button', { name: 'Collapse turns', exact: true }).click()
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBeLessThan(coldTrajectory.value)
+        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBe(1)
         return logicalTrajectoryRows()
       })
-      expect(collapseTurns.value).toBeLessThan(coldTrajectory.value)
+      expect(collapseTurns.value).toBe(1)
       const trajectorySearch = await measure(cdp, async () => {
         await page.getByRole('searchbox', { name: 'Search trajectory', exact: true }).fill('turn 499')
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBeLessThan(20)
+        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBe(1)
         return logicalTrajectoryRows()
       })
-      expect(trajectorySearch.value).toBeLessThan(20)
+      expect(trajectorySearch.value).toBe(1)
 
       await page.getByRole('tab', { name: 'Chat', exact: true }).click()
       const historyPages: { turns: number; measurement: Measurement }[] = []
@@ -1419,10 +1418,10 @@ describe('manual web performance: complex workspace and history', () => {
       const warmTrajectory = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).click()
         await expect.poll(logicalTrajectoryRows, { timeout: 30_000 })
-          .toBeGreaterThanOrEqual(EXPECTED_TRAJECTORY_ROWS)
+          .toBe(EXPECTED_TRAJECTORY_ROWS)
         return logicalTrajectoryRows()
       })
-      expect(warmTrajectory.value).toBeGreaterThanOrEqual(EXPECTED_TRAJECTORY_ROWS)
+      expect(warmTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
       const warmConversation = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Chat', exact: true }).click()
         return conversationTurns(page)
