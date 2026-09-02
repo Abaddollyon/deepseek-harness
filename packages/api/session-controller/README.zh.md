@@ -56,6 +56,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 
 无直接影响；模型请求仍由 Agent 和 LLM 包拥有。
 
+**运行时不变量：** 未发布伴生包；Session Controller 将持久状态和投影不变量委托给各自所属的软件包。
+
 ## 已知限制与延期工作
 
 <a id="known-limitations-and-deferred-work"></a>

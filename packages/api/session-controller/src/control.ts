@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { Deque } from '@deepseek-ai/dsh-deque'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import type { Session, SessionEvent, SessionEventMap, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -142,23 +143,6 @@ interface SupersedingKey {
   readonly key: string
 }
 
-/** One linked queue node; keyed nodes may be unlinked when a newer frame supersedes them. */
-class QueueNode {
-  /** Previous node toward the head, undefined at the head. */
-  prev: QueueNode | undefined
-  /** Next node toward the tail, undefined at the tail. */
-  next: QueueNode | undefined
-
-  /**
-   * @param frame - the frame to deliver unless it is superseded first.
-   * @param key - the superseding identity this node occupies, or undefined when the frame must always be delivered.
-   */
-  constructor(
-    readonly frame: SessionControlFrame,
-    readonly key: SupersedingKey | undefined,
-  ) {}
-}
-
 /**
  * Per-stream async queue: the controller's broadcasts push, the control
  * generation's AsyncIterable pulls; abort/return cleans up.
@@ -175,46 +159,37 @@ class QueueNode {
  * frame kind.
  */
 export class ControlQueue {
-  private head: QueueNode | undefined
-  private tail: QueueNode | undefined
-  /** Undelivered keyed nodes per (Session, projection key), so a newer frame can find the one it supersedes. */
-  private readonly supersedable = new Map<SessionId, Map<string, QueueNode>>()
+  private readonly buffer = new Deque<QueueEntry>()
+  private readonly supersedable = new Map<SessionId, Map<string, QueueEntry>>()
   private wake: (() => void) | undefined
   private done = false
   private length = 0
 
-  /** Frames still queued for delivery; superseded nodes are already unlinked. */
-  get size(): number {
-    return this.length
-  }
+  /** Frames still queued for delivery; superseded entries are removed logically. */
+  get size(): number { return this.length }
 
-  /**
-   * Queue one frame, superseding any undelivered frame with the same identity.
-   * @param frame - the frame to deliver; ignored after {@link end}.
+  /** Queue one frame, superseding an undelivered projection for the same identity.
+   * @param frame - frame to queue.
    */
   push(frame: SessionControlFrame): void {
     if (this.done) return
     const key = controlSupersedingKey(frame)
-    if (key === undefined) {
-      this.append(new QueueNode(frame, undefined))
-    } else {
-      const prior = this.supersedable.get(key.sessionId)?.get(key.key)
-      if (prior !== undefined) this.unlink(prior)
-      const node = new QueueNode(frame, key)
-      let byKey = this.supersedable.get(key.sessionId)
-      if (byKey === undefined) {
-        byKey = new Map()
-        this.supersedable.set(key.sessionId, byKey)
-      }
-      byKey.set(key.key, node)
-      this.append(node)
+    const entry: QueueEntry = { frame, key, active: true }
+    if (key !== undefined) {
+      const byKey = this.supersedable.get(key.sessionId) ?? new Map<string, QueueEntry>()
+      const prior = byKey.get(key.key)
+      if (prior !== undefined) { prior.active = false; this.length -= 1 }
+      byKey.set(key.key, entry)
+      this.supersedable.set(key.sessionId, byKey)
     }
+    this.buffer.pushBack(entry)
+    this.length += 1
     const wake = this.wake
     this.wake = undefined
     wake?.()
   }
 
-  /** Stop accepting frames; frames already queued still flush to an active drain. */
+  /** Stop accepting frames; already queued active frames still flush. */
   end(): void {
     if (this.done) return
     this.done = true
@@ -224,10 +199,9 @@ export class ControlQueue {
     wake?.()
   }
 
-  /**
-   * Pull queued frames until the queue ends; buffered frames flush on end but are dropped on abort.
+  /** Pull queued frames until the queue ends; abort drops the remaining buffer.
    * @param signal - remote stream cancellation.
-   * @returns the delivered frames in queue order.
+   * @returns delivered frames in queue order.
    */
   async *iterate(signal: AbortSignal): AsyncIterable<SessionControlFrame> {
     const onAbort = (): void => { this.end() }
@@ -235,10 +209,7 @@ export class ControlQueue {
     try {
       while (!this.done && !signal.aborted) {
         const frame = this.take()
-        if (frame !== undefined) {
-          yield frame
-          continue
-        }
+        if (frame !== undefined) { yield frame; continue }
         await new Promise<void>((resolve) => { this.wake = resolve })
       }
       while (!signal.aborted) {
@@ -249,47 +220,33 @@ export class ControlQueue {
     } finally {
       signal.removeEventListener('abort', onAbort)
       this.end()
+      this.buffer.clear()
+      this.length = 0
     }
   }
 
-  /** Link one node at the tail. */
-  private append(node: QueueNode): void {
-    node.prev = this.tail
-    if (this.tail === undefined) this.head = node
-    else this.tail.next = node
-    this.tail = node
-    this.length += 1
-  }
-
-  /** Detach one node, leaving every other node's delivery order untouched. */
-  private unlink(node: QueueNode): void {
-    if (node.prev === undefined) this.head = node.next
-    else node.prev.next = node.next
-    if (node.next === undefined) this.tail = node.prev
-    else node.next.prev = node.prev
-    this.length -= 1
-  }
-
-  /** Detach the head node's frame for delivery, releasing its superseding registration. */
   private take(): SessionControlFrame | undefined {
-    const node = this.head
-    if (node === undefined) return undefined
-    this.head = node.next
-    if (node.next === undefined) this.tail = undefined
-    else node.next.prev = undefined
-    this.length -= 1
-    const key = node.key
-    if (key !== undefined) {
-      const byKey = this.supersedable.get(key.sessionId)
-      // After end() the registrations are already released; before it, a
-      // linked keyed node is always its identity's current registration.
-      if (byKey !== undefined) {
-        byKey.delete(key.key)
-        if (byKey.size === 0) this.supersedable.delete(key.sessionId)
+    while (this.buffer.size > 0) {
+      const entry = this.buffer.popFront() as QueueEntry
+      if (!entry.active) continue
+      this.length -= 1
+      if (entry.key !== undefined) {
+        const byKey = this.supersedable.get(entry.key.sessionId)
+        if (byKey?.get(entry.key.key) === entry) {
+          byKey.delete(entry.key.key)
+          if (byKey.size === 0) this.supersedable.delete(entry.key.sessionId)
+        }
       }
+      return entry.frame
     }
-    return node.frame
+    return undefined
   }
+}
+
+interface QueueEntry {
+  readonly frame: SessionControlFrame
+  readonly key: SupersedingKey | undefined
+  active: boolean
 }
 
 /**

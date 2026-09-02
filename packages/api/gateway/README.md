@@ -60,6 +60,9 @@ No direct effect; invoked business Services own any model-visible result.
 
 ## Known Limitations and Deferred Work
 
+**Runtime invariant:** No companion is published; Gateway owns transport dispatch and has no independent mutable relation requiring a companion.
+
+
 <a id="known-limitations-and-deferred-work"></a>
 
 - The Connection adapter maps ordinary dispatch failures and business exceptions to the RPC `internal` code with empty details; lookup-policy errors carried by `TypertLookupFailure` are returned unchanged. Structured `TypertGatewayError` categories remain available only to same-process callers.

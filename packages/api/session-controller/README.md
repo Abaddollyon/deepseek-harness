@@ -58,6 +58,9 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
 
 ## Known Limitations and Deferred Work
 
+**Runtime invariant:** No companion is published; Session Controller delegates durable state and projection invariants to their owning packages.
+
+
 <a id="known-limitations-and-deferred-work"></a>
 
 - Control baselines represent process-local state and therefore cannot reconstruct jobs after a Host restart.

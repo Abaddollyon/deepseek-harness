@@ -58,6 +58,8 @@ Host 组合可通过 `registerRemoteEvents()` 注册唯一的应用事件 source
 
 无直接影响；被调用的业务服务负责产生任何模型可见结果。
 
+**运行时不变量：** 未发布伴生包；Gateway 负责传输分发，不拥有需要独立伴生包的可变关系。
+
 ## 已知限制与延期工作
 
 <a id="known-limitations-and-deferred-work"></a>
