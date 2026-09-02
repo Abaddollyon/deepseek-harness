@@ -1443,7 +1443,7 @@ describe('LocalJobRegistry.onJobAdopted', () => {
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     const seen: { snapshot: JobSnapshot; prior: string; markerAtNotify: string | undefined }[] = []
     ctx.jobs.onJobAdopted(() => { throw new Error('adoption observer boom') })
-    ctx.jobs.onJobAdopted((snapshot, priorIncarnation) => {
+    const disposeSeen = ctx.jobs.onJobAdopted((snapshot, priorIncarnation) => {
       seen.push({
         snapshot,
         prior: priorIncarnation,
@@ -1471,6 +1471,7 @@ describe('LocalJobRegistry.onJobAdopted', () => {
     done.resolve({ status: 'completed' })
     await tick()
     expect(state.records.get(stored.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+    disposeSeen()
   })
 
   it('awaits every observer before wiring an already-resolved done, which settles completed', async () => {
@@ -1483,7 +1484,8 @@ describe('LocalJobRegistry.onJobAdopted', () => {
     const gate = Promise.withResolvers<undefined>()
     const order: string[] = []
     ctx.jobs.onJobAdopted(() => true)
-    ctx.jobs.onJobAdopted(async () => { await gate.promise; order.push('observer') })
+    ctx.jobs.onJobAdopted(async () => { await gate.promise; order.push('observer'); return true })
+    ctx.jobs.onJobAdopted(async () => undefined)
     ctx.jobs.onJobAdopted(async () => { throw new Error('async observer boom') })
 
     ctx.jobs.registerResumer('bash', () => resumePlan(() => ({
@@ -1776,6 +1778,48 @@ describe('LocalJobRegistry durable persistence', () => {
     const persisted = state.records.get(id)?.output ?? ''
     expect(Buffer.byteLength(persisted)).toBeLessThanOrEqual(8)
     expect(persisted.endsWith('ABCDEF')).toBe(true)
+  })
+
+  it('keeps workflow truncation metadata and spill reference in a bounded durable record', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxPersistedOutputBytes: 256 })
+    const p = producer({ kind: 'workflow' })
+    const id = ctx.jobs.start(p.spec)
+    const marker = {
+      truncated: true as const,
+      originalChars: 60_000,
+      spillPath: '/artifacts/session/workflow-result.json',
+      preview: '\"line\\n'.repeat(500),
+    }
+    p.settle({
+      status: 'completed',
+      output: 'workflow "audit" completed (0 agents).\nReturn value:\n' + JSON.stringify(marker, null, 2),
+    })
+    await tick()
+
+    const persisted = state.records.get(id)?.output ?? ''
+    expect(Buffer.byteLength(persisted)).toBeLessThanOrEqual(256)
+    const recovered = JSON.parse(persisted.split('Return value:\n')[1]!) as typeof marker
+    expect({ ...recovered, preview: '<preview>' }).toEqual({ ...marker, preview: '<preview>' })
+    expect(recovered.preview.length).toBeLessThan(marker.preview.length)
+  })
+
+  it('tail-retains oversized producer text that only resembles a workflow result marker', async () => {
+    const { store, state } = fakeStore()
+    const ctx = await bootPersisted(store, { maxPersistedOutputBytes: 32 })
+    const invalidJson = producer({ kind: 'workflow' })
+    const invalidJsonId = ctx.jobs.start(invalidJson.spec)
+    invalidJson.settle({ status: 'completed', output: 'Return value:\n{not json' + 'x'.repeat(64) })
+    const invalidShape = producer({ kind: 'workflow' })
+    const invalidShapeId = ctx.jobs.start(invalidShape.spec)
+    invalidShape.settle({
+      status: 'completed',
+      output: 'Return value:\n' + JSON.stringify({ truncated: false, preview: 'x'.repeat(64) }),
+    })
+    await tick()
+
+    expect(Buffer.byteLength(state.records.get(invalidJsonId)?.output ?? '')).toBeLessThanOrEqual(32)
+    expect(Buffer.byteLength(state.records.get(invalidShapeId)?.output ?? '')).toBeLessThanOrEqual(32)
   })
 
   it('persist: false with a store mounted writes nothing', async () => {

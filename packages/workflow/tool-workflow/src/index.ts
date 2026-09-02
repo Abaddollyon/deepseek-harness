@@ -20,6 +20,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
 import type { RunDetachedData } from '@deepseek-ai/dsh-run-supervisor'
 import { WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowResult, WorkflowRun, WorkflowStopReason } from '@deepseek-ai/dsh-workflow'
@@ -30,6 +31,7 @@ import type {
 // Declaration merges: ctx.jobs, the workflow job kind, and run/detached.
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-run-supervisor/types'
+import type {} from '@deepseek-ai/dsh-spill'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -44,7 +46,7 @@ export const inject = ['tools', 'workflowEngine', 'systemPrompt']
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Serialized-result ceiling; longer JSON spills and returns recovery metadata (default 50000). */
   maxResultChars?: number
   /** Durable phase/log event ceiling per run (default 2000). */
   maxProgressEvents?: number
@@ -202,7 +204,7 @@ Script-body hooks:
 
 Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item \`null\`.
 
-Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes.`
+Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. When the serialized return value exceeds \`maxResultChars\`, the result is \`{ truncated: true, originalChars, spillPath, preview }\`; \`spillPath\` contains the exact complete JSON. The run executes in the foreground: this call returns when the whole script finishes.`
 
 type WorkflowCallArgs = {
   script: string
@@ -243,20 +245,51 @@ function stopReasonError(result: WorkflowResult): string | undefined {
   }
 }
 
-/** Render the run's outcome text: the meta name, agent count, and the JSON value (capped). */
-function renderResult(name: string, agentsStarted: number, value: JsonValue, maxChars: number): string {
+interface TruncatedWorkflowResult {
+  [key: string]: JsonValue
+  truncated: true
+  originalChars: number
+  spillPath: string
+  preview: string
+}
+
+/** Persist an oversized serialized value and replace it with explicit recovery metadata. */
+function projectResult(
+  ctx: Context, session: Session, callId: SaveTextSpill['source']['callId'], name: string, value: JsonValue, maxChars: number,
+): JsonValue | Promise<JsonValue> {
   // The engine returns JSON data (null for a valueless script), so stringify never yields undefined.
   const rendered = JSON.stringify(value, null, 2)
-  const clipped = rendered.length > maxChars
-    ? `${rendered.slice(0, maxChars)}\n… [truncated: ${rendered.length - maxChars} more characters]`
-    : rendered
-  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${clipped}`
+  if (rendered.length <= maxChars) return value
+  const spillStore = ctx.get('spillStore')
+  if (spillStore === undefined) {
+    throw new Error('workflow result exceeds maxResultChars but no ctx.spillStore backend is mounted')
+  }
+  const save: SaveTextSpill = {
+    owner: { sessionId: session.id },
+    source: { toolName: 'workflow', callId, label: 'result' },
+    suggestedName: `${name}-result.json`,
+    content: rendered,
+  }
+  return spillStore.saveText(save).then((ref) => {
+    const truncated: TruncatedWorkflowResult = {
+      truncated: true, originalChars: rendered.length, spillPath: String(ref.locator), preview: rendered.slice(0, maxChars),
+    }
+    return truncated
+  })
+}
+
+/** Render the run's outcome text: the meta name, agent count, and projected JSON value. */
+function renderResult(name: string, agentsStarted: number, value: JsonValue): string {
+  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${JSON.stringify(value, null, 2)}`
 }
 
 /** Await a supervisor-owned run through quiescence and map it to one final-output job. */
 async function settleSupervisedRun(
   run: WorkflowRun,
   recorder: WorkflowRecorder,
+  ctx: Context,
+  session: Session,
+  callId: SaveTextSpill['source']['callId'],
   maxResultChars: number,
 ): Promise<JobOutcome> {
   let result: WorkflowResult
@@ -273,7 +306,10 @@ async function settleSupervisedRun(
     case 'completed':
       return {
         status: 'completed',
-        output: renderResult(run.meta.name, result.agentsStarted, result.value as JsonValue, maxResultChars),
+        output: renderResult(
+          run.meta.name, result.agentsStarted,
+          await projectResult(ctx, session, callId, run.meta.name, result.value as JsonValue, maxResultChars),
+        ),
       }
     case 'cancelled':
       return { status: 'killed', ...result.error === undefined ? {} : { detail: result.error } }
@@ -363,7 +399,7 @@ export function apply(ctx: Context, config: Config): void {
       render: (args, value) => [{
         type: 'text',
         text: renderResult(
-          args.meta.name, value.agentsStarted as number, value.result as JsonValue, maxResultChars,
+          args.meta.name, value.agentsStarted as number, value.result as JsonValue,
         ),
       }],
     } : {
@@ -428,14 +464,14 @@ export function apply(ctx: Context, config: Config): void {
               }
               return {
                 cancel: (reason?: string) => { run?.cancel(reason ?? 'workflow job killed') },
-                done: settleSupervisedRun(run, recorder, maxResultChars),
+                done: settleSupervisedRun(run, recorder, ctx, parent.session, exec.callId, maxResultChars),
               }
             },
           })
         } catch (error: unknown) {
           if (run !== undefined) {
             run.cancel('workflow job registration failed')
-            void settleSupervisedRun(run, recorder, maxResultChars)
+            void settleSupervisedRun(run, recorder, ctx, parent.session, exec.callId, maxResultChars)
           }
           throw error
         }
@@ -471,10 +507,11 @@ export function apply(ctx: Context, config: Config): void {
           // throw into an isError). Report the reason, not partial output.
           throw new Error(error)
         }
+        const projected = projectResult(ctx, parent.session, exec.callId, run.meta.name, result.value as JsonValue, maxResultChars)
         return {
           runId: run.id,
           agentsStarted: result.agentsStarted,
-          result: result.value as JsonValue,
+          result: projected instanceof Promise ? await projected : projected,
         }
       } finally {
         exec.signal.removeEventListener('abort', onAbort)
