@@ -293,6 +293,8 @@
     { "path": "./packages/subagent/subagent-dsh-sdk" },
     { "path": "./packages/jobs/jobs" },
     { "path": "./packages/jobs/jobs-local" },
+    { "path": "./packages/jobs/jobs-store-domain" },
+    { "path": "./packages/jobs/run-supervisor" },
     { "path": "./packages/jobs/tool-jobs" },
     { "path": "./packages/experimental/agent-team" },
     { "path": "./packages/experimental/agent-team-profile" },

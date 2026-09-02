@@ -49,6 +49,27 @@
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
 
+    # SQLite storage backend: keyed-row medium for write-heavy domains. The
+    # jobs domain routes here so durable job records update as row writes, not
+    # whole-file JSON rewrites. Node 22 keeps node:sqlite behind an
+    # ExperimentalWarning that the built-CLI lazy-startup gate forbids, so the
+    # backend mounts — and the jobs route applies — only on Node >= 24; older
+    # engines keep every domain on the JSON default with identical semantics.
+    - id: storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      disabled: !!js Number(process.versions.node.split('.')[0]) < 24
+      config:
+        path: !!js dshHomePath('storages/domains.sqlite')
+
+    # Durable job records (domain 'jobs') + boot reconciliation: resume what a
+    # restart left resumable, settle the rest honestly, exactly one notice per
+    # unreported completion.
+    - id: jobs-store-domain
+      name: '@deepseek-ai/dsh-jobs-store-domain'
+
+    - id: run-supervisor
+      name: '@deepseek-ai/dsh-run-supervisor'
+
     - id: message-feedback
       name: '@deepseek-ai/dsh-message-feedback'
       config:
@@ -343,6 +364,17 @@
 
 - id: tool-jobs
   disabled: true
+
+# Durable background jobs: mirror registry records into the domain store so the
+# run supervisor can reconcile them after a service restart.
+- id: storage-domain
+  config:
+    backend: json
+    routes: !!js "JSON.parse(Number(process.versions.node.split('.')[0]) < 24 ? '{}' : '{\"jobs\":\"sqlite\"}')"
+
+- id: jobs
+  config:
+    persist: true
 
 - id: tool-fs
   disabled: true

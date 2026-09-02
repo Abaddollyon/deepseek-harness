@@ -28,7 +28,7 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":2,"chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}}
 {"type":"assistant/message","data":{"turn":1,"step":2,"message":{"role":"assistant","content":[{"type":"tool-call","id":"call_acp_background","name":"subagent_acp","arguments":"{\"description\":\"Observe ACP background failure\",\"prompt\":\"Return the scripted ACP failure.\",\"run_in_background\":true}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-pro"},"id":"{{message:5}}"},"usage":{"inputTokens":10,"outputTokens":5}},"sourceEventSeqs":[22,23,24,25,26],"surfaceOp":"append"}
 {"type":"tool/call","data":{"turn":1,"step":2,"callId":"call_acp_background","name":"subagent_acp","arguments":"{\"description\":\"Observe ACP background failure\",\"prompt\":\"Return the scripted ACP failure.\",\"run_in_background\":true}"}}
-{"type":"tool/result","data":{"turn":1,"step":2,"message":{"source":{"kind":"tool","callId":"call_acp_background"},"content":[{"type":"tool-result","toolCallId":"call_acp_background","content":[{"type":"text","text":"started background subagent job subagent-1"}],"isError":false}],"role":"user","id":"{{message:6}}"}},"sourceEventSeqs":[28],"surfaceOp":"append"}
+{"type":"tool/result","data":{"turn":1,"step":2,"message":{"source":{"kind":"tool","callId":"call_acp_background"},"content":[{"type":"tool-result","toolCallId":"call_acp_background","content":[{"type":"text","text":"started background subagent job {{job:1}}"}],"isError":false}],"role":"user","id":"{{message:6}}"}},"sourceEventSeqs":[28],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":2}}
 {"type":"step/start","data":{"turn":1,"step":3}}
 {"type":"assistant/chunk","data":{"turn":1,"step":3,"chunk":{"type":"block-start","index":0,"blockType":"tool-call"}}}
@@ -38,7 +38,7 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":3,"chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}}
 {"type":"assistant/message","data":{"turn":1,"step":3,"message":{"role":"assistant","content":[{"type":"tool-call","id":"call_acp_output","name":"job_output","arguments":"{\"job_id\":\"subagent-1\",\"wait\":true}"}],"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-pro"},"id":"{{message:7}}"},"usage":{"inputTokens":10,"outputTokens":5}},"sourceEventSeqs":[32,33,34,35,36],"surfaceOp":"append"}
 {"type":"tool/call","data":{"turn":1,"step":3,"callId":"call_acp_output","name":"job_output","arguments":"{\"job_id\":\"subagent-1\",\"wait\":true}"}}
-{"type":"tool/result","data":{"turn":1,"step":3,"message":{"source":{"kind":"tool","callId":"call_acp_output"},"content":[{"type":"tool-result","toolCallId":"call_acp_output","content":[{"type":"text","text":"(no new output)\n[status: failed, aborted; diagnostic: ACP unattended decision (policy: reject; request: execute; decision: denied)]"}],"isError":false}],"role":"user","id":"{{message:8}}"}},"sourceEventSeqs":[38],"surfaceOp":"append"}
+{"type":"tool/result","data":{"turn":1,"step":3,"message":{"source":{"kind":"tool","callId":"call_acp_output"},"content":[{"type":"tool-result","toolCallId":"call_acp_output","content":[{"type":"text","text":"Error: unknown job subagent-1"}],"isError":true}],"role":"user","id":"{{message:8}}"}},"sourceEventSeqs":[38],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":3}}
 {"type":"step/start","data":{"turn":1,"step":4}}
 {"type":"assistant/chunk","data":{"turn":1,"step":4,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}

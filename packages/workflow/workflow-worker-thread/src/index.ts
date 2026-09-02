@@ -12,6 +12,7 @@ import * as vm from 'node:vm'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
 import { WorkerRun } from './host.ts'
 import { validateMeta } from './meta.ts'
@@ -40,6 +41,8 @@ export interface Config {
   maxItemsPerCall?: number
   /** vm timeout for the script's initial synchronous slice, inside the worker (default 5000 ms). */
   syncTimeoutMs?: number
+  /** Whole-run wall-clock ceiling; 0 leaves the run unbounded (default 0 ms). */
+  maxRunWallMs?: number
   /**
    * How long after a cancellation an unsettled script may keep running before
    * the run force-settles `cancelled` and its worker is TERMINATED (default
@@ -118,16 +121,25 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
     maxTotalAgents: z.natural().min(1).default(1000),
     maxItemsPerCall: z.natural().min(1).default(4096),
     syncTimeoutMs: z.natural().min(1).default(5000),
+    maxRunWallMs: z.natural().default(0),
     disposeGraceMs: z.natural().default(5000),
   })
 
   private readonly config: ResolvedConfig
+
+  /** Resolved whole-run wall-clock ceiling exposed to owning consumers. */
+  readonly maxRunWallMs: number
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     // schemastery (static Config) has already filled the defaulted fields;
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
+    this.maxRunWallMs = this.config.maxRunWallMs
+    // maxRunWallMs reaches setTimeout, which clamps a longer delay to 1 ms.
+    if (this.config.maxRunWallMs > MAX_TIMER_DELAY_MS) {
+      throw new Error(`dsh-workflow-worker-thread: config.maxRunWallMs must be at most ${MAX_TIMER_DELAY_MS} (Node clamps a longer setTimeout delay to 1ms), got ${String(this.config.maxRunWallMs)}`)
+    }
   }
 
   /**
@@ -145,7 +157,7 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
     assertBodyParses(request.script, meta.name)
     const subagentProvider = resolveSubagentProvider(this.ctx, this.config.provider, request.subagentProvider)
     const maxTotalAgents = resolveMaxTotalAgents(request.maxTotalAgents, this.config.maxTotalAgents)
-    const id = WorkflowRunId(randomUUID())
+    const id = request.id ?? WorkflowRunId(randomUUID())
     const info: WorkflowRunInfo = { id, meta }
     const limits: WorkerLimits = {
       maxConcurrentAgents: this.config.maxConcurrentAgents === 0
@@ -178,6 +190,7 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
       init,
       subagentProvider,
       this.config.disposeGraceMs,
+      this.config.maxRunWallMs,
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },
         log: (message) => { this.emitWorkflowEvent('workflow/log', info, message) },
