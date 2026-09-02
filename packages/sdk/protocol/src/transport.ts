@@ -65,6 +65,7 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   private started = false
   private requestHandler: RequestHandler | undefined
   private notificationHandler: NotificationHandler | undefined
+  private malformedHandler: ((line: string) => void) | undefined
   private readonly pending = new Map<JsonRpcId, PendingRequest>()
 
   constructor(
@@ -107,6 +108,14 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
    */
   onNotification(handler: NotificationHandler): void {
     this.notificationHandler = handler
+  }
+
+  /**
+   * Install a callback for malformed peer frames.
+   * @param handler - Observer receiving the original malformed line.
+   */
+  onMalformed(handler: (line: string) => void): void {
+    this.malformedHandler = handler
   }
 
   /**
@@ -203,10 +212,13 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
     try {
       message = JSON.parse(line)
     } catch {
-      // Only JSON syntax errors reach this catch; malformed peer lines are ignored.
+      this.malformedHandler?.(line)
       return
     }
-    if (!message || typeof message !== 'object') return
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      this.malformedHandler?.(line)
+      return
+    }
     const frame = message as Record<string, unknown>
     const id = frame.id
     const method = frame.method
@@ -215,12 +227,18 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       return
     }
     if (typeof id === 'string' || typeof id === 'number') {
+      if (!this.pending.has(id) && this.malformedHandler !== undefined) {
+        this.malformedHandler(line)
+        return
+      }
       this.handleIncomingResponse(id, frame)
       return
     }
     if (typeof method === 'string') {
       this.notificationHandler?.(method, objectParams(frame.params))
+      return
     }
+    this.malformedHandler?.(line)
   }
 
   private async handleIncomingRequest(id: JsonRpcId, method: string, params: Record<string, unknown>): Promise<void> {

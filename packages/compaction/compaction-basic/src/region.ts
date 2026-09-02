@@ -427,7 +427,7 @@ async function summarizeCompaction(
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
   if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
     throw new Error(
-      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
+      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedRouteTokenCount})`,
     )
   }
   return {

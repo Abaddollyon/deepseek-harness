@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-09-02-subscription-web-search-provider-contract.md
+2026-09-02-subscription-web-search-provider-contract.md: 85533f1dbc1685c2feab5c32d86bbddc79c9547c
+2026-09-02-subscription-web-search-provider-contract.zh.md: 3a8aa23bf81f6843776085fb67c6c64b45f25cc1
