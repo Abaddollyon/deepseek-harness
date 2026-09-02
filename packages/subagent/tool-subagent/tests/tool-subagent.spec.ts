@@ -872,7 +872,7 @@ describe('dsh-tool-subagent background mode', () => {
     const start = await callSubagent(ctx, { description: 'deep research', prompt: 'dig in', run_in_background: true }, { agent: parent })
     expect(start.isError).toBe(false)
     if (start.isError) throw new Error('expected background subagent success')
-    const jobId = start.value.jobId
+    const jobId = (start.value as { jobId: string }).jobId
     expect(start.value).toEqual({ kind: 'background', jobId })
     expect(text(start)).toBe(`started background subagent job ${jobId}`)
 
