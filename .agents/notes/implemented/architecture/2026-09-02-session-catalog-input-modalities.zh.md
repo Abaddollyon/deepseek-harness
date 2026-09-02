@@ -1,6 +1,8 @@
-# Agent Note: Preserve model input modalities in the Session catalog
+# Agent Note: 在 Session 目录中保留模型输入模态
 
 Status: implemented
+
+[English](2026-09-02-session-catalog-input-modalities.md) | 中文
 
 ## Problem
 

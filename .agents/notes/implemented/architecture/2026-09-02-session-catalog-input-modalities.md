@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-09-02-session-catalog-input-modalities.zh.md)
+
 ## Problem
 
 The Session model catalog omitted adapter-reported input modalities, so clients could not distinguish image-capable models from text-only models.

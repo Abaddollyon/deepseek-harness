@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-02-session-catalog-input-modalities.md
-2026-09-02-session-catalog-input-modalities.md: 23a47ebbf4d678f42b2092a9567a3daf4505bc10
-2026-09-02-session-catalog-input-modalities.zh.md: 2e0ccdce80cbe9ea8b1e0df766a246874084b0ef
+2026-09-02-session-catalog-input-modalities.md: 60ba86eec27794f96bc9d4e506ab99ea8b018c18
+2026-09-02-session-catalog-input-modalities.zh.md: 732e5337f3d4edc76925cd823dad81914e07bcb5
