@@ -2490,7 +2490,7 @@ export interface Config {
 export type ClaudeCodePermissionMode = typeof CLAUDE_CODE_PERMISSION_MODES[number]
 ```
 
-Source: [`packages/subagent/subagent-claude-code/src/index.ts:38`](../packages/subagent/subagent-claude-code/src/index.ts)
+Source: [`packages/subagent/subagent-claude-code/src/index.ts:40`](../packages/subagent/subagent-claude-code/src/index.ts)
 
 <a id="deepseek-aidsh-subagent-codex"></a>
 
@@ -3346,6 +3346,36 @@ export interface Config {
 ```
 
 Source: [`packages/web/web-fetch-http/src/index.ts:32`](../packages/web/web-fetch-http/src/index.ts)
+
+<a id="deepseek-aidsh-web-search-claude-code"></a>
+
+## `@deepseek-ai/dsh-web-search-claude-code`
+
+Requires: `web` · `subprocess`
+
+```ts config-catalog
+/** Configuration for the Claude Code web-search plugin. */
+export interface Config {
+  /** Working directory used for Claude Code searches. */
+  cwd?: string
+  /** Per-request timeout in milliseconds. */
+  requestTimeoutMs?: number
+  /** Process-tree termination grace in milliseconds. */
+  disposeGraceMs?: number
+  /** Maximum normalized source count. */
+  maxResults?: number
+  /** Maximum SDK turns per query. */
+  maxTurns?: number
+  /** Maximum normalized payload bytes. */
+  maxPayloadBytes?: number
+  /** Optional absolute or bare Claude executable override. */
+  executable?: string
+  /** Provider IDs are fixed and cannot be overridden. */
+  id?: never
+}
+```
+
+Source: [`packages/web/web-search-claude-code/src/index.ts:39`](../packages/web/web-search-claude-code/src/index.ts)
 
 <a id="deepseek-aidsh-web-search-codex"></a>
 

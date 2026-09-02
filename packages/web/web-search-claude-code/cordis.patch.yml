@@ -1,0 +1,3 @@
+- insert:
+    - id: web-search-claude-code
+      name: '@deepseek-ai/dsh-web-search-claude-code'

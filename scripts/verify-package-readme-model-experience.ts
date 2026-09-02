@@ -168,6 +168,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/web/web-fetch-http': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/web/web-search-codex': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/web/web-search-exa': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
+  'packages/web/web-search-claude-code': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/workflow/workflow': { kind: 'indirect', reason: 'The service delegates parent and child model rendering to its consumer and engine.' },
   'packages/api/session-controller': { kind: 'none', reason: 'The BFF exposes session control while invoked Agent commands own every model-visible effect.' },
   'packages/api/settings-controller': { kind: 'none', reason: 'The BFF exposes browser and Host configuration state and registers no prompt, tool, or session event.' },
