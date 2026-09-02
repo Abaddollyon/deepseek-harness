@@ -90,9 +90,9 @@ function capturingCredentialStore(
     }),
     modify: (_id: string, mutate: CredentialMutate, options: CredentialModifyOptions) =>
       source.modify(provider, mutate, options).then((credential) => {
-      capture.credential = credential
-      return credential
-    }),
+        capture.credential = credential
+        return credential
+      }),
   } as unknown as CredentialStore
 }
 
