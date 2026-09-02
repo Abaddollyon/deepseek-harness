@@ -179,9 +179,6 @@ const handle = await ctx.agents.create({
 
 ## 已知限制与延期工作
 <a id="known-limitations-and-deferred-work"></a>
-## 已知限制与暂缓事项
-
-<a id="known-limitations-and-deferred-work"></a>
 
 
 这些限制说明循环何时需要特别留意。它们是当前包约束，不是任务积压。

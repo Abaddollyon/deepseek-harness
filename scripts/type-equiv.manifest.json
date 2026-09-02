@@ -154,11 +154,6 @@
     },
     {
       "doc": "docs/subsystems/core.md",
-      "symbol": "RequestPreflightAction",
-      "source": "packages/core/agent/src/runtime-types.ts"
-    },
-    {
-      "doc": "docs/subsystems/core.md",
       "symbol": "SessionStartSource",
       "source": "packages/core/agent/src/runtime-types.ts"
     },

@@ -34,11 +34,11 @@ interface CompactionResult {
   /** Human command that initiated this compaction, when it was manual. */
   sourceCommandId?: CommandId
   /** The seq of the appended `compaction/start` event. */
-  startSeq: SessionSeq
+  startSeq: number
   /** The seq of the appended `compaction/summary` event. */
-  summarySeq: SessionSeq
+  summarySeq: number
   /** The seq of the appended `compaction/end` event. */
-  endSeq: SessionSeq
+  endSeq: number
   /** The summary content blocks produced by the backend. */
   summary: ContentBlock[]
   /**
@@ -49,10 +49,10 @@ interface CompactionResult {
    * can be GREATER than `end`. {@link CompactionResult.shadowedSeqs} is the
    * authoritative set of shadowed nodes, in surface order.
    */
-  shadowedRange: { start: SessionSeq; end: SessionSeq }
+  shadowedRange: { start: number; end: number }
   /** The seqs of all shadowed surface nodes, in surface order. */
-  shadowedSeqs: SessionSeq[]
-  /** Estimated token count of the shadowed content. */
+  shadowedSeqs: number[]
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
 }
 ```

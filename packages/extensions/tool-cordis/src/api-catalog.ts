@@ -2473,9 +2473,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'estimateHeader(header: EpochHeader | undefined): number',
-        description: 'Heuristically price the non-surface request envelope — system prompt and tool schemas — under the same fixed heuristic `measure` applies (instance face of the pure `estimateHeader` export from `estimate.ts`).',
-        parameters: [{ name: 'header', description: 'canonical envelope, or undefined before any request.' }],
-        returns: 'heuristic system plus tool tokens; 0 for an absent envelope.',
+        description: 'Estimate the non-surface tokens in one canonical request envelope.',
+        parameters: [{ name: 'header', description: 'canonical request envelope, when one is available.' }],
+        returns: 'estimated request-header tokens.',
       },
       {
         signature: 'estimateMessage(message: Message): number',
@@ -3714,7 +3714,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CompactionResult',
-    declaration: 'export interface CompactionResult {\n    compactionId: CompactionId;\n    sourceCommandId?: CommandId;\n    startSeq: SessionSeq;\n    summarySeq: SessionSeq;\n    endSeq: SessionSeq;\n    summary: ContentBlock[];\n    shadowedRange: {\n        start: SessionSeq;\n        end: SessionSeq;\n    };\n    shadowedSeqs: SessionSeq[];\n    shadowedTokenCount: number;\n}',
+    declaration: 'export interface CompactionResult {\n    compactionId: CompactionId;\n    sourceCommandId?: CommandId;\n    startSeq: number;\n    summarySeq: number;\n    endSeq: number;\n    summary: ContentBlock[];\n    shadowedRange: {\n        start: number;\n        end: number;\n    };\n    shadowedSeqs: number[];\n    shadowedTokenCount: number;\n}',
   },
   {
     name: 'CompactionTrigger',

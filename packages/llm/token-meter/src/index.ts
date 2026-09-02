@@ -184,7 +184,11 @@ export class TokenMeter extends Service {
     }))
   }
 
-  /** Estimate the non-surface tokens in one canonical request envelope. */
+  /**
+   * Estimate the non-surface tokens in one canonical request envelope.
+   * @param header - canonical request envelope, when one is available.
+   * @returns estimated request-header tokens.
+   */
   estimateHeader(header: EpochHeader | undefined): number {
     return estimateHeader(header)
   }

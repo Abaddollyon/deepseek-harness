@@ -110,8 +110,8 @@ kind: "package-reference"
 
 ### 自动触发与溢出恢复
 
-当 `auto: true` 时，串行 `agent/pre-step` listener 会在请求派生前检查压力：它通过 `ctx.tokenMeter` 为最新持久路由请求 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留已定价近期尾部的同时摘要最旧的平衡范围。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
 当 `auto: true` 时，串行 `agent/request-preflight` listener 会在每个确切请求的规范 header 记录之后、消息派生之前执行准入：它通过 `ctx.tokenMeter` 为该请求的持久路由 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留已定价近期尾部的同时摘要最旧的平衡范围，并根据摘要模型的实际容量为配置的输出上限、已定价 envelope 与最后的压缩指令消息预留额度，使完整辅助请求始终可容纳——当没有平衡范围可容纳时，准入不发起摘要调用，并保留完整请求交由提供方处理。已提交的替换会从新表层重新分派准入，并受循环固定的重新分派上限约束。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
+
 当 `auto: true` 时，串行 `agent/request-preflight` listener 会在每个确切请求的规范 header 记录之后、消息派生之前执行准入：它通过 `ctx.tokenMeter` 为该请求的持久路由 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留通过精确摘要提供方／模型 header 计价的近期尾部的同时摘要最旧的平衡范围。它根据摘要模型的实际容量，为已配置输出上限、按摘要目标计价的 envelope 与最后的压缩指令消息预留额度，使完整辅助请求始终可容纳——当没有平衡范围可容纳时，准入不发起摘要调用，并保留完整请求交由提供方处理。已提交的替换会从新表层重新分派准入，并受循环固定的重新分派上限约束。每条完成的助手消息都会结束该请求的准入预算，因此工具调用续接会获得自己的 `maxOverflowRetries` 次尝试。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
 
 压力策略从拥有持久路由的适配器解析容量。当适配器无法为有效动态路由返回容量，或返回的容量会使目标的保留预算无效时，手动压力路径会抛出目标特定配置错误；自动 listener 会对该精确目标警告一次，委托准入并携带完整历史继续。剪枝、计量、解析和摘要中的运行故障会拒绝预检，不会被转换为准入。
@@ -138,7 +138,6 @@ kind: "package-reference"
 | [`src/config.ts`](src/config.ts) | 加载时验证与路由模型策略解析 |
 | [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` 与已解析策略词汇 |
 | — | 不发布运行时不变式伴生入口；持久标记对可在会话日志中观察。 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；持久标记对可在会话日志中观察） |
 
 </details>
 

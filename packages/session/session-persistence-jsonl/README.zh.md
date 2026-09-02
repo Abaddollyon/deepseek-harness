@@ -137,9 +137,6 @@ JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope �
 
 ## 已知限制与延期工作
 <a id="known-limitations-and-deferred-work"></a>
-## 已知限制与暂缓事项
-
-<a id="known-limitations-and-deferred-work"></a>
 
 
 这些限制说明本后端何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是任务积压。
@@ -160,3 +157,4 @@ JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope �
 无。
 
 </details>
+

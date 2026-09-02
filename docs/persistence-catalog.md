@@ -314,9 +314,9 @@ Source: [`packages/compaction/compaction/src/types.ts:72`](../packages/compactio
  */
 'compaction/prune': {
   /** The replaced range's first and last surface-node seqs (a surface-position span, like {@link CompactionResult.shadowedRange}). */
-  shadowedRange: { start: SessionSeq; end: SessionSeq }
+  shadowedRange: { start: number; end: number }
   /** The seqs of all shadowed surface nodes, in surface order. */
-  shadowedSeqs: SessionSeq[]
+  shadowedSeqs: number[]
   /** Heuristic price of the shadowed content under the token-meter's fixed estimator. */
   shadowedTokenCount: number
 }
@@ -337,7 +337,7 @@ Source: [`packages/compaction/compaction/src/types.ts:82`](../packages/compactio
 'compaction/start': { compactionId: CompactionId; sourceCommandId?: CommandId; turn: number | null }
 ```
 
-Source: [`packages/compaction/compaction/src/types.ts:24`](../packages/compaction/compaction/src/types.ts)
+Source: [`packages/compaction/compaction/src/types.ts:23`](../packages/compaction/compaction/src/types.ts)
 
 <a id="compactionsummary--log-only"></a>
 
@@ -357,8 +357,9 @@ Source: [`packages/compaction/compaction/src/types.ts:24`](../packages/compactio
   compactionId: CompactionId
   sourceCommandId?: CommandId
   summary: ContentBlock[]
-  shadowedRange: { start: SessionSeq; end: SessionSeq }
-  shadowedSeqs: SessionSeq[]
+  shadowedRange: { start: number; end: number }
+  shadowedSeqs: number[]
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
   /** The provider route that wrote the summary. */
   provider: string
@@ -391,7 +392,7 @@ Source: [`packages/compaction/compaction/src/types.ts:24`](../packages/compactio
 
 Types: [ContentBlock](subsystems/core.md) · [TokenUsage](subsystems/llm-streaming.md)
 
-Source: [`packages/compaction/compaction/src/types.ts:34`](../packages/compaction/compaction/src/types.ts)
+Source: [`packages/compaction/compaction/src/types.ts:33`](../packages/compaction/compaction/src/types.ts)
 
 ### `feedback/*`
 
