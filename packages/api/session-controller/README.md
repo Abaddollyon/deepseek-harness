@@ -27,9 +27,9 @@ History pages and follow opening snapshots carry a discriminated `SessionHistory
 
 Each endpoint states its activation policy. List, search, attachment, history pages, log following, skill discovery, and workspace-path opening can inspect persistence without activating an Agent; `canOpenWorkspacePath()` reports native-opening availability without addressing a Session. Queue mutation and cancellation require live state; model, rename, prompt, and file-reference operations may resolve or resume an ordinary Session. Create and fork are the only operations that create a new Agent directly. The skill catalog instead uses a live Agent when present or the recorded preset's standing scope when cold, so listing never starts an Agent.
 
-The Client adapter exposes `SessionEventStream`, a Gateway `RemoteJournalStream` bound to one ordinary or direct-subagent address. It opens follow before the initial page, publishes only contiguous `replace`, `prepend`, and `append` changes, and repairs reconnect or sequence gaps through a tail page. Backwards paging has two verbs: `loadOlder()` pulls one 50-message page, and `loadThrough(seq)` — the turn-jump loader — loops 200-message pages until the window covers the target seq, lowering a shared target on repeated calls, stopping on a page that makes no progress, and reporting busy through the same `loadingOlder` snapshot bit. Ordinary records cover `[event.seq, event.seq]`; packed rows cover `[event.seq, event.seq + memberCount - 1]`. A business, persistence, or unresolved continuity failure terminates the stream, while only physical carrier loss selects automatic resumption. `SessionControlStream` is a Gateway `RemoteSnapshotStream`; every generation opens with a complete process-local baseline, so reconnect replaces queue, jobs, and projection state instead of treating transient values as durable events.
+The Client adapter exposes `SessionEventStream`, a Gateway `RemoteJournalStream` bound to one ordinary or direct-subagent address. It opens follow before the initial page, publishes only contiguous `replace`, `prepend`, and `append` changes, and repairs reconnect or sequence gaps through a tail page. Ordinary records cover `[event.seq, event.seq]`; packed rows cover `[event.seq, event.seq + memberCount - 1]`. A business, persistence, or unresolved continuity failure terminates the stream, while only physical carrier loss selects automatic resumption. `SessionControlStream` is a Gateway `RemoteSnapshotStream`; every generation opens with a complete process-local baseline, so reconnect replaces queue, jobs, and projection state instead of treating transient values as durable events. Within one generation, a projection frame still queued when a newer frame for the same `(session, key)` arrives is superseded in place and never delivered — each projection frame carries the unit's complete value plus its watermark seq, which the Client applies higher-seq-wins — while queue and jobs frames always arrive in push order.
 
-The Session object also carries local submission echoes: `session.beginSubmission` inserts one into `SessionSnapshot.pendingSubmissions` synchronously, before the caller serializes and prompts, so a conversation UI can show the message on the submit click's own frame. Session derives each echo's `transcript`, `queued`, or `steering` placement from its current running state and the requested delivery mode, then retains that placement while serialization is in flight. The prompt's `requestId` is the correlation identity: the Host echoes it as the durable user source's `rpcId`, and queue occurrences project it as `SessionQueuedItem.rpcId`. An echo retires one animation frame after its durable event or queue occurrence is observed (the delay keeps it renderable until the replacement is ready), immediately when its identified prompt fails or is abandoned, and as failed on disposal; each retirement fires the registered `onRetire` callback exactly once. Echoes are Client memory only; reload and reconnect rebuild the conversation from durable events alone.
+The Session object also carries local submission echoes: `session.beginSubmission` inserts one into `SessionSnapshot.pendingSubmissions` synchronously, before the caller serializes and prompts, so a conversation UI can show the message on the submit click's own frame. The prompt's `requestId` is the correlation identity — the Host already echoes it as the durable user source's `rpcId`, and queue occurrences project it as `SessionQueuedItem.rpcId`. An echo retires one animation frame after its durable event or queue occurrence is observed (the delay keeps it renderable until the transcript node is), immediately when its identified prompt fails or is abandoned, and as failed on disposal; each retirement fires the registered `onRetire` callback exactly once. Echoes are Client memory only — reload and reconnect rebuild the conversation from durable events alone.
 
 -----
 
@@ -43,6 +43,8 @@ The Session object also carries local submission echoes: `session.beginSubmissio
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
+Cold list rows remain visible immediately. Durable titles are warmed through bounded `sessionQuery.readTitleSnapshots` reads and appear on a later poll; failed or cancelled batches remain retryable, cache entries are limited to visible cold rows, and live-session transitions invalidate cached titles.
+
 -----
 
 <a id="model-experience"></a>
@@ -55,6 +57,9 @@ None, as invoked Agent commands own any model-visible effect.
 No direct effect; model requests remain owned by the Agent and LLM packages.
 
 ## Known Limitations and Deferred Work
+
+**Runtime invariant:** No companion is published; Session Controller delegates durable state and projection invariants to their owning packages.
+
 
 <a id="known-limitations-and-deferred-work"></a>
 
@@ -72,5 +77,3 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
 None.
 
 </details>
-
-**Runtime invariant:** No companion is published. Every page and frame is checked against the addressed durable Session.

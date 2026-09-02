@@ -203,7 +203,7 @@ initial page、repair page 或 follow 的 terminal failure 进入当前 Session 
 
 `session.control()` 是 Host 范围的 snapshot stream，一个浏览器可观察所有当前 live Session 的瞬态状态，而不必为每个 transcript 打开 journal。
 
-每个 generation 先发完整 baseline，再发 queue、jobs 与 projection 增量帧。baseline 读取 attached Agent 和进程内 registry，不恢复冷 Agent。
+每个 generation 先发完整 baseline，再发 queue、jobs 与 projection 增量帧。仍在队列中的 projection 增量帧一旦被同一 `(session, key)` 的更新帧赶上，就会被原地取代而不再投递（见 [control queue projection coalescing](2026-08-30-control-queue-projection-coalescing.zh.md)）；queue 与 jobs 增量帧始终按推送顺序到达。baseline 读取 attached Agent 和进程内 registry，不恢复冷 Agent。
 
 queue 与 jobs 使用完整 replacement 值并按 last-wins 应用。Agent attach、detach、Session disposal 与 owner disposal 都能用空值或新 baseline 清除陈旧镜像。
 

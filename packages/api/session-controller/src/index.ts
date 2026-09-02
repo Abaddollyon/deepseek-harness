@@ -135,9 +135,11 @@ export class SessionController extends TypertRemoteService {
     ctx.plugin(SessionSkillCatalog)
 
     ctx.on('session/created', (session) => {
+      this.listState.invalidateColdTitle(session.id)
       ctx.emit('api-session/added', this.listState.summaryFor(session))
     })
     ctx.on('session/disposed', (session) => {
+      this.listState.invalidateColdTitle(session.id)
       ctx.emit('api-session/removed', session.id)
     })
     ctx.on('agent/status', ({ agent, status }) => {

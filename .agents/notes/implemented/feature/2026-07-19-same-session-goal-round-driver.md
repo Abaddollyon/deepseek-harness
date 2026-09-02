@@ -16,7 +16,7 @@ That bridge has concurrency and durability obligations. Human input, cancellatio
 
 The hierarchy is Goal → Goal Round → Turn → Step. A goal round is the outer continuation policy iteration; it becomes one goal-sourced session turn, and that turn can contain any number of ordinary model/tool steps. Human turns in the same session are not goal rounds and never increment `roundsStarted`.
 
-The plugin has no configuration. `maxGoalRounds` is resolved and persisted by `dsh-goal`, and the same-condition blocking threshold is resolved and prompted by `dsh-tool-goal`. Repeating those tunables in the driver would create multiple owners for one policy.
+The driver owns only continuation timing. `wake.mode` defaults to `always`; `event-driven` waits while a direct child agent or caller-owned background job remains live, and `wake.timeoutMs` bounds that wait. `maxGoalRounds` is resolved and persisted by `dsh-goal`, and the same-condition blocking threshold is resolved and prompted by `dsh-tool-goal`; those policy values remain outside the driver.
 
 ### Reservation and admission
 
@@ -31,6 +31,12 @@ Only the resulting `user/message` is an entered round and advances the goal fold
 The reserved `MessageId` distinguishes the driver's complete record from every other prompt. Ordinary work already queued before a reservation prevents scheduling. Ordinary work queued while an automatic prompt is pending makes that reservation stale, so a mixed claimed batch rejects the automatic proposal. Ordinary work arriving after the goal round entered remains queued for its own next turn; continuation is reconsidered only when the agent later becomes idle.
 
 A goal mutation during a round advances its durable revision. Settlement of the older revision cannot overwrite that mutation. The driver discards the old attempt outcome, reads the new projection, and continues only if the new revision is still active and armed. This makes model-recorded completion, pause, block, and edit authoritative over the physical turn's later close reason.
+
+### Event-conditioned continuation
+
+`always` mode preserves the original idle-loop behavior. In `event-driven` mode, an idle checkpoint proceeds immediately when no owned work is pending. A running direct child or a caller-owned `running` or `stopping` job suppresses the next goal round until a user-authored message, completion notice, relay, or safety-net timeout arrives. A message authorizes continuation through pending work only when that work was already live as the message entered the session; the human message whose own turn starts new background work cannot be reused as its completion signal. Goal-origin messages, `tool-goal` context, snapshots, and instructions do not authorize another round.
+
+The driver records exact session-event sequence numbers for wake messages and admitted goal rounds. Wake counters and Cordis timer disposers are process-local: session start resets them, while goal mutation, disarm, agent disposal, and plugin teardown cancel the timer. Event-driven mode fails at mount when the timer service is absent; the optional job registry contributes pending-work facts when mounted, and an inspection failure logs a warning and admits continuation rather than creating a silent stall. No durable goal or session format changes.
 
 ### Settlement
 
@@ -67,7 +73,7 @@ An inbox acceptance can win the microtask race immediately before plugin unload 
 
 ## Testing
 
-The unit suite uses the real agent loop and session service with only the model scripted. It covers exact sequential admission and cap enforcement, load/resume inertness, every outcome classification, rate limiting, request errors, max tokens, downstream prompt veto, pre-admission and in-flight cancellation, unrelated-human cancellation, failed-pause fallback, human-input ordering, queued and downstream revision races, forged goal attribution, failed mutation and turn checkpoints including a later one-shot injection, scheduler and custom-agent failures, session-start reset, exact lifecycle retirement, and queued/running plugin teardown. The new driver source has per-file 100% statement, branch, function, and line coverage.
+The unit suite uses the real agent loop, timer, job registry, and session service with only the model scripted. Wake-policy cases cover source classification, child and job pending state, quiet suppression, external wake messages, the safety timeout, configuration rejection, and missing-timer failure. It also covers exact sequential admission and cap enforcement, load/resume inertness, every outcome classification, rate limiting, request errors, max tokens, downstream prompt veto, pre-admission and in-flight cancellation, unrelated-human cancellation, failed-pause fallback, human-input ordering, queued and downstream revision races, forged goal attribution, failed mutation and turn checkpoints including a later one-shot injection, scheduler and custom-agent failures, session-start reset, exact lifecycle retirement, and queued/running plugin teardown. The new driver source has per-file 100% statement, branch, function, and line coverage.
 
 A keyless ACP snapshot mounts the shipped automation app with the real goal domain, goal tools, goal driver, agent loop, persistence, and replay adapter through `cordis.yml`. One human-originated turn creates and inspects a two-round goal, the first automatic turn stops normally, and ACP cancellation of a deliberately stalled second round records a durable pause. The normalized wire transcript and external JSONL assertions prove one session, round sources `1, 2`, the lifecycle mutation, and exact replay accounting without using `echo-agent` as an application surrogate.
 
