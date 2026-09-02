@@ -173,14 +173,12 @@ async function startupSession(
 export class BashTerminalBackend implements TerminalBackend {
   readonly type: string
 
-  /* c8 ignore next 8 -- optional provider defaults are covered by composition tests. */
   constructor(
     private readonly ctx: Context,
     private readonly config: ResolvedConfig,
-    /* c8 ignore next 3 -- default provider wiring is exercised by the built subprocess composition. */
     private readonly spawnTerminal: (
       spec: SubprocessTerminalSpawnSpec,
-    ) => Promise<SubprocessTerminalHandle> = /* c8 ignore next */ spec => ctx.subprocess.spawnTerminal(spec),
+    ) => Promise<SubprocessTerminalHandle> = spec => ctx.subprocess.spawnTerminal(spec),
     private readonly createSession: (
       terminal: SubprocessTerminalHandle,
       config: ResolvedConfig,
