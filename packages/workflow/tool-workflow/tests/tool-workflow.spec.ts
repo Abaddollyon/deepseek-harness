@@ -208,7 +208,7 @@ describe('dsh-tool-workflow', () => {
     expect(result.isError).toBe(true)
     expect((result.content[0] as { text: string }).text).toContain('settled without a result')
     expect(engine.disposed).toBe(1)
-    expect(session.events.map(event => event.type)).toEqual(['tool-workflow/run-start'])
+    expect(session.snapshotEvents().map(event => event.type)).toEqual(['tool-workflow/run-start'])
   })
 
   it('returns a non-resumable supervised job immediately without binding the caller signal', async () => {
@@ -224,7 +224,7 @@ describe('dsh-tool-workflow', () => {
     expect(ctx.jobs.get(jobId, parent)).toMatchObject({
       kind: 'workflow', label: 'workflow: audit', status: 'running', resumable: false,
     })
-    expect(session.events.map(event => [event.type, event.data])).toEqual([
+    expect(session.snapshotEvents().map(event => [event.type, event.data])).toEqual([
       ['tool-workflow/run-start', { runId, name: 'audit' }],
       ['run/detached', {
         jobId, kind: 'workflow', label: 'workflow: audit', runId, resumable: false,
@@ -237,7 +237,7 @@ describe('dsh-tool-workflow', () => {
     expect(settled.status).toBe('completed')
     expect(engine.disposed).toBe(1)
     expect(ctx.jobs.read(jobId, parent).text).toContain('\"answer\": 42')
-    expect(session.events.at(-1)).toMatchObject({
+    expect(session.snapshotEvents().at(-1)).toMatchObject({
       type: 'tool-workflow/run-end', data: { runId, stopReason: 'completed' },
     })
   })
@@ -254,7 +254,7 @@ describe('dsh-tool-workflow', () => {
     const settled = await ctx.jobs.wait(jobId, 1000, parent)
     expect(settled).toMatchObject({ status: 'killed', detail: 'user stopped workflow', reported: true })
     expect(engine.disposed).toBe(1)
-    expect(session.events.at(-1)).toMatchObject({
+    expect(session.snapshotEvents().at(-1)).toMatchObject({
       type: 'tool-workflow/run-end', data: { runId, stopReason: 'cancelled' },
     })
   })
@@ -429,7 +429,7 @@ describe('dsh-tool-workflow', () => {
     await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
     engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 0 })
     expect((await pending).isError).toBe(false)
-    expect(session.events.map(event => [event.type, event.data])).toEqual([
+    expect(session.snapshotEvents().map(event => [event.type, event.data])).toEqual([
       ['tool-workflow/run-start', { runId: 'run-1', name: 'audit', parentCallId: 'outer-call' }],
       ['tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }],
     ])
@@ -447,7 +447,7 @@ describe('dsh-tool-workflow', () => {
     engine.log(runId, 'dropped')
     engine.settleRun(runId, { value: null, stopReason: 'completed', agentsStarted: 0 })
     expect((await pending).isError).toBe(false)
-    expect(session.events.slice(1, -1).map(event => [event.type, event.data])).toEqual([
+    expect(session.snapshotEvents().slice(1, -1).map(event => [event.type, event.data])).toEqual([
       ['tool-workflow/phase', { runId: 'run-1', title: 'Scan', ordinal: 1 }],
       ['tool-workflow/log', { runId: 'run-1', message: 'abcd', ordinal: 2, truncated: true }],
       ['tool-workflow/log', { runId: 'run-1', message: 'last', ordinal: 3, truncated: true }],

@@ -1048,13 +1048,13 @@ export class RunSupervisor {
       | { readonly type: 'run/resumed'; readonly data: RunResumedData }
       | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
   ): Exclude<RunEventAppendOutcome, 'unavailable'> {
-    const accounted = hasRunEvent(live.session.events, event)
+    const accounted = hasRunEvent(live.session.snapshotEvents(), event)
     if (event.type === 'run/resumed') {
       if (accounted) return 'already-present'
       live.session.append('run/resumed', event.data)
       return 'recorded'
     }
-    const closers = workflowClosers(live.session.events, event.data.jobId, event.data.kind)
+    const closers = workflowClosers(live.session.snapshotEvents(), event.data.jobId, event.data.kind)
     for (const closer of closers) {
       (live.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
     }

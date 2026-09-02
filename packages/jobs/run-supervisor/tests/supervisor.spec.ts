@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionPreparation, UserMessage } from '@deepseek-ai/dsh-session'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -214,7 +214,7 @@ function tracked<T extends { ctx: Context }>(booted: T): T {
 }
 
 function runEvents(session: Session, type: string): SessionEvent[] {
-  return session.events.filter(event => event.type === type)
+  return session.snapshotEvents().filter(event => event.type === type)
 }
 
 /** Registry view through the session fence; falls back to the durable mirror. */
@@ -705,8 +705,8 @@ describe('RunSupervisor pending-record reconciliation', () => {
     expect(stoppedResumed[0]?.data).toMatchObject({ priorIncarnation: 'pre-supervisor-adoption' })
     expect(stoppedAbandoned).toHaveLength(1)
     expect(stoppedAbandoned[0]?.data).toMatchObject({ priorIncarnation: stopped.incarnation })
-    expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/agent-end')).toBe(true)
-    expect(alice.agent.session.events.some(event => event.type === 'tool-workflow/run-end')).toBe(true)
+    expect(alice.agent.session.snapshotEvents().some(event => event.type === 'tool-workflow/agent-end')).toBe(true)
+    expect(alice.agent.session.snapshotEvents().some(event => event.type === 'tool-workflow/run-end')).toBe(true)
     expect(alice.injected).toHaveLength(0)
     expect(ctx.jobs.get(running.id, alice.agent)).toMatchObject({
       status: 'running', incarnation: PROCESS_INCARNATION,
@@ -979,7 +979,7 @@ describe('RunSupervisor durable adoption markers', () => {
         } },
       ] as SessionEvent[] },
     }))
-    expect(agents.get('alice')?.agent.session.events.map(event => event.type)).toEqual([
+    expect(agents.get('alice')?.agent.session.snapshotEvents().map(event => event.type)).toEqual([
       'tool-workflow/agent-start', 'run/detached', 'run/abandoned',
       'tool-workflow/agent-end', 'tool-workflow/run-end',
     ])
@@ -1185,7 +1185,7 @@ describe('RunSupervisor durable adoption markers', () => {
       adoptedFromIncarnation: 'prior-incarnation',
     })
     const logs = new Map<string, SessionEvent[]>([['judy', [{
-      type: 'run/resumed', seq: 0, time: 1,
+      type: 'run/resumed', seq: SessionSeq(0), time: 1,
       data: { jobId: record.id, kind: 'bash', priorIncarnation: 'prior-incarnation' },
     }]]])
     const fake: FakePersistence = { logs, appended: [] }
@@ -1404,7 +1404,7 @@ describe('RunSupervisor workflow honest settlement', () => {
         } },
       ] as SessionEvent[] },
     }))
-    expect(agents.get('alice')?.agent.session.events.slice(3).map(event => event.type)).toEqual([
+    expect(agents.get('alice')?.agent.session.snapshotEvents().slice(3).map(event => event.type)).toEqual([
       'tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned',
     ])
   })
@@ -1541,8 +1541,8 @@ describe('RunSupervisor pending records with unreachable owners', () => {
     await flush()
 
     expect(runEvents(alice.agent.session, 'run/abandoned')).toHaveLength(1)
-    expect(alice.agent.session.events.filter(event => event.type === 'tool-workflow/agent-end')).toHaveLength(1)
-    expect(alice.agent.session.events.filter(event => event.type === 'tool-workflow/run-end')).toHaveLength(1)
+    expect(alice.agent.session.snapshotEvents().filter(event => event.type === 'tool-workflow/agent-end')).toHaveLength(1)
+    expect(alice.agent.session.snapshotEvents().filter(event => event.type === 'tool-workflow/run-end')).toHaveLength(1)
     expect(alice.injected).toHaveLength(1)
     expect(state.records.get(String(record.id))).toMatchObject({ status: 'killed', reported: true })
   })
@@ -1592,7 +1592,7 @@ describe('RunSupervisor pending records with unreachable owners', () => {
 
 /** One ordinary durable log entry, so offline appends must continue the seq. */
 function seedEvent(): SessionEvent {
-  return { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }
+  return { type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } }
 }
 
 describe('RunSupervisor internals (defensive lanes)', () => {
@@ -1911,7 +1911,7 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     const events = runEvents(stub.agent.session, 'run/abandoned')
     expect(events).toHaveLength(1)
     expect(events[0]?.data).toMatchObject({ jobId: record.id, reason: 'not-resumable' })
-    expect(stub.agent.session.events.map(event => event.type)).toEqual([
+    expect(stub.agent.session.snapshotEvents().map(event => event.type)).toEqual([
       'tool-workflow/agent-start', 'run/detached', 'tool-workflow/agent-end', 'tool-workflow/run-end', 'run/abandoned',
     ])
   })

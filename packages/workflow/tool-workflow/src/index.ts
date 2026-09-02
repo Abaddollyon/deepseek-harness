@@ -17,7 +17,8 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue, Session, SessionEventMap } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { RunDetachedData } from '@deepseek-ai/dsh-run-supervisor'
 import { WorkflowRunId } from '@deepseek-ai/dsh-workflow'
@@ -26,8 +27,6 @@ import type {
   ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowLogData,
   ToolWorkflowPhaseData, ToolWorkflowRunEndData, ToolWorkflowRunStartData,
 } from './types.ts'
-// Declaration merge only: makes ctx.systemPrompt visible for the section registration.
-import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 // Declaration merges: ctx.jobs, the workflow job kind, and run/detached.
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-run-supervisor/types'
