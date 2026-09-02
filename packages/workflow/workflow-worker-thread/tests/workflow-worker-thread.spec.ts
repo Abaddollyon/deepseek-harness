@@ -8,7 +8,7 @@ import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import type { ResolvedSubagentStartRequest, SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowMeta, WorkflowResult, WorkflowResultInfo, WorkflowRun, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow'
 import * as workerEngineModule from '../src/index.ts'
 import WorkerThreadWorkflowEngine, { type Config } from '../src/index.ts'
@@ -69,7 +69,7 @@ const ESCAPE = "globalThis.constructor.constructor('return process')()"
 
 /** One controllable child run: the test (or auto mode) settles it. */
 interface ControlledRun {
-  request: SubagentStartRequest
+  request: ResolvedSubagentStartRequest
   /** Fulfill the provider's async start with a published child. */
   publish(): void
   /** Reject the provider's async start before ownership transfer. */
@@ -100,14 +100,14 @@ class StubProvider implements SubagentProvider {
 
   constructor(
     readonly name: string,
-    private readonly reply?: (request: SubagentStartRequest, index: number) => SubagentResult,
+    private readonly reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult,
     private readonly disposeDelayMs = 0,
     private readonly deferStart = false,
     private readonly onAbortString?: (reason: string | undefined, index: number) => void,
     private readonly onSignalAbort?: (reason: unknown, index: number) => void,
   ) {}
 
-  async start(request: SubagentStartRequest): Promise<SubagentRun> {
+  async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
     const startGate = Promise.withResolvers<undefined>()
     const terminal = Promise.withResolvers<SubagentResult>()
     terminal.promise.catch(() => { /* provider owns early settlement until publication */ })
@@ -172,7 +172,7 @@ function text(reply: string): SubagentResult {
 
 interface SetupOptions {
   config?: Config
-  reply?: (request: SubagentStartRequest, index: number) => SubagentResult
+  reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult
   manual?: boolean
   disposeDelayMs?: number
   deferStart?: boolean
@@ -266,6 +266,19 @@ describe('dsh-workflow-worker-thread', { timeout: 120_000 }, () => {
       })
       expect(provider.runs[0]!.request.agentOptions).toEqual({ model: 'deepseek-v4-pro' })
       expect(provider.runs[0]!.request.parent).toBeDefined()
+    })
+
+    it('agent({label}) persists the label on the child; an unlabelled call stays label-free', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`
+        await agent('named child', { label: 'scout' })
+        return await agent('anonymous child')
+      `))
+
+      expect(result.stopReason).toBe('completed')
+      // Assert the provider's resolved durable descriptor, not transient request metadata.
+      expect(provider.runs[0]!.request.descriptor.label).toBe('scout')
+      expect(provider.runs[1]!.request.descriptor.label).toBeUndefined()
     })
 
     it('agent({provider}) forwards provider-only agentOptions across the thread', async () => {
@@ -1292,7 +1305,7 @@ describe('dsh-workflow-worker-thread', { timeout: 120_000 }, () => {
       const ctx = new Context()
       await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SubagentRuntime)
-      const requested = Promise.withResolvers<SubagentStartRequest>()
+      const requested = Promise.withResolvers<ResolvedSubagentStartRequest>()
       const ready = Promise.withResolvers<SubagentRun>()
       let disposeCalls = 0
       const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => ctx.logger)
