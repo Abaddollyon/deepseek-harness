@@ -66,6 +66,11 @@ describe('outcome mapping helpers', () => {
       status: 'failed',
       detail: 'Error: result failed; dispose failed: Error: reap failed',
     })
+    const hostile = { toString(): never { throw new Error('coercion') } }
+    await expect(settleRun({
+      id: SessionId('child-hostile'), localAgent: undefined,
+      result: Promise.reject(hostile), dispose: () => Promise.reject(hostile),
+    })).resolves.toEqual({ status: 'failed', detail: '<unrenderable value>; dispose failed: <unrenderable value>' })
   })
 
   it('keeps provider diagnostics separate in failed background outcomes', async () => {
