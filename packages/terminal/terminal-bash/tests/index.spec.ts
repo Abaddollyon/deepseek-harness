@@ -81,7 +81,9 @@ class StubSubprocessRuntime extends SubprocessRuntime {
   async resolveExecutable(command: string): Promise<string> { return command }
   spawn(_spec: SubprocessSpawnSpec): SubprocessHandle { throw new Error('unused') }
   async spawnTerminal(_spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
-    return terminalHandle()
+    const terminal = terminalHandle()
+    queueMicrotask(() => { (terminal.output as PassThrough).write(Buffer.from('\x1b]133;D;0\x07dsh> ')) })
+    return terminal
   }
 }
 
@@ -562,7 +564,21 @@ describe('terminal-bash plugin shape', () => {
     expect(ctx.terminals.listBackends()).toEqual([])
   })
 
-  it('ignores unrelated session events and mode changes without a live owner', async () => {
+  it('exercises the default provider and session constructor path', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(TerminalSessionService)
+    await ctx.plugin(EmptySandbox)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: '/tmp' })
+    await ctx.plugin(StubSubprocessRuntime)
+    const backend = new BashTerminalBackend(ctx, config())
+    const session = await backend.spawn(spec(agent(ctx)))
+    expect(session.motd).toBe('dsh> ')
+    await session.close('test complete')
+  })
+
+  it('ignores unrelated session events and mode changes without a live owner', async () =>{
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
