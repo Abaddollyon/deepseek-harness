@@ -8,6 +8,8 @@ import {
   ISOLATED_PROJECT_ROOT_MARKER,
   LOADER_SMOKE_TEST_TIMEOUT_MS,
   isolateWorkspaceProjectRoot,
+  resolveExampleLaunch,
+  resolveExampleMode,
   runLoaderSmoke,
 } from '@deepseek-ai/dsh-loader-smoke'
 
@@ -149,6 +151,19 @@ describe('runLoaderSmoke', () => {
       tsconfigPath,
       processTimeoutMs: 100,
     })).rejects.toThrow('hanging fixture did not exit within 0.1s.')
+  })
+})
+
+describe('launch resolver', () => {
+  it('rejects an unknown mode and missing source tsconfig', () => {
+    expect(() => resolveExampleMode('invalid')).toThrow('DSH_EXAMPLE_MODE')
+    expect(() => resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'src' })).toThrow('needs tsconfigPath')
+  })
+
+  it('derives the plain Node lib entry in lib mode', () => {
+    const launch = resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'lib' })
+    expect(launch.command).toBe(process.execPath)
+    expect(launch.args).toEqual(['/repo/lib/bin.js'])
   })
 })
 

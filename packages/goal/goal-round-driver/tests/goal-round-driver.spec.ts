@@ -231,7 +231,7 @@ describe('event-conditioned goal continuation', () => {
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(GoalService)
 
-    await expect(ctx.plugin(goalSession, eventDriven())).rejects.toThrow(
+    expect(() => { goalSession.apply(ctx, eventDriven()) }).toThrow(
       'event-driven wake mode requires the timer service',
     )
   })

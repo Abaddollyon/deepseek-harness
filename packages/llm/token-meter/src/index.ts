@@ -106,7 +106,7 @@ export class TokenMeter extends Service {
     super(ctx, 'tokenMeter')
     validateConfigKeys(config)
 
-ctx.sessionProjections.register(tokenUsageProjectionDefinition)
+    ctx.sessionProjections.register(tokenUsageProjectionDefinition)
     ctx.sessionProjections.register(contextPressureProjectionDefinition)
     ctx.sessionProjections.register(contextBreakdownProjectionDefinition)
     ctx.sessionProjections.register(modelRouteProjectionDefinition)
