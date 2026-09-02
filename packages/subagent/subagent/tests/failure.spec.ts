@@ -70,6 +70,14 @@ describe('subagentFailureFromLlmFailure', () => {
     expect(terminalDiagnostic(hostile)).toEqual({ diagnostic: '[unprintable thrown value]' })
     const aggregate = new AggregateError([new Error('outer', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 1_000 }) })])
     expect(terminalDiagnostic(aggregate).failure).toEqual({ code: QUOTA_EXCEEDED_CODE, retryAfterMs: 1_000 })
+    // Exercise the native AggregateError fallback when its members are not
+    // exposed as an own data property by a wrapper.
+    const nativeAggregate = new AggregateError([])
+    delete (nativeAggregate as unknown as { errors?: unknown }).errors
+    Object.setPrototypeOf(nativeAggregate, Object.create(AggregateError.prototype, {
+      errors: { get: () => [new LlmError('rate', 'RATE_LIMIT')] },
+    }))
+    expect(terminalDiagnostic(nativeAggregate).failure).toEqual({ code: 'RATE_LIMIT' })
     const cyclic = new AggregateError([])
     Object.defineProperty(cyclic, 'errors', { value: [cyclic] })
     expect(terminalDiagnostic(cyclic).failure).toBeUndefined()
