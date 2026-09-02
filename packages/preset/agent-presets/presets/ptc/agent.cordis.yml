@@ -233,6 +233,7 @@
 
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
+      disabled: true
       config:
         ownership: supervisor
 
