@@ -80,11 +80,13 @@ import { queueSubagentPrompt } from './internal.ts'
 export * from './out-of-process.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
+export { subagentFailureFromLlmFailure, subagentFailureFromUnknown } from './failure.ts'
 export type {
   ContinuableCreateRequest,
   ContinuableCreateSpec,
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
+  SubagentFailure,
   SubagentProvider,
   SubagentResult,
   SubagentRun,
@@ -108,6 +110,7 @@ export type {
 export { seedDescriptorTurn } from './descriptor-seed.ts'
 export { SubagentError } from './error.ts'
 export { settleRun } from './run-settlement.ts'
+export { settlementSummary } from './continuation.ts'
 export { assertSubagentMaxDepth, delegationDepthOf } from './depth.ts'
 export {
   appendDelegatedPolicyOverrides,

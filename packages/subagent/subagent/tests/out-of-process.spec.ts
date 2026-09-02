@@ -149,6 +149,61 @@ describe('settleRunResult', () => {
     expect(seen).toEqual(['error:transport died'])
   })
 
+  it('normalizes a non-Error provider failure while preserving output and facts', async () => {
+    const { controller, onAbort } = wiring()
+    const result = await settleRunResult({
+      attempt: async () => { throw 'provider exploded' },
+      collectOutput: () => [{ type: 'text', text: 'partial output' }],
+      collectDiagnostic: () => 'provider diagnostic',
+      collectFailure: () => ({ code: 'PROVIDER_FAILED' }),
+      cancelled: () => false,
+      onError: (error, stopReason) => {
+        expect(stopReason).toBe('error')
+        expect(error).toEqual(new Error('provider exploded'))
+      },
+      signal: controller.signal,
+      onAbort,
+    })
+    expect(result).toEqual({
+      output: [{ type: 'text', text: 'partial output' }],
+      diagnostic: 'provider diagnostic',
+      failure: { code: 'PROVIDER_FAILED' },
+      stopReason: 'error',
+    })
+  })
+
+  it('normalizes a successful provider diagnostic to the byte limit', async () => {
+    const { controller, onAbort } = wiring()
+    const result = await settleRunResult({
+      attempt: async () => ({
+        output: [],
+        diagnostic: '😀'.repeat(2_000),
+        stopReason: 'completed',
+      }),
+      collectOutput: () => [],
+      cancelled: () => false,
+      signal: controller.signal,
+      onAbort,
+    })
+    expect(result.stopReason).toBe('completed')
+    expect(result.diagnostic).toContain('[diagnostic truncated]')
+    expect(new TextEncoder().encode(result.diagnostic ?? '').byteLength).toBeLessThanOrEqual(4_096)
+  })
+
+  it('settles a successful attempt as aborted when cancellation wins', async () => {
+    const { controller, onAbort } = wiring()
+    await expect(settleRunResult({
+      attempt: async () => ({ output: [{ type: 'text', text: 'late' }], stopReason: 'completed' }),
+      collectOutput: () => [{ type: 'text', text: 'partial' }],
+      cancelled: () => true,
+      signal: controller.signal,
+      onAbort,
+    })).resolves.toEqual({
+      output: [{ type: 'text', text: 'partial' }],
+      stopReason: 'aborted',
+    })
+  })
+
   it('flattens a failure without a sink', async () => {
     const { controller, onAbort } = wiring()
     const result = await settleRunResult({

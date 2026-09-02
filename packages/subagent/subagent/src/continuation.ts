@@ -313,9 +313,11 @@ function continuableInitialPrompt(parentId: SessionId, prompt: ContentBlock[]): 
  * the parent's own task vocabulary.
  * @param childId - the durable child the parent knows by id.
  * @param stopReason - how the child's last ordinary turn ended.
+ * @param diagnostic - bounded provider or teardown detail, when available.
+ * @param failure - validated provider routing facts, when available.
  * @returns the model-facing opening line of the settlement notice.
  */
-function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
+export function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason'], diagnostic?: string, failure?: { readonly code: string; readonly retryAfterMs?: number }): string {
   const subject = `Background subagent ${childId}`
   switch (stopReason) {
     case 'completed':
@@ -329,7 +331,14 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
     case 'refusal':
       return `${subject} declined the task.`
     case 'error':
-      return `${subject} failed before it finished.`
+      if (failure?.code === 'QUOTA') return "The provider's quota for this route is exhausted; do not retry this route."
+      if (failure?.code === 'RATE_LIMIT') {
+        const wait = failure.retryAfterMs === undefined ? 'wait before retrying' : `wait ${Math.ceil(failure.retryAfterMs / 1000)} seconds before retrying`
+        return `The provider is rate-limited; ${wait}.`
+      }
+      return diagnostic === undefined || diagnostic.startsWith('SubagentError:')
+        ? `${subject} failed before it finished.`
+        : `The provider route could not serve ${subject}. Reason: ${diagnostic}`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */
@@ -889,6 +898,7 @@ export class SubagentContinuationManager {
         `continuable subagent teardown failed for ${reasons.length} ${failureSubject}: `
         + reasons.map(reason => errorChain(reason)).join('; '),
         'ACTIVATION_TEARDOWN_FAILED',
+        { cause: new AggregateError(reasons, 'selected teardown failures') },
       )
     }
   }
@@ -1455,9 +1465,11 @@ export class SubagentContinuationManager {
       }))
       const reasons = childFailures.filter(reason => reason !== undefined)
       if (reasons.length > 0) {
+        const cause = new AggregateError(reasons, 'descendant teardown failures')
         failures.push(new SubagentError(
           `subagent "${childId}" child teardown failed: ${reasons.map(reason => errorChain(reason)).join('; ')}`,
           'ACTIVATION_TEARDOWN_FAILED',
+          { cause },
         ))
       }
       // Quiesce before the flush: a turn still running would keep
@@ -1537,7 +1549,7 @@ export class SubagentContinuationManager {
     try {
       const parent = this.ctx.agents.get(activation.parentSession)
       if (parent === undefined) return
-      const summary = settlementSummary(activation.childId, terminal.stopReason)
+      const summary = settlementSummary(activation.childId, terminal.stopReason, terminal.diagnostic, terminal.failure)
       const message = createUserMessage({
         content: [
           { type: 'text' as const, text: summary },

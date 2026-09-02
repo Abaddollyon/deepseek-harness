@@ -27,6 +27,7 @@ import type {
   SubprocessOutcome,
   SubprocessSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
+import { thrown } from './error.ts'
 import {
   CodexAppServerWire,
   type CodexWireFailureFacts,
@@ -154,11 +155,6 @@ export interface CodexRunSpec {
   readonly onError?: (error: Error, stopReason: SubagentStopReason) => void
 }
 
-function thrown(value: unknown): Error {
-  /* v8 ignore next -- typed subprocess/wire failures reject with Error. */
-  return value instanceof Error ? value : new Error(String(value))
-}
-
 /**
  * Validate and preserve the one-shot task before crossing the process boundary.
  * @param prompt - task content accepted from the shared subagent service.
@@ -197,7 +193,6 @@ export async function disposeCodexChild(
     let outcome: SubprocessOutcome | undefined
     void child.done.then(
       (value) => { outcome = value },
-      /* v8 ignore next -- a positive pid excludes spawn-level done rejection. */
       () => {},
     )
     try {
@@ -368,11 +363,12 @@ export async function startCodexRun(
       : `${failure}\n${permission}`
     return diagnostic
   }
-  const withProcessOutcome = (facts: CodexFailureFacts): CodexFailureFacts => {
+  const withProcessOutcome = (facts: CodexFailureFacts | undefined): CodexFailureFacts => {
+    const base: CodexFailureFacts = { stage: 'turn', category: 'unknown', ...facts }
     const outcome = processFailureFacts?.outcome
     return outcome === undefined
-      ? facts
-      : { ...facts, outcome }
+      ? base
+      : { ...base, outcome }
   }
   const publishedProcessFailure = processFailure.catch(
     async (error: unknown): Promise<never> => {
@@ -427,6 +423,7 @@ export async function startCodexRun(
     },
     collectOutput,
     collectDiagnostic: () => diagnostic,
+    collectFailure: () => wire.collectFailure()?.failure,
     cancelled: () => runAbort.signal.aborted,
     onError: spec.onError,
     signal: request.signal,

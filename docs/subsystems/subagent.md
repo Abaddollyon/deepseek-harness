@@ -313,6 +313,8 @@ interface SubagentResult {
    * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
    */
   readonly diagnostic?: string
+  /** Structured provider failure facts, when safely classified. */
+  readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
 }

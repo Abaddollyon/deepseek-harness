@@ -8,7 +8,7 @@ import * as yaml from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { settleRunResult, settlementSummary } from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type {
@@ -141,8 +141,8 @@ class ProtocolPeer {
 interface FakeChildOptions {
   readonly pid?: number
   readonly exitOnTerminate?: boolean
-  readonly doneError?: Error
-  readonly waitForExitError?: Error
+  readonly doneError?: unknown
+  readonly waitForExitError?: unknown
 }
 
 interface FakeChild {
@@ -152,7 +152,7 @@ interface FakeChild {
   readonly toChild: PassThrough
   readonly stderr: PassThrough
   readonly settle: (outcome?: SubprocessOutcome) => void
-  readonly fail: (error: Error) => void
+  readonly fail: (error: unknown) => void
   readonly setStderr: (text: string) => void
   readonly terminate: () => void
   readonly waitForExit: (signal?: AbortSignal) => Promise<boolean>
@@ -165,7 +165,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
   const peer = new ProtocolPeer(toChild, fromChild)
   let exited = false
   let resolveDone!: (outcome: SubprocessOutcome) => void
-  let rejectDone!: (error: Error) => void
+  let rejectDone!: (error: unknown) => void
   const done = new Promise<SubprocessOutcome>((resolve, reject) => {
     resolveDone = resolve
     rejectDone = reject
@@ -177,7 +177,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
     exited = true
     resolveDone(outcome)
   }
-  const fail = (error: Error): void => {
+  const fail = (error: unknown): void => {
     if (exited) return
     exited = true
     rejectDone(error)
@@ -819,14 +819,14 @@ describe('CodexAppServerWire', () => {
   it('groups representative string errors without changing stop reasons', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens'],
-      ['sessionBudgetExceeded', 'limit', 'error'],
+      ['sessionBudgetExceeded', 'limit', 'error', { code: 'QUOTA' }],
       ['cyberPolicy', 'access-policy', 'error'],
       ['misalignmentPolicyViolation', 'access-policy', 'error'],
       ['serverOverloaded', 'service', 'error'],
       ['badRequest', 'product-error', 'error'],
       ['sandboxError', 'access-policy', 'error'],
     ] as const
-    for (const [codexErrorInfo, category, stopReason] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason, failure] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -849,6 +849,7 @@ describe('CodexAppServerWire', () => {
       expect(wire.collectFailure()).toEqual({
         stage: 'turn',
         category,
+        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('SECRET_TOKEN')
       expect(JSON.stringify(wire.collectFailure())).not.toContain('/private/secret.txt')
@@ -856,14 +857,38 @@ describe('CodexAppServerWire', () => {
     }
   })
 
+  it('carries a Codex 429 fact through settlement into the parent notice', async () => {
+    const { child, wire } = await initializeWire()
+    const pending = wire.runTurn(['task'], new AbortController().signal)
+    const turnStart = await child.peer.nextMethod('turn/start')
+    child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+    child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+      message: 'rate limited',
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429, retryAfterMs: 12_000 } },
+    }))
+    const result = await settleRunResult({
+      attempt: () => pending,
+      collectOutput: () => [],
+      collectFailure: () => wire.collectFailure()?.failure,
+      cancelled: () => false,
+      signal: new AbortController().signal,
+      onAbort: () => {},
+    })
+    expect(result.failure).toEqual({ code: 'RATE_LIMIT', retryAfterMs: 12_000 })
+    expect(settlementSummary('codex-child' as never, result.stopReason, result.diagnostic, result.failure))
+      .toContain('wait 12 seconds before retrying')
+    wire.close()
+  })
+
   it('groups object errors and retains only numeric HTTP status', async () => {
     const scenarios = [
       ['httpConnectionFailed', { httpStatusCode: 503 }, 'transport', 503],
+      ['httpConnectionFailed', { httpStatusCode: 429, retryAfterMs: 12_000 }, 'transport', 429, { code: 'RATE_LIMIT', retryAfterMs: 12_000 }],
       ['responseStreamDisconnected', {}, 'transport', undefined],
       ['responseTooManyFailedAttempts', { httpStatusCode: '503' }, 'transport', undefined],
       ['activeTurnNotSteerable', { turnKind: 'review' }, 'product-error', undefined],
     ] as const
-    for (const [codexErrorInfo, detail, category, httpStatus] of scenarios) {
+    for (const [codexErrorInfo, detail, category, httpStatus, failure] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -877,8 +902,41 @@ describe('CodexAppServerWire', () => {
         stage: 'turn',
         category,
         ...(httpStatus === undefined ? {} : { httpStatus }),
+        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('turnKind')
+      wire.close()
+    }
+  })
+
+  it('maps top-level HTTP fields when structured error info omits them', async () => {
+    const scenarios = [
+      [{ futureVariant: {} }, { statusCode: 503 }, { httpStatus: 503 }],
+      [null, { status: 429, retryAfterMs: 0 }, {
+        httpStatus: 429,
+        failure: { code: 'RATE_LIMIT' },
+      }],
+      [null, { status: 429, retryAfterMs: -1 }, {
+        httpStatus: 429,
+        failure: { code: 'RATE_LIMIT' },
+      }],
+    ] as const
+    for (const [codexErrorInfo, fields, expected] of scenarios) {
+      const { child, wire } = await initializeWire()
+      const result = wire.runTurn(['task'], new AbortController().signal)
+      const turnStart = await child.peer.nextMethod('turn/start')
+      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
+      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
+        message: 'provider failure',
+        codexErrorInfo,
+        ...fields,
+      }))
+      await expect(result).rejects.toThrow('status failed: unknown')
+      expect(wire.collectFailure()).toEqual({
+        stage: 'turn',
+        category: 'unknown',
+        ...expected,
+      })
       wire.close()
     }
   })
@@ -1582,14 +1640,14 @@ describe('run lifecycle and quiescence', () => {
   it('preserves representative terminal categories, HTTP status, and mapping', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens', undefined],
-      ['sessionBudgetExceeded', 'limit', 'error', undefined],
+      ['sessionBudgetExceeded', 'limit', 'error', undefined, { code: 'QUOTA' }],
       ['unauthorized', 'access-policy', 'error', undefined],
       ['internalServerError', 'service', 'error', undefined],
       [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'transport', 'error', 503],
       [{ activeTurnNotSteerable: { turnKind: 'review' } }, 'product-error', 'error', undefined],
       ['futureError', 'unknown', 'error', undefined],
     ] as const
-    for (const [codexErrorInfo, category, stopReason, httpStatus] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason, httpStatus, failure] of scenarios) {
       const { child, run, turnStart } = await publishRun()
       child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
       child.peer.send(
@@ -1605,6 +1663,7 @@ describe('run lifecycle and quiescence', () => {
         diagnostic: expectedFailureDiagnostic('turn', category, {
           ...(httpStatus === undefined ? {} : { httpStatus }),
         }),
+        ...(failure === undefined ? {} : { failure }),
         stopReason,
       })
       expect(result.diagnostic).not.toContain('SECRET_TOKEN')
@@ -2277,6 +2336,15 @@ describe('disposeCodexChild', () => {
     expect(child.waitForExit).not.toHaveBeenCalled()
   })
 
+  it('propagates a managed-tree rejection after positive-pid disposal', async () => {
+    const child = fakeChild({ doneError: new Error('managed tree failed') })
+    const wire = defaultWire(child)
+    await expect(disposeCodexChild(wire, child.handle))
+      .rejects.toThrow('managed tree failed')
+    expect(child.terminate).toHaveBeenCalledTimes(1)
+    expect(child.waitForExit).toHaveBeenCalledTimes(1)
+  })
+
   it('reports tree-wait failure with safe teardown facts', async () => {
     const child = fakeChild({
       waitForExitError: new Error('SECRET_TOKEN wait failure'),
@@ -2289,6 +2357,27 @@ describe('disposeCodexChild', () => {
       { outcome: { exitCode: 0, signal: null } },
     ))
     await expect(disposal).rejects.not.toThrow('SECRET_TOKEN')
+  })
+
+  it('normalizes a non-Error tree-wait failure and preserves the process outcome', async () => {
+    const child = fakeChild({ waitForExitError: 'wait failed as a string' })
+    child.settle({ exitCode: 17, signal: 'SIGTERM' })
+    const wire = defaultWire(child)
+    const disposal = disposeCodexChild(wire, child.handle)
+    await expect(disposal).rejects.toMatchObject({
+      name: 'CodexRunFailure',
+      facts: {
+        stage: 'teardown',
+        category: 'unknown',
+        outcome: { exitCode: 17, signal: 'SIGTERM' },
+      },
+      cause: { message: 'wait failed as a string' },
+    })
+    await expect(disposal).rejects.toThrow(expectedFailureDiagnostic(
+      'teardown',
+      'unknown',
+      { outcome: { exitCode: 17, signal: 'SIGTERM' } },
+    ))
   })
 
   it('does not wait for a pending process outcome after tree observation fails', async () => {

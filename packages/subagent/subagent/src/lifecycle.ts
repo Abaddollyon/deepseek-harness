@@ -23,7 +23,8 @@ import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
-import type { SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
+import type { SubagentFailure, SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
+import { ownDataProperty, subagentFailureFromUnknown } from './failure.ts'
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -34,6 +35,88 @@ export interface ActivationTerminal {
   readonly stopReason: SubagentResult['stopReason']
   /** The epoch's final assistant content, absent when it produced none or failed. */
   readonly output?: ContentBlock[]
+  /**
+   * Why the epoch failed, for a `stopReason` of `error` raised by teardown
+   * rather than by the child's own turn. The parent cannot otherwise tell a
+   * provider refusal from a quota exhaustion from a crash, and the delivery
+   * report is the only place it learns the epoch ended at all. Bounded to
+   * {@link TERMINAL_DIAGNOSTIC_LIMIT} and carrying the failure's own text, the
+   * same detail the one-shot tool path already reports.
+   */
+  readonly diagnostic?: string
+  /** Structured provider failure facts when teardown preserved a known LLM failure. */
+  readonly failure?: SubagentFailure
+}
+
+/** Byte ceiling for {@link ActivationTerminal.diagnostic}, matching the subagent result contract. */
+const TERMINAL_DIAGNOSTIC_LIMIT = 4096
+const FAILURE_GRAPH_DEPTH_LIMIT = 16
+
+/** Convert hostile thrown values into stable diagnostic text. */
+function thrownText(failure: unknown): string {
+  try { return String(failure) } catch { return '[unprintable thrown value]' }
+}
+
+/**
+ * Render a teardown failure as bounded diagnostic text.
+ * @param failure - the thrown value that ended the epoch.
+ * @returns the diagnostic member, omitted when the failure carries no text.
+ */
+export function terminalDiagnostic(failure: unknown): { diagnostic?: string; failure?: SubagentFailure } {
+  const text = thrownText(failure)
+  if (text.length === 0) return {}
+  const bounded = truncateDiagnostic(text)
+  const structured = collectFailureCause(failure)
+  return {
+    diagnostic: bounded,
+    ...structured === undefined ? {} : { failure: structured },
+  }
+}
+
+/** Truncate UTF-8 text without splitting a Unicode code point.
+ * @param text - diagnostic text to bound.
+ * @returns text no larger than the terminal diagnostic byte limit.
+ */
+function truncateDiagnostic(text: string): string {
+  if (Buffer.byteLength(text, 'utf8') <= TERMINAL_DIAGNOSTIC_LIMIT) return text
+  let bytes = 0
+  let result = ''
+  for (const character of text) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > TERMINAL_DIAGNOSTIC_LIMIT) break
+    result += character
+    bytes += size
+  }
+  return result
+}
+
+/** Find structured LLM facts through nested Error causes.
+ * @param failure - thrown teardown value.
+ * @returns known typed facts, or undefined when no cause is classified.
+ */
+function collectFailureCause(failure: unknown): SubagentFailure | undefined {
+  const seen = new Set<unknown>()
+  const visit = (current: unknown, depth: number): SubagentFailure | undefined => {
+    if (depth > FAILURE_GRAPH_DEPTH_LIMIT || current === null || (typeof current !== 'object' && typeof current !== 'function') || seen.has(current)) return undefined
+    seen.add(current)
+    try {
+      const nested = subagentFailureFromUnknown(ownDataProperty(current, 'failure'))
+      if (nested !== undefined) return nested
+      const direct = subagentFailureFromUnknown(current)
+      if (direct !== undefined) return direct
+      const cause = visit(ownDataProperty(current, 'cause'), depth + 1)
+      if (cause !== undefined) return cause
+      const members = ownDataProperty(current, 'errors') ?? (current instanceof AggregateError ? current.errors : undefined)
+      if (Array.isArray(members)) {
+        for (const member of members) {
+          const found = visit(member, depth + 1)
+          if (found !== undefined) return found
+        }
+      }
+    } catch { /* hostile getters are not allowed to break settlement */ }
+    return undefined
+  }
+  return visit(failure, 0)
 }
 
 /**
@@ -152,6 +235,7 @@ export function observeRun(
         stopReason: result.stopReason,
         // Omit the field when no output exists, matching continuable epochs.
         ...result.output.length === 0 ? {} : { lastAssistantMessage: result.output },
+        ...result.failure === undefined ? {} : { failure: result.failure },
       }, parent)
     },
     () => {
@@ -191,27 +275,34 @@ export function createActivationObserver(
   // output: an answer this harness could not durably release is not a result.
   const terminal = (failure: unknown): ActivationTerminal => failure === undefined
     ? captured
-    : { stopReason: 'error' }
+    : { stopReason: 'error', ...terminalDiagnostic(failure) }
   return {
     start: (child: Agent): void => {
-      boundary = child.session.seq
+      boundary = SessionLogOffset(child.session.seq)
       emit('subagent/start', identity, parent)
     },
     capture: (child: Agent): void => {
       const own = child.session.snapshotEvents(boundary)
       const output = finalAssistantOutput(own)
+      const end = foldConsumedWork(own).end
+      const failure = end?.data.reason.kind === 'error'
+        ? subagentFailureFromUnknown(end.data.reason.error)
+        : undefined
       captured = {
         stopReason: epochStopReason(own),
         ...output === undefined ? {} : { output },
+        ...failure === undefined ? {} : { failure },
       }
     },
     terminal,
     settle: (failure: unknown): void => {
-      const { stopReason, output } = terminal(failure)
+      const terminalResult = terminal(failure)
+      const { stopReason, output } = terminalResult
       emit('subagent/end', {
         ...identity,
         stopReason,
         ...output === undefined ? {} : { lastAssistantMessage: output },
+        ...terminalResult.failure === undefined ? {} : { failure: terminalResult.failure },
       }, parent)
     },
   }
@@ -252,9 +343,6 @@ function epochStopReason(events: readonly SessionEvent[]): SubagentResult['stopR
     case undefined:
     case 'completed':
       return droppedUnrun ? 'aborted' : 'completed'
-    /* v8 ignore next 3 -- `TurnEndReason` is merge-extensible, so this arm needs a
-     * backend that adds a variant; treating an unnameable reason as success would
-     * report failed work as completed. */
     default:
       return 'error'
   }
