@@ -145,7 +145,7 @@ function provider(runtime: FakeRuntime, overrides: Partial<CodexSearchProviderOp
   return new CodexSearchProvider(runtime.runtime, options(overrides))
 }
 
-async function expectCode(pending: Promise<unknown>, code: string, message?: string): Promise<void> {
+async function expectCode(pending: Promise<unknown>, code: string, message?: string): Promise<WebError> {
   try {
     await pending
     throw new Error('expected rejection')
@@ -154,7 +154,22 @@ async function expectCode(pending: Promise<unknown>, code: string, message?: str
     if (!(error instanceof WebError)) throw error
     expect(error.code).toBe(code)
     if (message !== undefined) expect(error.message).toBe(message)
+    return error
   }
+}
+
+function serializeError(error: unknown, seen = new Set<unknown>()): unknown {
+  if (!(error instanceof Error)) return error
+  if (seen.has(error)) return '[CIRCULAR]'
+  seen.add(error)
+  return Object.fromEntries([
+    ['name', error.name],
+    ['message', error.message],
+    ['stack', error.stack],
+    ...Object.getOwnPropertyNames(error)
+      .filter(key => !['message', 'stack'].includes(key))
+      .map(key => [key, serializeError(Reflect.get(error, key), seen)]),
+  ])
 }
 
 describe('CodexSearchProvider', () => {
@@ -255,6 +270,30 @@ describe('CodexSearchProvider', () => {
     await expectCode(pending, 'WEB_ABORTED')
   })
 
+  it('does not spawn when a resolver completes after plugin disposal', async () => {
+    const runtime = fakeRuntime()
+    const resolution = deferred<string>()
+    runtime.resolveExecutable.mockImplementationOnce(async () => await resolution.promise)
+    const value = provider(runtime)
+    const pending = value.search({ query: 'q' })
+    await vi.waitFor(() => { expect(runtime.resolveExecutable).toHaveBeenCalledOnce() })
+    await value.dispose()
+    resolution.resolve('/resolved/codex-test')
+    await expectCode(pending, 'WEB_ABORTED', 'Codex web search aborted')
+    expect(runtime.spawn).not.toHaveBeenCalled()
+
+    const rejected = fakeRuntime()
+    const rejectedResolution = deferred<string>()
+    rejected.resolveExecutable.mockImplementationOnce(async () => await rejectedResolution.promise)
+    const rejectedProvider = provider(rejected)
+    const rejectedPending = rejectedProvider.search({ query: 'q' })
+    await vi.waitFor(() => { expect(rejected.resolveExecutable).toHaveBeenCalledOnce() })
+    await rejectedProvider.dispose()
+    rejectedResolution.reject(new Error('resolver noticed disposal'))
+    await expectCode(rejectedPending, 'WEB_ABORTED', 'Codex web search aborted')
+    expect(rejected.spawn).not.toHaveBeenCalled()
+  })
+
   it('maps resolution and turn timeouts to the exact provider error', async () => {
     const resolution = fakeRuntime()
     resolution.resolveExecutable.mockImplementationOnce((
@@ -270,6 +309,15 @@ describe('CodexSearchProvider', () => {
       'WEB_PROVIDER_ERROR',
       'Codex web search timed out after 5 ms',
     )
+
+    const late = fakeRuntime()
+    const lateResolution = deferred<string>()
+    late.resolveExecutable.mockImplementationOnce(async () => await lateResolution.promise)
+    const latePending = provider(late, { requestTimeoutMs: 5 }).search({ query: 'q' })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+    lateResolution.resolve('/resolved/codex-test')
+    await expectCode(latePending, 'WEB_PROVIDER_ERROR', 'Codex web search timed out after 5 ms')
+    expect(late.spawn).not.toHaveBeenCalled()
 
     const waiting = fakeRuntime(fakeProcess((method) => {
       if (method === 'initialize') return {}
@@ -326,15 +374,35 @@ describe('CodexSearchProvider', () => {
     await started.promise
     process.waitForExit.mockRejectedValueOnce(new Error('already gone'))
     await value.dispose()
-    await expectCode(pending, 'WEB_PROVIDER_ERROR')
+    await expectCode(pending, 'WEB_ABORTED')
     await value.dispose()
     expect(process.terminate).toHaveBeenCalled()
   })
 
   it('maps spawn, pipe, and generic process failures without leaking details', async () => {
     const spawn = fakeRuntime()
-    spawn.spawn.mockImplementationOnce(() => { throw new Error('SECRET=private') })
-    await expectCode(provider(spawn).search({ query: 'q' }), 'WEB_PROVIDER_ERROR', 'Codex web search failed')
+    spawn.spawn.mockImplementationOnce(() => {
+      throw new Error('SECRET=private TOKEN=also-private ~/.codex/auth.json /private/bin/codex-test')
+    })
+    const error = await expectCode(
+      provider(spawn, { executable: '/private/bin/codex-test' }).search({ query: 'q' }),
+      'WEB_PROVIDER_ERROR',
+      'Codex web search failed',
+    )
+    const serialized = JSON.stringify(serializeError(error))
+    expect(serialized).not.toContain('private')
+    expect(serialized).not.toContain('also-private')
+    expect(serialized).not.toContain('.codex')
+    expect(serialized).not.toContain('/private/bin')
+    expect(serialized).toContain('[REDACTED]')
+
+    const nonError = fakeRuntime()
+    nonError.spawn.mockImplementationOnce(() => { throw 'TOKEN=private' })
+    const nonErrorResult = await expectCode(
+      provider(nonError).search({ query: 'q' }),
+      'WEB_PROVIDER_ERROR',
+    )
+    expect(JSON.stringify(serializeError(nonErrorResult))).not.toContain('private')
 
     for (const missing of ['stdin', 'stdout'] as const) {
       const process = successfulProcess()

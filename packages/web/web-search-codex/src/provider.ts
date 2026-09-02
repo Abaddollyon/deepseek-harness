@@ -2,7 +2,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import type {
   SubprocessHandle,
   SubprocessOutcome,
@@ -62,6 +62,31 @@ class CodexProcessError extends Error {
   }
 }
 
+class CodexDiagnostic extends Error {
+  readonly category: string
+  readonly executable: string
+  readonly excerpt: string | undefined
+  readonly exitCode: number | null | undefined
+  readonly signal: NodeJS.Signals | null | undefined
+  readonly stage: string
+
+  constructor(
+    stage: string,
+    executable: string,
+    category: string,
+    excerpt: string | undefined,
+    outcome?: SubprocessOutcome,
+  ) {
+    super(`Codex ${category} at ${stage}`)
+    this.category = category
+    this.executable = basename(executable)
+    this.excerpt = excerpt
+    this.exitCode = outcome?.exitCode
+    this.signal = outcome?.signal
+    this.stage = stage
+  }
+}
+
 const require = createRequire(import.meta.url)
 const codexManifest = require.resolve('@openai/codex/package.json')
 const codexPackage = JSON.parse(readFileSync(codexManifest, 'utf8')) as {
@@ -101,7 +126,7 @@ export class CodexSearchProvider implements WebSearchProvider {
     if (!isValidOptions(this.options)) {
       throw new WebError('invalid Codex provider configuration', WEB_INVALID_CONFIG)
     }
-    if (isAborted(signal)) throw abortedError(signal?.reason)
+    if (isAborted(signal)) throw abortedError()
 
     const cwd = resolveDirectory(this.options.cwd)
     const controller = new AbortController()
@@ -116,24 +141,46 @@ export class CodexSearchProvider implements WebSearchProvider {
     let child: SubprocessHandle | undefined
     let wire: CodexSearchWire | undefined
     let primaryError: unknown
+    const configured = this.options.executable
+    let executable = configured ?? codexWrapper
+    let stage = 'resolveExecutable'
     try {
-      const configured = this.options.executable
-      let executable: string
       try {
         executable = await this.subprocess.resolveExecutable(
-          configured ?? codexWrapper,
+          executable,
           undefined,
           controller.signal,
         )
       } catch (error: unknown) {
-        if (isAborted(signal)) throw abortedError(error)
-        if (controller.signal.reason === timeoutReason) throw timeoutError(this.options.requestTimeoutMs, error)
-        throw new WebError(CODEX_MISSING_MESSAGE, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE', { cause: error })
+        const diagnostic = safeDiagnostic(stage, executable, error, this.options.maxPayloadBytes)
+        if (isAborted(signal)) throw abortedError(diagnostic)
+        if (controller.signal.reason === timeoutReason) {
+          throw timeoutError(this.options.requestTimeoutMs, diagnostic)
+        }
+        if (controller.signal.aborted) throw abortedError(diagnostic)
+        throw new WebError(
+          CODEX_MISSING_MESSAGE,
+          'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
+          { cause: diagnostic },
+        )
+      }
+      if (controller.signal.aborted) {
+        const diagnostic = safeDiagnostic(
+          stage,
+          executable,
+          controller.signal.reason,
+          this.options.maxPayloadBytes,
+        )
+        if (controller.signal.reason === timeoutReason) {
+          throw timeoutError(this.options.requestTimeoutMs, diagnostic)
+        }
+        throw abortedError(diagnostic)
       }
 
       const argv = configured === undefined
         ? [process.execPath, executable, 'app-server', '--stdio']
         : [executable, 'app-server', '--stdio']
+      stage = 'spawn'
       child = this.subprocess.spawn({
         argv,
         cwd,
@@ -152,22 +199,38 @@ export class CodexSearchProvider implements WebSearchProvider {
 
       wire = new CodexSearchWire(child.stdout, child.stdin)
       wire.start()
+      stage = 'initialize'
       await raceChild(wire.initialize(controller.signal), child)
+      stage = 'thread/start'
       await raceChild(wire.startThread(cwd, controller.signal), child)
+      stage = 'turn/start'
       const turn = await raceChild(wire.runTurn(request.query, controller.signal), child)
+      stage = 'normalize'
       return structuredResult(turn.items, this.options.maxResults, this.options.maxPayloadBytes)
     } catch (error: unknown) {
       primaryError = error
-      if (isAborted(signal)) throw abortedError(error)
-      if (controller.signal.reason === timeoutReason) throw timeoutError(this.options.requestTimeoutMs, error)
       if (error instanceof WebError) throw error
+      const diagnostic = safeDiagnostic(stage, executable, error, this.options.maxPayloadBytes)
+      if (isAborted(signal)) throw abortedError(diagnostic)
+      if (controller.signal.reason === timeoutReason) {
+        throw timeoutError(this.options.requestTimeoutMs, diagnostic)
+      }
+      if (controller.signal.aborted) throw abortedError(diagnostic)
       if (error instanceof CodexProtocolError) {
-        throw new WebError('Codex returned invalid web search protocol data', WEB_PROVIDER_PROTOCOL, { cause: error })
+        throw new WebError(
+          'Codex returned invalid web search protocol data',
+          WEB_PROVIDER_PROTOCOL,
+          { cause: diagnostic },
+        )
       }
       if (isAuthEvidence(error)) {
-        throw new WebError(CODEX_AUTH_MESSAGE, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE', { cause: error })
+        throw new WebError(
+          CODEX_AUTH_MESSAGE,
+          'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
+          { cause: diagnostic },
+        )
       }
-      throw new WebError('Codex web search failed', WEB_PROVIDER_ERROR, { cause: error })
+      throw new WebError('Codex web search failed', WEB_PROVIDER_ERROR, { cause: diagnostic })
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
@@ -188,7 +251,11 @@ export class CodexSearchProvider implements WebSearchProvider {
         this.searches.delete(controller)
       }
       if (primaryError === undefined && cleanupError !== undefined) {
-        throw new WebError('Codex web search cleanup failed', WEB_PROVIDER_ERROR, { cause: cleanupError })
+        throw new WebError(
+          'Codex web search cleanup failed',
+          WEB_PROVIDER_ERROR,
+          { cause: safeDiagnostic('cleanup', executable, cleanupError, this.options.maxPayloadBytes) },
+        )
       }
     }
   }
@@ -199,8 +266,8 @@ function resolveDirectory(value: string): string {
     const cwd = resolve(value)
     if (!statSync(cwd).isDirectory()) throw new Error('not a directory')
     return cwd
-  } catch (cause: unknown) {
-    throw new WebError('invalid Codex provider configuration', WEB_INVALID_CONFIG, { cause })
+  } catch {
+    throw new WebError('invalid Codex provider configuration', WEB_INVALID_CONFIG)
   }
 }
 
@@ -238,16 +305,54 @@ function isAuthEvidence(error: unknown): boolean {
   return /(?:login required|authentication required|not authenticated|run codex login)/iu.test(error.diagnostic)
 }
 
+function safeDiagnostic(
+  stage: string,
+  executable: string,
+  error: unknown,
+  maxPayloadBytes: number,
+  category?: string,
+): CodexDiagnostic {
+  const processError = error instanceof CodexProcessError ? error : undefined
+  const raw = processError?.diagnostic ?? (error instanceof Error ? error.message : String(error))
+  const executableName = basename(executable)
+  const withoutExecutablePath = executable === executableName
+    ? raw
+    : raw.split(executable).join(executableName)
+  const redacted = withoutExecutablePath
+    .replace(
+      /\b(KEY|PASSWORD|SECRET|TOKEN)(?:_[A-Z0-9]+)?\s*[:=]\s*[^\s,;]+/giu,
+      '$1=[REDACTED]',
+    )
+    .replace(
+      /(?:~|\/(?:home|Users)\/[^/\s]+)[/\\]\.codex(?:[/\\][^\s,;]*)?/giu,
+      '[CODEX_AUTH_PATH]',
+    )
+    .replace(/(?:[A-Z]:)?[/\\](?:[^\s,;:/\\]+[/\\]?)+/giu, '[PATH]')
+  const limit = Math.min(maxPayloadBytes, 4_096)
+  const excerpt = Buffer.from(redacted).subarray(0, limit).toString('utf8').trim() || undefined
+  return new CodexDiagnostic(
+    stage,
+    executable,
+    category ?? (processError === undefined ? 'failure' : 'process-exit'),
+    excerpt,
+    processError?.outcome,
+  )
+}
+
 function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
-function abortedError(cause: unknown): WebError {
-  return new WebError('Codex web search aborted', WEB_ABORTED, { cause })
+function abortedError(cause?: CodexDiagnostic): WebError {
+  return new WebError('Codex web search aborted', WEB_ABORTED, cause === undefined ? undefined : { cause })
 }
 
-function timeoutError(milliseconds: number, cause: unknown): WebError {
-  return new WebError(`Codex web search timed out after ${milliseconds} ms`, WEB_PROVIDER_ERROR, { cause })
+function timeoutError(milliseconds: number, cause: CodexDiagnostic): WebError {
+  return new WebError(
+    `Codex web search timed out after ${milliseconds} ms`,
+    WEB_PROVIDER_ERROR,
+    { cause },
+  )
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
