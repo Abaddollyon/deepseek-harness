@@ -6,6 +6,7 @@
  * @module @deepseek-ai/dsh-subagent/run-settlement
  */
 
+import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { SubagentResult, SubagentRun } from './types.ts'
@@ -18,14 +19,17 @@ function finalText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Render a failed stop reason with optional provider-authored detail. */
 function failureDetail(result: SubagentResult): string {
   const stopReason = result.stopReason
-  return result.diagnostic === undefined
+  const detail = result.diagnostic === undefined
     ? stopReason
-    : `${stopReason}; diagnostic: ${result.diagnostic}`
+    : stopReason + '; diagnostic: ' + result.diagnostic
+  if (result.failure === undefined) return detail
+  const retry = result.failure.retryAfterMs === undefined
+    ? ''
+    : '; retry after ' + String(result.failure.retryAfterMs) + 'ms'
+  return detail + '; failure code: ' + result.failure.code + retry
 }
-
 /**
  * Map a child result to the task outcome: completed carries final text, local
  * cancellation (`aborted` without a diagnostic) is killed, and provider-
@@ -52,6 +56,11 @@ function runOutcome(result: SubagentResult): JobOutcome {
   }
 }
 
+/** Render a rejection while containing hostile coercion hooks. */
+function rejectionDetail(value: unknown): string {
+  try { return String(value) } catch { return errorChain(value) }
+}
+
 /**
  * Await the child result, dispose the run, then return its task outcome. Result
  * and disposal failures become `failed`; when both fail, both details survive.
@@ -63,13 +72,13 @@ export async function settleRun(run: SubagentRun): Promise<JobOutcome> {
   try {
     outcome = runOutcome(await run.result)
   } catch (error: unknown) {
-    outcome = { status: 'failed', detail: String(error) }
+    outcome = { status: 'failed', detail: rejectionDetail(error) }
   }
   try {
     await run.dispose()
   } catch (error: unknown) {
     const prefix = outcome.detail === undefined ? '' : `${outcome.detail}; `
-    return { status: 'failed', detail: `${prefix}dispose failed: ${String(error)}` }
+    return { status: 'failed', detail: `${prefix}dispose failed: ${rejectionDetail(error)}` }
   }
   return outcome
 }

@@ -7,6 +7,10 @@ import {
 
 const MAX_SUBAGENT_DIAGNOSTIC_BYTES = 4_096
 
+function rejectUnknown(value: Error): Promise<never> {
+  return Promise.reject(value)
+}
+
 describe('outcome mapping helpers', () => {
   it.each([
     ['completed', { status: 'completed', output: 'partial' }],
@@ -66,6 +70,12 @@ describe('outcome mapping helpers', () => {
       status: 'failed',
       detail: 'Error: result failed; dispose failed: Error: reap failed',
     })
+    const hostile = { toString(): never { throw new Error('coercion') } }
+    await expect(settleRun({
+      id: SessionId('child-hostile'), localAgent: undefined,
+      result: rejectUnknown(hostile as unknown as Error),
+      dispose: () => rejectUnknown(hostile as unknown as Error),
+    })).resolves.toEqual({ status: 'failed', detail: '<unrenderable value>; dispose failed: <unrenderable value>' })
   })
 
   it('keeps provider diagnostics separate in failed background outcomes', async () => {
@@ -75,12 +85,13 @@ describe('outcome mapping helpers', () => {
       result: Promise.resolve({
         output: [{ type: 'text', text: 'partial assistant text' }],
         diagnostic: 'Claude Code denied a tool request',
+        failure: { code: 'RATE_LIMIT' as const, retryAfterMs: 2500 },
         stopReason: 'error',
       }),
       dispose: () => Promise.resolve(),
     })).resolves.toEqual({
       status: 'failed',
-      detail: 'error; diagnostic: Claude Code denied a tool request',
+      detail: 'error; diagnostic: Claude Code denied a tool request; failure code: RATE_LIMIT; retry after 2500ms',
     })
   })
 

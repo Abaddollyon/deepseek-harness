@@ -13,7 +13,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { ContentBlock, GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId, LlmError, QUOTA_EXCEEDED_CODE, errorChain } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,6 +22,8 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
+import { createActivationObserver, createLifecycleEmitter, terminalDiagnostic } from '../src/lifecycle.ts'
+import { settlementSummary } from '../src/continuation.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 
@@ -1149,24 +1151,49 @@ describe('continuable durability and teardown', () => {
 
   it('reports selected-child disposal failures after releasing the child', async () => {
     const hold = Promise.withResolvers<undefined>()
-    const adapter = new GatedAdapter([{ chunks: textResponse('target'), gate: hold.promise }])
+    const holdChild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('target'), gate: hold.promise },
+      { chunks: textResponse('child'), gate: holdChild.promise },
+    ])
     const { ctx, parent } = await setupWith(adapter)
     const target = await ctx.subagents.startContinuable(startSpec(parent))
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const targetAgent = ctx.agents.get(target.childId)!
+    const descendant = await ctx.subagents.startContinuable(startSpec(targetAgent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
     const manager = (ctx.subagents as unknown as {
       continuations: { activations: Map<SessionId, { handle: { dispose: () => Promise<void> } }> }
     }).continuations
-    const activation = manager.activations.get(target.childId)!
+    const activation = manager.activations.get(descendant.childId)!
     const realDispose = activation.handle.dispose.bind(activation.handle)
     activation.handle.dispose = async () => {
       await realDispose()
-      throw new Error('selected cleanup failed')
+      throw new Error('selected cleanup failed', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 2_000 }) })
     }
 
     const drained = ctx.subagents.drainContinuableChildren(parent, [target.childId])
     hold.resolve(undefined)
+    holdChild.resolve(undefined)
 
-    await expect(drained).rejects.toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    const failure = await drained.catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    expect(errorChain(failure)).toContain('descendant teardown failures')
+    // This is the AggregateError produced by dispose(), not a synthetic graph:
+    // the descendant SubagentError remains reachable through both aggregate
+    // layers and its LLM cause keeps the retry classification intact.
+    const outer = (failure as SubagentError).cause
+    expect(outer).toBeInstanceOf(AggregateError)
+    const childFailure: unknown = (outer as AggregateError).errors[0]
+    expect(childFailure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    expect((childFailure as SubagentError).cause).toBeInstanceOf(AggregateError)
+    expect(terminalDiagnostic(failure)).toMatchObject({
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 2_000 },
+    })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
     expect(ctx.agents.get(target.childId)).toBeUndefined()
   })
 
@@ -1492,6 +1519,56 @@ describe('continuable review regressions', () => {
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     // Deriving this from disposal success would report the failure as completed.
     expect(ends[0]!.stopReason).toBe('max-tokens')
+  })
+
+  it('carries typed quota facts through the continuable lifecycle and parent notice', async () => {
+    const { ctx, parent } = await setup([
+      () => {
+        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
+          providerRetryAfterMs: 12_000,
+        })
+      },
+      textResponse('parent ack'),
+    ])
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+    expect(ends[0]).toMatchObject({
+      stopReason: 'error',
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
+    })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
+  })
+
+  it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = SessionId('future-reason-child')
+    const child = ctx.agentLoop.create(childId, {})
+    const observer = createActivationObserver(
+      createLifecycleEmitter(ctx, () => ctx),
+      'spawn',
+      childId,
+      parent,
+    )
+    observer.start(child)
+    child.session.append('turn/start', { turn: 1 })
+    child.session.append('step/start', { turn: 1, step: 1 })
+    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } as never })
+    observer.capture(child)
+
+    expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
+  })
+
+  it('renders a future backend stop reason as an abnormal settlement', () => {
+    expect(settlementSummary(SessionId('future-child'), 'test-future' as never)).toBe(
+      'Background subagent future-child ended abnormally (test-future) before it finished.',
+    )
   })
 
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
@@ -2954,6 +3031,11 @@ describe('SubagentRuntime.interrupt', () => {
     expect(cancelSpy).not.toHaveBeenCalled()
     await run.result
     await run.dispose()
+  })
+
+  it('ignores absent ids during selected child teardown', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    await expect(ctx.subagents.drainContinuableChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
   })
 
   it('accepts an interrupt after natural completion', async () => {

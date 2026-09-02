@@ -30,6 +30,8 @@ export interface Config {
   stopReason?: SubagentStopReason
   /** Safe non-assistant detail for a non-completed result. */
   diagnostic?: string
+  /** Structured provider failure facts for non-completed results. */
+  failure?: { readonly code: string; readonly retryAfterMs?: number }
   /** Start-time features advertised by the provider. */
   capabilities?: Partial<SubagentCapabilities>
   /** Whether tool descriptions say the child inherits completed turns. */
@@ -77,6 +79,9 @@ class ScriptedSubagentProvider implements SubagentProvider {
         ...wantsStructured ? { structured: this.config.structured ?? { reply } } : {},
         ...this.config.diagnostic !== undefined && terminal !== 'completed'
           ? { diagnostic: this.config.diagnostic }
+          : {},
+        ...this.config.failure !== undefined && terminal !== 'completed'
+          ? { failure: this.config.failure }
           : {},
         stopReason: terminal,
       }

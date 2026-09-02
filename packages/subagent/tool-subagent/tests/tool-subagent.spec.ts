@@ -177,6 +177,7 @@ describe('dsh-tool-subagent', () => {
     const ctx = await setup({ provider: 'mock' }, {
       reply: 'partial assistant text',
       diagnostic: 'Claude Code denied a tool request',
+      failure: { code: 'QUOTA' },
       stopReason: 'error',
     })
 
@@ -185,6 +186,7 @@ describe('dsh-tool-subagent', () => {
     expect(text(result)).toBe(
       'Error: subagent run failed\n'
       + 'Diagnostic: Claude Code denied a tool request\n'
+      + 'Failure code: QUOTA\n'
       + 'Partial output before the run ended:\npartial assistant text',
     )
   })
@@ -898,6 +900,7 @@ describe('dsh-tool-subagent background mode', () => {
       reply: 'not background output',
       diagnostic: 'Claude Code cancelled an unattended dialog',
       stopReason: 'error',
+      failure: { code: 'QUOTA' },
     })
     const parent = ownerAgent(ctx, 'sess-parent')
 
@@ -919,7 +922,7 @@ describe('dsh-tool-subagent background mode', () => {
     })
     expect(text(output)).toBe(
       '(no new output)\n'
-      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog]',
+      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog; failure code: QUOTA]',
     )
   })
 

@@ -26,6 +26,7 @@ import {
   captureDelegatedPolicyOverrides,
   childSessionMeta,
   finalAssistantOutput,
+  subagentFailureFromUnknown,
   resolveChildAgentOptions,
   resolveChildDepth,
 } from '@deepseek-ai/dsh-subagent'
@@ -227,11 +228,15 @@ function readResult(
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
+  const failure = lastEnd?.data.reason.kind === 'error'
+    ? subagentFailureFromUnknown(lastEnd.data.reason.error)
+    : undefined
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
+      // A committed capture concludes the turn; every later error path rolls it back.
       return { output, structured: structured.captured.value, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason }
+  return { output, stopReason, ...failure === undefined ? {} : { failure } }
 }
