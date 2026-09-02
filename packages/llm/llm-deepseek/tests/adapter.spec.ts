@@ -170,6 +170,32 @@ describe('request image policy', () => {
     expect(textOnly?.[0]!.visualTokens).toBe(0)
   })
 
+  it('keeps image-count caps isolated across adapter routes', () => {
+    const images = [
+      imageRef,
+      {
+        ...imageRef,
+        attachmentId: AttachmentId(`sha256:${'c'.repeat(64)}`),
+        name: 'second',
+      },
+    ]
+    const capped = adapterOf({
+      models: [{ id: 'vision', inputModalities: ['text', 'image'] }],
+      maxImagesPerRequest: 1,
+      imageOffloadCountQuantum: 1,
+    })
+    const uncapped = adapterOf({
+      models: [{ id: 'vision', inputModalities: ['text', 'image'] }],
+      maxImagesPerRequest: 2,
+      imageOffloadCountQuantum: 1,
+    })
+
+    expect(capped.imageRequestPricing('capped', 'vision')?.priceImages(images)
+      .map(price => price.visualTokens === 0)).toEqual([true, false])
+    expect(uncapped.imageRequestPricing('uncapped', 'vision')?.priceImages(images)
+      .map(price => price.visualTokens === 0)).toEqual([false, false])
+  })
+
   it('prices descriptor text through the serializer\'s access resolution', () => {
     const attachments = {} as AttachmentStore
     const adapter = new DeepSeekAdapter({

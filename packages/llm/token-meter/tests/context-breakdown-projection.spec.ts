@@ -64,7 +64,7 @@ function appendSummaryMeter(ctx: Context, session: Session, start: SessionSeqTyp
     summary: [{ type: 'text', text: 'summary' }],
     shadowedRange: { start, end },
     shadowedSeqs: shadowed.map(node => node.seq),
-    shadowedTokenCount: shadowed.reduce((total, node) => total + node.tokens, 0),
+    shadowedTokenCount: shadowed.reduce((total, node) => total + node.heuristicTokens, 0),
     provider: 'mock',
     model: 'mock',
   })
@@ -168,17 +168,27 @@ describe('contextBreakdown session projection', () => {
     session.append('step/end', { turn: 1, step: 1 })
     const grown = agree()
     expect(grown).toBeGreaterThan(0)
+    const beforeNodes = ctx.tokenMeter.measure(session).nodes
+    const beforeHeuristic = beforeNodes.reduce((total, node) => total + node.heuristicTokens, 0)
+    const shadowedHeuristic = beforeNodes
+      .filter(node => node.seq === question || node.seq === answer)
+      .reduce((total, node) => total + node.heuristicTokens, 0)
 
     appendSummaryMeter(ctx, session, question, answer)
     // The armed shadow price must not move the published figure by itself.
     expect(agree()).toBe(grown)
-    session.append('user/message', createUserMessage({
+    const summary = createUserMessage({
       content: [{ type: 'text', text: 'summary' }],
       source: { kind: 'plugin', plugin: 'test' },
-    }), {
+    })
+    session.append('user/message', summary, {
       surfaceOp: { op: 'replace', start: question, end: answer },
       sourceEventSeqs: [question, answer],
     })
+    const expected = beforeHeuristic - shadowedHeuristic + estimateMessage(summary)
+    expect(projected(ctx, session).messageTokens).toBe(expected)
+    expect(ctx.tokenMeter.measure(session).nodes
+      .reduce((total, node) => total + node.heuristicTokens, 0)).toBe(expected)
     expect(agree()).toBeLessThan(grown)
   })
 

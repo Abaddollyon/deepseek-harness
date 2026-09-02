@@ -71,6 +71,7 @@ kind: "package-reference"
 | `maxTokens` | `8192` | 摘要请求的输出上限；可包含推理 token。 |
 | `compactionRetries` | `1` | 压力仍高于阈值时，在首次压缩后进行的额外尝试次数。 |
 | `maxOverflowRetries` | `1` | 已确认上下文窗口溢出后的最大重试次数；`0` 只禁用恢复。 |
+| `maxOverflowRetries` | `1` | 每次预检准入与提供方确认溢出序列中的最大替换重试次数；`0` 禁用两条自动路径。 |
 | `modelPolicies` | `[]` | 针对个别模型路由的精确 `{ provider, model, ...partialPolicy }` 覆盖。 |
 | `auto` | `true` | 启用自动压缩与溢出恢复；设为 `false` 则仅手动执行。 |
 
@@ -109,9 +110,11 @@ kind: "package-reference"
 
 ### 自动触发与溢出恢复
 
-当 `auto: true` 时，串行 `agent/pre-step` listener 会在请求派生前检查压力：它通过 `ctx.tokenMeter` 为最新持久路由请求 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留已定价近期尾部的同时摘要最旧的平衡范围。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
+当 `auto: true` 时，串行 `agent/request-preflight` listener 会在每个确切请求的规范 header 记录之后、消息派生之前执行准入：它通过 `ctx.tokenMeter` 为该请求的持久路由 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留已定价近期尾部的同时摘要最旧的平衡范围，并根据摘要模型的实际容量为配置的输出上限、已定价 envelope 与最后的压缩指令消息预留额度，使完整辅助请求始终可容纳——当没有平衡范围可容纳时，准入不发起摘要调用，并保留完整请求交由提供方处理。已提交的替换会从新表层重新分派准入，并受循环固定的重新分派上限约束。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
 
-压力策略从拥有持久路由的适配器解析容量。适配器无法为有效动态路由返回容量时，手动压力路径会抛出目标特定配置错误；自动 listener 会对该精确目标警告一次，并携带完整历史继续。
+当 `auto: true` 时，串行 `agent/request-preflight` listener 会在每个确切请求的规范 header 记录之后、消息派生之前执行准入：它通过 `ctx.tokenMeter` 为该请求的持久路由 envelope 定价，当压力越过路由模型的阈值时，先剪枝，再在保留通过精确摘要提供方／模型 header 计价的近期尾部的同时摘要最旧的平衡范围。它根据摘要模型的实际容量，为已配置输出上限、按摘要目标计价的 envelope 与最后的压缩指令消息预留额度，使完整辅助请求始终可容纳——当没有平衡范围可容纳时，准入不发起摘要调用，并保留完整请求交由提供方处理。已提交的替换会从新表层重新分派准入，并受循环固定的重新分派上限约束。每条完成的助手消息都会结束该请求的准入预算，因此工具调用续接会获得自己的 `maxOverflowRetries` 次尝试。`agent/request-error` listener 响应提供方确认的 `CONTEXT_WINDOW_EXCEEDED`：它绕过常规阈值与保留策略，尝试一次最大平衡头部缩减，并且只在表层替换 generation 前进后才授权重试。取消全程保持最终决定权。
+
+压力策略从拥有持久路由的适配器解析容量。当适配器无法为有效动态路由返回容量，或返回的容量会使目标的保留预算无效时，手动压力路径会抛出目标特定配置错误；自动 listener 会对该精确目标警告一次，委托准入并携带完整历史继续。剪枝、计量、解析和摘要中的运行故障会拒绝预检，不会被转换为准入。
 
 ### 摘要机制
 
@@ -123,7 +126,7 @@ kind: "package-reference"
 
 ### 配置解析
 
-`resolveConfig` 验证并分离默认值，`resolveTargetPolicy` 将精确的提供方／模型覆盖合并到默认值之上，`resolveCompactSpec` 使用适配器拥有的上下文容量将合并后的策略缩放为具体 token 预算。策略解析绝不咨询模型发现（`listModels()`）；只有持久路由的容量才重要。
+`resolveConfig` 验证并分离默认值，`resolveTargetPolicy` 将精确的提供方／模型覆盖合并到默认值之上，`resolveCompactSpec` 使用适配器拥有的上下文容量缩放合并后的策略，并返回显式的 `{ kind: 'resolved', spec }` 或 `{ kind: 'invalid', error }` 结果。自动预检会在发出目标范围的警告后委托 `invalid` 情形；显式压力压缩会抛出返回的错误。策略解析绝不咨询模型发现（`listModels()`）；只有持久路由的容量才重要。
 
 ### 源码地图
 

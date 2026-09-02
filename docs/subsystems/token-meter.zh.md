@@ -91,6 +91,13 @@ Replay owner for one service-wide estimator and isolated per-session folds.
 measure(session: Session, requestHeader?: EpochHeader): TokenMeasurement
 
 /**
+ * Estimate the non-surface tokens in one canonical request envelope.
+ * @param header - canonical request envelope, when one is available.
+ * @returns estimated request-header tokens.
+ */
+estimateHeader(header: EpochHeader | undefined): number
+
+/**
  * Heuristically price one model-visible message (instance face of the pure
  * `estimateMessage` export from `estimate.ts`).
  * @param message - message to price without mutation.
