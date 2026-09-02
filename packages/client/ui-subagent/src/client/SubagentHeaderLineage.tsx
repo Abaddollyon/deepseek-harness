@@ -745,7 +745,7 @@ function CatalogDropdown({
             openTitle()
             return
           }
-if (!open) clickPinned.current = true
+          if (!open) clickPinned.current = true
           changeOpen(!open)
         }}
         onKeyDown={(event) => {
