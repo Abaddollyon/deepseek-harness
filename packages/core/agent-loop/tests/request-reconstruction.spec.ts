@@ -339,6 +339,7 @@ describe('request stability across the loop', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, { persona: 'stable base' })
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
@@ -365,7 +366,7 @@ describe('request stability across the loop', () => {
       defaultEffort: ReasoningEffortId('max'),
     })
     const disposeFirst = ctx.llm.registerAdapter(['mock'], first)
-    const agent = ctx.agentLoop.create(SessionId('effort-hmr'), { provider: 'mock', model: 'mock' })
+    const agent = (await ctx.agents.create({ sessionId: SessionId('effort-hmr'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
 
     send(agent, 'go')
     await started.promise
@@ -457,6 +458,7 @@ describe('request stability across the loop', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt, { persona: 'stable base' })
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
@@ -468,10 +470,7 @@ describe('request stability across the loop', () => {
         yield* textResponse('owned')
       })()
     })
-    const agent = ctx.agentLoop.create(SessionId('listener-owned'), {
-      provider: 'listener',
-      model: 'virtual',
-    })
+    const agent = (await ctx.agents.create({ sessionId: SessionId('listener-owned'), agentOptions: { provider: 'listener', model: 'virtual' } })).agent
 
     send(agent, 'go')
     await waitForIdle(ctx, agent)

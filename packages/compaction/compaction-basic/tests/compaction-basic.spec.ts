@@ -600,7 +600,6 @@ describe('pressure measurement and retention', () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
     void new SessionProjectionRegistry(ctx)
-    void new SessionProjectionRegistry(ctx)
   void new TokenMeter(ctx)
     ctx.llm.registerAdapter(['large', 'small'], new RoutedContextAdapter({
       large: 10_000,
@@ -628,7 +627,6 @@ describe('pressure measurement and retention', () => {
   it('requires capacity only for proactive pressure, not provider-confirmed overflow', async () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
-    void new SessionProjectionRegistry(ctx)
     void new SessionProjectionRegistry(ctx)
   void new TokenMeter(ctx)
     ctx.llm.registerAdapter(['unknown-context'], new ContextAdapter(1_000))
@@ -1371,7 +1369,12 @@ async function summarizerHarness(
 ): Promise<{ ctx: Context; adapter: ScriptedAdapter; compact: ExposedCompactionEngine }> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
-  void new SessionProjectionRegistry(ctx)
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentLoop, { agents: [] })
   void new TokenMeter(ctx)
   const adapter = new ScriptedAdapter(blocks, finish)
   ctx.llm.registerAdapter([model], adapter)
@@ -1548,7 +1551,6 @@ describe('default one-shot summarizer', () => {
   it('fails clearly when no complete summarization target can be resolved', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
-    void new SessionProjectionRegistry(ctx)
     void new SessionProjectionRegistry(ctx)
   void new TokenMeter(ctx)
     const compact = new ExposedCompactionEngine(ctx, { auto: false })
@@ -2086,6 +2088,7 @@ describe('automatic listener and loader composition', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     const meterFiber = await ctx.plugin(TokenMeter)
     const compactFiber = await ctx.plugin(BasicCompactionEngine, { auto: false })
 
@@ -2218,8 +2221,9 @@ describe('automatic listener and loader composition', () => {
     let summaryCapacity: number | undefined
 
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(TokenMeter)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(TokenMeter)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
@@ -2258,7 +2262,7 @@ describe('automatic listener and loader composition', () => {
 
     try {
       const seed = conversation(4).snapshotEvents().slice(0, -1)
-      const handle = await ctx.agentLoop.createAgent(ctx, {
+      const handle = await ctx.agents.create( {
         sessionId: SessionId(`summary-boundary-${capacityDelta}`),
         seed,
         agentOptions: { provider: MODEL, model: MODEL },
@@ -2313,8 +2317,9 @@ describe('automatic listener and loader composition', () => {
     const summaryAttempts: number[] = []
 
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(TokenMeter)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(TokenMeter)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
@@ -2370,7 +2375,7 @@ describe('automatic listener and loader composition', () => {
 
     try {
       const seed = conversation(8, 'large fixture '.repeat(300).trim()).snapshotEvents().slice(0, -1)
-      const handle = await ctx.agentLoop.createAgent(ctx, {
+      const handle = await ctx.agents.create( {
         sessionId: SessionId('earlier-listener-replacement'),
         seed,
         agentOptions: { provider: MODEL, model: MODEL },

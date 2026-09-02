@@ -238,10 +238,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       { thresholdChars: 100, headChars: 20, tailChars: 10 },
     )
     try {
-      const agent = ctx.agentLoop.create(
-        SessionId('tool-call-continuation-admission'),
-        { provider: 'mock', model: 'mock' },
-      )
+      const agent = (await ctx.agents.create({ sessionId: SessionId('tool-call-continuation-admission'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: 'large first request '.repeat(80) }],
         source: { kind: 'user' },
@@ -271,10 +268,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       ...await next(), provider: 'mock', model: 'mock',
     }))
     try {
-      const agent = ctx.agentLoop.create(SessionId('routed-pressure'), {
-        provider: 'unconfigured-agent-fallback',
-        model: 'unconfigured-agent-fallback',
-      })
+      const agent = (await ctx.agents.create({ sessionId: SessionId('routed-pressure'), agentOptions: { provider: 'unconfigured-agent-fallback', model: 'unconfigured-agent-fallback' } })).agent
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a routed multi-step task' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, agent)
 
@@ -292,7 +286,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
   it('runs automatic pressure after the next step starts but before its request', async () => {
     const { ctx } = await harness(8)
     try {
-      const agent = ctx.agentLoop.create(SessionId('post-step-order'), { provider: 'mock', model: 'mock' })
+      const agent = (await ctx.agents.create({ sessionId: SessionId('post-step-order'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do tool work' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, agent)
 
@@ -329,7 +323,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
   it('the head checkpoint the loop lands is a balanced cut on both sides', async () => {
     const { ctx } = await harness(8)
     try {
-      const agent = ctx.agentLoop.create(SessionId('repro'), { provider: 'mock', model: 'mock' })
+      const agent = (await ctx.agents.create({ sessionId: SessionId('repro'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a long multi-step task' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, agent)
 
@@ -366,6 +360,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       const ctx = new Context()
       const adapter = new OverflowRecoveryAdapter(delivery)
       await mountAgentLoopTestDependencies(ctx)
+      await ctx.plugin(SessionProjectionRegistry)
       await mountInvariants(ctx)
       await ctx.plugin(AgentLoop, { agents: [] })
       await ctx.plugin(TokenMeter)
@@ -382,7 +377,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       })
 
       try {
-        const { agent } = await ctx.agentLoop.createAgent(ctx, {
+        const { agent } = await ctx.agents.create( {
           sessionId: SessionId(`overflow-${delivery}`),
           seed: overflowHistorySeed(),
           agentOptions: {
@@ -444,6 +439,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
     const ctx = new Context()
     const adapter = new OverflowRecoveryAdapter('thrown', true)
     await mountAgentLoopTestDependencies(ctx)
+    await ctx.plugin(SessionProjectionRegistry)
     await mountInvariants(ctx)
     await ctx.plugin(LlmRetry)
     await ctx.plugin(AgentLoop, { agents: [] })
@@ -458,7 +454,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
     })
 
     try {
-      const { agent } = await ctx.agentLoop.createAgent(ctx, {
+      const { agent } = await ctx.agents.create( {
         sessionId: SessionId('alternating-recovery'),
         seed: overflowHistorySeed(),
         agentOptions: { provider: 'mock', model: 'mock' },
