@@ -18,4 +18,19 @@ describe('loader composition', () => {
     expect(registerSearchProvider).toHaveBeenCalledOnce()
     expect(disposer).not.toHaveBeenCalled()
   })
+  it('accepts every explicit configuration edge', () => {
+    const dispose = vi.fn()
+    const registerSearchProvider = vi.fn(() => dispose)
+    const ctx = { web: { registerSearchProvider }, effect: vi.fn() } as never
+    apply(ctx, {
+      cwd: '/tmp',
+      requestTimeoutMs: 1,
+      disposeGraceMs: 1,
+      maxResults: 1,
+      maxTurns: 1,
+      maxPayloadBytes: 1,
+      executable: 'claude',
+    })
+    expect(registerSearchProvider).toHaveBeenCalledOnce()
+  })
 })
