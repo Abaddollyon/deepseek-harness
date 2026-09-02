@@ -7,6 +7,10 @@ import {
 
 const MAX_SUBAGENT_DIAGNOSTIC_BYTES = 4_096
 
+function rejectUnknown(value: Error): Promise<never> {
+  return Promise.reject(value)
+}
+
 describe('outcome mapping helpers', () => {
   it.each([
     ['completed', { status: 'completed', output: 'partial' }],
@@ -69,10 +73,8 @@ describe('outcome mapping helpers', () => {
     const hostile = { toString(): never { throw new Error('coercion') } }
     await expect(settleRun({
       id: SessionId('child-hostile'), localAgent: undefined,
-      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
-      result: Promise.reject(hostile),
-      // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
-      dispose: () => Promise.reject(hostile),
+      result: rejectUnknown(hostile as unknown as Error),
+      dispose: () => rejectUnknown(hostile as unknown as Error),
     })).resolves.toEqual({ status: 'failed', detail: '<unrenderable value>; dispose failed: <unrenderable value>' })
   })
 
