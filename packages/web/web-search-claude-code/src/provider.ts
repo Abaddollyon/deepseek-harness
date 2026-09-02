@@ -1,5 +1,6 @@
 import {
   query as officialQuery,
+  type Query,
   type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@deepseek-ai/cordis'
@@ -11,21 +12,32 @@ import {
   type WebSearchResult,
   type WebSearchSource,
 } from '@deepseek-ai/dsh-web'
-import { claudeSpawnSpec, ManagedClaudeCodeProcess } from './process.ts'
+import { claudeSpawnSpec, ManagedClaudeCodeProcess } from '@deepseek-ai/dsh-subagent-claude-code'
+/** Provider contract constant. */
 export const CLAUDE_CODE_PROVIDER_ID = 'claude-code'
+/** Provider contract constant. */
 export const DEFAULT_TIMEOUT_MS = 60000
+/** Provider contract constant. */
 export const DEFAULT_DISPOSE_GRACE_MS = 3000
+/** Provider contract constant. */
 export const DEFAULT_MAX_RESULTS = 8
+/** Provider contract constant. */
 export const DEFAULT_MAX_TURNS = 4
+/** Provider contract constant. */
 export const DEFAULT_MAX_PAYLOAD_BYTES = 262144
+/** Provider contract constant. */
 export const WEB_ABORTED = 'WEB_ABORTED'
+/** Provider contract constant. */
 export const WEB_PROVIDER_ERROR = 'WEB_PROVIDER_ERROR'
+/** Provider contract constant. */
 export const WEB_PROVIDER_PROTOCOL = 'WEB_PROVIDER_PROTOCOL'
+/** Provider contract constant. */
 export const WEB_INVALID_CONFIG = 'WEB_INVALID_CONFIG'
 const unavailable =
   'Sign in with Claude Code (claude login) and retry; DSH does not read provider credentials'
 const missing =
   'Claude Code CLI is unavailable; install Claude Code and retry; DSH does not read provider credentials'
+/** Runtime options for one Claude Code provider instance. */
 export interface ClaudeCodeSearchProviderOptions {
   readonly cwd: string
   readonly requestTimeoutMs: number
@@ -34,6 +46,7 @@ export interface ClaudeCodeSearchProviderOptions {
   readonly maxTurns: number
   readonly maxPayloadBytes: number
   readonly executable?: string
+  readonly query?: typeof officialQuery
 }
 const obj = (v: unknown): Record<string, unknown> | undefined =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -52,6 +65,12 @@ function source(v: unknown): WebSearchSource | undefined {
       : {}),
   }
 }
+/** Normalize structured SDK output into the WebSearchResult contract.
+ * @param value - SDK structured output.
+ * @param maxResults - Maximum number of sources.
+ * @param maxPayloadBytes - Maximum serialized result size.
+ * @returns The normalized web-search result.
+ */
 export function normalizeResult(
   value: unknown,
   maxResults = DEFAULT_MAX_RESULTS,
@@ -103,6 +122,7 @@ function authError(v: unknown): boolean {
     s,
   )
 }
+/** Web search provider backed by the official Claude Agent SDK. */
 export class ClaudeCodeSearchProvider implements WebSearchProvider {
   readonly id = CLAUDE_CODE_PROVIDER_ID
   private readonly active = new Set<AbortController>()
@@ -126,16 +146,17 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
       controller.abort(signal?.reason)
     }
     signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) controller.abort(signal.reason)
     const timer = setTimeout(() => {
       controller.abort('timeout')
     }, this.options.requestTimeoutMs)
     let child: SubprocessHandle | undefined
-    let q: import('@anthropic-ai/claude-agent-sdk').Query | undefined
+    let q: Query | undefined
     let primary: unknown
     try {
       let raw = false
       let structured: unknown
-      q = officialQuery({
+      q = (this.options.query ?? officialQuery)({
         prompt:
           'turn exactly one WebSearch call for this query: ' +
           request.query +
@@ -179,7 +200,7 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
         }
         if (message.type === 'result') {
           if (message.subtype !== 'success') {
-            if (authError(message))
+            if (authError(JSON.stringify(message)))
               throw new WebError(
                 unavailable,
                 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
@@ -240,6 +261,7 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
       if (child) child.terminate()
     }
   }
+  /** Abort every in-flight search owned by this provider. */
   dispose(): void {
     for (const c of this.active) c.abort('disposed')
   }

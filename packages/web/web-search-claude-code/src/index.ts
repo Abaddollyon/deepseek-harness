@@ -27,6 +27,7 @@ export {
 export type { ClaudeCodeSearchProviderOptions } from './provider.ts'
 export const name = 'web-search-claude-code'
 export const inject = ['web', 'subprocess']
+/** Configuration for the Claude Code web-search plugin. */
 export interface Config {
   /** Working directory used for Claude Code searches. */
   cwd?: string
