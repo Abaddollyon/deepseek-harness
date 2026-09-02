@@ -58,6 +58,18 @@ function fireDrag(row: HTMLElement, kind: 'dragOver' | 'drop', clientY: number):
 }
 
 describe('workspace browser rows', () => {
+  it('fails closed for forged pending interaction statuses', () => {
+    const node = {
+      id: sid('forged'), title: 'Forged', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0,
+      pendingInteraction: 'forged',
+    } as unknown as SessionNode
+    expect(() => render(
+      <SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()}
+        onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} onTogglePinned={vi.fn()} t={t} />,
+    )).toThrow()
+  })
+
   it('renders an untitled row as a dated New Session, never the directory-basename fallback', () => {
     // Sessions without a durable title carry the workspace's own name as their
     // stored display title; rendering it made every row under a group read as

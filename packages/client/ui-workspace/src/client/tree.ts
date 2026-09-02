@@ -17,6 +17,12 @@ function pendingStatus(snapshot: PendingInteractionSnapshot, id: SessionId): Pen
   return kind === 'approval' || kind === 'plan-review' || kind === 'question' ? kind : undefined
 }
 
+/** Whether a session has at least one active (future or overdue) schedule. */
+function activeSchedule(s: SessionSummary): boolean {
+  const schedules = (s as SessionSummary & { projectionValues?: { schedule?: readonly unknown[] } }).projectionValues?.schedule
+  return schedules !== undefined && schedules.length > 0
+}
+
 function pendingFields(snapshot: PendingInteractionSnapshot, id: SessionId):
   | Record<never, never>
   | { readonly pendingInteraction: PendingInteractionStatus } {
@@ -292,6 +298,7 @@ function sessionNode(
     runningSubagentCount: descendants.get(s.id)?.runningCount ?? 0,
     completed: s.completed === true,
     updatedAt: s.updatedAt,
+    hasActiveSchedule: activeSchedule(s),
     ...pendingFields(pendingInteractions, s.id),
   }
 }
@@ -537,6 +544,7 @@ export function deriveSearchResults(
         running: summary.running,
         runningSubagentCount: descendants.get(summary.id)?.runningCount ?? 0,
         completed: summary.completed === true,
+        hasActiveSchedule: activeSchedule(summary),
         ...pendingFields(pendingInteractions, summary.id),
         ...match === undefined ? {} : { snippet: match.snippet },
       }

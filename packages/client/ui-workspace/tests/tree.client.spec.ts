@@ -172,6 +172,20 @@ describe('deriveGroups', () => {
     expect(search.items[0]?.completed).toBe(true)
   })
 
+  it('derives one active-Schedule fact for grouped, flat, and search rows', () => {
+    const now = Date.now()
+    const absent = summary('absent', 4)
+    const empty = { ...summary('empty', 3), projectionValues: { schedule: [] } } as SessionSummary
+    const future = { ...summary('future', 2), projectionValues: { schedule: [{ id: 'future', at: new Date(now + 60_000).toISOString() }] } } as SessionSummary
+    const overdue = { ...summary('overdue', 1), projectionValues: { schedule: [{ id: 'overdue', at: new Date(now - 60_000).toISOString() }] } } as SessionSummary
+    const sessions = list(absent, empty, future, overdue)
+    const workspaces = [workspace('project', ['absent', 'empty', 'future', 'overdue'], 'Project')]
+    const expected = [[sid('absent'), false], [sid('empty'), false], [sid('future'), true], [sid('overdue'), true]]
+    expect(deriveGroups(sessions, workspaces, noArchive, view(['project']))[0]!.sessions.map(node => [node.id, node.hasActiveSchedule])).toEqual(expected)
+    expect(deriveFlat(sessions, noArchive).map(node => [node.id, node.hasActiveSchedule])).toEqual(expected)
+    expect(deriveSearchResults(sessions, workspaces, 'project', noArchive, { items: [], hasMore: false }, 10).items.map(node => [node.id, node.hasActiveSchedule])).toEqual(expected)
+  })
+
   it('hides subagent-origin sessions without hiding ordinary forks', () => {
     const parent = summary('parent', 1)
     const subagent = {
@@ -410,12 +424,14 @@ describe('deriveSearchResults', () => {
           running: false,
           runningSubagentCount: 0,
           completed: false,
+          hasActiveSchedule: false,
           snippet: 'title session body excerpt',
         },
         {
           id: workspaceHit.id,
           title: 'Ordinary title',
           workspace: 'Needle Workspace',
+          hasActiveSchedule: false,
           running: false,
           runningSubagentCount: 0,
           completed: false,
@@ -427,6 +443,7 @@ describe('deriveSearchResults', () => {
           running: false,
           runningSubagentCount: 0,
           completed: false,
+          hasActiveSchedule: false,
           snippet: 'body needle excerpt',
         },
       ],

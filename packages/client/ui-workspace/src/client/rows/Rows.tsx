@@ -289,7 +289,6 @@ function sessionStatuses(
       pending = { state: 'warning', label: t('status.waitingAnswer') }
       break
     case undefined: break
-    /* v8 ignore next -- closed PendingInteractionStatus union */
     default: return assertNever(node.pendingInteraction)
   }
   if (pending !== undefined) return subagents === undefined ? [pending] : [pending, subagents]
