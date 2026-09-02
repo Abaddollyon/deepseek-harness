@@ -2,6 +2,8 @@
 
 Status: proposed
 
+[English](2026-09-02-subscription-web-search-provider-contract.md) | 中文
+
 ## Problem
 订阅式 CLI 需要网页搜索，同时不能修改主机接线或读取凭据。
 

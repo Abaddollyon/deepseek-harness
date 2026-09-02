@@ -110,7 +110,10 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
     this.notificationHandler = handler
   }
 
-  /** Install a callback for malformed peer frames. */
+  /**
+   * Install a callback for malformed peer frames.
+   * @param handler - Observer receiving the original malformed line.
+   */
   onMalformed(handler: (line: string) => void): void {
     this.malformedHandler = handler
   }
@@ -224,12 +227,18 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       return
     }
     if (typeof id === 'string' || typeof id === 'number') {
+      if (!this.pending.has(id) && this.malformedHandler !== undefined) {
+        this.malformedHandler(line)
+        return
+      }
       this.handleIncomingResponse(id, frame)
       return
     }
     if (typeof method === 'string') {
       this.notificationHandler?.(method, objectParams(frame.params))
+      return
     }
+    this.malformedHandler?.(line)
   }
 
   private async handleIncomingRequest(id: JsonRpcId, method: string, params: Record<string, unknown>): Promise<void> {

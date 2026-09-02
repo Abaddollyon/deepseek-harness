@@ -1,4 +1,6 @@
-# Bilingual-pair consistency record. Regenerate with:
-# pnpm run verify-translation-pairing --write packages/web/web-search-codex/README.md
-README.md:
-README.zh.md:
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/web/web-search-codex/README.md
+README.md: 7b7b2ceafb5f68553bd307e70b7bf37e3f580f83
+README.zh.md: 031d4c12220b7d821453fe65fafa4da630f96612

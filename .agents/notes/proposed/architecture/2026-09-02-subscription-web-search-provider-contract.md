@@ -2,6 +2,8 @@
 
 Status: proposed
 
+English | [中文](2026-09-02-subscription-web-search-provider-contract.zh.md)
+
 ## Problem
 Subscription CLIs need web search without host wiring or credential reads.
 

@@ -3254,6 +3254,32 @@ export interface Config {
 
 来源：[`packages/web/web-fetch-http/src/index.ts:32`](../packages/web/web-fetch-http/src/index.ts)
 
+<a id="deepseek-aidsh-web-search-codex"></a>
+
+## `@deepseek-ai/dsh-web-search-codex`
+
+需要：`web` · `subprocess`
+
+```ts config-catalog
+/** Optional plugin configuration; defaults are applied by {@link apply}. */
+export interface Config {
+  /** Working directory; defaults to the host process directory. */
+  cwd?: string
+  /** Inner request timeout in milliseconds; defaults to 60000. */
+  requestTimeoutMs?: number
+  /** Process-tree termination grace in milliseconds; defaults to 3000. */
+  disposeGraceMs?: number
+  /** Provider-side result cap; defaults to 8. */
+  maxResults?: number
+  /** Serialized result/diagnostic cap in bytes; defaults to 262144. */
+  maxPayloadBytes?: number
+  /** Bare or absolute Codex executable override. */
+  executable?: string
+}
+```
+
+来源：[`packages/web/web-search-codex/src/index.ts:31`](../packages/web/web-search-codex/src/index.ts)
+
 <a id="deepseek-aidsh-web-search-deepseek"></a>
 
 ## `@deepseek-ai/dsh-web-search-deepseek`
