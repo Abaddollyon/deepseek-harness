@@ -898,6 +898,7 @@ describe('dsh-tool-subagent background mode', () => {
       reply: 'not background output',
       diagnostic: 'Claude Code cancelled an unattended dialog',
       stopReason: 'error',
+      failure: { code: 'QUOTA' },
     })
     const parent = ownerAgent(ctx, 'sess-parent')
 
@@ -919,7 +920,7 @@ describe('dsh-tool-subagent background mode', () => {
     })
     expect(text(output)).toBe(
       '(no new output)\n'
-      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog]',
+      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog; failure code: QUOTA]',
     )
   })
 

@@ -19,14 +19,17 @@ function finalText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Render a failed stop reason with optional provider-authored detail. */
 function failureDetail(result: SubagentResult): string {
   const stopReason = result.stopReason
-  return result.diagnostic === undefined
+  const detail = result.diagnostic === undefined
     ? stopReason
-    : `${stopReason}; diagnostic: ${result.diagnostic}`
+    : stopReason + '; diagnostic: ' + result.diagnostic
+  if (result.failure === undefined) return detail
+  const retry = result.failure.retryAfterMs === undefined
+    ? ''
+    : '; retry after ' + String(result.failure.retryAfterMs) + 'ms'
+  return detail + '; failure code: ' + result.failure.code + retry
 }
-
 /**
  * Map a child result to the task outcome: completed carries final text, local
  * cancellation (`aborted` without a diagnostic) is killed, and provider-

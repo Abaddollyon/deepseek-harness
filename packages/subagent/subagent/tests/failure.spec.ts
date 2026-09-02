@@ -76,7 +76,7 @@ describe('subagentFailureFromLlmFailure', () => {
     delete (nativeAggregate as unknown as { errors?: unknown }).errors
     Object.setPrototypeOf(nativeAggregate, Object.create(AggregateError.prototype, {
       errors: { get: () => [new LlmError('rate', 'RATE_LIMIT')] },
-    }))
+    }) as object)
     expect(terminalDiagnostic(nativeAggregate).failure).toEqual({ code: 'RATE_LIMIT' })
     const cyclic = new AggregateError([])
     Object.defineProperty(cyclic, 'errors', { value: [cyclic] })

@@ -1184,7 +1184,7 @@ describe('continuable durability and teardown', () => {
     // layers and its LLM cause keeps the retry classification intact.
     const outer = (failure as SubagentError).cause
     expect(outer).toBeInstanceOf(AggregateError)
-    const childFailure = (outer as AggregateError).errors[0]
+    const childFailure: unknown = (outer as AggregateError).errors[0]
     expect(childFailure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
     expect((childFailure as SubagentError).cause).toBeInstanceOf(AggregateError)
     expect(terminalDiagnostic(failure)).toMatchObject({
