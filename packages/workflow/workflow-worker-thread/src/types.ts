@@ -54,6 +54,12 @@ export interface ChildStartRequest {
   provider?: string
   /** The per-child model override, if the call passed one. */
   model?: string
+  /**
+   * The per-child reasoning effort, if the call passed one. Carried as a plain
+   * string across the thread and branded host-side; the host validates it
+   * against the selected route before any child starts.
+   */
+  reasoningEffort?: string
 }
 
 /**

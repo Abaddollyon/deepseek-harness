@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-goal-round-driver` 会在同一会话中自动继续 active 的 goal：每当 agent 空闲且存在 active、已启用续行并有剩余容量的 goal 时，驱动器就会启动下一个 Goal Round。每一轮都是朝目标前进的一次模型轮次，由保留的 goal-round 提示词驱动；只有来源为 goal 的 Round 会计入 goal 的 Round 上限，上限耗尽时 goal 会记录一个 blocker。驱动器没有自己的配置——Round 上限属于 goal 定义，面向模型的阻塞阈值属于 `dsh-tool-goal`，策略因此只保留在一处。当任务应跨多轮自行推进时，与 `dsh-goal` 和 `dsh-tool-goal` 一起挂载它；当每一步都需要人工 steering（中途引导）时，不要挂载。
+`dsh-goal-round-driver` 会在同一会话中自动继续 active 的 goal：每当 agent 空闲且存在 active、已启用续行并有剩余容量的 goal 时，驱动器就会启动下一个 Goal Round。每一轮都是朝目标前进的一次模型轮次，由保留的 goal-round 提示词驱动；只有来源为 goal 的 Round 会计入 goal 的 Round 上限，上限耗尽时 goal 会记录一个 blocker。驱动器支持可选的 wake 策略：always 立即继续，event-driven 在后台工作结束或计时器唤醒后继续；事件驱动模式需要 timer 服务。Round 上限属于 goal 定义，面向模型的阻塞阈值属于 `dsh-tool-goal`。当任务应跨多轮自行推进时，与 `dsh-goal` 和 `dsh-tool-goal` 一起挂载它；当每一步都需要人工 steering（中途引导）时，不要挂载。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 组合方式
 
-把驱动器挂载在 goal 服务与 goal 工具旁边；驱动器本身不需要任何配置。
+把驱动器挂载在 goal 服务与 goal 工具旁边。可选的 `wake` 配置默认立即续行；如果运行中的子 agent 或调用方所属 job 应抑制静默轮询，请选择 `event-driven` 并设置有界的 `timeoutMs`。
 
 ```yaml
 - id: goal
@@ -71,7 +71,7 @@ Round 只在整个 agent 进入 idle 时启动；完成、暂停和阻塞会阻�
 - **先预留，后准入。** idle 时驱动器为当前 `{ goalId, revision }` 预留 `roundsStarted + 1`，排入一条携带 goal 消息来源的 `<goal_round>` 提示词；只有进入步骤的 `user/message` 才会增加 `roundsStarted`。因陈旧而被拒绝的预留不会消耗 Round 编号。
 - **竞态防护。** `agent/pre-step` 监听器会在下游监听器前后验证完整的已领取记录与当前 goal，因此陈旧、已取消或竞争中的提示词会在其步骤进入前被拒绝。在预留前到达的人类工作会让自动工作让行，直到 agent 重新进入 idle。
 - **持久性检查点。** `goal/changed` 会产生持久性义务：排队工作前，驱动器会等待 `ctx.sessions.flush()`，并在等待后重新检查 goal revision 与竞争输入。通过 `agent/error` 到达的 flush 失败会停用续行，避免另一 Round 启动。
-- **默认关闭的 teardown。** Teardown 会关闭准入、停用所有活跃 goal 的续行、以 `parent` 原因取消进行中的工作，并在事件防护仍生效的情况下等待驱动器和 agent 完全停稳。
+- **默认关闭的 teardown。** Teardown 会关闭准入、停用所有活跃 goal 的续行，在以 `parent` 原因取消前移除驱动器已领取的提示词，并在事件防护仍生效的情况下等待驱动器和 agent 完全停稳。外部人工输入仍保持待处理。
 
 ### 源码地图
 

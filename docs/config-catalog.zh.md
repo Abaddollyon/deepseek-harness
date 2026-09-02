@@ -767,6 +767,27 @@ export interface Config {
 
 来源：[`packages/goal/goal/src/index.ts:172`](../packages/goal/goal/src/index.ts)
 
+<a id="deepseek-aidsh-goal-round-driver"></a>
+
+## `@deepseek-ai/dsh-goal-round-driver`
+
+需要：`agents` · `goals` · `sessions`
+
+```ts config-catalog
+/** Deployment-level policy for automatic goal continuation. */
+export interface Config {
+  /** Conditions that may reserve the next goal round. */
+  wake: {
+    /** `always` preserves immediate continuation; `event-driven` waits while owned work remains live. */
+    mode: 'always' | 'event-driven'
+    /** Maximum quiet wait before a safety-net continuation. */
+    timeoutMs: number
+  }
+}
+```
+
+来源：[`packages/goal/goal-round-driver/src/index.ts:26`](../packages/goal/goal-round-driver/src/index.ts)
+
 <a id="deepseek-aidsh-headless"></a>
 
 ## `@deepseek-ai/dsh-headless`
@@ -883,18 +904,24 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-webserver`
 
 ```ts config-catalog
-/** Web server listen and response-compression config. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
-  /** Response compression for socket-backed HTTP requests. @default 'none' */
-  compression?: 'none' | 'gzip'
-  /** Gzip DEFLATE level from 0 through 9. @default 1 */
-  compressionLevel?: number
-  /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
-  compressionThresholdBytes?: number
+  /** Whether responses are compressed at all. */
+  compress?: boolean
+  /** Smallest body the carrier encodes. */
+  compressMinBytes?: number
+  /** Brotli quality, 0-11. */
+  brotliQuality?: number
+  /** Deflate level for gzip, 0-9. */
+  gzipLevel?: number
+  /** Content-hashed asset pathname prefixes. */
+  immutablePathPrefixes?: string[]
+  /** Lifetime for immutable responses, in seconds. */
+  immutableMaxAgeSeconds?: number
 }
 ```
 
@@ -1763,7 +1790,7 @@ export interface Config {
 
 依赖：[`SandboxMode`](subsystems/sandbox.zh.md)
 
-来源：[`packages/sandbox/sandbox-policy/src/index.ts:70`](../packages/sandbox/sandbox-policy/src/index.ts)
+来源：[`packages/sandbox/sandbox-policy/src/index.ts:76`](../packages/sandbox/sandbox-policy/src/index.ts)
 
 <a id="deepseek-aidsh-sdk-app"></a>
 
@@ -1869,6 +1896,12 @@ export interface Config {
   compression?: JsonlCompression
   /** Maximum cold Session preparations retained for history-to-resume reuse. */
   preparedSessionCacheSize?: number
+  /**
+   * Maximum concurrent per-session header reads during `list()`/`listSnapshots()`.
+   * Raise for high-latency filesystems (network mounts), lower to bound I/O
+   * pressure on congested disks.
+   */
+  listConcurrency?: number
   /** Fixed live-event coalescing window; not a backend completion deadline. */
   writeBatchMaxDelayMs?: number
 }
@@ -1877,7 +1910,7 @@ export interface Config {
 export type JsonlCompression = 'zstd' | 'none'
 ```
 
-来源：[`packages/session/session-persistence-jsonl/src/index.ts:70`](../packages/session/session-persistence-jsonl/src/index.ts)
+来源：[`packages/session/session-persistence-jsonl/src/index.ts:76`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 <a id="deepseek-aidsh-session-projection-cache"></a>
 
@@ -3406,7 +3439,6 @@ export interface Config {
 - `@deepseek-ai/dsh-experimental-client-ui-agent-team`（[`packages/experimental/client-ui-agent-team/src/index.ts`](../packages/experimental/client-ui-agent-team/src/index.ts)）
 - `@deepseek-ai/dsh-fs-e2b` — 需要 `e2b`（[`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts)）
 - `@deepseek-ai/dsh-fs-observation-policy`（[`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts)）
-- `@deepseek-ai/dsh-goal-round-driver` — 需要 `agents` · `goals` · `sessions`（[`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker-auto` — 需要 `webServer` · `loader`（[`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker-native`（[`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts)）
 - `@deepseek-ai/dsh-host-plugin-inventory` — 需要 `loader`（[`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts)）
