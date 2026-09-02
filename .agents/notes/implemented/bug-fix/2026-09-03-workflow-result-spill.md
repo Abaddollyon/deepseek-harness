@@ -28,4 +28,4 @@ The workflow package test returns a structured value above 50,000 characters, ve
 
 ## Consequences
 
-Large successful workflow results are recoverable in both foreground and supervised modes, and models are told the contract in the tool description. Oversized completion now depends on a mounted spill backend; missing or failed storage is visible as an error instead of silent data loss. Durable marker metadata receives priority over preview text.
+Large successful workflow results are recoverable in both foreground and supervised modes, and models are told the contract in the tool description. Oversized completion now depends on a mounted spill backend; missing or failed storage is visible as an error instead of silent data loss. Durable marker metadata receives priority over preview text. This marker+spill contract applies to workflow results (structured JSON); raw stream producers retain the established tail-clipping behavior, whose stream-level truncation metadata remains visible to their callers rather than being mistaken for a workflow result.

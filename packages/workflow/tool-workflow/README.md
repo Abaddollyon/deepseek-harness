@@ -42,7 +42,7 @@ With `ownership: caller`, the tool awaits the result, bridges the parent step's 
 | Field | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. |
+| `maxResultChars` | `50000` | Ceiling for the serialized return value only; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. The marker envelope may exceed this value, as with bash result metadata. |
 | `ownership` | `caller` | `caller` waits in the tool call; `supervisor` durably hands the bounded run to `ctx.jobs`. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
@@ -158,7 +158,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 These limits define what the tool does not yet support. They are current constraints, not a task backlog.
 
 - **Supervisor ownership is durable accounting, not workflow resumption** — the current workflow record is non-resumable after host death and is honestly settled on restart; live supervised runs continue only while the host process remains alive.
-- **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays and scalars in a field; the canonical workflow result stays complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
+- **`args` must be an object and the result envelope is metadata-bearing** — callers wrap top-level arrays and scalars in a field; `maxResultChars` caps only the serialized return value, while an oversized value is replaced by a recoverable marker whose envelope may exceed the cap, as with bash result metadata.
 - **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
 - **Durable records are top-level and observational** — nested PTC mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
 

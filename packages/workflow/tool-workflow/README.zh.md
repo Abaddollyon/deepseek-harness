@@ -42,7 +42,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
-| `maxResultChars` | `50000` | 序列化返回值上限；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`。 |
+| `maxResultChars` | `50000` | 仅限制序列化返回值；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`。如 bash 结果元数据一样，标记封装可能超过此值。 |
 | `ownership` | `caller` | `caller` 在工具调用中等待；`supervisor` 将有界运行持久交接给 `ctx.jobs`。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-workflow)是每个受支持字段的穷尽式真源。
