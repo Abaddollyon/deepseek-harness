@@ -1,36 +1,104 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  claudeQueryOptions,
+  claudeSpawnSpec,
+  ManagedClaudeCodeProcess,
+  sdkEnvironmentOverlay,
+} from '@deepseek-ai/dsh-subagent-claude-code'
+import { claudeSpawnSpec as directSpawn, ManagedClaudeCodeProcess as DirectProcess } from '../../../subagent/subagent-claude-code/src/process.ts'
+import { claudeQueryOptions as directOptions } from '../../../subagent/subagent-claude-code/src/run.ts'
 import { apply, inject, name } from '../src/index.ts'
+
+type Cleanup = () => void | Promise<void>
+
+function composition() {
+  const providers = new Map<string, { id: string; dispose(): Promise<void> }>()
+  const cleanups: Cleanup[] = []
+  const children = new Set<number>()
+  const registerSearchProvider = vi.fn((provider: { id: string; dispose(): Promise<void> }) => {
+    if (providers.has(provider.id)) throw Object.assign(new Error('duplicate'), { code: 'WEB_DUPLICATE_PROVIDER' })
+    providers.set(provider.id, provider)
+    return () => { providers.delete(provider.id) }
+  })
+  const ctx = {
+    web: { registerSearchProvider },
+    subprocess: { spawn: () => { children.add(1); throw new Error('unused') } },
+    effect: vi.fn((factory: () => Generator<Cleanup>) => {
+      for (const cleanup of factory()) cleanups.push(cleanup)
+    }),
+  }
+  return {
+    ctx: ctx as never,
+    providers,
+    children,
+    registerSearchProvider,
+    dispose: async () => {
+      for (const cleanup of cleanups.reverse()) await cleanup()
+    },
+  }
+}
+
 describe('loader composition', () => {
-  it('declares the web and subprocess seams', () => {
+  it('declares exact seams and preserves shared Claude SDK exports', () => {
     expect(name).toBe('web-search-claude-code')
     expect(inject).toEqual(['web', 'subprocess'])
+    expect(claudeSpawnSpec).toBe(directSpawn)
+    expect(ManagedClaudeCodeProcess).toBe(DirectProcess)
+    expect(claudeQueryOptions).toBe(directOptions)
+    expect(typeof sdkEnvironmentOverlay).toBe('function')
   })
-  it('registers and retains a disposer', () => {
-    const disposer = vi.fn()
-    const registerSearchProvider = vi.fn(() => disposer)
-    const ctx = {
-      web: { registerSearchProvider },
-      effect: vi.fn((fn: () => Generator) => {
-        fn().next()
-      }),
-    } as never
-    apply(ctx, { cwd: '.' })
-    expect(registerSearchProvider).toHaveBeenCalledOnce()
-    expect(disposer).not.toHaveBeenCalled()
+
+  it('registers fixed ID, rejects duplicates, then disposes and unregisters with no children', async () => {
+    const fake = composition()
+    apply(fake.ctx)
+    expect([...fake.providers]).toHaveLength(1)
+    expect(fake.providers.has('claude-code')).toBe(true)
+    expect(() => { apply(fake.ctx) }).toThrow('duplicate')
+    expect(fake.registerSearchProvider).toHaveBeenCalledTimes(2)
+    await fake.dispose()
+    expect(fake.providers.size).toBe(0)
+    expect(fake.children.size).toBe(0)
   })
-  it('accepts every explicit configuration edge', () => {
-    const dispose = vi.fn()
-    const registerSearchProvider = vi.fn(() => dispose)
-    const ctx = { web: { registerSearchProvider }, effect: vi.fn() } as never
-    apply(ctx, {
-      cwd: '/tmp',
-      requestTimeoutMs: 1,
-      disposeGraceMs: 1,
-      maxResults: 1,
-      maxTurns: 1,
-      maxPayloadBytes: 1,
-      executable: 'claude',
+
+  it('accepts every explicit bound and executable form', () => {
+    const low = composition()
+    apply(low.ctx, {
+      cwd: '.', requestTimeoutMs: 1, disposeGraceMs: 1, maxResults: 1,
+      maxTurns: 1, maxPayloadBytes: 1048, executable: 'claude',
     })
-    expect(registerSearchProvider).toHaveBeenCalledOnce()
+    const high = composition()
+    apply(high.ctx, {
+      cwd: '.', requestTimeoutMs: 600000, disposeGraceMs: 60000, maxResults: 50,
+      maxTurns: 16, maxPayloadBytes: 1048576, executable: process.execPath,
+    })
+    expect(low.providers.has('claude-code')).toBe(true)
+    expect(high.providers.has('claude-code')).toBe(true)
+  })
+
+  it.each([
+    [{ id: 'other' }, 'id cannot be overridden'],
+    [{ cwd: '   ' }, 'cwd must be nonblank'],
+    [{ executable: '' }, 'executable must be'],
+    [{ executable: ' claude' }, 'executable must be'],
+    [{ executable: './claude' }, 'executable must be'],
+    [{ requestTimeoutMs: 0 }, 'requestTimeoutMs'],
+    [{ requestTimeoutMs: 600001 }, 'requestTimeoutMs'],
+    [{ requestTimeoutMs: 1.5 }, 'requestTimeoutMs'],
+    [{ requestTimeoutMs: Number.MAX_VALUE }, 'requestTimeoutMs'],
+    [{ disposeGraceMs: 0 }, 'disposeGraceMs'],
+    [{ disposeGraceMs: 60001 }, 'disposeGraceMs'],
+    [{ maxResults: 0 }, 'maxResults'],
+    [{ maxResults: 51 }, 'maxResults'],
+    [{ maxTurns: 0 }, 'maxTurns'],
+    [{ maxTurns: 17 }, 'maxTurns'],
+    [{ maxPayloadBytes: 1047 }, 'maxPayloadBytes'],
+    [{ maxPayloadBytes: 1048577 }, 'maxPayloadBytes'],
+  ] as const)('rejects invalid config %# with WEB_INVALID_CONFIG', (config, message) => {
+    expect(() => { apply(composition().ctx, config as never) }).toThrow(message)
+    try {
+      apply(composition().ctx, config as never)
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'WEB_INVALID_CONFIG' })
+    }
   })
 })
