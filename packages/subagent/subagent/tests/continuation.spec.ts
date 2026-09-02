@@ -2387,7 +2387,7 @@ describe('continuable settlement delivery', () => {
     expect(parent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(false)
   })
 
-  it('records but cannot deliver a teardown notice once the parent is disposed too', async () => {
+  it('keeps a teardown notice pending across parent disposal for a resumed lifecycle', async () => {
     const hold = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('interrupted'), gate: hold.promise }])
     const { ctx } = await setupWith(adapter)
@@ -2404,22 +2404,26 @@ describe('continuable settlement delivery', () => {
     await drained
     expect(settlementNotices(host.agent)).toHaveLength(1)
 
-    // Disposal is a `keepInbox: false` cancel, so it durably cancels the notice
-    // it never claimed. Teardown delivery therefore reaches a parent that is
-    // still resident — a resumed one reads the log, not a pending message — and
-    // no wording anywhere may promise otherwise.
+    // Disposal keeps the pending inbox, so the notice it never claimed is
+    // still parked when the resumed lifecycle takes over: pending input is
+    // durable session state, not runtime residue teardown may discard.
     await host.dispose()
     const resumed = await ctx.agents.resume({
       resumeSessionId: parentId,
       agentOptions: { provider: 'mock', model: 'mock' },
     })
-    expect(settlementNotices(resumed.agent)).toEqual([])
+    expect(settlementNotices(resumed.agent)).toHaveLength(1)
+    expect(settlementNotices(resumed.agent)[0]!.text).toBe(
+      `Background subagent ${started.childId} was stopped before it finished.`
+      + '\nIt left no closing message.',
+    )
     await resumed.dispose()
-    // The account is still in the durable log: delivered, then cancelled unread.
+    // The account in the durable log: delivered and still pending, never
+    // cancelled unread.
     const persisted = await ctx.sessionPersistence.load(parentId)
     expect(persisted.events.flatMap(event => event.type === 'agent/inbox/spliced'
       ? [{ inserted: event.data.inserted.length, removed: event.data.removedCount ?? 0 }]
-      : [])).toEqual([{ inserted: 1, removed: 0 }, { inserted: 0, removed: 1 }])
+      : [])).toEqual([{ inserted: 1, removed: 0 }])
   })
 
   it('drops the notice without disturbing teardown when the parent is gone', async () => {

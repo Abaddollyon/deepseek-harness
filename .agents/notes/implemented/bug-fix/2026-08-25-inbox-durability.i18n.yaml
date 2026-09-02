@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-inbox-durability.md
+2026-08-25-inbox-durability.md: 5dd6d8c7750153ca4b7c68d585c242bf5bb7e389
+2026-08-25-inbox-durability.zh.md: 8a4d0b871c66d4f38b25ae62b4b886b6a2d6ab99

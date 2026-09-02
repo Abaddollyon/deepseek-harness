@@ -4,9 +4,11 @@ import { fileURLToPath } from 'node:url'
 import type { Worker } from 'node:worker_threads'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import type { ResolvedSubagentStartRequest, SubagentCapabilities, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowMeta, WorkflowResult, WorkflowResultInfo, WorkflowRun, WorkflowRunInfo } from '@deepseek-ai/dsh-workflow'
 import * as workerEngineModule from '../src/index.ts'
 import WorkerThreadWorkflowEngine, { type Config } from '../src/index.ts'
@@ -16,8 +18,36 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 
 /** A minimal parent stand-in: the engine only threads it through to the provider. */
-function fakeParent(): Agent {
-  return { id: SessionId('workflow-parent'), options: {} } as unknown as Agent
+function fakeParent(options: AgentOptions = {}): Agent {
+  return { id: SessionId('workflow-parent'), options } as unknown as Agent
+}
+
+/**
+ * One adapter whose exact routes declare reasoning efforts, so effort
+ * validation runs against the SAME capability query the loop would use.
+ * `unknown-model` deliberately declares none.
+ */
+class ReasoningAdapter extends LlmAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      ...model === 'no-reasoning'
+        ? {}
+        : { reasoning: { efforts: [{ id: ReasoningEffortId('low'), name: 'low' }, { id: ReasoningEffortId('high'), name: 'high' }] } },
+    })
+  }
+
+  stream(): AsyncIterable<never> {
+    throw new Error('effort validation never dispatches a request')
+  }
+}
+
+/** Mount the LLM capability with the reasoning-declaring adapter on two routes. */
+async function mountReasoningLlm(ctx: Context): Promise<void> {
+  await ctx.plugin(LlmRuntime)
+  ctx.llm.registerAdapter(['inherited-provider', 'openai'], new ReasoningAdapter())
 }
 
 // Allow cold worker startup on contended CI runners.
@@ -39,7 +69,7 @@ const ESCAPE = "globalThis.constructor.constructor('return process')()"
 
 /** One controllable child run: the test (or auto mode) settles it. */
 interface ControlledRun {
-  request: SubagentStartRequest
+  request: ResolvedSubagentStartRequest
   /** Fulfill the provider's async start with a published child. */
   publish(): void
   /** Reject the provider's async start before ownership transfer. */
@@ -70,14 +100,14 @@ class StubProvider implements SubagentProvider {
 
   constructor(
     readonly name: string,
-    private readonly reply?: (request: SubagentStartRequest, index: number) => SubagentResult,
+    private readonly reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult,
     private readonly disposeDelayMs = 0,
     private readonly deferStart = false,
     private readonly onAbortString?: (reason: string | undefined, index: number) => void,
     private readonly onSignalAbort?: (reason: unknown, index: number) => void,
   ) {}
 
-  async start(request: SubagentStartRequest): Promise<SubagentRun> {
+  async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
     const startGate = Promise.withResolvers<undefined>()
     const terminal = Promise.withResolvers<SubagentResult>()
     terminal.promise.catch(() => { /* provider owns early settlement until publication */ })
@@ -142,7 +172,7 @@ function text(reply: string): SubagentResult {
 
 interface SetupOptions {
   config?: Config
-  reply?: (request: SubagentStartRequest, index: number) => SubagentResult
+  reply?: (request: ResolvedSubagentStartRequest, index: number) => SubagentResult
   manual?: boolean
   disposeDelayMs?: number
   deferStart?: boolean
@@ -238,12 +268,87 @@ describe('dsh-workflow-worker-thread', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.parent).toBeDefined()
     })
 
+    it('agent({label}) persists the label on the child; an unlabelled call stays label-free', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`
+        await agent('named child', { label: 'scout' })
+        return await agent('anonymous child')
+      `))
+
+      expect(result.stopReason).toBe('completed')
+      // Assert the provider's resolved durable descriptor, not transient request metadata.
+      expect(provider.runs[0]!.request.descriptor.label).toBe('scout')
+      expect(provider.runs[1]!.request.descriptor.label).toBeUndefined()
+    })
+
     it('agent({provider}) forwards provider-only agentOptions across the thread', async () => {
       const { ctx, parent, provider } = await setup()
       const result = await run(ctx, parent, scripted("return await agent('route me', { provider: 'openai' })"))
 
       expect(result.value).toBe('stub reply')
       expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai' })
+    })
+
+    it('agent({reasoningEffort}) alone validates against the INHERITED route and reaches the child as agentOptions', async () => {
+      const { ctx, provider } = await setup()
+      await mountReasoningLlm(ctx)
+      const parent = fakeParent({ provider: 'inherited-provider', model: 'inherited-model' })
+      const result = await run(ctx, parent, scripted("return await agent('think', { reasoningEffort: 'high' })"))
+
+      expect(result.stopReason).toBe('completed')
+      expect(provider.runs[0]!.request.agentOptions).toEqual({ reasoningEffort: 'high' })
+    })
+
+    it('a per-call provider/model override moves which route the effort is validated against', async () => {
+      const { ctx, provider } = await setup()
+      await mountReasoningLlm(ctx)
+      // The parent route offers no reasoning at all; the overridden one does.
+      const parent = fakeParent({ provider: 'inherited-provider', model: 'no-reasoning' })
+      const result = await run(ctx, parent, scripted("return await agent('think', { provider: 'openai', model: 'gpt-x', reasoningEffort: 'low' })"))
+
+      expect(result.stopReason).toBe('completed')
+      expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai', model: 'gpt-x', reasoningEffort: 'low' })
+    })
+
+    it('an effort the selected route does not offer kills the script loudly instead of quietly lowering it', async () => {
+      const { ctx, provider } = await setup()
+      await mountReasoningLlm(ctx)
+      const parent = fakeParent({ provider: 'inherited-provider', model: 'inherited-model' })
+      const result = await run(ctx, parent, scripted("return await pipeline([1], () => agent('think', { reasoningEffort: 'max' }))"))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain('agent() reasoningEffort "max" was refused by the selected route')
+      expect(result.error).toContain('does not support reasoning effort "max"')
+      expect(provider.runs).toHaveLength(0)
+    })
+
+    it('an effort against a model with no reasoning at all is refused before the child starts', async () => {
+      const { ctx, provider } = await setup()
+      await mountReasoningLlm(ctx)
+      const parent = fakeParent({ provider: 'inherited-provider', model: 'no-reasoning' })
+      const result = await run(ctx, parent, scripted("return await agent('think', { reasoningEffort: 'low' })"))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain('agent() reasoningEffort "low" was refused by the selected route')
+      expect(provider.runs).toHaveLength(0)
+    })
+
+    it('an effort with no complete route to apply to is refused by name', async () => {
+      const { ctx } = await setup()
+      await mountReasoningLlm(ctx)
+      const result = await run(ctx, fakeParent({ provider: 'inherited-provider' }), scripted("return await agent('think', { reasoningEffort: 'low' })"))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain('agent() reasoningEffort "low" needs a complete route')
+    })
+
+    it('an effort request without an LLM capability composed is refused, never accepted-then-ignored', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted("return await agent('think', { reasoningEffort: 'low' })"))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain('composes no LLM capability to validate it against')
+      expect(provider.runs).toHaveLength(0)
     })
 
     it('a start-request provider override selects every child without changing the engine default', async () => {
@@ -1200,7 +1305,7 @@ describe('dsh-workflow-worker-thread', { timeout: 120_000 }, () => {
       const ctx = new Context()
       await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SubagentRuntime)
-      const requested = Promise.withResolvers<SubagentStartRequest>()
+      const requested = Promise.withResolvers<ResolvedSubagentStartRequest>()
       const ready = Promise.withResolvers<SubagentRun>()
       let disposeCalls = 0
       const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => ctx.logger)

@@ -74,7 +74,7 @@ describe('Agent.cancel()', () => {
     expect(agent.session.snapshotEvents().some(e => e.type === 'turn/end')).toBe(true)
   })
 
-  it('cancel({ keepInbox: true }) does not restore work already claimed by a waking send', async () => {
+  it('cancel({ keepInbox: true }) restores work already claimed by a waking send', async () => {
     const adapter = new MockAdapter([textResponse('wake reply')])
     const ctx = await harness(adapter)
     const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
@@ -89,7 +89,7 @@ describe('Agent.cancel()', () => {
     expect(agent.session.snapshotEvents().some(event =>
       event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
     await agent.whenIdle()
-    expect(agent.inbox.nextTurn).toHaveLength(0)
+    expect(agent.inbox.nextTurn).toHaveLength(1)
     expect(userTexts(agent)).toEqual([])
     expect(adapter.requests).toHaveLength(0)
     expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
@@ -98,8 +98,8 @@ describe('Agent.cancel()', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'wake it')
     await idle
-    expect(userTexts(agent)).toEqual(['wake it'])
-    expect(adapter.requests).toHaveLength(1)
+    expect(userTexts(agent)).toEqual(['preserved', 'wake it'])
+    expect(adapter.requests).toHaveLength(2)
   })
 
   it('cancel({ keepInbox: true }) parks queued work after an active turn aborts', async () => {
@@ -341,8 +341,8 @@ describe('Agent.cancel()', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'later')
     await idle
-    expect(adapter.requests).toHaveLength(2)
-    expect(userTexts(agent)).toEqual(['first', 'later'])
+    expect(adapter.requests).toHaveLength(3)
+    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'later'])
   })
 
   it('replacement work queued after idle-listener cancellation replays at convergence', async () => {
@@ -372,15 +372,15 @@ describe('Agent.cancel()', () => {
 
     // The wake sent after the cancel fired is latched: the surviving
     // replacement runs at convergence without a third message.
-    expect(adapter.requests).toHaveLength(2)
-    expect(userTexts(agent)).toEqual(['first', 'surviving replacement'])
+    expect(adapter.requests).toHaveLength(3)
+    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'surviving replacement'])
     expect(agent.inbox.nextTurn).toHaveLength(0)
 
     const idle = waitForIdle(ctx, agent)
     send(agent, 'wake it')
     await idle
-    expect(adapter.requests).toHaveLength(3)
-    expect(userTexts(agent)).toEqual(['first', 'surviving replacement', 'wake it'])
+    expect(adapter.requests).toHaveLength(4)
+    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'surviving replacement', 'wake it'])
   })
 
   it('cancel() mid-step aborts the active turn and drops every queued tail item', async () => {
@@ -796,16 +796,16 @@ describe('Agent.cancel()', () => {
     send(agent, 'B')
 
     await idle
-    expect(userTexts(agent)).toEqual(['B'])
+    expect(userTexts(agent)).toEqual(['A', 'B'])
     expect(agent.inbox.nextTurn).toHaveLength(0)
-    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests).toHaveLength(2)
 
     const replacementIdle = waitForIdle(ctx, agent)
     send(agent, 'C')
     await replacementIdle
-    expect(userTexts(agent)).toEqual(['B', 'C'])
-    expect(adapter.requests).toHaveLength(2)
-    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(3)
+    expect(userTexts(agent)).toEqual(['A', 'B', 'C'])
+    expect(adapter.requests).toHaveLength(3)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(4)
   })
 
   it("cancel clears the turn's steering — it is not re-enqueued as a fresh turn", async () => {

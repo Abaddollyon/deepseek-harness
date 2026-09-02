@@ -1,9 +1,17 @@
 import { existsSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import {
+  ISOLATED_PROJECT_ROOT_MARKER,
+  LOADER_SMOKE_TEST_TIMEOUT_MS,
+  isolateWorkspaceProjectRoot,
+  resolveExampleLaunch,
+  resolveExampleMode,
+  runLoaderSmoke,
+} from '@deepseek-ai/dsh-loader-smoke'
 
 const configPath = '/tmp/fixture.cordis.yml'
 const tsconfigPath = fileURLToPath(new URL('../../../../tsconfig.json', import.meta.url))
@@ -67,6 +75,36 @@ describe('runLoaderSmoke', () => {
     expect(existsSync(inspected)).toBe(false)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
+  it('anchors each subprocess in its requested root and creates the discovery marker', async () => {
+    const parents = await Promise.all([
+      mkdtemp(join(tmpdir(), 'dsh-loader-root-a-')),
+      mkdtemp(join(tmpdir(), 'dsh-loader-root-b-')),
+    ])
+    try {
+      const observed: string[] = []
+      for (const [index, parent] of parents.entries()) {
+        await runLoaderSmoke({
+          label: `root fixture ${index}`,
+          tempDirPrefix: `loader-smoke-root-${index}-`,
+          tempDirParent: parent,
+          binScript: fixture('success'),
+          configPath,
+          tsconfigPath,
+          inspect: async (cwd) => {
+            observed.push(cwd)
+            expect((await stat(join(cwd, '.git'))).isDirectory()).toBe(true)
+          },
+        })
+      }
+      expect(observed).toHaveLength(2)
+      expect(observed[0]).toContain(parents[0])
+      expect(observed[1]).toContain(parents[1])
+      expect(observed[0]).not.toBe(observed[1])
+    } finally {
+      await Promise.all(parents.map(parent => rm(parent, { recursive: true, force: true })))
+    }
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
   it('rejects a non-zero exit with captured diagnostics', async () => {
     await expect(runLoaderSmoke({
       label: 'failure fixture',
@@ -113,5 +151,75 @@ describe('runLoaderSmoke', () => {
       tsconfigPath,
       processTimeoutMs: 100,
     })).rejects.toThrow('hanging fixture did not exit within 0.1s.')
+  })
+})
+
+describe('launch resolver', () => {
+  it('rejects an unknown mode and missing source tsconfig', () => {
+    expect(() => resolveExampleMode('invalid')).toThrow('DSH_EXAMPLE_MODE')
+    expect(() => resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'src' })).toThrow('needs tsconfigPath')
+  })
+
+  it('derives the plain Node lib entry in lib mode', () => {
+    expect(resolveExampleMode('lib')).toBe('lib')
+    const launch = resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'lib' })
+    expect(launch.command).toBe(process.execPath)
+    expect(launch.args).toEqual(['/repo/lib/bin.js'])
+    expect(() => resolveExampleLaunch({ srcBin: '/repo/bin.ts', mode: 'lib' })).toThrow('expected a \"/src/\" segment')
+  })
+
+  it('selects the ESM source loader', () => {
+    const launch = resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'src', tsconfigPath: '/repo/tsconfig.json', sourceImport: 'tsx/esm' })
+    expect(launch.args[0]).toBe('--import')
+    expect(launch.env.TSX_TSCONFIG_PATH).toBe('/repo/tsconfig.json')
+  })
+})
+
+describe('isolateWorkspaceProjectRoot', () => {
+  it('creates the marker and keeps an existing real marker directory', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    try {
+      await isolateWorkspaceProjectRoot(cwd)
+      await isolateWorkspaceProjectRoot(cwd)
+      const marker = await lstat(join(cwd, ISOLATED_PROJECT_ROOT_MARKER))
+      expect(marker.isDirectory()).toBe(true)
+      expect(marker.isSymbolicLink()).toBe(false)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a symlinked marker without following it into foreign state', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    const foreign = await mkdtemp(join(tmpdir(), 'dsh-isolate-foreign-'))
+    try {
+      await symlink(foreign, join(cwd, ISOLATED_PROJECT_ROOT_MARKER))
+      await expect(isolateWorkspaceProjectRoot(cwd)).rejects.toThrow('already exists as a symbolic link')
+      // The harness neither replaced the link nor touched its target.
+      expect((await lstat(join(cwd, ISOLATED_PROJECT_ROOT_MARKER))).isSymbolicLink()).toBe(true)
+      expect(existsSync(foreign)).toBe(true)
+    } finally {
+      await Promise.all([cwd, foreign].map(dir => rm(dir, { recursive: true, force: true })))
+    }
+  })
+
+  it('propagates non-ENOENT marker stat failures', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    try {
+      const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      await expect(isolateWorkspaceProjectRoot(cwd, async () => { throw denied })).rejects.toBe(denied)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a marker file planted by workspace setup', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    try {
+      await writeFile(join(cwd, ISOLATED_PROJECT_ROOT_MARKER), 'gitdir: ../elsewhere')
+      await expect(isolateWorkspaceProjectRoot(cwd)).rejects.toThrow('already exists as a non-directory entry')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 })

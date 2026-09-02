@@ -73,7 +73,7 @@ Profile 集成 driver 使用仅限仓库内部的 `tests/fixtures/production-pro
 
 ### 设计
 
-harness 建立在一个分离之上：冒烟测试在隔离世界中的子进程里运行，测试进程只观察与断言。`runLoaderSmoke` 创建临时 cwd、在那里准备世界状态、以隔离的 DSH 主目录（临时 cwd 下的 `DSH_HOME`、`DSH_AGENTS_HOME`）spawn 解析出的可执行文件、立即关闭 stdin，并在截止时间内等待干净退出，然后在每种结果下都执行检查与清理。`runFixtureTurn` 停留在进程内：它查找组合中的唯一根 agent，跟踪任务从持久收件箱接收到整个 agent 完全停稳，汇总每步用量，并在返回前刷写会话。
+harness 建立在一个分离之上：冒烟测试在隔离世界中的子进程里运行，测试进程只观察与断言。`runLoaderSmoke` 创建临时 cwd、在那里准备世界状态，并用空的 `.git` 标记目录把该 cwd 锚定为自己的项目根——标记缺失时创建、已是真实目录时保留、若是会别名外来项目状态的符号链接或文件则立即报错——使指令与技能的向上发现停在自有 cwd。随后以隔离的 DSH 主目录（临时 cwd 下的 `DSH_HOME`、`DSH_AGENTS_HOME`）spawn 解析出的可执行文件、立即关闭 stdin，并在截止时间内等待干净退出，然后在每种结果下都执行检查与清理。`runFixtureTurn` 停留在进程内：它查找组合中的唯一根 agent，跟踪任务从持久收件箱接收到整个 agent 完全停稳，汇总每步用量，并在返回前刷写会话。
 
 ### 源码地图
 

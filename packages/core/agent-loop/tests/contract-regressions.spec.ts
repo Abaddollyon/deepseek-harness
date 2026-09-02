@@ -250,7 +250,7 @@ describe('abort during tool execution ends the turn', () => {
         : []))
       .toEqual([])
     expect(agent.inbox.nextStep.map(inboxText))
-      .toEqual(['accepted result context during disposal'])
+      .toEqual(['accepted before disposal', 'accepted result context during disposal'])
     expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/start'))
       .toHaveLength(1)
     expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')?.data.reason)
