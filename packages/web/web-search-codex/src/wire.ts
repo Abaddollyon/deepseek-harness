@@ -8,6 +8,12 @@ type JsonObject = Record<string, unknown>
 /** Protocol validation failure safe for provider-level classification. */
 export class CodexProtocolError extends Error {}
 
+/** Stable structured authentication signal from the Codex app-server. */
+export class CodexAuthError extends CodexProtocolError {
+  /** Stable authentication marker for the Codex login-required response. */
+  readonly code = 'CODEX_LOGIN_REQUIRED'
+}
+
 /** Structured notifications collected for one completed search turn. */
 export interface CodexSearchTurnResult {
   readonly items: readonly JsonObject[]
@@ -146,6 +152,7 @@ export class CodexSearchWire {
     if (early !== undefined) completion.resolve(early)
     const terminal = await this.guarded(completion.promise, signal)
     if (terminal.status !== 'completed') {
+      if (terminal.status === 'login required') throw new CodexAuthError('Codex app-server reported login required')
       throw new CodexProtocolError(`Codex web search turn ended with status ${String(terminal.status)}`)
     }
     return { items: this.itemsByTurn.get(turnId) ?? [] }

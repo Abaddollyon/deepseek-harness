@@ -3,12 +3,18 @@
 // provider calls a deterministic local Anthropic-compatible endpoint through
 // the real credentials service.
 import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import type { SubprocessHandle, SubprocessRuntime, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { CodexSearchProvider } from '../../../packages/web/web-search-codex/src/provider.ts'
+import { ClaudeCodeSearchProvider } from '../../../packages/web/web-search-claude-code/src/provider.ts'
+import { createClaudeQueryReplay, type ClaudeQueryReplayState } from '../../../packages/web/web-search-claude-code/tests/fixtures/sdk-query.ts'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { WEB_SEARCH_MAX_RESULTS } from '@deepseek-ai/dsh-tool-web'
@@ -16,12 +22,13 @@ import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
-import { connectFreshWorkspace, expandOwningTurnProcess, newEnglishPage, saveFailureShot } from './support.ts'
+import { connectFreshWorkspace, expandOwningTurnProcess, expandTurnProcesses, newEnglishPage, saveFailureShot } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/web-search-round', import.meta.url))
 const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/web-search-round/session.jsonl', import.meta.url))
 const UI_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/web-search-round/ui.expected.md', import.meta.url))
 const MODE = webSnapshotMode()
+process.env.TZ = 'Asia/Shanghai'
 const QUERIES = ['DeepSeek Harness snapshot search', 'DeepSeek Harness multi-query search'] as const
 const PROMPT = `Use web_search once with queries ${JSON.stringify(QUERIES)}. Then reply exactly SEARCH_DONE and stop.`
 const SEARCH_CREDENTIAL_REF = credentialRef('DSH_WEB_SEARCH_E2E_KEY')
@@ -264,7 +271,7 @@ describe('web e2e: shipped default web search', () => {
     await expect.poll(() => page.getByText('SEARCH_DONE', { exact: true }).count(), { timeout: 15_000 })
       .toBeGreaterThanOrEqual(1)
     const searchTool = page.locator('[data-tool="web_search"]')
-    await expandOwningTurnProcess(page, searchTool)
+    await expandTurnProcesses(page)
     await searchTool.waitFor({ timeout: 10_000 })
     const snapshot = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
@@ -323,6 +330,255 @@ describe('web e2e: shipped default web search', () => {
   it.skipIf(MODE === 'record')('stayed clean and kept the exact fixture inventory', async () => {
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['session.jsonl', 'ui.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, [
+      'session.jsonl', 'ui.expected.md', 'ui.claude-code.expected.md', 'ui.codex.expected.md',
+    ])
   })
 })
+
+interface SubscriptionCase {
+  id: 'codex' | 'claude-code'
+  answer: string
+  unavailable: string
+  auth: string
+}
+
+const SUBSCRIPTION_CASES: readonly SubscriptionCase[] = [
+  {
+    id: 'codex',
+    answer: 'Offline Codex answer',
+    unavailable: 'Codex CLI is unavailable; install Codex and retry; DSH does not read provider credentials',
+    auth: 'Sign in with the Codex CLI (codex login) and retry; DSH does not read provider credentials',
+  },
+  {
+    id: 'claude-code',
+    answer: 'Offline Claude Code answer',
+    unavailable: 'Claude Code CLI is unavailable; install Claude Code and retry; DSH does not read provider credentials',
+    auth: 'Sign in with Claude Code (claude login) and retry; DSH does not read provider credentials',
+  },
+]
+
+type WebToolResult = Extract<SessionEvent, { type: 'tool/result' }>
+
+function findWebToolResult(events: readonly SessionEvent[]): WebToolResult | undefined {
+  return events.find((event): event is WebToolResult => (
+    event.type === 'tool/result' && event.data.message.source.callId === 'call_web_search'
+  ))
+}
+
+interface ProcessReplayState {
+  active: Set<SubprocessHandle>
+  spawned: number
+  settled: number
+  errorCodes: string[]
+}
+
+function replaySubprocess(
+  runtime: SubprocessRuntime,
+  state: ProcessReplayState,
+  unavailable: boolean,
+): SubprocessRuntime {
+  return {
+    resolveExecutable: async (command, env, signal) => {
+      if (unavailable) {
+        throw Object.assign(new Error('scripted provider executable unavailable'), { code: 'ENOENT' })
+      }
+      return await runtime.resolveExecutable(command, env, signal)
+    },
+    spawn: (spec: SubprocessSpawnSpec) => {
+      const child = runtime.spawn(spec)
+      state.active.add(child)
+      state.spawned += 1
+      void child.done.then(
+        () => { state.active.delete(child); state.settled += 1 },
+        () => { state.active.delete(child); state.settled += 1 },
+      )
+      return child
+    },
+    spawnTerminal: async spec => await runtime.spawnTerminal(spec),
+  } as SubprocessRuntime
+}
+
+function installSubscriptionProvider(
+  entry: SubscriptionCase,
+  unavailable: boolean,
+  authFailure: boolean,
+  state: ProcessReplayState,
+  sdk: ClaudeQueryReplayState,
+): (ctx: Context, cwd: string) => void {
+  return (ctx, cwd) => {
+    process.env.DSH_REPLAY_CWD = cwd
+    sdk.authFailure = authFailure
+    const runtime = replaySubprocess(ctx.subprocess, state, unavailable && !authFailure)
+    const codexExecutable = fileURLToPath(new URL(
+      '../../../packages/web/web-search-codex/tests/fixtures/' + (authFailure ? 'app-server-auth.mjs' : 'app-server.mjs'),
+      import.meta.url,
+    ))
+    const provider = entry.id === 'codex'
+      ? new CodexSearchProvider(runtime, {
+        cwd,
+        requestTimeoutMs: 5_000,
+        disposeGraceMs: 250,
+        maxResults: 6,
+        maxPayloadBytes: 262_144,
+        executable: unavailable ? 'missing-codex-replay' : codexExecutable,
+      })
+      : new ClaudeCodeSearchProvider({ subprocess: runtime } as Context, {
+        cwd,
+        requestTimeoutMs: 5_000,
+        disposeGraceMs: 250,
+        maxResults: 6,
+        maxTurns: 1,
+        maxPayloadBytes: 262_144,
+        executable: process.execPath,
+        query: createClaudeQueryReplay(sdk),
+      })
+    const registered = {
+      id: provider.id,
+      available: () => provider.available(),
+      search: async (request: Parameters<typeof provider.search>[0], signal?: AbortSignal) => {
+        try {
+          return await provider.search(request, signal)
+        } catch (error: unknown) {
+          const code = error as { code?: unknown }
+          if (typeof code.code === 'string') state.errorCodes.push(code.code)
+          throw error
+        }
+      },
+      dispose: () => provider.dispose(),
+    }
+    const unregister = ctx.web.registerSearchProvider(registered)
+    ctx.effect(function* () {
+      yield async () => {
+        await provider.dispose()
+        unregister()
+      }
+    }, 'web subscription replay provider')
+  }
+}
+
+for (const entry of SUBSCRIPTION_CASES) {
+  describe.skipIf(MODE === 'record')('web e2e: subscription ' + entry.id, () => {
+    let scaffold: WebScaffold
+    let browser: Browser
+    let page: Page
+    const events: SessionEvent[] = []
+    const processState: ProcessReplayState = { active: new Set(), spawned: 0, settled: 0, errorCodes: [] }
+    const sdkState: ClaudeQueryReplayState = { closed: 0, prompts: [], spawns: 0 }
+
+    beforeAll(async () => {
+      scaffold = await launchWebScaffold({
+        compareReplaySession: false,
+        replayFixture: FIXTURE,
+        paceMs: 15,
+        subscriptionSearch: {
+          id: entry.id,
+          install: installSubscriptionProvider(entry, false, false, processState, sdkState),
+        },
+      })
+      scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { events.push(event) })
+      browser = await chromium.launch()
+      page = await newEnglishPage(browser)
+      await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+      await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+      await connectFreshWorkspace(page, scaffold.workspaceCwd)
+    }, 120_000)
+
+    afterAll(async () => {
+      await browser?.close()
+      await scaffold?.close()
+    })
+
+    it('drives the real provider and renders answer, sources, and truncation', async () => {
+      const settled = scaffold.whenTurnSettled(30_000)
+      const input = page.locator('[data-composer-input]').first()
+      await input.fill(PROMPT)
+      await input.press('Enter')
+      await settled
+      const result = findWebToolResult(events)
+      const block = result?.data.message.content[0]
+      expect(block?.isError).toBe(false)
+      const text = block?.content.filter(item => item.type === 'text').map(item => item.text).join('') ?? ''
+      expect(text).toContain(entry.answer)
+      expect(text).toContain('(Showing the first 8 sources. Refine the query for more.)')
+      expect(result?.data.meta).toMatchObject({ truncated: true })
+      expect((result?.data.meta as { sources?: unknown[] } | undefined)?.sources).toHaveLength(8)
+      expect(processState.spawned).toBe(2)
+      expect(processState.settled).toBe(2)
+      if (entry.id === 'claude-code') {
+        expect(sdkState.prompts).toHaveLength(2)
+        expect(sdkState.spawns).toBe(2)
+        expect(sdkState.closed).toBe(2)
+      }
+      await expect.poll(() => page.getByText('SEARCH_DONE', { exact: true }).count(), { timeout: 15_000 })
+        .toBeGreaterThanOrEqual(1)
+      const row = page.locator('[data-tool="web_search"]')
+      await expandOwningTurnProcess(page, row)
+      await row.locator('[data-expandable]').first().click()
+      const card = page.locator('[data-web="search"]')
+      await card.waitFor({ timeout: 10_000 })
+      await card.getByText(entry.answer, { exact: false }).first().waitFor({ state: 'visible' })
+      await card.getByText('Source list truncated').waitFor({ state: 'visible' })
+      expect(await card.locator('ol li').count()).toBe(8)
+      const snapshot = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)
+      await compareOrRefreshGolden(
+        join(SNAPSHOT_DIR, 'ui.' + entry.id + '.expected.md'), snapshot, MODE,
+      )
+    }, 60_000)
+  })
+
+  for (const failureMode of ['missing', 'auth'] as const) {
+    describe.skipIf(MODE === 'record')('web e2e: ' + failureMode + ' subscription ' + entry.id, () => {
+      let scaffold: WebScaffold
+      let browser: Browser
+      let page: Page
+      const events: SessionEvent[] = []
+      const processState: ProcessReplayState = { active: new Set(), spawned: 0, settled: 0, errorCodes: [] }
+      const sdkState: ClaudeQueryReplayState = { closed: 0, prompts: [], spawns: 0, unavailable: failureMode === 'missing' && entry.id === 'claude-code' }
+
+      beforeAll(async () => {
+        scaffold = await launchWebScaffold({
+          compareReplaySession: false,
+          replayFixture: FIXTURE,
+          subscriptionSearch: {
+            id: entry.id,
+            install: installSubscriptionProvider(entry, failureMode === 'missing', failureMode === 'auth', processState, sdkState),
+          },
+        })
+        scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { events.push(event) })
+        browser = await chromium.launch()
+        page = await newEnglishPage(browser)
+        await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+        await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+        await connectFreshWorkspace(page, scaffold.workspaceCwd)
+      }, 120_000)
+
+      afterAll(async () => {
+        await browser?.close()
+        await scaffold?.close()
+      })
+
+      it('reports actionable unavailable without hanging or leaving children', async () => {
+        const settled = scaffold.whenTurnSettled(30_000)
+        const input = page.locator('[data-composer-input]').first()
+        await input.fill(PROMPT)
+        await input.press('Enter')
+        await settled
+        const result = findWebToolResult(events)
+        const block = result?.data.message.content[0]
+        expect(block?.isError).toBe(true)
+        const text = block?.content.filter(item => item.type === 'text').map(item => item.text).join('') ?? ''
+        const expectedMessage = failureMode === 'missing' ? entry.unavailable : entry.auth
+        expect(text).toBe('Error: ' + expectedMessage)
+        expect(processState.errorCodes[0]).toBe('WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
+        expect(processState.errorCodes).toHaveLength(2)
+        const row = page.locator('[data-tool="web_search"]')
+        await expandOwningTurnProcess(page, row)
+        await row.getByText(expectedMessage, { exact: false }).waitFor({ state: 'visible' })
+        expect(processState.active.size).toBe(0)
+        expect(processState.spawned).toBe(failureMode === 'missing' ? 0 : 2)
+        expect(processState.settled).toBe(failureMode === 'missing' ? 0 : 2)
+      }, 60_000)
+    })
+  }
+}
