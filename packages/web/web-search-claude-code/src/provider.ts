@@ -58,6 +58,14 @@ export interface ClaudeCodeSearchProviderOptions {
 }
 
 type ObjectValue = Record<string, unknown>
+const classifiedFailures = new WeakSet<WebError>()
+
+function publicFailure(message: string, code: string): WebError {
+  const error = new WebError(message, code)
+  classifiedFailures.add(error)
+  return error
+}
+
 interface ActiveSearch {
   readonly abort: () => void
   readonly done: Promise<void>
@@ -103,7 +111,7 @@ export function normalizeResult(
     || typeof output.truncated !== 'boolean'
     || (output.answer !== undefined && typeof output.answer !== 'string')
   ) {
-    throw new WebError(
+    throw publicFailure(
       'Claude Code returned malformed structured web search data',
       WEB_PROVIDER_PROTOCOL,
     )
@@ -196,28 +204,34 @@ function rawSources(value: unknown, query: string): WebSearchSource[] | undefine
 }
 
 function protocol(message: string): WebError {
-  return new WebError(message, WEB_PROVIDER_PROTOCOL)
+  return publicFailure(message, WEB_PROVIDER_PROTOCOL)
 }
 
-function providerFailure(message: string, cause?: unknown): WebError {
-  return new WebError(message, WEB_PROVIDER_ERROR, cause === undefined ? undefined : { cause })
+function providerFailure(message: string): WebError {
+  return publicFailure(message, WEB_PROVIDER_ERROR)
 }
 
 function mapFailure(error: unknown, reason: unknown, timeoutMs: number): WebError {
-  if (error instanceof WebError) return error
+  if (error instanceof WebError && classifiedFailures.has(error)) return error
   if (reason === callerAbort || reason === disposeAbort) {
-    return new WebError('web search was cancelled', WEB_ABORTED)
+    return publicFailure('web search was cancelled', WEB_ABORTED)
   }
   if (reason === timeoutAbort) {
     return providerFailure(`Claude Code web search timed out after ${timeoutMs} ms`)
   }
   if (authError(error)) {
-    return new WebError(unavailable, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
+    return publicFailure(unavailable, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
   }
   if (missingExecutable(error)) {
-    return new WebError(missing, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
+    return publicFailure(missing, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
   }
-  return providerFailure('Claude Code web search provider failed', error)
+  return providerFailure('Claude Code web search provider failed')
+}
+
+function throwIfAborted(controller: AbortController, timeoutMs: number): void {
+  if (controller.signal.aborted) {
+    throw mapFailure(undefined, controller.signal.reason, timeoutMs)
+  }
 }
 
 async function cleanup(
@@ -252,7 +266,7 @@ async function cleanup(
     }
   }
   if (primary !== undefined || failure === undefined) return undefined
-  return providerFailure('Claude Code web search cleanup failed', failure)
+  return providerFailure('Claude Code web search cleanup failed')
 }
 
 /** Web search provider backed by the official Claude Agent SDK. */
@@ -308,11 +322,12 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
     try {
       const cwd = resolve(this.options.cwd)
       if (!statSync(cwd).isDirectory()) {
-        throw new WebError('Claude Code web search cwd is not a directory', WEB_INVALID_CONFIG)
+        throw publicFailure('Claude Code web search cwd is not a directory', WEB_INVALID_CONFIG)
       }
       const executable = this.options.executable === undefined
         ? undefined
         : await this.ctx.subprocess.resolveExecutable(this.options.executable, undefined, controller.signal)
+      throwIfAborted(controller, this.options.requestTimeoutMs)
       let rawCount = 0
       let resultCount = 0
       let structured: unknown
@@ -355,13 +370,18 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
           },
           ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
           spawnClaudeCodeProcess: (spawn: SpawnOptions) => {
+            throwIfAborted(controller, this.options.requestTimeoutMs)
             if (child !== undefined) throw protocol('Claude Code SDK attempted more than one process spawn')
-            child = this.ctx.subprocess.spawn(claudeSpawnSpec(spawn, this.options.disposeGraceMs))
-            return new ManagedClaudeCodeProcess(child)
+            const spawned = this.ctx.subprocess.spawn(claudeSpawnSpec(spawn, this.options.disposeGraceMs))
+            child = spawned
+            throwIfAborted(controller, this.options.requestTimeoutMs)
+            return new ManagedClaudeCodeProcess(spawned)
           },
         },
       })
+      throwIfAborted(controller, this.options.requestTimeoutMs)
       for await (const message of query) {
+        throwIfAborted(controller, this.options.requestTimeoutMs)
         if (message.type === 'user' && message.tool_use_result !== undefined) {
           const sources = rawSources(message.tool_use_result, request.query)
           if (sources !== undefined) {
@@ -373,14 +393,13 @@ export class ClaudeCodeSearchProvider implements WebSearchProvider {
           resultCount += 1
           if (message.subtype !== 'success') {
             if (authError(message)) {
-              throw new WebError(unavailable, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
+              throw publicFailure(unavailable, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
             }
             throw providerFailure('Claude Code web search failed')
           }
           structured = message.structured_output
         }
       }
-      if (controller.signal.aborted) throw new Error('aborted')
       if (child === undefined) throw protocol('Claude Code SDK did not spawn a process')
       if (rawCount !== 1) {
         throw protocol(rawCount === 0

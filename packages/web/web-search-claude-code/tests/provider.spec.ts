@@ -1,6 +1,7 @@
 import process from 'node:process'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
+import { WebError } from '@deepseek-ai/dsh-web'
 import {
   ClaudeCodeSearchProvider,
   normalizeResult,
@@ -129,6 +130,22 @@ async function failure(plan: HarnessPlan, code: string, message?: string) {
   const promise = provider.search({ query: 'q' })
   if (message === undefined) await expect(promise).rejects.toMatchObject({ code })
   else await expect(promise).rejects.toMatchObject({ code, message })
+}
+
+function serializeRecursively(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value !== 'object' || value === null) return value
+  if (seen.has(value)) return '[circular]'
+  seen.add(value)
+  const serialized: Record<string, unknown> = {}
+  if (value instanceof Error) {
+    serialized.name = value.name
+    serialized.message = value.message
+    serialized.cause = serializeRecursively(value.cause, seen)
+  }
+  for (const key of Object.keys(value)) {
+    serialized[key] = serializeRecursively((value as Record<string, unknown>)[key], seen)
+  }
+  return serialized
 }
 
 describe('result normalization', () => {
@@ -263,6 +280,26 @@ describe('execution failures and cleanup', () => {
     await failure({ queryError: new Error('Claude Code executable not found') }, 'WEB_PROVIDER_CONFIGURED_UNAVAILABLE')
     await failure({ queryError: new Error('please log in to continue') }, 'WEB_PROVIDER_ERROR')
     await failure({ queryError: 'plain failure' }, 'WEB_PROVIDER_ERROR')
+  })
+
+  it('never serializes raw resolver or SDK failure details through public causes', async () => {
+    const secret = 'Bearer review-secret at /private/provider/auth.json'
+    for (const plan of [
+      { executable: 'claude', resolve: Object.assign(new Error(secret), { stderr: secret, cause: new Error(secret) }) },
+      { executable: 'claude', resolve: new WebError(secret, 'WEB_PROVIDER_ERROR', { cause: new Error(secret) }) },
+      { iterationError: Object.assign(new Error(secret), { stderr: secret, cause: new Error(secret) }) },
+      { closeError: Object.assign(new Error(secret), { stderr: secret, cause: new Error(secret) }) },
+    ]) {
+      try {
+        await harness(plan).provider.search({ query: 'q' })
+        expect.unreachable('search must reject')
+      } catch (error) {
+        const serialized = JSON.stringify(serializeRecursively(error))
+        expect(serialized).not.toContain('review-secret')
+        expect(serialized).not.toContain('/private/provider/auth.json')
+        expect(error).not.toHaveProperty('cause')
+      }
+    }
   })
 
   it('classifies resolution, spawn, iteration, cwd and exit failures', async () => {

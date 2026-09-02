@@ -10,19 +10,27 @@ import { claudeQueryOptions as directOptions } from '../../../subagent/subagent-
 import { apply, inject, name } from '../src/index.ts'
 
 type Cleanup = () => void | Promise<void>
+type RegisteredProvider = {
+  id: string
+  dispose(): Promise<void>
+  search(request: { query: string }): Promise<unknown>
+}
 
-function composition() {
-  const providers = new Map<string, { id: string; dispose(): Promise<void> }>()
+function composition(resolveExecutable: (command: string) => Promise<string> = async command => command) {
+  const providers = new Map<string, RegisteredProvider>()
   const cleanups: Cleanup[] = []
   const children = new Set<number>()
-  const registerSearchProvider = vi.fn((provider: { id: string; dispose(): Promise<void> }) => {
+  const registerSearchProvider = vi.fn((provider: RegisteredProvider) => {
     if (providers.has(provider.id)) throw Object.assign(new Error('duplicate'), { code: 'WEB_DUPLICATE_PROVIDER' })
     providers.set(provider.id, provider)
     return () => { providers.delete(provider.id) }
   })
   const ctx = {
     web: { registerSearchProvider },
-    subprocess: { spawn: () => { children.add(1); throw new Error('unused') } },
+    subprocess: {
+      resolveExecutable,
+      spawn: () => { children.add(1); throw new Error('unused') },
+    },
     effect: vi.fn((factory: () => Generator<Cleanup>) => {
       for (const cleanup of factory()) cleanups.push(cleanup)
     }),
@@ -58,6 +66,33 @@ describe('loader composition', () => {
     await fake.dispose()
     expect(fake.providers.size).toBe(0)
     expect(fake.children.size).toBe(0)
+  })
+
+  it('disposal during blocked executable resolution aborts startup before spawn, then unregisters', async () => {
+    let release!: (value: string) => void
+    let markStarted!: () => void
+    const started = new Promise<void>((resolve) => { markStarted = resolve })
+    const resolution = new Promise<string>((resolve) => { release = resolve })
+    const resolveExecutable = vi.fn(async () => {
+      markStarted()
+      return await resolution
+    })
+    const fake = composition(resolveExecutable)
+    apply(fake.ctx, { executable: 'claude', requestTimeoutMs: 1000 })
+    const provider = fake.providers.get('claude-code')
+    expect(provider).toBeDefined()
+    const search = provider?.search({ query: 'blocked startup' })
+    await started
+
+    const disposal = fake.dispose()
+    expect(fake.providers.has('claude-code')).toBe(true)
+    release(process.execPath)
+
+    await expect(search).rejects.toMatchObject({ code: 'WEB_ABORTED' })
+    await disposal
+    expect(fake.providers.size).toBe(0)
+    expect(fake.children.size).toBe(0)
+    expect(resolveExecutable).toHaveBeenCalledOnce()
   })
 
   it('accepts every explicit bound and executable form', () => {

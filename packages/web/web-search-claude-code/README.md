@@ -1,5 +1,5 @@
 ---
-description: "The Claude Code-backed search provider for ctx.web: how deployments mount vendor-native web search with portable snippets and publication dates."
+description: "Claude Code subscription web search for ctx.web through the official Agent SDK and managed subprocess seam."
 kind: "package-bundle"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-With `dsh-web-search-claude-code`, the harness searches the web through Claude Code and gets vendor-native results with portable snippets and publication dates. Choose it when a deployment has an Claude Code API key and wants Claude Code's keyword or neural search. Claude Code returns no generated answer, so results carry no `content` — only citeable sources. A result with no non-blank highlight is dropped, so a call can return fewer sources than requested. The model-facing `web_search` tool lives in `dsh-tool-web`.
+This plugin registers the fixed `claude-code` search provider with `ctx.web`. Each request runs one official Claude Agent SDK `query()` with only `WebSearch`, structured JSON output, no session persistence, and a bounded turn count. It uses the user's existing Claude Code subscription login without reading, copying, or probing credentials.
 
 ## Table of Contents
 
@@ -25,40 +25,45 @@ With `dsh-web-search-claude-code`, the harness searches the web through Claude C
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount the provider in a composition that already loads the web service; it registers as the `claude-code` search provider, so `ctx.web.search()` resolves it automatically when it is the only usable search backend — or pin it with `searchProvider: claude-code`.
+Load `web`, a `subprocess` implementation, and this plugin. Select it explicitly in the active profile with `web.searchProvider: claude-code` when more than one search provider is registered.
 
-### When to choose it
-
-Choose this backend when a deployment holds an Claude Code API key and wants Claude Code's keyword or neural search with per-result highlight snippets and publication dates. The provider is unavailable — and every search call fails with a structured error — when the key is empty or the endpoint base does not parse.
-
-### Minimal configuration
-
-Load the web service and the provider; the API key falls back to `$EXA_API_KEY` from the launch environment, and all other settings have safe defaults.
+### Minimal composition
 
 ```yaml
 - name: '@deepseek-ai/dsh-web'
+- name: '@deepseek-ai/dsh-subprocess-local'
 - name: '@deepseek-ai/dsh-web-search-claude-code'
   config:
-    apiKey: !!js process.env.EXA_API_KEY
+    cwd: .
+    requestTimeoutMs: 60000
+
+web:
+  searchProvider: claude-code
 ```
 
 | Field | Default | Meaning |
-|---|---|---|
-| `apiKey` | `$EXA_API_KEY` | Claude Code API key; empty or absent makes the provider unavailable |
-| `baseURL` | `https://api.claude-code.ai` | Endpoint base; `/search` is appended. An unparseable value makes the provider unavailable |
-| `searchType` | `auto` | Retrieval mode sent as Claude Code's `type`: `auto`, `keyword`, or `neural` |
-| `numResults` | (unset) | Default result count when a request carries no `maxResults`; must be a positive integer |
-| `highlightsPerResult` | `1` | Highlight sentences requested per result (Claude Code's `highlightsPerUrl`); must be a positive integer |
+|---|---:|---|
+| `cwd` | `process.cwd()` | Working directory resolved and validated when a search starts |
+| `requestTimeoutMs` | `60000` | Request deadline; safe integer from 1 through 600000 |
+| `disposeGraceMs` | `3000` | Process-tree termination grace; safe integer from 1 through 60000 |
+| `maxResults` | `8` | Normalized source cap; safe integer from 1 through 50 |
+| `maxTurns` | `4` | Agent SDK turn cap; safe integer from 1 through 16 |
+| `maxPayloadBytes` | `262144` | Serialized result cap; safe integer from 1048 through 1048576 |
+| `executable` | SDK package default | Optional nonblank bare or absolute Claude executable override |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-web-search-claude-code) is the exhaustive source for every accepted field and its JSDoc.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-web-search-claude-code) is the exhaustive declaration reference.
 
-### What a search returns
+### Login and availability
 
-Each Claude Code result maps to a `WebSearchSource`: `url`, `title`, the first non-blank highlight as `snippet`, and `publishedDate` as `publishedAt`; a result with no highlight has no portable snippet and is dropped. A request's `maxResults` wins over the configured `numResults` default and is sent to Claude Code as a cost and latency optimization — the final bound is enforced by the service, which truncates and flags. Claude Code returns no generated answer, so the result carries no `content`.
+DSH never reads `~/.claude/*`, keychains, environment credential stores, or provider tokens. Authentication remains owned by Claude Code; sign in outside DSH with `claude login`. `available()` is only a synchronous executable/configuration hint and deliberately does not run a search or authentication probe.
 
-### Failures and recovery
+Stable authentication evidence returns exactly: `Sign in with Claude Code (claude login) and retry; DSH does not read provider credentials`.
 
-Provider failures — HTTP errors, network failures, unparseable or wrong-shape bodies — surface as `WebError` `WEB_PROVIDER_ERROR`; an aborted request surfaces as `WEB_ABORTED`. HTTP redirects are rejected before the `Location` target is contacted and surface as `WEB_PROVIDER_ERROR`. Callers route on the code; the model-facing `web_search` tool surfaces failures to the model under its own error wrapper.
+A missing executable returns exactly: `Claude Code CLI is unavailable; install Claude Code and retry; DSH does not read provider credentials`.
+
+### Results and failures
+
+The provider requires exactly one matching raw `WebSearch` result plus one successful structured result. It normalizes HTTP(S) sources, deduplicates URLs, applies source and UTF-8 payload caps, and returns the grounded answer as `content`. Missing, duplicate, malformed, or mismatched protocol data returns `WEB_PROVIDER_PROTOCOL`; cancellation returns `WEB_ABORTED`; timeouts and redacted execution failures return `WEB_PROVIDER_ERROR`.
 
 -----
 
@@ -66,29 +71,27 @@ Provider failures — HTTP errors, network failures, unparseable or wrong-shape 
 ## Understand the implementation
 
 <details>
-<summary>Implementation internals — click to expand</summary>
-
-This section explains the design decisions behind the provider; the observable behavior is fully covered in [Use this package](#use-this-package).
+<summary>Implementation details — click to expand</summary>
 
 ### Design philosophy
 
-The provider is a thin adapter over Claude Code's API with two deliberate rules:
-
-- **Portable snippets only.** A source gains a `snippet` only from a real highlight; inventing one from other fields would make the seam lie, so snippet-less results are dropped entirely.
-- **No invented answers.** Claude Code returns no generated answer, so `content` is omitted rather than fabricating provider prose the model might trust.
+- **Subscription authentication stays provider-owned.** The adapter never translates Claude credentials into a Harness secret.
+- **All processes stay seam-owned.** The Agent SDK's custom spawn callback projects through `ctx.subprocess`, so one managed process tree exists per query.
+- **Only public, bounded errors cross the seam.** Raw SDK, resolver, stderr, and filesystem errors are classified and discarded rather than attached as serializable causes.
 
 ### Source map
 
-| File | Role |
+| File | Responsibility |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin entry: config schema, environment fallback, provider registration |
-| [`src/provider.ts`](src/provider.ts) | The `Claude CodeSearchProvider`: request dispatch, abort classification, result mapping |
-| [`src/index.ts`](src/index.ts) | Claude Code wire types: `Claude CodeSearchResponse`, `Claude CodeResult`, `Claude CodeError` |
-| — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
+| [`src/index.ts`](src/index.ts) | Config validation, fixed-ID registration, and effect-scoped lifecycle |
+| [`src/provider.ts`](src/provider.ts) | Agent SDK protocol, normalization, error classification, and process cleanup |
+| [`tests/provider.spec.ts`](tests/provider.spec.ts) | Keyless SDK replay, protocol, redaction, race, and cleanup coverage |
+| [`tests/loader-composition.spec.ts`](tests/loader-composition.spec.ts) | Loader registration, duplicate rejection, blocked-startup disposal, and public re-exports |
+| — | No runtime invariant companion is published; this adapter owns no independent event sequence or mutable data relation beyond contracts enforced by the web and subprocess seams. |
 
-### Request and mapping flow
+### Lifecycle
 
-`search()` posts the query, retrieval mode, highlight request, and optional result count to `{baseURL}/search` with `redirect: 'error'`, so a redirect fails the request without contacting the target. The parsed `results[]` are mapped one by one, snippet-less entries dropped, and the service applies the final `maxResults` bound on the way back. An abort — a `DOMException` named `AbortError` — becomes `WEB_ABORTED`; anything else becomes `WEB_PROVIDER_ERROR`.
+Registration yields two LIFO cleanups: provider disposal runs first, aborts all active controllers, and waits for every query/process tree to settle; only then does the registry disposer unregister `claude-code`. Abort checks surround executable resolution and SDK startup, while a spawned child is recorded synchronously before any later await, so teardown cannot lose a process.
 
 </details>
 
@@ -97,36 +100,29 @@ The provider is a thin adapter over Claude Code's API with two deliberate rules:
 <a id="further-exploration"></a>
 ## Further Exploration
 
-Read these pages when the package-level contract is not enough. They move from the shared vocabulary to the service, the model-facing tools, and the design rationale.
-
-- [Web subsystem](../../../docs/subsystems/web.md) — the exhaustive search request/result vocabulary and error codes.
-- [Web package map](../README.md) — the six-package family and each role.
-- [dsh-web](../web/README.md) — the web service this provider registers into.
-- [dsh-tool-web](../tool-web/README.md) — the model-facing `web_search` tool that renders this provider's sources.
-- [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-web-search-claude-code) — every accepted config field and its source declaration.
-- [Web capability seam decision](../../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.md) — why search and fetch share one provider-selection service.
+- [Web subsystem](../../../docs/subsystems/web.md) — shared search contracts and provider selection.
+- [Web package map](../README.md) — the provider package family.
+- [Subprocess package](../../subprocess/subprocess/README.md) — managed process-tree contract.
+- [Public adapter exports decision](../../../.agents/notes/implemented/architecture/2026-09-02-claude-code-adapter-public-exports.md) — why the shared Claude adapter helpers are package API.
 
 -----
 
 <a id="model-experience"></a>
 ## Model Experience
 
-Indirectly, through `dsh-tool-web`, which retains this provider's `maxResults`-bounded URLs, titles, first highlights, and publication dates or its claude-codect `Claude Code search aborted`, `Claude Code search request failed: <error>`, and `Claude Code returned an unprocessable response body: <error>` failures under the consumer's error wrapper.
+Indirectly, through `dsh-tool-web`, the model receives a concise grounded answer and bounded citation sources while public failures expose only stable codes and actionable messages.
 
 #### KV Cache effect
 
-No direct invalidation; the named consumer owns any request-prefix changes.
+No direct invalidation; the web tool owns any prompt-prefix presentation.
 
 ## Known Limitations and Deferred Work
-
 <a id="known-limitations-and-deferred-work"></a>
 
-
-These limits define when the provider is a poor fit. They are current package constraints.
-
-- **A result with no non-blank highlight is dropped entirely** — there is no portable snippet to map, so fewer sources than requested can return.
-- **Only `searchType`/`numResults`/`highlightsPerResult` are exposed** — Claude Code's other controls (livecrawl, category, domain/date filters, full-text contents) wait on provider-neutral service fields ([seam Agent Note](../../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.md)).
-- **Abort classification is error-shape-based** — only a `DOMException` named `AbortError` maps to `WEB_ABORTED`; an abort carrying a custom reason (such as `dsh-timeout`'s `TimeoutReason`) surfaces as `WEB_PROVIDER_ERROR`.
+- **Claude Code must already be installed and signed in** — this plugin never performs login or credential discovery.
+- **Only `WebSearch` is enabled** — file, shell, MCP, and other Agent SDK tools are intentionally unavailable.
+- **One query creates one process** — there is no session reuse, batching, fallback provider, or coordinator.
+- **`cwd` is provider configuration** — `WebSearchRequest` carries no session working directory.
 
 <a id="dev-note"></a>
 ### Dev Note
@@ -134,10 +130,6 @@ These limits define when the provider is a poor fit. They are current package co
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-This Dev Note is working context for maintainers: open questions and undecided directions. It is explicitly non-authoritative — shipped behavior, limits, and rationale live in the sections above and the linked Agent Notes.
-
-#### Future: wider Claude Code control surface
-
-Claude Code's livecrawl, category, domain and date filters, and full-text contents stay unexposed. Exposing them needs provider-neutral service fields first, so the family adds one coordinated control rather than a vendor-specific argument.
+Keep replay tests keyless. New SDK message shapes must first be captured as bounded fixtures and must not weaken the exactly-one raw `WebSearch` rule or the no-public-cause rule.
 
 </details>
