@@ -161,9 +161,17 @@ describe('launch resolver', () => {
   })
 
   it('derives the plain Node lib entry in lib mode', () => {
+    expect(resolveExampleMode('lib')).toBe('lib')
     const launch = resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'lib' })
     expect(launch.command).toBe(process.execPath)
     expect(launch.args).toEqual(['/repo/lib/bin.js'])
+    expect(() => resolveExampleLaunch({ srcBin: '/repo/bin.ts', mode: 'lib' })).toThrow('expected a \"/src/\" segment')
+  })
+
+  it('selects the ESM source loader', () => {
+    const launch = resolveExampleLaunch({ srcBin: '/repo/src/bin.ts', mode: 'src', tsconfigPath: '/repo/tsconfig.json', sourceImport: 'tsx/esm' })
+    expect(launch.args[0]).toBe('--import')
+    expect(launch.env.TSX_TSCONFIG_PATH).toBe('/repo/tsconfig.json')
   })
 })
 
@@ -192,6 +200,16 @@ describe('isolateWorkspaceProjectRoot', () => {
       expect(existsSync(foreign)).toBe(true)
     } finally {
       await Promise.all([cwd, foreign].map(dir => rm(dir, { recursive: true, force: true })))
+    }
+  })
+
+  it('propagates non-ENOENT marker stat failures', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dsh-isolate-root-'))
+    try {
+      const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      await expect(isolateWorkspaceProjectRoot(cwd, async () => { throw denied })).rejects.toBe(denied)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
     }
   })
 

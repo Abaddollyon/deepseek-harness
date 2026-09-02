@@ -37,9 +37,12 @@ export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
  * symlinked or file marker would alias project state the harness does not own.
  * @param cwd - isolated process cwd.
  */
-export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
+export async function isolateWorkspaceProjectRoot(
+  cwd: string,
+  stat: typeof lstat = lstat,
+): Promise<void> {
   const marker = join(cwd, ISOLATED_PROJECT_ROOT_MARKER)
-  const existing = await lstat(marker).catch((error: unknown): undefined => {
+  const existing = await stat(marker).catch((error: unknown): undefined => {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     return undefined
   })
