@@ -299,8 +299,8 @@ describe('session.history projections block', () => {
     // gateway-owned Session-list unit remains.
     expect(after.projections.asOfSeq).toBe(session.seq - 1)
     expect('test/last-user' in after.projections.values).toBe(false)
-    expect(after.projections.values.sessionListMetadata.blank).toBe(true)
-    expect(typeof after.projections.values.sessionListMetadata.lastPromptAt).toBe('number')
+    expect(after.projections.values.sessionListMetadata!.blank).toBe(true)
+    expect(typeof after.projections.values.sessionListMetadata!.lastPromptAt).toBe('number')
   })
 
   it('removes the gateway-owned Session-list unit when the gateway fiber unloads', async () => {
@@ -331,8 +331,8 @@ describe('session.list projections column', () => {
     if (!response.ok) throw new Error('unreachable')
     const row = response.value.items.find(item => item.sessionId === session.id)
     expect(row?.projections?.values['test/last-user']).toEqual({ text: 'm0' })
-    expect(row?.projections?.values.sessionListMetadata).toMatchObject({ blank: false })
-    expect(typeof row?.projections?.values.sessionListMetadata.lastPromptAt).toBe('number')
+    expect(row?.projections?.values.sessionListMetadata!).toMatchObject({ blank: false })
+    expect(typeof row?.projections?.values.sessionListMetadata!.lastPromptAt).toBe('number')
     expect(row?.projections?.asOfSeq).toBe(session.seq - 1)
   })
 
