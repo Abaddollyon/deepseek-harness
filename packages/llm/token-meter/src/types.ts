@@ -7,7 +7,12 @@
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session/types'
 
-export type { ContextBreakdownProjection, ContextPressureProjection, TokenUsageProjection } from './projection.ts'
+export type {
+  ContextBreakdownProjection,
+  ContextPressureProjection,
+  ModelRouteProjection,
+  TokenUsageProjection,
+} from './projection.ts'
 
 /** Token-meter plugin configuration; the fixed estimator has no settings. */
 export type TokenMeterConfig = Record<string, never>

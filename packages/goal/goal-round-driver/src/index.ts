@@ -6,17 +6,40 @@
 import { isDeepStrictEqual } from 'node:util'
 import { FiberState } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
+import type { TimerService } from '@deepseek-ai/cordis-plugin-timer'
+import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { GoalMessageSource, GoalRef, GoalView } from '@deepseek-ai/dsh-goal'
+import type { JobRegistry } from '@deepseek-ai/dsh-jobs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import { renderGoalRoundPrompt } from './prompt.ts'
+import { hasPendingWork, isWakeSource } from './wake.ts'
 
 export { renderGoalRoundPrompt } from './prompt.ts'
 
 export const name = 'goal-round-driver'
 export const inject = ['agents', 'goals', 'sessions']
+
+/** Deployment-level policy for automatic goal continuation. */
+export interface Config {
+  /** Conditions that may reserve the next goal round. */
+  wake: {
+    /** `always` preserves immediate continuation; `event-driven` waits while owned work remains live. */
+    mode: 'always' | 'event-driven'
+    /** Maximum quiet wait before a safety-net continuation. */
+    timeoutMs: number
+  }
+}
+
+/** Runtime schema for {@link Config}. */
+export const Config: z<Config> = z.object({
+  wake: z.object({
+    mode: z.union(['always', 'event-driven'] as const).default('always'),
+    timeoutMs: z.number().min(1_000).default(300_000),
+  }).default({ mode: 'always', timeoutMs: 300_000 }),
+})
 
 /** Identity reserved before a goal continuation enters the agent inbox. */
 interface RoundIdentity {
@@ -40,6 +63,11 @@ interface DriverState {
   attempt: RoundAttempt | undefined
   competingQueued: boolean
   needsCheckpoint: boolean
+  lastWakeSeq: number
+  wakeBaselineSeq: number
+  wakeObservedPending: boolean
+  wakeTimer: (() => void) | undefined
+  timeoutDue: boolean
   requested: boolean
   run: Promise<void> | undefined
   stopping: boolean
@@ -72,8 +100,18 @@ function renderThrown(value: unknown): string {
   return value instanceof Error ? value.message : String(value)
 }
 
+/** Resolve and validate the optional timer needed only by event-driven policy. */
+function resolveWakeTimer(mode: Config['wake']['mode'], timer: TimerService | undefined): TimerService | undefined {
+  if (mode === 'always') return undefined
+  if (timer === undefined) {
+    throw new Error('goal-round-driver: event-driven wake mode requires the timer service')
+  }
+  return timer
+}
+
 /** Install automatic same-session continuation and its race fences. */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
+  const timer = resolveWakeTimer(config.wake.mode, ctx.get('timer'))
   const states = new Map<Agent, DriverState>()
 
   /** Create state for an exact currently live agent. */
@@ -85,6 +123,11 @@ export function apply(ctx: Context): void {
       attempt: undefined,
       competingQueued: false,
       needsCheckpoint: false,
+      lastWakeSeq: 0,
+      wakeBaselineSeq: 0,
+      wakeObservedPending: false,
+      wakeTimer: undefined,
+      timeoutDue: false,
       requested: false,
       run: undefined,
       stopping: false,
@@ -113,8 +156,46 @@ export function apply(ctx: Context): void {
     return readyToDrive(state) && !state.needsCheckpoint
   }
 
+  /** Cancel one pending safety-net wake. */
+  function clearWakeTimer(state: DriverState): void {
+    if (state.wakeTimer === undefined) return
+    state.wakeTimer()
+    state.wakeTimer = undefined
+  }
+
+  /** Read pending work without allowing an optional registry failure to stall a goal. */
+  function pendingWork(state: DriverState): boolean | undefined {
+    const jobs: JobRegistry | undefined = ctx.get('jobs')
+    try {
+      return hasPendingWork(state.agent, ctx.agents.list(), jobs)
+    } catch (error: unknown) {
+      ctx.logger.warn(`goal-round-driver: could not inspect pending work for agent "${state.agent.id}": ${renderThrown(error)}`)
+      return undefined
+    }
+  }
+
+  /** Whether event-driven policy permits a continuation at this idle checkpoint. */
+  function wakeDue(state: DriverState): boolean {
+    if (state.timeoutDue) return true
+    const pending = pendingWork(state)
+    if (pending === undefined) return true
+    return !pending || (state.wakeObservedPending && state.lastWakeSeq > state.wakeBaselineSeq)
+  }
+
+  /** Arm one process-local safety net while a goal waits on owned work. */
+  function armWakeTimeout(state: DriverState, service: TimerService): void {
+    if (state.wakeTimer !== undefined) return
+    state.wakeTimer = service.timeout(() => {
+      state.wakeTimer = undefined
+      state.timeoutDue = true
+      requestDrive(state)
+    }, config.wake.timeoutMs)
+  }
+
   /** Remove automatic authority while preserving the durable phase. */
   function disarm(state: DriverState): void {
+    clearWakeTimer(state)
+    state.timeoutDue = false
     try {
       const goal = currentGoal(state)
       if (goal?.activation === 'armed') ctx.goals.disarm(state.agent)
@@ -162,14 +243,26 @@ export function apply(ctx: Context): void {
     }
 
     const goal = currentGoal(state)
-    if (goal === undefined || goal.phase !== 'active' || goal.activation !== 'armed') return
+    if (goal === undefined || goal.phase !== 'active' || goal.activation !== 'armed') {
+      clearWakeTimer(state)
+      state.timeoutDue = false
+      return
+    }
     if (goal.roundsStarted >= goal.maxGoalRounds) {
+      clearWakeTimer(state)
+      state.timeoutDue = false
       ctx.goals.block(agent, goalRef(goal), {
         code: 'round-limit',
         message: `Goal reached its configured limit of ${goal.maxGoalRounds} rounds.`,
       })
       return
     }
+    if (timer !== undefined && !wakeDue(state)) {
+      armWakeTimeout(state, timer)
+      return
+    }
+    clearWakeTimer(state)
+    state.timeoutDue = false
 
     const round = goal.roundsStarted + 1
     const content = renderGoalRoundPrompt(goal, round)
@@ -249,12 +342,21 @@ export function apply(ctx: Context): void {
     })
 
     ctx.on('agent/created', ({ agent }) => { stateFor(agent) })
-    ctx.on('agent/disposed', ({ agent }) => { states.delete(agent) })
+    ctx.on('agent/disposed', ({ agent }) => {
+      const state = states.get(agent)
+      if (state !== undefined) clearWakeTimer(state)
+      states.delete(agent)
+    })
     ctx.on('agent/session-start', ({ agent }) => {
       const state = stateFor(agent)
       state.attempt = undefined
       state.competingQueued = false
       state.needsCheckpoint = false
+      state.lastWakeSeq = 0
+      state.wakeBaselineSeq = 0
+      state.wakeObservedPending = false
+      clearWakeTimer(state)
+      state.timeoutDue = false
     })
     ctx.on('agent/status', ({ agent, status }) => {
       const state = stateFor(agent)
@@ -277,7 +379,11 @@ export function apply(ctx: Context): void {
     })
     ctx.on('goal/changed', ({ agent }) => {
       const state = stateFor(agent)
+      clearWakeTimer(state)
+      state.timeoutDue = false
       state.needsCheckpoint = true
+      state.wakeBaselineSeq = Math.max(state.wakeBaselineSeq, state.lastWakeSeq)
+      state.wakeObservedPending = false
       requestDrive(state)
     })
 
@@ -310,8 +416,20 @@ export function apply(ctx: Context): void {
       const state = stateFor(agent)
       switch (event.type) {
         case 'user/message':
+          if (isWakeSource(event.data.source)) {
+            state.lastWakeSeq = event.seq
+            state.wakeObservedPending = pendingWork(state) ?? false
+            clearWakeTimer(state)
+            state.timeoutDue = false
+            if (timer !== undefined) requestDrive(state)
+            return
+          }
           if (state.attempt !== undefined && event.data.id === state.attempt.messageId) {
             state.attempt.phase = 'admitted'
+            state.wakeBaselineSeq = event.seq
+            state.wakeObservedPending = false
+            clearWakeTimer(state)
+            state.timeoutDue = false
           }
           return
         case 'turn/end':

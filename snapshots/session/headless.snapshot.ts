@@ -37,7 +37,7 @@ import {
   type SnapshotManifest,
   type WorkspaceSnapshotEntry,
 } from '@deepseek-ai/dsh-session-snapshot'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import { ISOLATED_PROJECT_ROOT_MARKER, LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import { resolvePwshPath } from '@deepseek-ai/dsh-pwsh-local'
 import { parseSessionLog } from '@deepseek-ai/dsh-llm-replay'
 
@@ -64,7 +64,9 @@ function snapshotMode(value: string | undefined): SnapshotMode {
 }
 
 const mode = snapshotMode(process.env.DSH_SNAPSHOT)
-const RUNTIME_WORKSPACE_ENTRIES = ['.agents', '.dsh', '.snapshot-patches'] as const
+// The harness-planted project-root marker is runtime state too: committed
+// workspace.expected trees cannot carry a `.git` path (Git refuses it).
+const RUNTIME_WORKSPACE_ENTRIES = ['.agents', '.dsh', '.snapshot-patches', ISOLATED_PROJECT_ROOT_MARKER] as const
 
 interface JsonObject {
   [key: string]: unknown
