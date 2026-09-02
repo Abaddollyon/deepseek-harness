@@ -19,6 +19,7 @@ import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 const dirs: string[] = []
@@ -28,6 +29,7 @@ async function mountPersistentHarness(root: string, adapter: MockAdapter): Promi
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -64,7 +66,7 @@ async function settleToolTurn(ctx: Context, agent: Agent): Promise<void> {
   }))
   agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
   await waitForIdle(ctx, agent)
-  if (!agent.session.events.some(event => event.type === 'tool/result')) {
+  if (!agent.session.snapshotEvents().some(event => event.type === 'tool/result')) {
     throw new Error('expected the tool turn to settle a durable tool/result')
   }
 }
@@ -86,7 +88,7 @@ describe('disposal flushes the settled log', () => {
     const flushed = Promise.withResolvers<undefined>()
     first.ctx.on('session/flush', async (session) => {
       if (session !== handle.agent.session || release !== undefined) return
-      sawToolResult = session.events.some(event => event.type === 'tool/result')
+      sawToolResult = session.snapshotEvents().some(event => event.type === 'tool/result')
       flushed.resolve(undefined)
       await new Promise<void>((resolve) => { release = resolve })
     })

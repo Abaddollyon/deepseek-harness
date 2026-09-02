@@ -27,11 +27,8 @@ sequenceDiagram
   Driver-->>SDK: <code>agent/inbox/claimed</code> { message, turn } per message
   Driver->>Hooks: <code>agent/pre-step</code> waterfall
   Hooks-->>Driver: authoritative reject or enter(messages)
-  alt ordinary reject or pre-step failure
+  alt proposed step rejected or pre-step failed
     Driver-->>Driver: claimed batch stays removed, the open turn spends no step
-  else turn signal aborts before pre-step completes
-    Agent-->>Driver: restore the claimed batch for retry or the next turn
-    Driver-->>Agent: teardown removes only the exact owned queued prompt after cancellation settles
   else enter proposed step
   Driver->>Session: <code>step/start</code>
   Driver->>Session: <code>user/message</code> per entered message

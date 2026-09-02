@@ -975,7 +975,7 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     const first = limited.sessionPersistence.list().then((result) => {
       firstSettled = true
       return result
-    }, (error) => {
+    }, (error: unknown) => {
       firstSettled = true
       throw error
     })

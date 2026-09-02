@@ -19,12 +19,14 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter) {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -40,6 +42,7 @@ async function mountPersistentHarness(root: string, adapter: MockAdapter): Promi
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -70,7 +73,7 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
 
 /** All user-message texts recorded in the log (to assert what actually ran). */
 function userTexts(agent: Agent): string[] {
-  return agent.session.events
+  return agent.session.snapshotEvents()
     .filter(e => e.type === 'user/message')
     .flatMap(e => e.type === 'user/message' ? e.data.content : [])
     .flatMap(b => b.type === 'text' ? [b.text] : [])
@@ -112,9 +115,9 @@ describe('pre-step abort restores the claimed batch', () => {
     expect(agent.inbox.nextTurn.map(message => message.content[0])).toEqual([{ type: 'text', text: 'A' }])
     expect(userTexts(agent)).toEqual([])
     expect(adapter.requests).toHaveLength(0)
-    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
+    expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
       .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
-    expect(agent.session.events.some(event =>
+    expect(agent.session.snapshotEvents().some(event =>
       event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
 
     const idle = waitForIdle(ctx, agent)
@@ -192,7 +195,7 @@ describe('pre-step abort restores the claimed batch', () => {
 
     expect(agent.inbox.nextStep.map(message => message.content[0]))
       .toEqual([{ type: 'text', text: 'staged steering' }])
-    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
+    expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
       .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
 
     const idle = waitForIdle(ctx, agent)
@@ -235,7 +238,7 @@ describe('pre-step abort restores the claimed batch', () => {
 
     expect(resumed.agent.inbox.nextTurn.map(message => message.content[0]))
       .toEqual([{ type: 'text', text: 'queued survivor' }])
-    expect(resumed.agent.session.events.some(event =>
+    expect(resumed.agent.session.snapshotEvents().some(event =>
       event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
     await secondCtx.fiber.dispose()
   })

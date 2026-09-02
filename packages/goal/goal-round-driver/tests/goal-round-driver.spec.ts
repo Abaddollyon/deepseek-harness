@@ -936,7 +936,7 @@ describe('same-session goal driving', () => {
     // the interruption for the next lifecycle.
     expect(test.agent.inbox.nextTurn.map(message => message.content[0]))
       .toEqual([{ type: 'text', text: 'human queued' }])
-    expect(test.agent.session.events.some(event =>
+    expect(test.agent.session.snapshotEvents().some(event =>
       event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
     expect(test.agent.status).toBe('idle')
   })
