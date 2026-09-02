@@ -482,7 +482,6 @@ export function apply(ctx: Context, config: Config): void {
           // Keep member listeners alive through disposal: an engine may
           // synthesize cancelled member endings while reaching quiescence.
           await run.dispose()
-          /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
           if (result === undefined) throw new Error('workflow run settled without a result')
           recorder.finish(run.id, result.stopReason)
         } finally {
