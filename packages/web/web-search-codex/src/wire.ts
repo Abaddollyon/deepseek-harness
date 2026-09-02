@@ -1,16 +1,182 @@
+/** Minimal Codex app-server client for one ephemeral web-search turn. */
+
 import type { Readable, Writable } from 'node:stream'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
-type Obj=Record<string,unknown>
-const obj=(v:unknown,l:string):Obj=>{if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('invalid '+l);return v as Obj}
-const id=(v:unknown,l:string):string=>{if(typeof v!=='string'||!v)throw new Error('invalid '+l);return v}
-export interface CodexTurnResult { sources: Obj[]; answer?: string }
-export class CodexSearchWire { private readonly t:JsonRpcLineTransport; private thread?:string; private turn?:string; private done=Promise.withResolvers<Obj>(); private items:Obj[]=[]; private closed=false; private fatal=Promise.withResolvers<never>()
- constructor(input:Readable,output:Writable){this.t=new JsonRpcLineTransport(input,output); void this.fatal.promise.catch(()=>{}); this.t.onRequest(m=>m==='currentTime/read'?Promise.resolve({ currentTimeAt:Math.floor(Date.now()/1000) }):Promise.reject(new Error('unsupported request '+m))); this.t.onNotification((m,p)=>{try{this.note(m,p)}catch(e){this.fatal.reject(e)}})}
-  start(){this.t.start()}
-  async run(cwd:string,query:string,signal:AbortSignal):Promise<CodexTurnResult>{ obj(await this.guard(this.t.request('initialize',{ clientInfo:{ name:'deepseek-harness',title:'DeepSeek Harness',version:'0.0.1' },capabilities:{ experimentalApi:false,requestAttestation:false } },signal),signal),'initialize'); this.t.notify('initialized'); await this.guard(this.t.flush(),signal); const tr=obj(await this.guard(this.t.request('thread/start',{ cwd,ephemeral:true,approvalPolicy:'never',sandbox:'read-only',config:{ web_search:'live',tools:{ web_search:true } } },signal),signal),'thread'); const th=obj(tr.thread,'thread'); if(th.ephemeral!==true)throw new Error('thread is not ephemeral'); this.thread=id(th.id,'thread id'); const rr=obj(await this.guard(this.t.request('turn/start',{ threadId:this.thread,input:[{ type:'text',text:'Use the built-in web search exactly once. Search exactly as supplied: '+query+'. Use no other tools and return source URLs and snippets.',text_elements:[] }] },signal),signal),'turn'); const tu=obj(rr.turn,'turn'); this.turn=id(tu.id,'turn id'); const early=this.done.promise; const terminal=await this.guard(early,signal); if(terminal.status!=='completed')throw new Error('turn did not complete'); return this.parse()}
-  interrupt(){if(this.thread&&this.turn&&!this.closed)void this.t.request('turn/interrupt',{ threadId:this.thread,turnId:this.turn }).catch(()=>{})}
-  close(){if(!this.closed){this.closed=true;this.t.close()}}
-  private async guard<T>(p:Promise<T>,s:AbortSignal):Promise<T>{if(s.aborted){void p.catch(()=>{});throw new Error('aborted')} return Promise.race([p,this.fatal.promise,new Promise<T>((_,r)=>{ s.addEventListener('abort',()=>r(new Error('aborted')),{ once:true }); })])}
-  private note(m:string,p:Obj){if(m==='item/completed'){if(p.threadId!==this.thread)return;if(p.turnId!==this.turn)return;const i=obj(p.item,'item');if(i.type==='webSearch')this.items.push(i)} else if(m==='turn/completed'){if(p.threadId!==this.thread)return;const x=obj(p.turn,'turn');if(id(x.id,'turn id')===this.turn)this.done.resolve(x)}}
-  private parse():CodexTurnResult{const sources:Obj[]=[];let answer:string|undefined;for(const i of this.items){const rs=Array.isArray(i.results)?i.results:[];for(const r of rs){const x=obj(r,'result');if(typeof x.url==='string')sources.push(x)} if(typeof i.final_answer==='string')answer=i.final_answer} return { sources,...answer!==undefined?{ answer }: {} }}
+
+type JsonObject = Record<string, unknown>
+
+/** Structured web-search observation from one completed Codex turn. */
+export interface CodexSearchTurnResult {
+  readonly items: readonly JsonObject[]
+}
+
+function object(value: unknown, label: string): JsonObject {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Codex app-server returned invalid ${label}`)
+  }
+  return value as JsonObject
+}
+
+function thrown(value: unknown): Error {
+  return value instanceof Error ? value : new Error('Codex web search was cancelled')
+}
+
+function identifier(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Codex app-server returned invalid ${label}`)
+  }
+  return value
+}
+
+function prompt(query: string): string {
+  return 'Use the built-in web search exactly once. Search exactly as supplied: ' + query + '. Use no other tools; return source URLs and snippets.'
+}
+
+async function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  let rejectCancelled!: (reason: Error) => void
+  const cancelled = new Promise<never>((_, reject) => { rejectCancelled = reject })
+  const onAbort = (): void => { rejectCancelled(thrown(signal.reason)) }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([pending, cancelled])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/** One process-local app-server connection with one thread and one turn. */
+export class CodexSearchWire {
+  private readonly transport: JsonRpcLineTransport
+  private readonly fatal = Promise.withResolvers<never>()
+  private readonly itemsByTurn = new Map<string, JsonObject[]>()
+  private readonly completedByTurn = new Map<string, JsonObject>()
+  private threadId: string | undefined
+  private turnId: string | undefined
+  private turnCompleted: PromiseWithResolvers<JsonObject> | undefined
+  private closed = false
+
+  /** Create an app-server protocol client over caller-owned streams. */
+  constructor(input: Readable, output: Writable) {
+    this.transport = new JsonRpcLineTransport(input, output)
+    void this.fatal.promise.catch(() => {})
+    this.transport.onRequest((method) => {
+      if (method === 'currentTime/read') {
+        return Promise.resolve({ currentTimeAt: Math.floor(Date.now() / 1_000) })
+      }
+      return Promise.reject(
+        new Error(`Codex web search rejects interactive request ${JSON.stringify(method)}`),
+      )
+    })
+    this.transport.onNotification((method, params) => {
+      try {
+        this.handleNotification(method, params)
+      } catch (error: unknown) {
+        this.fatal.reject(error)
+      }
+    })
+  }
+
+  /** Start consuming JSON-RPC frames. */
+  start(): void {
+    this.transport.start()
+  }
+
+  /** Perform the official initialize/initialized handshake.
+   * @param signal - operation cancellation signal.
+   */
+  async initialize(signal: AbortSignal): Promise<void> {
+    object(await this.guarded(this.transport.request('initialize', {
+      clientInfo: { name: 'deepseek-harness', title: 'DeepSeek Harness', version: '0.0.1' },
+      capabilities: { experimentalApi: false, requestAttestation: false },
+    }, signal), signal), 'initialize response')
+    this.transport.notify('initialized')
+    await this.guarded(this.transport.flush(), signal)
+  }
+
+  /** Create one ephemeral, non-interactive, read-only thread with native web search configured.
+   * @param cwd - thread working directory.
+   * @param request - provider-neutral batch controls mapped into native configuration.
+   * @param signal - operation cancellation signal.
+   */
+  async startThread(cwd: string, signal: AbortSignal): Promise<void> {
+    const response = object(await this.guarded(this.transport.request('thread/start', {
+      cwd,
+      ephemeral: true,
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      config: { web_search: 'live', tools: { web_search: true } },
+    }, signal), signal), 'thread/start response')
+    const thread = object(response.thread, 'thread/start thread')
+    if (thread.ephemeral !== true) throw new Error('Codex app-server did not create an ephemeral thread')
+    this.threadId = identifier(thread.id, 'thread/start thread id')
+  }
+
+  /** Run one turn containing all deduplicated queries and collect only structured web-search items.
+   * @param request - deduplicated ordered queries and search controls.
+   * @param signal - operation cancellation signal.
+   * @returns structured native search result items plus terminal usage.
+   */
+  async runTurn(query: string, signal: AbortSignal): Promise<CodexSearchTurnResult> {
+    const threadId = this.threadId
+    if (threadId === undefined) throw new Error('Codex web search turn started before thread creation')
+    const completion = Promise.withResolvers<JsonObject>()
+    this.turnCompleted = completion
+    const response = object(await this.guarded(this.transport.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: prompt(query), text_elements: [] }],
+    }, signal), signal), 'turn/start response')
+    const turn = object(response.turn, 'turn/start turn')
+    const turnId = identifier(turn.id, 'turn/start turn id')
+    this.turnId = turnId
+    const early = this.completedByTurn.get(turnId)
+    if (early !== undefined) completion.resolve(early)
+    const terminal = await this.guarded(completion.promise, signal)
+    if (terminal.status !== 'completed') {
+      throw new Error(`Codex web search turn ended with status ${String(terminal.status)}`)
+    }
+    return { items: this.itemsByTurn.get(turnId) ?? [] }
+  }
+
+  /** Request best-effort remote cancellation when both protocol ids are known. */
+  interrupt(): void {
+    if (this.closed || this.threadId === undefined || this.turnId === undefined) return
+    void this.transport.request('turn/interrupt', {
+      threadId: this.threadId,
+      turnId: this.turnId,
+    }).catch(() => {})
+  }
+
+  /** Detach protocol listeners and reject pending protocol requests. */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.transport.close()
+  }
+
+  private async guarded<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) {
+      void pending.catch(() => {})
+      throw thrown(signal.reason)
+    }
+    return await abortable(Promise.race([pending, this.fatal.promise]), signal)
+  }
+
+  private handleNotification(method: string, params: JsonObject): void {
+    if (method === 'item/completed') {
+      const threadId = identifier(params.threadId, 'item/completed thread id')
+      if (threadId !== this.threadId) return
+      const turnId = identifier(params.turnId, 'item/completed turn id')
+      const item = object(params.item, 'item/completed item')
+      if (item.type !== 'webSearch') return
+      this.itemsByTurn.set(turnId, [...this.itemsByTurn.get(turnId) ?? [], item])
+      return
+    }
+    if (method !== 'turn/completed') return
+    const threadId = identifier(params.threadId, 'turn/completed thread id')
+    if (threadId !== this.threadId) return
+    const turn = object(params.turn, 'turn/completed turn')
+    const turnId = identifier(turn.id, 'turn/completed turn id')
+    this.completedByTurn.set(turnId, turn)
+    if (turnId === this.turnId) this.turnCompleted?.resolve(turn)
+  }
 }

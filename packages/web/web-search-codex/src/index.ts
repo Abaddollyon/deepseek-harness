@@ -10,5 +10,5 @@ export const Config: z<Config> = z.object({ cwd:z.string(),requestTimeoutMs:z.nu
 export function apply(ctx: Context, config: Config = {}): void {
   const provider=new CodexSearchProvider(ctx.subprocess,{ cwd:config.cwd ?? process.cwd(),requestTimeoutMs:config.requestTimeoutMs ?? 60000,disposeGraceMs:config.disposeGraceMs ?? 3000,maxResults:config.maxResults ?? 8,maxPayloadBytes:config.maxPayloadBytes ?? 262144,...config.executable !== undefined ? { executable:config.executable } : {} })
   const dispose=ctx.web.registerSearchProvider(provider)
-  ctx.effect(function*(){ yield dispose }, 'web-search-codex')
+  ctx.effect(function*(){ yield () => { void provider.dispose(); dispose() } }, 'web-search-codex')
 }
