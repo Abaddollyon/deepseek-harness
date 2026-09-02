@@ -896,6 +896,7 @@ export class SubagentContinuationManager {
         `continuable subagent teardown failed for ${reasons.length} ${failureSubject}: `
         + reasons.map(reason => errorChain(reason)).join('; '),
         'ACTIVATION_TEARDOWN_FAILED',
+        { cause: new AggregateError(reasons, 'selected teardown failures') },
       )
     }
   }

@@ -1179,10 +1179,21 @@ describe('continuable durability and teardown', () => {
     const failure = await drained.catch((error: unknown) => error)
     expect(failure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
     expect(errorChain(failure)).toContain('descendant teardown failures')
-    const graph = new SubagentError('aggregate', 'ACTIVATION_TEARDOWN_FAILED', {
-      cause: new AggregateError([new Error('nested', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 2_000 }) })]),
+    // This is the AggregateError produced by dispose(), not a synthetic graph:
+    // the descendant SubagentError remains reachable through both aggregate
+    // layers and its LLM cause keeps the retry classification intact.
+    const outer = (failure as SubagentError).cause
+    expect(outer).toBeInstanceOf(AggregateError)
+    const childFailure = (outer as AggregateError).errors[0]
+    expect(childFailure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
+    expect((childFailure as SubagentError).cause).toBeInstanceOf(AggregateError)
+    expect(terminalDiagnostic(failure)).toMatchObject({
+      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 2_000 },
     })
-    expect(terminalDiagnostic(graph)).toMatchObject({ failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 2_000 } })
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(
+      "The provider's quota for this route is exhausted; do not retry this route.",
+    )
     expect(ctx.agents.get(target.childId)).toBeUndefined()
   })
 
