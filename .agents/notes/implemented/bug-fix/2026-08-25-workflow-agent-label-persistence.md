@@ -10,7 +10,7 @@ English | [中文](2026-08-25-workflow-agent-label-persistence.zh.md)
 
 ## Decision
 
-The label now travels the path [per-agent reasoning effort](../feature/2026-08-19-workflow-per-agent-reasoning-effort.md) established for per-call options: an optional `label` on `ChildStartRequest` (which the `child-start` protocol payload carries verbatim), forwarded by the worker runtime, and passed by the host into `subagents.start`, which persists it into the child's descriptor. The sidebar already consumes that descriptor — the subagent list-children projection folds it and the client session-list projection displays `child.label ?? childId` — so no client change was needed.
+The label now travels the path [per-agent reasoning effort](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md) established for per-call options: an optional `label` on `ChildStartRequest` (which the `child-start` protocol payload carries verbatim), forwarded by the worker runtime, and passed by the host into `subagents.start`, which persists it into the child's descriptor. The sidebar already consumes that descriptor — the subagent list-children projection folds it and the client session-list projection displays `child.label ?? childId` — so no client change was needed.
 
 Only the script's explicit `label` option travels. The prompt-derived label the runtime computes for observer narration on unlabelled calls stays run-local: an unlabelled `agent()` call produces exactly the durable descriptor it produced before, and its sidebar row keeps the session-id fallback. The wire field is optional end to end, so a peer that never sends one is tolerated unchanged.
 

@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-标签现在沿 [按 agent 配置推理等级](../feature/2026-08-19-workflow-per-agent-reasoning-effort.zh.md) 为每次调用选项建立的路径传递：`ChildStartRequest` 增加可选 `label`（`child-start` 协议载荷原样携带该类型），由 worker 运行时转发，再由宿主传入 `subagents.start`，由其持久化到子级的 descriptor。侧栏本就消费该 descriptor——subagent 的 list-children projection 会折叠它，客户端 Session 列表 projection 以 `child.label ?? childId` 显示——因此客户端无需改动。
+标签现在沿 [按 agent 配置推理等级](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.zh.md) 为每次调用选项建立的路径传递：`ChildStartRequest` 增加可选 `label`（`child-start` 协议载荷原样携带该类型），由 worker 运行时转发，再由宿主传入 `subagents.start`，由其持久化到子级的 descriptor。侧栏本就消费该 descriptor——subagent 的 list-children projection 会折叠它，客户端 Session 列表 projection 以 `child.label ?? childId` 显示——因此客户端无需改动。
 
 只有脚本显式给出的 `label` 选项会被传递。未给标签的调用中，运行时为观察器叙述计算的提示词派生标签仍只存在于本次运行：未命名的 `agent()` 调用产生与此前完全相同的持久 descriptor，其侧栏行保留 Session id 回退。该线上字段端到端可选，因此从不发送它的对端也照常兼容。
 
