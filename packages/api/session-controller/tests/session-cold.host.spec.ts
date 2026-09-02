@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { SessionHistoryController } from '@deepseek-ai/dsh-api-session-controller/src/history.ts'
 import { ApiSessionList } from '../src/list.ts'
@@ -148,7 +149,7 @@ describe('sessions.list cold merge', () => {
     expect(byId['vanished']).toMatchObject({ blank: false, updatedAt: 600 })
     expect(byId['read-failure']).toMatchObject({ blank: false, updatedAt: 700 })
     expect(byId['missing-cwd']).toBeUndefined()
-    expect(inspect).toHaveBeenCalledTimes(10)
+    expect(inspect).toHaveBeenCalledTimes(11)
     expect(inspect.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining([
       sid('small-blank'),
       sid('small-conversation'),
@@ -503,7 +504,8 @@ describe('sessions.list cold merge', () => {
   it('lists through a query that disappears before cold title projection', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
-    const source: SessionHeader = { version: 0, id: sid('query-disappears'), createdAt: 1, cwd: '/proj' }
+    await ctx.plugin(SessionProjectionRegistry)
+    const source: SessionHeader = { version: 0, id: sid('query-disappears'), createdAt: 1, cwd: '/proj', isSeeded: false }
     const disposeQuery = ctx.provide('sessionQuery', {
       listSessions: async () => {
         disposeQuery?.()

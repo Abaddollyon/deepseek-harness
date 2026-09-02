@@ -3,13 +3,13 @@ import {
   RemoteJournalStream,
   RemoteStream,
   RemoteStreamCarrierError,
-  RemoteStreamError,
   type RemoteJournalChange,
   type RemoteJournalFrame,
   type RemoteStreamFactory,
   type RemoteStreamItem,
   type RemoteStreamOptions,
 } from '../src/client/index.ts'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 
 interface Entry {
   readonly seq: number
@@ -410,7 +410,7 @@ describe('RemoteJournalStream', () => {
   })
 
   it('keeps a pre-opening domain failure terminal', async () => {
-    const failure = new RemoteStreamError('fixture-domain', 'domain failure', {})
+    const failure = new RemoteError('gateway/internal', 'domain failure', {})
     const fixture = journalFixture([{ frames: [], terminal: failure }], [])
 
     await expect(fixture.journal.open({})).rejects.toBe(failure)

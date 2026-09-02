@@ -103,7 +103,7 @@ function turnAppends(session: Session, turn: number): (() => void)[] {
 /** Grow one session to roughly `target` events. */
 function growSession(session: Session, target: number): void {
   let turn = 0
-  while (session.events.length < target) {
+  while (session.seq < target) {
     turn += 1
     for (const append of turnAppends(session, turn)) append()
   }
@@ -119,14 +119,14 @@ function growSession(session: Session, target: number): void {
  * policy can possibly save.
  */
 async function emitBurst(session: Session, turns: number, mode: Mode): Promise<number> {
-  const before = session.events.length
+  const before = session.seq
   for (let turn = 10_000; turn < 10_000 + turns; turn += 1) {
     for (const append of turnAppends(session, turn)) {
       append()
       if (mode === 'paced') await macrotask()
     }
   }
-  return session.events.length - before
+  return session.seq - before
 }
 
 /** Yield to the macrotask queue, letting every open stream drain its buffer. */
@@ -220,7 +220,7 @@ describe('manual host performance: Session control fan-out', () => {
     attachAgent(ctx, long)
     growSession(long, LONG_SESSION_EVENTS)
     const seedMs = performance.now() - catalogStart
-    const longEvents = long.events.length
+    const longEvents = long.seq
 
     expect(ctx.sessions.list()).toHaveLength(CATALOG_SESSIONS + 1)
     expect(longEvents).toBeGreaterThanOrEqual(LONG_SESSION_EVENTS)
