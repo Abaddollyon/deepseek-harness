@@ -614,7 +614,7 @@ describe('SubagentHeaderLineage', () => {
     const failed = props(catalog({
       entries: [],
       state: 'error',
-      error: { code: 'internal', message: 'index down', details: {} },
+      error: { code: 'gateway/internal', message: 'index down', details: {} },
     }))
     render(<SubagentHeaderLineage {...failed} />)
     hoverCatalog(screen.getByRole('button', { name: /0 个子代理/ }))

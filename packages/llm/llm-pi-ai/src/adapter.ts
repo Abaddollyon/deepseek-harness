@@ -82,16 +82,12 @@ function capturingCredentialStore(
       capture.credential = credential
       return credential
     }),
-    /* v8 ignore next -- request auth never enumerates credentials; the proxy must still satisfy CredentialStore. */
-    list: options => source.list(options),
+    list: source.list.bind(source),
     modify: (_id, mutate, options) => source.modify(provider, mutate, options).then((credential) => {
       capture.credential = credential
       return credential
     }),
-    /* v8 ignore next -- request auth never logs out; the proxy must still satisfy CredentialStore. */
-    delete: (_id, options) => source.delete(provider, options).then(() => {
-      capture.credential = undefined
-    }),
+    delete: source.delete.bind(source),
   }
 }
 
@@ -442,8 +438,7 @@ export class PiAiAdapter extends LlmAdapter {
       }
       if (authFailure === undefined) return
       if (retriesLeft === 0) {
-        /* v8 ignore next -- toStreamChunks emits the terminal usage chunk before every error finish */
-        if (heldUsage !== undefined) yield heldUsage
+        yield heldUsage!
         yield { type: 'finish', reason: { kind: 'error', failure: authFailure } }
         return
       }
