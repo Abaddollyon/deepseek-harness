@@ -36,6 +36,7 @@ export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
  * existing real marker directory. Any other pre-existing entry fails loud: a
  * symlinked or file marker would alias project state the harness does not own.
  * @param cwd - isolated process cwd.
+ * @param stat - filesystem stat function, injectable for deterministic error-path tests.
  */
 export async function isolateWorkspaceProjectRoot(
   cwd: string,
