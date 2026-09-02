@@ -28,12 +28,19 @@ export type { ClaudeCodeSearchProviderOptions } from './provider.ts'
 export const name = 'web-search-claude-code'
 export const inject = ['web', 'subprocess']
 export interface Config {
+  /** Working directory used for Claude Code searches. */
   cwd?: string
+  /** Per-request timeout in milliseconds. */
   requestTimeoutMs?: number
+  /** Process-tree termination grace in milliseconds. */
   disposeGraceMs?: number
+  /** Maximum normalized source count. */
   maxResults?: number
+  /** Maximum SDK turns per query. */
   maxTurns?: number
+  /** Maximum normalized payload bytes. */
   maxPayloadBytes?: number
+  /** Optional Claude executable override. */
   executable?: string
 }
 export const Config: z<Config> = z.object({

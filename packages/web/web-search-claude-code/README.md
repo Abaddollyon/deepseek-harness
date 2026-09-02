@@ -12,4 +12,4 @@ Select it with searchProvider: claude-code. Defaults are process.cwd(), a 60-sec
 
 ## Lifecycle
 
-Cancellation, timeout, and fiber disposal terminate the complete subprocess tree. Tests use deterministic SDK-message replays and never perform network searches.
+Cancellation, timeout, and fiber disposal terminate the complete subprocess tree. Tests use deterministic SDK-message replays and never perform network searches. No invariant companion is published because the provider has no independent persisted state.
