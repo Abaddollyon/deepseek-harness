@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   SessionListState, SessionSummary, SubagentCatalogSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -614,7 +615,7 @@ describe('SubagentHeaderLineage', () => {
     const failed = props(catalog({
       entries: [],
       state: 'error',
-      error: { code: 'gateway/internal', message: 'index down' },
+      error: new RemoteError('gateway/internal', 'index down', {}),
     }))
     render(<SubagentHeaderLineage {...failed} />)
     hoverCatalog(screen.getByRole('button', { name: /0 个子代理/ }))
