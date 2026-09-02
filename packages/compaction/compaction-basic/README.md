@@ -57,10 +57,6 @@ You can verify success by watching the conversation continue past the point wher
         retainTokens: 2048
 ```
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 ### Tuning when condensation starts
 
 All settings are optional. The defaults start condensing at 80% of the routed model's context window and keep the newest 16% verbatim; the table below is the complete policy surface, and the generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-compaction-basic) is the exhaustive source.
@@ -74,11 +70,8 @@ All settings are optional. The defaults start condensing at 80% of the routed mo
 | `summarizationModel` | `''` | Set together with `summarizationProvider`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
 | `maxTokens` | `8192` | Output cap for the summarization request; may include reasoning tokens. |
 | `compactionRetries` | `1` | Extra condensation attempts after the first when pressure remains above threshold. |
-<<<<<<< HEAD
 | `maxOverflowRetries` | `1` | Maximum retries after a confirmed context-window overflow; `0` disables recovery only. |
-=======
 | `maxOverflowRetries` | `1` | Maximum replacement retries in each preflight admission and provider-confirmed overflow sequence; `0` disables both automatic paths. |
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 | `modelPolicies` | `[]` | Exact `{ provider, model, ...partialPolicy }` overrides for individual model routes. |
 | `auto` | `true` | Enable automatic condensation and overflow recovery; set `false` for manual-only operation. |
 
@@ -117,15 +110,9 @@ The backend is built on four commitments:
 
 ### Automatic triggers and overflow recovery
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 With `auto: true`, a serial `agent/pre-step` listener checks pressure before request derivation: it prices the latest durable routed request envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a priced recent tail. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
-=======
 With `auto: true`, a serial `agent/request-preflight` listener admits each exact request after its canonical header is logged and before its messages are derived: it prices that request's durable routed envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a priced recent tail, reserving the configured output cap, priced envelope, and final compaction-instruction message against the actual summarizer model capacity so the complete auxiliary request always fits — when no balanced span fits, admission makes no summarization call and preserves the full request for provider handling. A committed replacement redispatches admission from the new surface, bounded by the loop's fixed redispatch ceiling. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
-=======
 With `auto: true`, a serial `agent/request-preflight` listener admits each exact request after its canonical header is logged and before its messages are derived: it prices that request's durable routed envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a recent tail priced through the exact summarizer provider/model header. It reserves the configured output cap, that summary-target-priced envelope, and the final compaction-instruction message against the actual summarizer model capacity so the complete auxiliary request always fits — when no balanced span fits, admission makes no summarization call and preserves the full request for provider handling. A committed replacement redispatches admission from the new surface, bounded by the loop's fixed redispatch ceiling. Each completed assistant message ends that request's admission budget, so a tool-call continuation receives its own `maxOverflowRetries` attempts. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
->>>>>>> 4b6b8bb646 (fix(compaction): harden request admission accounting)
 
 Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route, or a capacity that makes the target's retention budget invalid, makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target, delegates admission, and continues with full history. Operational pruning, metering, resolution, and summarization failures reject preflight instead of being converted into admission.
 
@@ -150,11 +137,8 @@ The transaction validates the surface span and the durable lock, appends `compac
 | [`src/summarizer.ts`](src/summarizer.ts) | Default `ctx.llm.stream()` summarization, checkpoint framing, safe-summary projection |
 | [`src/config.ts`](src/config.ts) | Load-time validation and routed-model policy resolution |
 | [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` and resolved policy vocabulary |
-<<<<<<< HEAD
 | — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
-=======
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; the durable bracket is observable in the session log) |
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 
 </details>
 
@@ -175,11 +159,6 @@ Read these pages when the package-level contract is not enough; they move from t
 -----
 
 <a id="model-experience"></a>
-<<<<<<< HEAD
-=======
->>>>>>> 81cec46129 (docs(compaction): record canonical preflight admission)
-=======
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 ## Model Experience
 
 ### Conversation history

@@ -135,12 +135,9 @@ JSONL 存储不会向实时请求提供提示词或 schema。加载会恢复已�
 
 JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope 与模型路由匹配时，恢复 loop 才能重用提供方缓存；崩溃修复结果仅追加。
 
-<<<<<<< HEAD
 ## 已知限制与延期工作
-=======
 <a id="known-limitations-and-deferred-work"></a>
 ## 已知限制与暂缓事项
->>>>>>> 52b69137f4 (docs: reconcile rebased preflight documentation with the base)
 
 <a id="known-limitations-and-deferred-work"></a>
 
