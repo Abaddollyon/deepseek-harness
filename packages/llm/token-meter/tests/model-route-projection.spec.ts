@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SessionStore from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { RequestContext, Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -26,7 +26,7 @@ const coldRoute = (ctx: Context, session: Session): ModelRouteProjection | null 
   const restored = ctx.sessionProjections.restore(
     {},
     session.snapshotEvents(),
-    0,
+    SessionLogOffset(0),
     session.header,
     session.inheritedEventCount,
   ).snapshot.values
