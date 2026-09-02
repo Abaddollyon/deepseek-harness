@@ -19,8 +19,8 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { SessionControlController } from '@deepseek-ai/dsh-api-session-controller/src/control.ts'
-import { ApiSessionList, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from '@deepseek-ai/dsh-api-session-controller/src/list.ts'
+import { SessionControlController } from '../src/control.ts'
+import { ApiSessionList, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from '../src/list.ts'
 import type { SessionControlFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 
 // The real deployment this benchmark models: ~1560 sessions in the catalog and
