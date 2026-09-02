@@ -68,10 +68,10 @@ describe('preview example overlays', () => {
 })
 
 /**
- * The pack consumes built `lib/` output. An unbuilt checkout (the unit
- * coverage lane runs before any build) self-skips. Native Windows routes this
- * suite through its post-build uninstrumented gate, and preview builds exercise
- * the same path against complete real artifacts.
+ * The pack consumes built `lib/` output. An unbuilt checkout (both coverage
+ * lanes run before any build) self-skips; the serial-windows complete
+ * reference routes this suite through its post-build uninstrumented gate, and
+ * preview builds exercise the same path against complete real artifacts.
  */
 const subjectBuilt = existsSync(join(repoRoot, 'packages/util/timeout/lib/index.js'))
 
@@ -199,11 +199,11 @@ const archive = async (): Promise<Uint8Array> =>
     expect(loader.usage().modules).toBeGreaterThan(0)
   })
 
-  it('keeps third-party runtime JavaScript in the webserver closure', async () => {
+  it('keeps third-party runtime JavaScript published under src', async () => {
     const result = packedWebServer()
     expect(result.missing).toEqual([])
-    expect(Object.hasOwn(result.files, 'node_modules/js-yaml/dist/js-yaml.mjs')).toBe(true)
-    expect(Object.hasOwn(result.files, 'node_modules/node-addon-native-custom-loader/lib/index.js')).toBe(true)
+    expect(Object.hasOwn(result.files, 'node_modules/debug/src/index.js')).toBe(true)
+    expect(Object.hasOwn(result.files, 'node_modules/ms/index.js')).toBe(true)
 
     const vfs = loadVfsImage(await inflateImage(result.image, 'the packed webserver'), DEFAULT_ROOT)
     const loader = new WorkerModuleLoader({

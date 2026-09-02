@@ -7,12 +7,10 @@
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
-import { request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { brotliDecompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -30,7 +28,7 @@ afterEach(async () => {
 })
 
 /** Write a cordis.yml with one webserver row, then boot it through the real Loader. */
-async function loadComposition(port = 0): Promise<Context> {
+async function loadComposition(port = 0, gzip = false): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-webserver-loader-'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -38,6 +36,13 @@ async function loadComposition(port = 0): Promise<Context> {
     '  config:',
     "    host: '127.0.0.1'",
     `    port: ${String(port)}`,
+    ...(gzip
+      ? [
+        '    compression: gzip',
+        '    compressionLevel: 1',
+        '    compressionThresholdBytes: 16',
+      ]
+      : []),
     '',
   ].join('\n'))
 
@@ -73,23 +78,6 @@ async function request(
   return { status: response.status, body: (await response.text()).slice(0, 80), headers: response.headers }
 }
 
-/** Read encoded bytes without fetch's automatic content-coding decode. */
-async function rawRequest(
-  port: number,
-  path: string,
-  headers: Record<string, string>,
-): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
-  return new Promise((resolve, reject) => {
-    const client = httpRequest({ port, host: '127.0.0.1', path, headers }, (response) => {
-      const chunks: Buffer[] = []
-      response.on('data', (chunk: Buffer) => { chunks.push(chunk) })
-      response.on('end', () => { resolve({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks) }) })
-    })
-    client.on('error', reject)
-    client.end()
-  })
-}
-
 /** Open one raw upgrade request and return after the handler writes its response. */
 async function upgrade(port: number, path: string): Promise<ReturnType<typeof connect>> {
   const socket = connect(port, '127.0.0.1')
@@ -109,6 +97,98 @@ async function upgrade(port: number, path: string): Promise<ReturnType<typeof co
 }
 
 describe('real Loader composition', () => {
+  it('applies gzip only to eligible socket-backed HTTP responses', { timeout: 60_000 }, async () => {
+    expect(HttpServer.Config({ host: '127.0.0.1', port: 0 })).toEqual({
+      host: '127.0.0.1',
+      port: 0,
+      compression: 'none',
+      compressionLevel: 1,
+      compressionThresholdBytes: 1024,
+    })
+    expect(() => HttpServer.Config({
+      host: '127.0.0.1', port: 0, compressionLevel: 10,
+    })).toThrow()
+
+    const loaded = await loadComposition(0, true)
+    const server = loaded.webServer
+    const body = 'compressible response '.repeat(8)
+    server.register({
+      kind: 'exact',
+      path: '/text',
+      handler: (_req, res) => {
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'content-length': String(Buffer.byteLength(body)),
+        })
+        res.end(body)
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/stream',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.write(body.slice(0, 40))
+        res.end(body.slice(40))
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/small',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '5' })
+        res.end('small')
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/events',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.end(body)
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/archive',
+      handler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/gzip' })
+        res.end(body)
+      },
+    })
+    server.register({
+      kind: 'exact',
+      path: '/range',
+      handler: (_req, res) => {
+        res.writeHead(206, { 'content-type': 'text/plain', 'content-range': 'bytes 0-15/160' })
+        res.end(body.slice(0, 16))
+      },
+    })
+
+    const compressed = await request(server.port, '/text', { headers: { 'accept-encoding': 'br, gzip, deflate' } })
+    expect(compressed).toMatchObject({ status: 200, body: body.slice(0, 80) })
+    expect(compressed.headers.get('content-encoding')).toBe('gzip')
+    expect(compressed.headers.get('content-length')).toBeNull()
+    expect(compressed.headers.get('vary')).toBe('Accept-Encoding')
+    const streamed = await request(server.port, '/stream', { headers: { 'accept-encoding': 'gzip' } })
+    expect(streamed).toMatchObject({ body: body.slice(0, 80) })
+    expect(streamed.headers.get('content-encoding')).toBe('gzip')
+    expect((await request(server.port, '/small', { headers: { 'accept-encoding': 'gzip' } }))
+      .headers.get('content-encoding')).toBeNull()
+
+    const identity = await request(server.port, '/text', {
+      headers: { 'accept-encoding': 'gzip;q=0.5, identity;q=1' },
+    })
+    expect(identity.headers.get('content-encoding')).toBeNull()
+    expect(identity.headers.get('vary')).toBe('Accept-Encoding')
+    expect((await request(server.port, '/events', { headers: { 'accept-encoding': 'gzip' } }))
+      .headers.get('content-encoding')).toBeNull()
+    expect((await request(server.port, '/archive', { headers: { 'accept-encoding': 'gzip' } }))
+      .headers.get('content-encoding')).toBeNull()
+    expect((await request(server.port, '/range', { headers: { 'accept-encoding': 'gzip' } }))
+      .headers.get('content-encoding')).toBeNull()
+  })
+
   // Real-Loader composition resolves workspace packages through tsx at test
   // time; first resolution after the host/client program split is slow enough
   // to trip the default 5s budget on cold caches.
@@ -123,59 +203,6 @@ describe('real Loader composition', () => {
     expect(server).toBeInstanceOf(HttpServer)
     const port = server.port
     expect(port).toBeGreaterThan(0)
-
-    // The real Loader path also carries the response-policy defaults: a body
-    // over the default 1024-byte threshold is brotli encoded at quality 5,
-    // while the same carrier keeps a small body identity encoded.
-    const largeBody = JSON.stringify({ payload: 'default-policy '.repeat(500) })
-    server.register({
-      kind: 'exact',
-      path: '/default-policy',
-      handler: (_req, res) => {
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(largeBody)
-      },
-    })
-    server.register({
-      kind: 'exact',
-      path: '/default-small',
-      handler: (_req, res) => {
-        res.writeHead(200, { 'content-type': 'text/plain' })
-        res.end('small')
-      },
-    })
-    server.register({
-      kind: 'prefix',
-      path: '/assets',
-      handler: (_req, res) => {
-        res.writeHead(200, { 'content-type': 'application/javascript' })
-        res.end(largeBody)
-      },
-    })
-    server.register({
-      kind: 'prefix',
-      path: '/plugins',
-      handler: (_req, res) => {
-        res.writeHead(200, { 'content-type': 'application/javascript' })
-        res.end(largeBody)
-      },
-    })
-    const encoded = await rawRequest(port, '/default-policy', { 'accept-encoding': 'br, gzip' })
-    expect(encoded.headers['content-encoding']).toBe('br')
-    expect(encoded.headers['cache-control']).toBe('no-cache')
-    expect(brotliDecompressSync(encoded.body).toString('utf8')).toBe(largeBody)
-    const small = await rawRequest(port, '/default-small', { 'accept-encoding': 'br, gzip' })
-    expect(small.headers['content-encoding']).toBeUndefined()
-    expect(small.body.toString('utf8')).toBe('small')
-    const asset = await rawRequest(port, '/assets/app-hash.js', { 'accept-encoding': 'br, gzip' })
-    expect(asset.status).toBe(200)
-    expect(asset.headers['content-encoding']).toBe('br')
-    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable')
-    expect(brotliDecompressSync(asset.body).toString('utf8')).toBe(largeBody)
-    const plugin = await rawRequest(port, '/plugins/example/client.js?rev=deadbeef', { 'accept-encoding': 'br, gzip' })
-    expect(plugin.headers['content-encoding']).toBe('br')
-    expect(plugin.headers['cache-control']).toBe('no-cache')
-    expect(brotliDecompressSync(plugin.body).toString('utf8')).toBe(largeBody)
 
     // Routing precedence: exact beats prefix, longest prefix wins, a prefix
     // route answers its own path, and routes own their method handling

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -26,6 +27,8 @@ import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent
 async function harness(adapter: MockAdapter, sessionRoot?: string, dshHome?: string) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
+  // AgentLoop declares the registry as a required injection.
+  await ctx.plugin(SessionProjectionRegistry)
   if (sessionRoot !== undefined) {
     await ctx.plugin(JsonlSessionPersistence, { root: sessionRoot, compression: 'none' })
   }
@@ -57,13 +60,13 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
   })
 }
 
-function events(agent: Agent): SessionEvent[] {
-  return [...agent.session.events]
+function events(agent: Agent): readonly SessionEvent[] {
+  return agent.session.snapshotEvents()
 }
 
 /** Find a session event by type, narrowed; throws when absent. */
 function findEvent<T extends SessionEvent['type']>(
-  log: SessionEvent[],
+  log: readonly SessionEvent[],
   type: T,
   position: 'first' | 'last' = 'first',
 ): Extract<SessionEvent, { type: T }> {
@@ -184,8 +187,8 @@ describe('bash tool through the agent loop', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-bg-'))
     dirs.push(dir)
     const sentinel = join(dir, 'release')
-    // The registry mints uuid job ids, so the collection call reads the id
-    // back from the start ack visible in its own request context.
+    // The job id is deterministic (a fresh LocalJobRegistry counts per kind from 1),
+    // so the script can name `bash-1` without threading a generated id.
     const adapter = new MockAdapter([
       toolCallResponse('call-1', 'bash', {
         command: `while [ ! -f ${JSON.stringify(sentinel)} ]; do sleep 0.02; done; echo bg-ok`,
@@ -193,11 +196,7 @@ describe('bash tool through the agent loop', () => {
         run_in_background: true,
       }),
       textResponse('Started it in the background.'),
-      (options) => {
-        const jobId = /started background job (bash-[0-9a-f-]+)/.exec(JSON.stringify(options))?.[1]
-        if (jobId === undefined) throw new Error('start ack not visible to the collection turn')
-        return toolCallResponse('call-2', 'job_output', { job_id: jobId })
-      },
+      toolCallResponse('call-2', 'job_output', { job_id: 'bash-1' }),
       textResponse('Background job finished.'),
     ])
     const ctx = await harness(adapter)
@@ -208,8 +207,7 @@ describe('bash tool through the agent loop', () => {
 
     const firstResult = findEvent(events(agent), 'tool/result')
     expect(firstResult.data.message.content[0].isError).toBe(false)
-    expect(resultText(firstResult)).toMatch(/^started background job bash-/)
-    const jobId = resultText(firstResult).slice('started background job '.length)
+    expect(resultText(firstResult)).toBe('started background job bash-1')
     // The turn closed with the task still running, so the notice cannot exist yet.
     const isNotice = (e: SessionEvent): e is SessionEvent<'user/message'> =>
       e.type === 'user/message' && e.data.source.kind === 'plugin'
@@ -232,7 +230,7 @@ describe('bash tool through the agent loop', () => {
     const notice = events(agent).find(isNotice)!
     const noticeText = notice.data.content
       .filter(block => block.type === 'text').map(block => block.text).join('')
-    expect(noticeText).toContain(`background job ${jobId} (bash: `)
+    expect(noticeText).toContain('background job bash-1 (bash: ')
     expect(noticeText).toContain('finished [status: completed, exit code: 0]')
     expect(notice.data.source).toMatchObject({
       kind: 'plugin',

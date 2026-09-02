@@ -7,9 +7,9 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as yaml from 'js-yaml'
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type {
   SubprocessHandle,
@@ -18,7 +18,6 @@ import type {
 } from '@deepseek-ai/dsh-subprocess'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as codex from '../src/index.ts'
-import * as invariant from '../src/invariant.ts'
 import {
   CODEX_PERMISSION_MODES,
   DEFAULT_CODEX_PERMISSION_MODE,
@@ -142,8 +141,8 @@ class ProtocolPeer {
 interface FakeChildOptions {
   readonly pid?: number
   readonly exitOnTerminate?: boolean
-  readonly doneError?: unknown
-  readonly waitForExitError?: unknown
+  readonly doneError?: Error
+  readonly waitForExitError?: Error
 }
 
 interface FakeChild {
@@ -153,7 +152,7 @@ interface FakeChild {
   readonly toChild: PassThrough
   readonly stderr: PassThrough
   readonly settle: (outcome?: SubprocessOutcome) => void
-  readonly fail: (error: unknown) => void
+  readonly fail: (error: Error) => void
   readonly setStderr: (text: string) => void
   readonly terminate: () => void
   readonly waitForExit: (signal?: AbortSignal) => Promise<boolean>
@@ -166,7 +165,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
   const peer = new ProtocolPeer(toChild, fromChild)
   let exited = false
   let resolveDone!: (outcome: SubprocessOutcome) => void
-  let rejectDone!: (error: unknown) => void
+  let rejectDone!: (error: Error) => void
   const done = new Promise<SubprocessOutcome>((resolve, reject) => {
     resolveDone = resolve
     rejectDone = reject
@@ -178,7 +177,7 @@ function fakeChild(options: FakeChildOptions = {}): FakeChild {
     exited = true
     resolveDone(outcome)
   }
-  const fail = (error: unknown): void => {
+  const fail = (error: Error): void => {
     if (exited) return
     exited = true
     rejectDone(error)
@@ -429,6 +428,7 @@ describe('task admission and package contracts', () => {
 
   it('registers the default descriptor, validates config, and unregisters on HMR', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const fiber = await ctx.plugin(codex, {})
@@ -458,6 +458,7 @@ describe('task admission and package contracts', () => {
 
   it('keeps named instances, runs, and HMR ownership isolated', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const safeChild = fakeChild()
@@ -560,6 +561,7 @@ describe('task admission and package contracts', () => {
 
   it('rejects duplicate provider names without replacing the first instance', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const firstFiber = await ctx.plugin(codex, {
@@ -595,6 +597,7 @@ describe('task admission and package contracts', () => {
 
   it('resolves the safe permission default when apply is called directly', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const child = fakeChild()
@@ -689,6 +692,7 @@ describe('task admission and package contracts', () => {
 
   it('requires a parent session cwd without suggesting unsupported config', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const spawn = vi.spyOn(ctx.subprocess, 'spawn')
@@ -708,28 +712,12 @@ describe('task admission and package contracts', () => {
     await ctx.fiber.dispose()
   })
 
-  it('keeps the namespace export shape and package-owned empty invariant', async () => {
+  it('keeps the namespace export shape', () => {
     expect('default' in codex).toBe(false)
     expect(codex.name).toBe('subagent-codex')
     expect(codex.inject).toEqual(['subagents', 'subprocess'])
     const loader = Object.create(Loader.prototype) as Loader
     expect(loader.unwrapExports(codex)).toBe(codex)
-
-    const dispose = vi.fn()
-    const register = vi.fn((
-      _packageName: string,
-      _installer: InvariantInstaller,
-    ) => dispose)
-    const ctx = { invariants: { register } } as unknown as Context
-    await expect(invariant.apply(ctx)).resolves.toBe(dispose)
-    expect(register).toHaveBeenCalledWith(
-      '@deepseek-ai/dsh-subagent-codex',
-      expect.any(Function),
-    )
-    const install = register.mock.calls[0]![1]
-    await install(new Context(), (message) => { throw new Error(message) })
-    expect(invariant.name).toBe('subagent-codex-invariant')
-    expect(invariant.inject).toEqual(['invariants'])
   })
 })
 
@@ -831,15 +819,14 @@ describe('CodexAppServerWire', () => {
   it('groups representative string errors without changing stop reasons', async () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens'],
-      ['sessionBudgetExceeded', 'limit', 'error', undefined],
-      ['usageLimitExceeded', 'limit', 'error', { code: 'QUOTA' }],
+      ['sessionBudgetExceeded', 'limit', 'error'],
       ['cyberPolicy', 'access-policy', 'error'],
       ['misalignmentPolicyViolation', 'access-policy', 'error'],
       ['serverOverloaded', 'service', 'error'],
       ['badRequest', 'product-error', 'error'],
       ['sandboxError', 'access-policy', 'error'],
     ] as const
-    for (const [codexErrorInfo, category, stopReason, failure] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -862,7 +849,6 @@ describe('CodexAppServerWire', () => {
       expect(wire.collectFailure()).toEqual({
         stage: 'turn',
         category,
-        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('SECRET_TOKEN')
       expect(JSON.stringify(wire.collectFailure())).not.toContain('/private/secret.txt')
@@ -873,12 +859,11 @@ describe('CodexAppServerWire', () => {
   it('groups object errors and retains only numeric HTTP status', async () => {
     const scenarios = [
       ['httpConnectionFailed', { httpStatusCode: 503 }, 'transport', 503],
-      ['httpConnectionFailed', { httpStatusCode: 429, retryAfterMs: 12_000 }, 'transport', 429, { code: 'RATE_LIMIT', retryAfterMs: 12_000 }],
       ['responseStreamDisconnected', {}, 'transport', undefined],
       ['responseTooManyFailedAttempts', { httpStatusCode: '503' }, 'transport', undefined],
       ['activeTurnNotSteerable', { turnKind: 'review' }, 'product-error', undefined],
     ] as const
-    for (const [codexErrorInfo, detail, category, httpStatus, failure] of scenarios) {
+    for (const [codexErrorInfo, detail, category, httpStatus] of scenarios) {
       const { child, wire } = await initializeWire()
       const result = wire.runTurn(['task'], new AbortController().signal)
       const turnStart = await child.peer.nextMethod('turn/start')
@@ -892,41 +877,8 @@ describe('CodexAppServerWire', () => {
         stage: 'turn',
         category,
         ...(httpStatus === undefined ? {} : { httpStatus }),
-        ...(failure === undefined ? {} : { failure }),
       })
       expect(JSON.stringify(wire.collectFailure())).not.toContain('turnKind')
-      wire.close()
-    }
-  })
-
-  it('maps top-level HTTP fields when structured error info omits them', async () => {
-    const scenarios = [
-      [{ futureVariant: {} }, { statusCode: 503 }, { httpStatus: 503 }],
-      [null, { status: 429, retryAfterMs: 0 }, {
-        httpStatus: 429,
-        failure: { code: 'RATE_LIMIT', retryAfterMs: 0 },
-      }],
-      [null, { status: 429, retryAfterMs: -1 }, {
-        httpStatus: 429,
-        failure: { code: 'RATE_LIMIT' },
-      }],
-    ] as const
-    for (const [codexErrorInfo, fields, expected] of scenarios) {
-      const { child, wire } = await initializeWire()
-      const result = wire.runTurn(['task'], new AbortController().signal)
-      const turnStart = await child.peer.nextMethod('turn/start')
-      child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
-      child.peer.send(turnCompleted('failed', 'turn-1', 'thread-1', {
-        message: 'provider failure',
-        codexErrorInfo,
-        ...fields,
-      }))
-      await expect(result).rejects.toThrow('status failed: unknown')
-      expect(wire.collectFailure()).toEqual({
-        stage: 'turn',
-        category: 'unknown',
-        ...expected,
-      })
       wire.close()
     }
   })
@@ -1631,15 +1583,13 @@ describe('run lifecycle and quiescence', () => {
     const scenarios = [
       ['contextWindowExceeded', 'limit', 'max-tokens', undefined],
       ['sessionBudgetExceeded', 'limit', 'error', undefined],
-      ['usageLimitExceeded', 'limit', 'error', undefined, { code: 'QUOTA' }],
       ['unauthorized', 'access-policy', 'error', undefined],
       ['internalServerError', 'service', 'error', undefined],
       [{ httpConnectionFailed: { httpStatusCode: 503 } }, 'transport', 'error', 503],
-      [{ httpConnectionFailed: { httpStatusCode: 429, retryAfterMs: 12_000 } }, 'transport', 'error', 429, { code: 'RATE_LIMIT', retryAfterMs: 12_000 }],
       [{ activeTurnNotSteerable: { turnKind: 'review' } }, 'product-error', 'error', undefined],
       ['futureError', 'unknown', 'error', undefined],
     ] as const
-    for (const [codexErrorInfo, category, stopReason, httpStatus, failure] of scenarios) {
+    for (const [codexErrorInfo, category, stopReason, httpStatus] of scenarios) {
       const { child, run, turnStart } = await publishRun()
       child.peer.respond(turnStart, { turn: { id: 'turn-1' } })
       child.peer.send(
@@ -1655,7 +1605,6 @@ describe('run lifecycle and quiescence', () => {
         diagnostic: expectedFailureDiagnostic('turn', category, {
           ...(httpStatus === undefined ? {} : { httpStatus }),
         }),
-        ...(failure === undefined ? {} : { failure }),
         stopReason,
       })
       expect(result.diagnostic).not.toContain('SECRET_TOKEN')
@@ -2170,6 +2119,7 @@ describe('run lifecycle and quiescence', () => {
 
   it('uses the registered provider config and logs flattened errors', async () => {
     const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SubagentRuntime)
     await ctx.plugin(LocalSubprocessRuntime)
     const child = fakeChild()
@@ -2327,15 +2277,6 @@ describe('disposeCodexChild', () => {
     expect(child.waitForExit).not.toHaveBeenCalled()
   })
 
-  it('propagates a managed-tree rejection after positive-pid disposal', async () => {
-    const child = fakeChild({ doneError: new Error('managed tree failed') })
-    const wire = defaultWire(child)
-    await expect(disposeCodexChild(wire, child.handle))
-      .rejects.toThrow('managed tree failed')
-    expect(child.terminate).toHaveBeenCalledTimes(1)
-    expect(child.waitForExit).toHaveBeenCalledTimes(1)
-  })
-
   it('reports tree-wait failure with safe teardown facts', async () => {
     const child = fakeChild({
       waitForExitError: new Error('SECRET_TOKEN wait failure'),
@@ -2348,36 +2289,6 @@ describe('disposeCodexChild', () => {
       { outcome: { exitCode: 0, signal: null } },
     ))
     await expect(disposal).rejects.not.toThrow('SECRET_TOKEN')
-  })
-
-  it('normalizes a non-Error tree-wait failure and preserves the process outcome', async () => {
-    const child = fakeChild({ waitForExitError: 'wait failed as a string' })
-    child.settle({ exitCode: 17, signal: 'SIGTERM' })
-    const wire = defaultWire(child)
-    const disposal = disposeCodexChild(wire, child.handle)
-    await expect(disposal).rejects.toMatchObject({
-      name: 'CodexRunFailure',
-      facts: {
-        stage: 'teardown',
-        category: 'unknown',
-        outcome: { exitCode: 17, signal: 'SIGTERM' },
-      },
-      cause: { message: 'wait failed as a string' },
-    })
-    await expect(disposal).rejects.toThrow(expectedFailureDiagnostic(
-      'teardown',
-      'unknown',
-      { outcome: { exitCode: 17, signal: 'SIGTERM' } },
-    ))
-  })
-
-  it('contains an unrenderable non-Error tree-wait failure', async () => {
-    const child = fakeChild({ waitForExitError: { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } })
-    const disposal = disposeCodexChild(defaultWire(child), child.handle)
-    await expect(disposal).rejects.toMatchObject({
-      name: 'CodexRunFailure',
-      cause: { message: '<unrenderable value>' },
-    })
   })
 
   it('does not wait for a pending process outcome after tree observation fails', async () => {

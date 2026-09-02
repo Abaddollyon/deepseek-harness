@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { LAUNCHER_FAILURE_EXIT } from '@deepseek-ai/node-addon-landlock-run'
 import { SANDBOX_UNAVAILABLE, SandboxUnavailableError } from '@deepseek-ai/dsh-sandbox'
 import { LocalSandboxProvider } from '@deepseek-ai/dsh-sandbox-local'
@@ -51,6 +52,7 @@ ${fatalBranch}exec "$@"
 async function setup(fatalExit?: number): Promise<SandboxBashExecutor> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSandboxProvider, {})
   const sandbox = ctx.sandbox as LocalSandboxProvider
   sandbox.internals = {
@@ -68,6 +70,7 @@ async function setup(fatalExit?: number): Promise<SandboxBashExecutor> {
 async function setupConfiguredRunner(runner: string): Promise<SandboxBashExecutor> {
   const ctx = new Context()
   contexts.push(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(LocalSandboxProvider, {
     runnerCommand: [runner],
     runnerFailureSignatures: ['configured-runner: fatal'],
@@ -169,22 +172,17 @@ describe('partial Landlock runner-failure classification', () => {
       expect((background as { path?: unknown }).path).toBeUndefined()
       expect(background).not.toBeInstanceOf(SandboxUnavailableError)
     } else {
-      const completed = foreground as { exitCode: number; stderr: { text: string } }
-      expect(completed).toMatchObject({
+      expect(foreground).toMatchObject({
+        exitCode: 127,
         signal: null,
         sandbox: { mode: 'read-only', denied: false, enforcement: 'full' },
       })
-      // Linux shell fallback status differs across Node/libuv releases: Node 24
-      // commonly reports command-not-found (127), while Node 25 reports the
-      // malformed shell program's ordinary failure (1). Both prove that the
-      // launched runner was not misclassified as sandbox infrastructure failure.
-      expect([1, 127]).toContain(completed.exitCode)
-      expect(completed.stderr.text.length).toBeGreaterThan(0)
+      expect((foreground as { stderr: { text: string } }).stderr.text.length).toBeGreaterThan(0)
 
       const background = bash.start(bash.resolve(request))
       await background.done
       expect(background.status).toBe('completed')
-      expect(background.exitCode).toBe(completed.exitCode)
+      expect(background.exitCode).toBe(127)
       expect(background.signal).toBeNull()
       expect(background.sandbox).toEqual({ mode: 'read-only', denied: false, enforcement: 'full' })
       const output = background.readOutput().delta

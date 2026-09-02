@@ -13,9 +13,8 @@
 
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentCapabilities, SubagentFailure, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
+import type { SubagentCapabilities, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
 
 /** Maximum UTF-8 size of {@link SubagentResult.diagnostic}. */
 const MAX_SUBAGENT_DIAGNOSTIC_BYTES = 4_096
@@ -155,35 +154,23 @@ export function resolveChildCwd(prefix: string, configured: string | undefined, 
 
 /** Normalize an unknown thrown value to an Error (the catch binding is `unknown`). */
 function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(errorChain(value))
-}
-
-/**
- * Read one provider snapshot without letting provider failure reject a published run.
- * @param collect - provider snapshot callback, when that snapshot is supported.
- * @returns the snapshot, or `undefined` when it is absent or its callback throws.
- */
-function collectSnapshot<T>(collect: (() => T) | undefined): T | undefined {
-  try {
-    return collect?.()
-  } catch {
-    // A provider snapshot failure omits that snapshot; the primary result still settles.
-    return undefined
-  }
+  // The rejecting surfaces (wire clients, spawn failures) only throw
+  // `Error`s; the `String(value)` arm is a defensive fallback for a non-Error
+  // throw the typed surfaces cannot produce.
+  /* v8 ignore next */
+  return value instanceof Error ? value : new Error(String(value))
 }
 
 /** Inputs to {@link settleRunResult}. */
 export interface RunResultSettlement {
   /** The turn attempt (typically racing local cancellation); returns the terminal result. */
   attempt: () => Promise<SubagentResult>
-  /** Snapshot the provider exposes when cancellation or failure wins settlement; a throw yields empty output. */
+  /** Snapshot the provider exposes when cancellation or failure wins settlement. */
   collectOutput: () => ContentBlock[]
-  /** Snapshot safe provider-authored detail when a failure wins settlement; a throw omits the detail. */
+  /** Snapshot safe provider-authored detail when a failure wins settlement. */
   collectDiagnostic?: (() => string | undefined) | undefined
   /** Whether local cancellation settled before the attempt's outcome is observed. */
   cancelled: () => boolean
-  /** Structured retry/routing facts when a failure flattened to a stop reason; a throw omits the facts. */
-  collectFailure?: (() => SubagentFailure | undefined) | undefined
   /** Diagnostic sink for a failure flattened to a stop reason; a throw from it is contained. */
   onError?: ((error: Error, stopReason: SubagentStopReason) => void) | undefined
   /** The request's cancellation signal (the listener is removed at settlement). */
@@ -206,26 +193,24 @@ export async function settleRunResult(parts: RunResultSettlement): Promise<Subag
   try {
     const result = await parts.attempt()
     return parts.cancelled()
-      ? { output: collectSnapshot(parts.collectOutput) ?? [], stopReason: 'aborted' }
+      ? { output: parts.collectOutput(), stopReason: 'aborted' }
       : normalizeSubagentDiagnostic(result)
   } catch (error: unknown) {
     // Cover a rejection already queued when cancellation arrives.
-    if (parts.cancelled()) return { output: collectSnapshot(parts.collectOutput) ?? [], stopReason: 'aborted' }
+    if (parts.cancelled()) return { output: parts.collectOutput(), stopReason: 'aborted' }
     // Flatten post-publication transport failures while preserving diagnostics.
     try {
       parts.onError?.(toError(error), 'error')
     } catch {
       // The diagnostic sink cannot reject the run result.
     }
-    const collected = collectSnapshot(parts.collectDiagnostic)
-    const failure = collectSnapshot(parts.collectFailure)
+    const collected = parts.collectDiagnostic?.()
     const diagnostic = collected === undefined
       ? undefined
       : limitSubagentDiagnostic(collected)
     return {
-      output: collectSnapshot(parts.collectOutput) ?? [],
+      output: parts.collectOutput(),
       ...diagnostic === undefined ? {} : { diagnostic },
-      ...failure === undefined ? {} : { failure },
       stopReason: 'error',
     }
   } finally {

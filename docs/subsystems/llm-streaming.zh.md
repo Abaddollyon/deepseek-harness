@@ -220,20 +220,7 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。`LlmFailureCodeMap` 提供已知且与提供方无关的路由值，派生的开放字符串类型则允许提供方扩展；消费方将每个未知值视为不可重试。
-
-```ts type-equiv
-/** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
-interface LlmFailureCodeMap {
-  quota: 'QUOTA'
-  rateLimit: 'RATE_LIMIT'
-}
-```
-
-```ts type-equiv
-/** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
-type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
-```
+每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -241,7 +228,7 @@ interface LlmFailure {
   /** Human-readable provider or transport failure. */
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
-  readonly code: LlmFailureCode
+  readonly code: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
@@ -948,7 +935,7 @@ async discoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, sig
  * @param request - endpoint, protocol, and one-shot credential to use.
  * @param signal - caller cancellation supplied by the Remote carrier.
  * @returns advertised models in endpoint order.
- * @throws TypertRemoteFailure with `model-discovery-failed` when discovery refuses or fails.
+ * @throws RemoteError with `llm/model-discovery-rejected` when discovery refuses or fails.
  */
 @Remote('discoverModels') async remoteDiscoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal, ): Promise<LlmDiscoveredModel[]>
 

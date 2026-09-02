@@ -13,20 +13,10 @@ kind: "package-library"
 
 ## 目录
 
-- [模型体验](#model-experience)
 - [已知限制与暂缓事项](#known-limitations-and-deferred-work)
 - [开发备注](#dev-note)
 
 -----
-
-<a id="model-experience"></a>
-## 模型体验
-
-无；这些浏览器安全辅助函数只为调用方格式化路径，不注册任何模型可见内容。
-
-#### KV Cache 影响
-
-无；该包既不组装也不发送模型请求。
 
 ## 已知限制与暂缓事项
 
@@ -45,3 +35,5 @@ kind: "package-library"
 无。
 
 </details>
+
+**运行时不变式：** 不发布伴生入口。这个工具不持有可变运行时关系。

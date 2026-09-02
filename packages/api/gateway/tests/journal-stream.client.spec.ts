@@ -3,7 +3,6 @@ import {
   RemoteJournalStream,
   RemoteStream,
   RemoteStreamCarrierError,
-  RemoteStreamError,
   type RemoteJournalChange,
   type RemoteJournalFrame,
   type RemoteStreamFactory,
@@ -390,33 +389,6 @@ describe('RemoteJournalStream', () => {
       message: 'fixture journal emitted a partially overlapping entry',
     })
     await fixture.journal.dispose()
-  })
-
-  it('retries a carrier loss before the opening cursor without duplicate publication', async () => {
-    const fixture = journalFixture([
-      { frames: [], terminal: new RemoteStreamCarrierError('lost before opening') },
-      { frames: [opened(1, page('healthy', [0, 1]))], hold: true },
-    ], [])
-
-    await fixture.journal.open({ limit: 2 })
-
-    await vi.waitFor(() => { expect(fixture.changes).toHaveLength(1) })
-    expect(fixture.changes).toEqual([{
-      type: 'replace', page: page('healthy', [0, 1]), entries: entries(0, 1), hasMore: false,
-    }])
-    expect(fixture.followRequests).toEqual([{ limit: 2 }, { limit: 2 }])
-    expect(fixture.failed).not.toHaveBeenCalled()
-    await fixture.journal.dispose()
-  })
-
-  it('keeps a pre-opening domain failure terminal', async () => {
-    const failure = new RemoteStreamError('fixture-domain', 'domain failure', {})
-    const fixture = journalFixture([{ frames: [], terminal: failure }], [])
-
-    await expect(fixture.journal.open({})).rejects.toBe(failure)
-    expect(fixture.followRequests).toEqual([{}])
-    expect(fixture.changes).toEqual([])
-    expect(fixture.failed).not.toHaveBeenCalled()
   })
 
   it('repairs a replacement generation through one tail page and drops replay overlap', async () => {

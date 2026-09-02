@@ -11,7 +11,7 @@
  * @module @deepseek-ai/dsh-loader-smoke
  */
 
-import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -26,31 +26,6 @@ const DEFAULT_PROCESS_TIMEOUT_MS = 30_000
 
 /** Vitest deadline that leaves room for the subprocess-owned 30-second diagnostic timeout. */
 export const LOADER_SMOKE_TEST_TIMEOUT_MS = DEFAULT_PROCESS_TIMEOUT_MS + 15_000
-
-/** Project-root marker used to stop upward workspace discovery at an owned cwd. */
-export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
-
-/**
- * Anchor Loader discovery at a harness-owned cwd so ancestor worktrees cannot
- * contribute instructions or skills. Creates the marker when absent and keeps an
- * existing real marker directory. Any other pre-existing entry fails loud: a
- * symlinked or file marker would alias project state the harness does not own.
- * @param cwd - isolated process cwd.
- */
-export async function isolateWorkspaceProjectRoot(cwd: string): Promise<void> {
-  const marker = join(cwd, ISOLATED_PROJECT_ROOT_MARKER)
-  const existing = await lstat(marker).catch((error: unknown): undefined => {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    return undefined
-  })
-  if (existing === undefined) {
-    await mkdir(marker)
-    return
-  }
-  if (existing.isDirectory()) return
-  const kind = existing.isSymbolicLink() ? 'a symbolic link' : 'a non-directory entry'
-  throw new Error(`isolateWorkspaceProjectRoot: ${marker} already exists as ${kind}; an owned cwd must not alias foreign project state.`)
-}
 
 /** Which artifact an example bin is booted from: unbuilt `src` via tsx, or built `lib` via plain Node. */
 export type ExampleMode = 'src' | 'lib'
@@ -207,14 +182,17 @@ export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<Loade
   const processTimeoutMs = options.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS
   try {
     await options.prepare?.(cwd)
-    await isolateWorkspaceProjectRoot(cwd)
     const launch = resolveExampleLaunch({
       srcBin: options.binScript,
       libBin: options.libBinScript,
       configArgs: options.binArgs ?? [options.configPath],
       ...options.mode !== undefined ? { mode: options.mode } : {},
       tsconfigPath: options.tsconfigPath,
-      env: { DSH_HOME: join(cwd, '.dsh'), DSH_AGENTS_HOME: join(cwd, '.agents'), ...options.env },
+      env: {
+        DSH_HOME: join(cwd, '.dsh'),
+        DSH_AGENTS_HOME: join(cwd, '.agents'),
+        ...options.env,
+      },
     })
     // `input: ''` writes nothing and closes stdin — the fixture-visible
     // stdin-close contract. `reject: false` folds spawn errors, the SIGKILL

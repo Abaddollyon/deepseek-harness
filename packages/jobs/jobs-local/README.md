@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-jobs-local` runs background jobs inside the harness process: work keeps running while the agent moves on, and the owning agent can read, wait on, list, and cancel it, with completion delivered as an in-session notice when `dsh-tool-jobs` is also mounted. It implements the `dsh-jobs` contract with process-local live state and fresh snapshots. With `persist: true` and a mounted `ctx.jobStore`, records survive host restarts for honest settlement or producer-controlled re-adoption; producer execution itself remains process-local.
+`dsh-jobs-local` runs background jobs inside the harness process: work keeps running while the agent moves on, and the owning agent can read, wait on, list, and cancel it, with completion delivered as an in-session notice when `dsh-tool-jobs` is also mounted. It implements the `dsh-jobs` contract with in-memory records handed out as fresh snapshots, never live state. A per-owner concurrency limit (default 10) bounds how many jobs one agent can have running or stopping at once; jobs die with the harness process and are not durable across restarts.
 
 ## Table of Contents
 
@@ -29,11 +29,11 @@ Load this plugin when a composition needs in-process background jobs: long-runni
 
 ### When to choose it
 
-Choose it for process-local producers, optionally paired with a durable record store and run supervisor for restart accounting. Use another provider when producer execution, rather than its record and resume payload, must continue in another process.
+Choose it when jobs should live in the harness process and die with it. Avoid it when work must survive a restart or span processes: records are in-memory, so a durable or cross-process backend must implement the same contract differently.
 
 ### Minimal configuration
 
-Loading the plugin registers `ctx.jobs`. Durable registration requires `persist: true` and a mounted `ctx.jobStore`; ordinary jobs remain available without either.
+Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional and defaults to `10`.
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -41,13 +41,9 @@ Loading the plugin registers `ctx.jobs`. Durable registration requires `persist:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `maxConcurrentJobsPerOwner` | `10` | Maximum `running` plus `stopping` jobs per exact owner, or in the shared unowned bucket. |
-| `persist` | `false` | Mirror records to a mounted `ctx.jobStore` and enable acknowledged durable starts. |
-| `maxSettledJobs` | `100` | Retained reported terminal records per owner; unreported records are never pressure-evicted. |
-| `teardownGraceMs` | `10000` | Bound for producer release and final durable-mirror drain during teardown. |
-| `maxPersistedOutputBytes` | `65536` | UTF-8 byte cap for output stored in a durable record. |
+| `maxConcurrentJobsPerOwner` | `10` | Maximum `running` plus `stopping` jobs per exact owner, or in the shared unowned bucket |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for accepted fields.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for the accepted field.
 
 ### What each owner gets
 
@@ -84,11 +80,11 @@ This section explains the design decisions behind the registry and points at the
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema, `LocalJobRegistry`, admission, lifecycle, teardown |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; snapshot checks live in `dsh-jobs/invariant`) |
+| — | No runtime invariant companion is published; `@deepseek-ai/dsh-jobs/invariant` owns per-snapshot identity, status, timestamp, and owner checks. This provider's admission decision uses private configuration and must fail before a backend starter runs; `LocalJobRegistry.start()` enforces it synchronously for current producers. Repeating an aggregate after publication would expose private configuration solely to this companion and would not verify the fail-closed pre-start guarantee. |
 
 ### Scope layers
 
-`attachController`, `onJobDone`, and `onJobsChanged` register into the calling context's scope layer. The controller question (`servesOwner`) and listener delivery (`listenersFor`, `changedFor`) walk the same chain: global layer first, then each scoped layer along the owner's chain. Registrations are anonymous tokens so duplicate labels stay independently disposable. `onJobAdopted` is host-wide because restart accounting spans sessions. A resumer returns a deferred producer plan: the registry commits the adoption marker, awaits observers, and starts the producer only after the account accepts ownership. Once an observer returns `true` to confirm its durable account, the registry drops its in-memory marker so later report and settlement mirrors cannot resurrect proof the supervisor already cleared; with only observational listeners, the marker remains. A missing store, rejected marker write, or explicit observer veto therefore leaves producer work unstarted; an older unaccounted marker remains authoritative across repeated restarts.
+`attachController`, `onJobDone`, and `onJobsChanged` register into the calling context's scope layer. The controller question (`servesOwner`) and listener delivery (`listenersFor`, `changedFor`) walk the same chain: global layer first, then each scoped layer along the owner's chain. Registrations are anonymous tokens so duplicate labels stay independently disposable.
 
 ### Admission and settlement
 
@@ -132,7 +128,7 @@ No direct invalidation; the named consumers own any request-prefix changes.
 
 These limits define when the registry is a poor fit. They are current package constraints, not a task backlog.
 
-- **Producer execution is process-local** — persistence preserves records and resume payloads, not a running JavaScript producer; resumable kinds must supply an idempotent deferred resumer.
+- **Jobs are process-local** — records die with the harness process; durable or cross-restart execution needs a separate backend implementing the seam.
 - **A silently ineffective cancel can stall teardown and hold capacity** — if `cancel` returns without settling `done`, the registry cannot distinguish it from a slow stop; the job keeps one bucket slot for the rest of the service lifetime, and only an explicit throw can be force-failed safely.
 
 <a id="dev-note"></a>

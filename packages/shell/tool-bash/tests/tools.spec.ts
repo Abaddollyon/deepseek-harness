@@ -6,11 +6,12 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellProcess, ShellProcessRead, ShellRunResult } from '@deepseek-ai/dsh-shell'
-import SystemPrompt, { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -19,6 +20,7 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 import { processOutcome } from '../src/background.ts'
@@ -188,6 +190,8 @@ async function setupSandboxed(withApproval = false) {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(LocalJobRegistry)
   await ctx.plugin(ToolTasks)
+  await ctx.plugin(SessionProjectionRegistry)
+  ctx.sessionProjections.register(turnBoundaryProjectionDefinition)
   await ctx.plugin(SandboxPolicyService, {})
   await ctx.plugin(RecordingSandboxExecutor)
   if (withApproval) await ctx.plugin(ApprovalService)
@@ -201,18 +205,37 @@ function sandboxAgent(
   ctx?: Context,
   onAppend?: (type: string) => void,
 ): Agent {
-  const events: Array<{ type: string; data?: Record<string, unknown> }> = [{ type: 'turn/start' }]
-  if (mode !== undefined) events.push({ type: 'sandbox/mode', data: { mode } })
+  const events: Array<{
+    type: string
+    seq: ReturnType<typeof SessionSeq>
+    time: number
+    data: Record<string, unknown>
+  }> = [{ type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } }]
+  if (mode !== undefined) {
+    events.push({ type: 'sandbox/mode', seq: SessionSeq(1), time: 1, data: { mode } })
+  }
   const id = SessionId('sandbox-session')
   return {
     id,
     ...ctx === undefined ? {} : { ctx: ctx.plugin(() => {}).ctx },
     session: {
       id,
-      header: { version: 0, id, createdAt: 0 },
-      events,
+      header: { version: 0, id, createdAt: 0, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+      firstLiveSeq: SessionLogOffset(0),
+      get seq() { return SessionLogOffset(events.length) },
+      eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
+      snapshotEvents: (
+        fromSeq = SessionLogOffset(0),
+        toSeqExclusive = SessionLogOffset(events.length),
+      ) => events.slice(fromSeq, toSeqExclusive),
       append: (type: string, data: Record<string, unknown>) => {
-        const event = { type, data }
+        const event = {
+          type,
+          seq: SessionSeq(events.length),
+          time: events.length,
+          data,
+        }
         events.push(event)
         onAppend?.(type)
         return event
@@ -379,12 +402,12 @@ describe('bash tool', () => {
     const ctx = await setup()
     ctx.systemPrompt.section({
       name: 'test:before-bash',
-      order: FIRST_PARTY_SECTION_ORDER.TOOL_BASH - 10,
+      order: ctx.systemPrompt.getSectionOrder('TOOL_BASH') - 10,
       text: 'before',
     })
     ctx.systemPrompt.section({
       name: 'test:after-bash',
-      order: FIRST_PARTY_SECTION_ORDER.TOOL_BASH + 10,
+      order: ctx.systemPrompt.getSectionOrder('TOOL_BASH') + 10,
       text: 'after',
     })
     const assembly = await ctx.systemPrompt.assemble()
@@ -450,37 +473,33 @@ describe('background execution through the job runtime', () => {
     const started = await call(ctx, 'bash', { command: 'echo bg-ok', description: 'test command', run_in_background: true })
     expect(started.isError).toBe(false)
     if (started.isError) throw new Error('expected background bash success')
-    const { jobId } = started.value as { jobId: string }
-    expect(jobId).toMatch(/^bash-/)
-    expect(started.value).toEqual({ kind: 'background', jobId })
-    expect(text(started)).toBe(`started background job ${jobId}`)
+    expect(started.value).toEqual({ kind: 'background', jobId: 'bash-1' })
+    expect(text(started)).toBe('started background job bash-1')
 
-    const read = await callUntilText(ctx, 'job_output', { job_id: jobId }, 'bg-ok')
+    const read = await callUntilText(ctx, 'job_output', { job_id: 'bash-1' }, 'bg-ok')
     expect(text(read)).toContain('bg-ok')
     // A later read reports the terminal outcome in the generic status line.
-    const final = await callUntilText(ctx, 'job_output', { job_id: jobId }, '[status: completed, exit code: 0]')
+    const final = await callUntilText(ctx, 'job_output', { job_id: 'bash-1' }, '[status: completed, exit code: 0]')
     expect(final.isError).toBe(false)
   })
 
   it('a running background job is killable through the REAL job_kill tool', async () => {
     const ctx = await setupWithTasks()
-    const started = await call(ctx, 'bash', { command: 'sleep 60', description: 'test command', run_in_background: true })
-    const jobId = (started.value as { jobId: string }).jobId
+    await call(ctx, 'bash', { command: 'sleep 60', description: 'test command', run_in_background: true })
 
-    const killed = await call(ctx, 'job_kill', { job_id: jobId })
-    expect(text(killed)).toBe(`requested cancellation of job ${jobId}`)
+    const killed = await call(ctx, 'job_kill', { job_id: 'bash-1' })
+    expect(text(killed)).toBe('requested cancellation of job bash-1')
     // The cancel reached the process handle; the task settles as killed with
     // the signal detail mapped by processOutcome.
-    const final = await call(ctx, 'job_output', { job_id: jobId, wait: true })
+    const final = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true })
     expect(text(final)).toContain('[status: killed, signal: SIGTERM]')
   })
 
   it('a self-signal background exit is reported as killed through the REAL job_output tool', async () => {
     const ctx = await setupWithTasks()
-    const started = await call(ctx, 'bash', { command: 'kill -TERM $$', description: 'test command', run_in_background: true })
-    const jobId = (started.value as { jobId: string }).jobId
+    await call(ctx, 'bash', { command: 'kill -TERM $$', description: 'test command', run_in_background: true })
 
-    const final = await call(ctx, 'job_output', { job_id: jobId, wait: true })
+    const final = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true })
     expect(text(final)).toContain('[status: killed, signal: SIGTERM]')
   })
 
@@ -489,16 +508,15 @@ describe('background execution through the job runtime', () => {
     const ctx = await setupWithTasks()
     const agent = registerFakeAgent(ctx, 'sess-owner')
     const started = await call(ctx, 'bash', { command: 'sleep 60', description: 'test command', run_in_background: true }, agent)
-    const jobId = (started.value as { jobId: string }).jobId
-    expect(text(started)).toBe(`started background job ${jobId}`)
+    expect(text(started)).toBe('started background job bash-1')
 
-    const anon = await call(ctx, 'job_output', { job_id: jobId })
+    const anon = await call(ctx, 'job_output', { job_id: 'bash-1' })
     expect(anon.isError).toBe(true)
     expect(text(anon)).toMatch(/belongs to another session/)
 
-    const killed = await call(ctx, 'job_kill', { job_id: jobId }, agent)
+    const killed = await call(ctx, 'job_kill', { job_id: 'bash-1' }, agent)
     expect(killed.isError).toBe(false)
-    await call(ctx, 'job_output', { job_id: jobId, wait: true }, agent) // await settlement — no orphan
+    await call(ctx, 'job_output', { job_id: 'bash-1', wait: true }, agent) // await settlement — no orphan
   })
 
   it('fails loud when the job runtime is not loaded', async () => {
@@ -626,10 +644,10 @@ describe('sandbox escalation through the generic task producer', () => {
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
-    ;(malformed.session.events as unknown as Array<{ type: string; data: { mode: string } }>).push({
-      type: 'sandbox/mode',
-      data: { mode: 'unknown-mode' },
-    })
+    ;(malformed.session.append as unknown as (
+      type: string,
+      data: Record<string, unknown>,
+    ) => unknown)('sandbox/mode', { mode: 'unknown-mode' })
     expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
   })
 
@@ -667,7 +685,7 @@ describe('sandbox escalation through the generic task producer', () => {
     })
     expect(foreground.isError).toBe(false)
     const background = await call(ctx, 'bash', { ...escalate, run_in_background: true }, agent)
-    expect(text(background)).toMatch(/^started background job bash-/)
+    expect(text(background)).toBe('started background job bash-1')
     expect(bash.modes).toEqual(['workspace-write', 'workspace-write'])
   })
 
@@ -1281,7 +1299,7 @@ describe('the model-facing bash tool builds its request from named args only (no
     // The call really went down the background path (the recorder sees the real
     // request the consumer built, so the absent env/stdin below is a real
     // negative, not a recorder that drops everything).
-    expect(text(result)).toMatch(/^started background job bash-/)
+    expect(text(result)).toBe('started background job bash-1')
     expect(bash.requests).toHaveLength(1)
     const request = bash.requests[0]!
     expect(request.command).toBe('sleep 1')

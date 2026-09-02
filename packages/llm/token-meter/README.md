@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@deepseek-ai/dsh-token-meter` is the replay-aware token measurement service: `ctx.tokenMeter` advances one isolated fold per session from the durable event log, so compaction and other pressure-sensitive plugins share one accounting without depending on the compaction engine. With it you can measure current request and context pressure, price a single message, and — when the session-projection seam is mounted — read the `tokenUsage`, `contextPressure`, and `contextBreakdown` projections. It uses a fixed heuristic for text and routes without image pricing, applies adapter-declared visual-token pricing when available, and reuses provider-reported usage only when the request envelope matches exactly. It adds no prompt, message, schema, or tool of its own, and it never makes decisions for the loop. The optional `modelRoute` projection republishes the latest resolved provider, model, and context window from the durable request context.
+`@deepseek-ai/dsh-token-meter` is the replay-aware token measurement service: `ctx.tokenMeter` advances one isolated fold per session from the durable event log, so compaction and other pressure-sensitive plugins share one accounting without depending on the compaction engine. With it you can measure current request and context pressure, price a single message, and — when the session-projection seam is mounted — read the `tokenUsage`, `contextPressure`, and `contextBreakdown` projections. It uses a fixed heuristic for text and routes without image pricing, applies adapter-declared visual-token pricing when available, and reuses provider-reported usage only when the request envelope matches exactly. It adds no prompt, message, schema, or tool of its own, and it never makes decisions for the loop.
 
 ## Table of Contents
 
@@ -148,3 +148,5 @@ This Dev Note is non-authoritative working context: notes for maintainers and op
 - A per-provider exact tokenizer is not decided; keeping one deterministic heuristic is what makes every consumer's measurement agree and replay-stable.
 
 </details>
+
+**Runtime invariant:** No companion is published. Token estimates are per-call outputs and the private session cache is invalidated at its event mutation boundary. The package's three projections do expose observation streams, but their schemas fix the JSON payloads; the usage folds replace same-attempt samples, so totals need not be monotone when a final sample corrects an earlier chunk, and the composition fold prices through the same `estimate.ts` heuristic as the measurement service and subtracts producer-logged shadow prices derived from that service's own fixed-heuristic node prices, which makes its message figure equal the sum of `measure().nodes[].heuristicTokens` by construction rather than by a relation worth observing at runtime; the route-priced `surfaceTokens` deliberately diverges by the routed model's image repricing.

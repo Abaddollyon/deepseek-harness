@@ -338,9 +338,7 @@ describe('tool-terminal foreground API', () => {
     const background = await call(ctx, 'terminal_send', {
       sessionId: 'pty-1', text: 'work', run_in_background: true,
     }, agent)
-    // The uuid-bearing ack may be clipped by the byte bound; the canonical
-    // value still carries the complete job id.
-    expect((background.value as { jobId: string }).jobId).toMatch(/^pty-send-/)
+    expect(text(background)).toContain('pty-send-1')
     expect(Buffer.byteLength(text(background))).toBeLessThanOrEqual(64)
   })
 
@@ -409,11 +407,9 @@ describe('tool-terminal task integration', () => {
     const { ctx, agent } = await setup(true)
     await call(ctx, 'terminal_open', { type: 'stub' }, agent)
     const started = await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'build', run_in_background: true }, agent)
-    const jobId = (started.value as { jobId: string }).jobId
-    expect(jobId).toMatch(/^pty-send-/)
-    expect(text(started)).toBe(`started background job ${jobId}`)
-    expect(started).toMatchObject({ isError: false, value: { kind: 'background', jobId } })
-    const output = await call(ctx, 'job_output', { job_id: jobId, wait: true }, agent)
+    expect(text(started)).toBe('started background job pty-send-1')
+    expect(started).toMatchObject({ isError: false, value: { kind: 'background', jobId: 'pty-send-1' } })
+    const output = await call(ctx, 'job_output', { job_id: 'pty-send-1', wait: true }, agent)
     expect(text(output)).toContain('live output')
     expect(text(output)).toContain('[status: completed, wait: stdin_read]')
   })
@@ -427,8 +423,8 @@ describe('tool-terminal task integration', () => {
 
     stub.sessions[0]!.delta = '界'.repeat(100)
     stub.sessions[0]!.deltaTruncated = true
-    const started = await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'background', run_in_background: true }, agent)
-    const background = await call(ctx, 'job_output', { job_id: (started.value as { jobId: string }).jobId, wait: true }, agent)
+    await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'background', run_in_background: true }, agent)
+    const background = await call(ctx, 'job_output', { job_id: 'pty-send-1', wait: true }, agent)
     expect(Buffer.byteLength(text(background))).toBeLessThanOrEqual(64)
     expect(text(background)).toContain('[status: completed')
     expect(text(background).match(/\[output truncated\]/g)).toHaveLength(1)
@@ -443,19 +439,16 @@ describe('tool-terminal task integration', () => {
     expect((await callWithSignal(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'x', run_in_background: true }, agent, controller.signal)).isError).toBe(true)
 
     stub.sessions[0]!.autoSettle = false
-    const killable = await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: '', run_in_background: true }, agent)
-    const killableId = (killable.value as { jobId: string }).jobId
-    expect(killableId).toMatch(/^pty-send-/)
-    expect(text(await call(ctx, 'job_kill', { job_id: killableId }, agent))).toContain('requested cancellation')
+    expect(text(await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: '', run_in_background: true }, agent))).toContain('pty-send-1')
+    expect(text(await call(ctx, 'job_kill', { job_id: 'pty-send-1' }, agent))).toContain('requested cancellation')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(text(await call(ctx, 'job_output', { job_id: killableId }, agent))).toContain('[status: killed')
+    expect(text(await call(ctx, 'job_output', { job_id: 'pty-send-1' }, agent))).toContain('[status: killed')
 
     stub.sessions[0]!.rejectOperation = true
     stub.sessions[0]!.autoSettle = false
-    const failing = await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'bad', run_in_background: true }, agent)
-    const failingId = (failing.value as { jobId: string }).jobId
+    expect(text(await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'bad', run_in_background: true }, agent))).toContain('pty-send-2')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(text(await call(ctx, 'job_output', { job_id: failingId }, agent))).toContain('[status: failed')
+    expect(text(await call(ctx, 'job_output', { job_id: 'pty-send-2' }, agent))).toContain('[status: failed')
   })
 
   it('reports foreground cancellation after the terminal operation settles', async () => {
@@ -487,8 +480,8 @@ describe('tool-terminal task integration', () => {
     const { ctx, agent, stub } = await setup(true)
     await call(ctx, 'terminal_open', { type: 'stub' }, agent)
     stub.sessions[0]!.statusValue = { kind: 'exited', exitCode: null, signal: null }
-    const started = await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'exit', run_in_background: true }, agent)
-    const output = await call(ctx, 'job_output', { job_id: (started.value as { jobId: string }).jobId, wait: true }, agent)
+    await call(ctx, 'terminal_send', { sessionId: 'pty-1', text: 'exit', run_in_background: true }, agent)
+    const output = await call(ctx, 'job_output', { job_id: 'pty-send-1', wait: true }, agent)
     expect(text(output)).toContain('session exited: unknown')
   })
 })

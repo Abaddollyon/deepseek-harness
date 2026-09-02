@@ -8,7 +8,6 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { ToolCallId, ProviderRequestId, ReasoningEffortId } from './brand.ts'
 import type { Message } from './message.ts'
-import type { LlmFailureCode } from './error.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -42,7 +41,7 @@ export interface LlmFailure {
   /** Human-readable provider or transport failure. */
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
-  readonly code: LlmFailureCode
+  readonly code: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
@@ -256,13 +255,13 @@ export interface LlmModelDiscoveryOperation extends LlmModelDiscoveryRequest {
   signal?: AbortSignal
 }
 
-/** Stable failure returned by the `llm/discoverModels` Remote method. */
-export interface LlmModelDiscoveryError {
-  readonly code: 'model-discovery-failed'
-  readonly message: string
-  readonly details: {
-    readonly settingsNs: string
-    readonly baseURL?: string
+declare module '@deepseek-ai/dsh-typert-protocol' {
+  interface RemoteErrorDetailsMap {
+    /** A draft provider interrogation refused or failed. */
+    'llm/model-discovery-rejected': {
+      readonly settingsNs: string
+      readonly baseURL?: string
+    }
   }
 }
 

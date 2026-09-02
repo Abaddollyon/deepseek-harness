@@ -31,7 +31,6 @@ const useSessionPendingInteraction: SidebarRootComponentProps['useSessionPending
 function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; width?: number } = {}) {
   const startSession = vi.fn()
   const toggleSidebar = vi.fn()
-  let workspaceSectionOwner: SidebarSectionOwnerProps | undefined
   let regionOwner: SidebarSectionOwnerProps | undefined
   let settingsOwner: SidebarSettingsOwnerProps | undefined
   let footerActionOwner: SidebarFooterActionOwnerProps | undefined
@@ -57,10 +56,6 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
           footerActionOwner = owner
           return <div data-testid="footer-action-seat" data-wide={owner.wide} />
         }
-        if (key === 'sidebar.workspace.section') {
-          workspaceSectionOwner = owner as SidebarSectionOwnerProps
-          return <div data-testid="workspace-section" data-wide={owner.wide} />
-        }
         regionOwner = owner as SidebarSectionOwnerProps
         return <div data-testid="region" data-wide={owner.wide} />
       }) as SidebarRootComponentProps['renderSlot']}
@@ -70,10 +65,6 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
   return {
     startSession,
     toggleSidebar,
-    workspaceSectionOwner: () => {
-      if (workspaceSectionOwner === undefined) throw new Error('workspace section owner not rendered')
-      return workspaceSectionOwner
-    },
     regionOwner: () => {
       if (regionOwner === undefined) throw new Error('region owner not rendered')
       return regionOwner
@@ -155,14 +146,11 @@ describe('SidebarRoot shell', () => {
 
   it('hands the region its wide flag and clamps expandSidebar to the collapsed state', () => {
     const b = mountShell()
-    expect(b.workspaceSectionOwner().wide).toBe(true)
     expect(b.regionOwner().wide).toBe(true)
     // The settings seat rides the same wide flag (ui-settings renders the row).
     expect(b.settingsOwner().wide).toBe(true)
     expect(b.footerActionOwner().wide).toBe(true)
     // Expanded: the request is a no-op (no accidental collapse).
-    b.workspaceSectionOwner().expandSidebar()
-    expect(b.toggleSidebar).not.toHaveBeenCalled()
     b.regionOwner().expandSidebar()
     expect(b.toggleSidebar).not.toHaveBeenCalled()
   })
@@ -175,15 +163,11 @@ describe('SidebarRoot shell', () => {
     expect(b.regionOwner().wide).toBe(true)
     vi.advanceTimersByTime(200)
     b.rerender({})
-    expect(b.workspaceSectionOwner().wide).toBe(false)
     expect(b.regionOwner().wide).toBe(false)
     expect(b.footerActionOwner().wide).toBe(false)
-    expect(screen.getByTestId('workspace-section')).toBeTruthy()
     expect(screen.getByTestId('region')).toBeTruthy()
-    b.workspaceSectionOwner().expandSidebar()
-    expect(b.toggleSidebar).toHaveBeenCalledOnce()
     b.regionOwner().expandSidebar()
-    expect(b.toggleSidebar).toHaveBeenCalledTimes(2)
+    expect(b.toggleSidebar).toHaveBeenCalledOnce()
   })
 
   it('renders statically collapsed on a cold start (no crossfade classes)', () => {

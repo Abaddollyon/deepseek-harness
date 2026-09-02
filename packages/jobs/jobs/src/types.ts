@@ -5,7 +5,7 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { JsonValue, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { JobId } from './brand.ts'
 
 export { JobId } from './brand.ts'
@@ -39,27 +39,6 @@ export interface JobOutcome {
 }
 
 /**
- * Durable resume policy carried by {@link JobStart.durability}. Absence of the
- * whole block — or of {@link resumeSpec} — means a persisted record for this
- * job cannot be re-adopted after a host restart and boot reconciliation
- * settles it honestly instead.
- */
-export interface JobDurability {
-  /**
-   * Producer-owned JSON re-start payload handed back to the {@link JobResumer}
-   * registered for this kind on a later boot. Absent (or `null`) means the
-   * work is not resumable after a host restart.
-   */
-  resumeSpec?: JsonValue
-  /**
-   * Session that owns the durable record's lifecycle events. When {@link
-   * JobStart.owner} is also present the two must name the same session; the
-   * registry fails the registration loudly on a mismatch.
-   */
-  recordSession?: SessionId
-}
-
-/**
  * Producer declaration passed to {@link JobRegistry.start}. The runtime
  * preflights access and cleanup before invoking {@link run}; the producer owns
  * execution resources while the runtime owns identity and lifecycle state.
@@ -81,19 +60,6 @@ export interface JobStart {
    * open to any caller until service disposal.
    */
   owner?: Agent
-  /**
-   * Durable resume policy for this producer's work. Only consulted when the
-   * registry persists records; omission means a persisted record is not
-   * resumable and is settled honestly after a host restart.
-   */
-  durability?: JobDurability
-  /**
-   * Producer-supplied stable id fragment: the job registers as
-   * `<kind>-<idHint>` instead of the minted `<kind>-<uuid>`. Must be
-   * non-empty and must not collide with a registered or persisted id — a
-   * collision fails the registration loudly before {@link run} is invoked.
-   */
-  idHint?: string
   /**
    * Start the work after preflight and synchronously return its hooks. Called
    * once; a throw leaves nothing registered, and the producer must clean up any
@@ -129,16 +95,8 @@ export interface JobHooks {
  * a fresh object per call, never live registry state.
  */
 export interface JobSnapshot {
-  /** The registry-issued id (`<kind>-<uuid>`, or `<kind>-<idHint>`). */
+  /** The registry-issued id (`<kind>-N`). */
   id: JobId
-  /**
-   * 1-based display ordinal within the owner's bucket (registration order),
-   * kept for model-facing lists so the model never has to repeat a 36-char
-   * uuid to tell jobs apart. Process-local presentation state: restored
-   * records are re-numbered in startedAt order on boot, so the ordinal is not
-   * stable across restarts — the id is.
-   */
-  ordinal: number
   /** The producer kind the job was registered with. */
   kind: JobKind
   /** The producer-supplied one-line label. */
@@ -153,18 +111,6 @@ export interface JobSnapshot {
   ownerSession?: SessionId
   /** Current lifecycle state. */
   status: JobStatus
-  /**
-   * Whether a persisted record of this job could be re-adopted after a host
-   * restart: true exactly when the producer supplied a non-null
-   * {@link JobDurability.resumeSpec}.
-   */
-  resumable: boolean
-  /**
-   * The process incarnation that owns the record. Matches the current
-   * process's `PROCESS_INCARNATION` for work started (or adopted) here, and
-   * names the writing process for a restored record still awaiting a resumer.
-   */
-  incarnation: string
   /** Kind-specific status detail, present once the producer supplied one (usually terminal). */
   detail?: string
   /** Epoch ms when the job was registered. */
@@ -203,49 +149,6 @@ export type JobDoneListener = (
 ) => void | PromiseLike<void>
 
 /**
- * One persisted non-terminal record offered to a {@link JobResumer} during
- * boot replay: the durable facts a producer needs to decide whether it can
- * re-adopt the work under the original id.
- */
-export interface JobResumeCandidate {
-  /** The original durable id; adoption keeps it. */
-  readonly id: JobId
-  /** Producer kind the record was registered with. */
-  readonly kind: JobKind
-  /** The producer-supplied one-line label. */
-  readonly label: string
-  /** Session that owned the record, when it had one. */
-  readonly ownerSession?: SessionId
-  /** The producer-owned re-start payload persisted at registration. */
-  readonly resumeSpec: JsonValue
-  /** Epoch ms when the job was originally registered. */
-  readonly startedAt: number
-  /** Incarnation of the process that wrote the record. */
-  readonly priorIncarnation: string
-}
-
-/**
- * Deferred producer for a restored record. The registry durably records the
- * adoption and awaits its account observers before invoking {@link start}.
- */
-export interface JobResumePlan {
-  /**
-   * Start the producer and return its hooks. Called at most once after adoption
-   * commit; a throw settles the record as a failed resume.
-   * @returns hooks for the newly started producer.
-   */
-  start(): JobHooks
-}
-
-/**
- * Resume handler for one job kind. Returning a deferred {@link JobResumePlan}
- * accepts the persisted record under its original id; returning `undefined`
- * declines it. The handler may inspect the candidate but must not start work.
- * A throw or decline settles the record honestly as `failed`.
- */
-export type JobResumer = (candidate: JobResumeCandidate) => JobResumePlan | undefined
-
-/**
  * Observation callback for a change to what one owner's {@link JobRegistry.list}
  * would return. It is owner-granular rather than job-granular because the
  * change may be a removal, which no per-job record can express, and because
@@ -255,16 +158,3 @@ export type JobResumer = (candidate: JobResumeCandidate) => JobResumePlan | unde
  * set changed with it.
  */
 export type JobsChangedListener = (owner: Agent | undefined) => void
-
-/**
- * Listener for one restored job accepted by a producer resumer. Returned
- * promises settle before producer work starts. Returning `true` confirms the
- * listener durably accounted the adoption, allowing later registry mirrors to
- * omit the marker; `false` rejects the ownership transfer, while `void` is
- * observational. Throws are contained so observational listeners cannot
- * accidentally veto it.
- */
-export type JobAdoptedListener = (
-  snapshot: JobSnapshot,
-  priorIncarnation: string,
-) => void | boolean | PromiseLike<void | boolean>

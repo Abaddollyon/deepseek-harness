@@ -29,19 +29,11 @@ sequenceDiagram
   Hooks-->>Driver: authoritative reject or enter(messages)
   alt proposed step rejected or pre-step failed
     Driver-->>Driver: claimed batch stays removed, the open turn spends no step
-    opt the turn aborts before the step starts
-      Driver-->>Driver: unstarted claimed batch restored to the inbox
-    end
   else enter proposed step
   Driver->>Session: <code>step/start</code>
   Driver->>Session: <code>user/message</code> per entered message
   Driver->>Prompt: <code>system-prompt/assemble</code> waterfall
-  Driver->>Hooks: <code>agent/request</code> waterfall
-  Driver->>Session: append canonical request/header and request/context
-  Driver->>Hooks: <code>agent/request-preflight</code> waterfall
-  Hooks-->>Driver: admit or retry after a replacement commit
-  Driver-->>Driver: derive messages from admitted surface
-  Driver->>LLM: <code>llm/stream</code> waterfall
+  Driver->>LLM: <code>agent/request</code> waterfall, then <code>llm/stream</code> waterfall
   LLM-->>Driver: StreamChunk*
   Driver->>Session: <code>assistant/chunk</code>*
   Session-->>SDK: <code>session/event</code> <code>assistant/chunk</code>*
@@ -81,7 +73,7 @@ sequenceDiagram
 
 The `assistant/message` event records every successful provider call, including content-less and `max-tokens` finishes. Empty content stays out of derived history, while the durable event keeps usage and `sourceEventSeqs` listing the exact `assistant/chunk` events, including an explicit empty list.
 
-`dsh-compaction-basic` uses `agent/request-preflight` for exact-route pressure after the canonical header is logged and before request derivation, while `agent/request-error` remains the provider-confirmed overflow backstop. Preflight retries only after pruning or summarization advances the surface replacement generation; the loop validates that generation and bounds productive redispatches. Before summarization, compaction reserves output, envelope, and instruction tokens against the actual summary model capacity and declines without changing durable history when no balanced replay range fits. Provider-error recovery opens a fresh retry turn only after surface progress; otherwise the original request error remains authoritative.
+`dsh-compaction-basic` uses `agent/pre-step` for pressure before request derivation and `agent/request-error` only for canonical context overflow. Once either trigger qualifies, optional tool-result pruning runs before summary selection. Recovery works between the closed failed step and failed turn close, and opens a fresh retry turn only when pruning or summarization advances the surface replacement generation; otherwise the original request error remains authoritative.
 
 The returned `agent/pre-step` decision is authoritative; listeners wrapping `next()` preserve downstream messages and `startsRequestSeries` unless replacement is intentional. Steering and injected context pass through the same waterfall after a later claim operation takes their next-step batch.
 

@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-client-ui-workflow-run` 是浏览器插件，把持久化的顶层工作流运行重建为 dsh Web 客户端中的独立 Chat 节点。它消费由 `dsh-tool-workflow` 拥有的五类 `tool-workflow/*` Session 事件，注册一个 `ConversationNodeDefinition`，并通过 keyed `conversation.chat.node` slot 渲染，不改变现有工作流工具卡。运行与每个阶段都是受控 disclosure：挂载时运行中、失败、已取消与已中断层级默认展开，全部完成的层级默认折叠，用户可以点击整行或按 Enter、Space 切换任一层级。只有当所有实时事实同时成立时，成员才可打开子 Session；节点只显示运行、阶段、成员身份与状态。
+`dsh-client-ui-workflow-run` 是浏览器插件，把持久化的顶层工作流运行重建为 dsh Web 客户端中的独立 Chat 节点。它消费由 `dsh-tool-workflow` 拥有的四类 `tool-workflow/*` Session 事件，注册一个 `ConversationNodeDefinition`，并通过 keyed `conversation.chat.node` slot 渲染，不改变现有工作流工具卡。运行与每个阶段都是受控 disclosure：挂载时运行中、失败、已取消与已中断层级默认展开，全部完成的层级默认折叠，用户可以点击整行或按 Enter、Space 切换任一层级。只有当所有实时事实同时成立时，成员才可打开子 Session；节点只显示运行、阶段、成员身份与状态。
 
 ## 目录
 
@@ -25,15 +25,15 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-经 `dsh-tool-workflow` 发起的顶层工作流运行会在对话中显示为独立节点：展开运行查看其阶段，展开阶段查看其成员。阶段组只来自开始过的成员；成员结算只改变状态，不删除或重排成员。只要子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'` 且 `parentId` 等于当前 Session，成员即可打开其子 Session。结算不会撤销这一点：完成或已中断的成员在其子行仍存在时保持可打开，因为 `sessions.open(id)` 对已结束的子级同样有效。带下划线的成员文字是唯一可见导航提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，右侧状态仍只显示生命周期词。组件只调用注入的普通 `sessions.open(id)`；普通列表中不存在其子 Session 的行（远程、仅地址化或父级不符）都不可交互。
+经 `dsh-tool-workflow` 发起的顶层工作流运行会在对话中显示为独立节点：展开运行查看其阶段，展开阶段查看其成员。阶段组只来自开始过的成员；成员结算只改变状态，不删除或重排成员。
 
 ### 导航节点
 
-运行使用 32 像素行，带常驻 chevron、行内状态点与状态文字；阶段使用 disclosure 行，在主区显示标题与成员数、在固定尾部显示聚合状态；成员使用 16 像素状态点槽、可省略名称区与固定状态列。打开成员的子 Session 需要子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'` 且 `parentId` 等于当前 Session——远程、仅地址化、父级不符或不存在的行都不可交互；只要子行存在，结算不会撤销导航。
+运行使用 32 像素行，带常驻 chevron、行内状态点与状态文字；阶段使用 disclosure 行，在主区显示标题与成员数、在固定尾部显示聚合状态；成员使用 16 像素状态点槽、可省略名称区与固定状态列。打开成员的子 Session 需要成员仍在运行、子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'`、`parentId` 等于当前 Session，且列表行仍标记运行——远程、仅地址化、父级不符或终态的行都不可交互。
 
 ### 状态与完成
 
-完成状态会立即更新，但只要焦点仍位于展开内容内，自动折叠就会等待焦点离开。若所属 Turn 或 Step 已关闭但终点事件缺失，界面把相应运行或成员显示为已中断，而不改写工具结果。已分离的运行在起始 Step 关闭后仍显示为运行中，因为后续终点事件由监督器负责。
+完成状态会立即更新，但只要焦点仍位于展开内容内，自动折叠就会等待焦点离开。若所属 Turn 或 Step 已关闭但终点事件缺失，界面把相应运行或成员显示为已中断，而不改写工具结果。
 
 -----
 
@@ -85,8 +85,8 @@ kind: "package-reference"
 
 这些限制定义哪些运行会产生记录、节点暴露什么；它们是当前包约束。
 
-- **只有经 `dsh-tool-workflow` 发起的顶层调用会生成这些记录**：嵌套 Code Mode 调用和直接 `WorkflowEngine` 消费方不会生成。
-- **导航跟随普通 Session 列表**：成员结算后只要其子行仍在列表中就保持可打开；但列表不包含其子 Session 的成员（例如远程行）永不从本节点提供打开入口。
+- **只有经 `dsh-tool-workflow` 发起的顶层调用会生成这些记录**：嵌套 PTC mode 调用和直接 `WorkflowEngine` 消费方不会生成。
+- **导航刻意只面向实时运行**：终态成员继续保留供复盘，但本节点永不为其提供冷 Session 入口。
 - **节点只显示运行、阶段、成员身份与状态**：脚本、输出、错误、日志、用量、静态拓扑与控制操作都不属于本界面。
 
 <a id="dev-note"></a>
@@ -98,3 +98,5 @@ kind: "package-reference"
 无。
 
 </details>
+
+**运行时不变式：** 不发布伴生入口。浏览器插件只贡献 effect 所有的 Conversation Definition、keyed renderer 与 dictionary；Host tool 包负责持久事件不变式。

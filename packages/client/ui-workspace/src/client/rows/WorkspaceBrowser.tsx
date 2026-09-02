@@ -15,14 +15,14 @@ import {
   Button, IconCloseFill14, IconPersonalizationOutline16,
   IconProjectAddOutline16, IconSearchOutline16, Menu, Modal, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { SessionListState, SessionSearchResultItem } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type {
+  SessionListState, SessionSearchResultItem,
+} from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceBrowserProps } from '../contract/slots.ts'
-import type { PendingInteractionSnapshot, SessionNode, SessionOrderBy } from '../tree.ts'
-import {
-  currentGroupKey, deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, UNGROUPED_KEY,
-} from '../tree.ts'
+import type { SessionNode, SessionOrderBy } from '../tree.ts'
+import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from '../tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
@@ -37,12 +37,23 @@ const EXPAND_SLIDE_MS = 300
 const SEARCH_DEBOUNCE_MS = 250
 /** `session.search` wire bound, measured in JavaScript UTF-16 code units. */
 const SEARCH_QUERY_MAX_CODE_UNITS = 500
-/**
- * Session rows visible per Workspace before the local overflow control. It
- * bounds the expanded list only: `GroupNode.sessions` is empty while a group is
- * folded, so both the slice and the overflow count exclude pinned live rows.
- */
+/** Session rows visible per Workspace before the local overflow control. */
 const COLLAPSED_SESSION_LIMIT = 5
+
+/** Fold one Workspace without charging its provisional New Session against the ordinary-row limit. */
+function collapsedSessionRows(sessions: readonly SessionNode[]): {
+  rows: readonly SessionNode[]
+  hiddenCount: number
+} {
+  let ordinaryCount = 0
+  const rows = sessions.filter((session) => {
+    if (session.blank) return true
+    if (ordinaryCount >= COLLAPSED_SESSION_LIMIT) return false
+    ordinaryCount += 1
+    return true
+  })
+  return { rows, hiddenCount: sessions.length - rows.length }
+}
 
 /** Keep controlled input and RPC payload inside the session.search wire contract. */
 function sanitizeSearchQuery(value: string): string {
@@ -103,8 +114,8 @@ function reconciledSessionOrder(sessionIds: readonly SessionId[], stored: readon
 
 /** Newest update first with stable Session identity as the tie-break. */
 function compareSessionRecency(a: SessionId, b: SessionId, byId: SessionListState['byId']): number {
-  const aUpdatedAt = (byId[a] as { updatedAt: number }).updatedAt
-  const bUpdatedAt = (byId[b] as { updatedAt: number }).updatedAt
+  const aUpdatedAt = byId[a]?.updatedAt ?? Number.NEGATIVE_INFINITY
+  const bUpdatedAt = byId[b]?.updatedAt ?? Number.NEGATIVE_INFINITY
   if (aUpdatedAt !== bUpdatedAt) return bUpdatedAt - aUpdatedAt
   return a < b ? -1 : 1
 }
@@ -138,7 +149,8 @@ function nextSessionOrderAccount({
   }
   const updatedAt: Record<string, number> = {}
   for (const id of sessionIds) {
-    updatedAt[id] = (list.byId[id] as { updatedAt: number }).updatedAt
+    const session = list.byId[id]
+    if (session !== undefined) updatedAt[id] = session.updatedAt
   }
   const orderChanged = previousOrder === undefined
     || order.length !== previousOrder.length
@@ -173,7 +185,7 @@ function ViewOptionsMenu({ groupBy, orderBy, onGroupPick, onOrderPick, t }: {
       selectedIds={[groupBy, orderBy]}
       onSelect={(id) => {
         if (id === 'workspace' || id === 'flat') onGroupPick(id)
-        else onOrderPick(id as SessionOrderBy)
+        else if (id === 'manual' || id === 'updated') onOrderPick(id)
         setOpen(false)
       }}
       align="end"
@@ -220,11 +232,9 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
-  'useSessions' | 'startSession' | 'createLooseSession' | 'open' | 'forkSession'
+  'useSessions' | 'useSessionPendingInteraction' | 'startSession' | 'open' | 'forkSession'
   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
 > & {
-  /** Pending interaction state projected from the session UI domain. */
-  pendingInteractions: PendingInteractionSnapshot
   /** Host account home for POSIX hover-path abbreviation. */
   home?: string | undefined
   workspaces: readonly WorkspaceView[]
@@ -242,15 +252,6 @@ type SessionTreeProps = Pick<
   setSessionOrder: (accountKey: string, order: string[]) => void
   /** Registry-global archive set (hidden rows). */
   archivedSessionIds: readonly SessionNode['id'][]
-  /**
-   * User-pinned Session ids in pin order (browser-local, persisted in the
-   * view store). Distinct from the automatic folded-group live holdout
-   * (GroupNode.pinned): user pins render in the Pinned section at the top of
-   * the sidebar and are omitted from every group and the flat list.
-   */
-  pinnedSessionIds: readonly string[]
-  /** Pin/unpin one Session (row menu action; browser-local, survives reloads). */
-  togglePinnedSession: (sessionId: SessionNode['id']) => void
   /** Open the browser-owned rename dialog for a real Workspace group. */
   onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
@@ -263,63 +264,16 @@ type SessionTreeProps = Pick<
   orderBy: SessionOrderBy
 }
 
-/**
- * The user-pinned threads section at the top of the sidebar: rows in explicit
- * pin order, each rendered exactly once because the grouped tree and the flat
- * list omit pinned ids. These are explicit, reload-surviving user pins —
- * unrelated to the automatic live-row holdout a folded group renders under
- * its header (GroupNode.pinned). Rows carry no drag wiring: pin order is the
- * pin gesture's own sequence.
- */
-function PinnedSessionSection({ rows, currentId, now, onOpen, onRename, onFork, onArchive, onTogglePinned, flat = false, t }: {
-  rows: readonly SessionNode[]
-  currentId: SessionNode['id'] | undefined
-  now: number
-  onOpen: (id: SessionNode['id']) => void
-  onRename: (id: SessionNode['id'], currentTitle: string) => void
-  onFork: (id: SessionNode['id']) => void
-  onArchive: (id: SessionNode['id']) => void
-  onTogglePinned: (id: SessionNode['id']) => void
-  /** Render the rows without a leading status slot, matching the flat list. */
-  flat?: boolean | undefined
-  t: WorkspaceBrowserProps['t']
-}) {
-  if (rows.length === 0) return null
-  return (
-    <div className={css.groupSection}>
-      <div className={css.pinnedHeader} role="heading" aria-level={2}>
-        {t('section.pinned')}
-      </div>
-      {rows.map(node => (
-        <SessionNodeItem
-          key={node.id}
-          node={node}
-          currentId={currentId}
-          now={now}
-          onOpen={onOpen}
-          onRename={onRename}
-          onFork={onFork}
-          onArchive={onArchive}
-          onTogglePinned={onTogglePinned}
-          userPinned
-          flat={flat}
-          t={t}
-        />
-      ))}
-    </div>
-  )
-}
-
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
-  useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds,
-  pinnedSessionIds, togglePinnedSession,
+  useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
-  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, pendingInteractions, home, t,
+  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
 }: SessionTreeProps) {
   const list = useSessions(s => s)
+  const pendingInteractions = useSessionPendingInteraction(s => s)
   const current = list.current
   const [expandedSessionGroups, setExpandedSessionGroups] = useState<string[]>([])
   // Transient drag marker state; the selected mode owns the resulting order.
@@ -344,7 +298,7 @@ function SessionTree({
   )
   const ungroupedSessionIds = useMemo(() => {
     const accounted = new Set(workspaces.flatMap(workspace => workspace.sessionIds))
-    return list.ids.filter(id => list.byId[id] !== undefined && !accounted.has(id))
+    return list.ids.filter((id: SessionId) => list.byId[id] !== undefined && !accounted.has(id))
   }, [list, workspaces])
   useEffect(() => {
     if (list.phase !== 'ready') return
@@ -385,18 +339,13 @@ function SessionTree({
     [sessionOrderByAccount, ungroupedSessionIds],
   )
   const groups = useMemo(
-    () => deriveGroups(list, orderedWorkspaces, archivedSessionIds, {
+    () => deriveGroups(list, orderedWorkspaces, archivedSessionIds, pendingInteractions, {
       expandedGroups,
       ...(sessionOrderByAccount[UNGROUPED_KEY] === undefined
         ? {}
         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
-      pinnedSessionIds,
-    }, pendingInteractions),
-    [list, orderedWorkspaces, archivedSessionIds, expandedGroups, sessionOrderByAccount, pinnedSessionIds, pendingInteractions],
-  )
-  const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, pendingInteractions),
-    [list, archivedSessionIds, pinnedSessionIds, pendingInteractions],
+    }),
+    [list, orderedWorkspaces, archivedSessionIds, pendingInteractions, expandedGroups, sessionOrderByAccount],
   )
   const now = Date.now()
   const commitSessionDrag = (activeDrag: DragState, over: NonNullable<DragState['over']>): void => {
@@ -405,21 +354,47 @@ function SessionTree({
     setDrag(null)
     const group = groups.find(candidate => candidate.key === activeDrag.accountKey)
     if (group === undefined) return
-    const targetIndex = group.sessions.findIndex(session => session.id === over.id)
+    const sessionsExpanded = expandedSessionGroups.includes(group.key)
+    const renderedSessions = sessionsExpanded ? group.sessions : collapsedSessionRows(group.sessions).rows
+    const targetIndex = renderedSessions.findIndex(session => session.id === over.id)
     if (targetIndex === -1) return
-    const anchor = over.half === 'before' ? over.id : group.sessions[targetIndex + 1]?.id
-    if (anchor === activeDrag.sessionId) return
-    const sourceIndex = group.sessions.findIndex(session => session.id === activeDrag.sessionId)
-    const anchorIndex = anchor === undefined
-      ? group.sessions.length
-      : group.sessions.findIndex(session => session.id === anchor)
-    if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
+    const sourceIndex = renderedSessions.findIndex(session => session.id === activeDrag.sessionId)
+    if (over.id === activeDrag.sessionId) return
+    const withoutSource = renderedSessions.filter(session => session.id !== activeDrag.sessionId)
+    const targetWithoutSourceIndex = withoutSource.findIndex(session => session.id === over.id)
+    if (targetWithoutSourceIndex === -1) return
+    const visibleInsertAt = over.half === 'before' ? targetWithoutSourceIndex : targetWithoutSourceIndex + 1
+    if (sourceIndex !== -1 && visibleInsertAt === sourceIndex) return
     const accountSessionIds = activeDrag.accountKey === UNGROUPED_KEY
       ? orderedUngroupedSessionIds
-      : (orderedWorkspaces.find(workspace => workspace.workspaceId === activeDrag.accountKey) as { sessionIds: SessionId[] }).sessionIds
+      : orderedWorkspaces.find(workspace => workspace.workspaceId === activeDrag.accountKey)?.sessionIds
+    if (accountSessionIds === undefined) return
     const nextOrder = accountSessionIds.filter(id => id !== activeDrag.sessionId)
+    let anchor: SessionId | undefined
+    if (sessionsExpanded) {
+      anchor = over.half === 'before' ? over.id : renderedSessions[targetIndex + 1]?.id
+    } else {
+      // A collapsed group may render the blank row after hidden ordinary rows.
+      // Place the source at the visible boundary before those hidden account members.
+      const previousVisible = withoutSource[visibleInsertAt - 1]?.id
+      if (previousVisible === undefined) {
+        anchor = nextOrder[0]
+      } else {
+        const previousIndex = nextOrder.indexOf(previousVisible)
+        if (previousIndex === -1) return
+        anchor = nextOrder[previousIndex + 1]
+      }
+    }
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
-    nextOrder.splice(insertAt, 0, activeDrag.sessionId)
+    nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
+    if (!sessionsExpanded && sourceIndex !== -1) {
+      const nodes = new Map(group.sessions.map(node => [node.id, node]))
+      const nextGroup = nextOrder.flatMap((id) => {
+        const node = nodes.get(id)
+        return node === undefined ? [] : [node]
+      })
+      if (!collapsedSessionRows(nextGroup).rows.some(node => node.id === activeDrag.sessionId)) return
+    }
     setSessionOrder(activeDrag.accountKey, nextOrder.map(id => id as string))
     if (orderBy === 'updated' || activeDrag.accountKey === UNGROUPED_KEY) return
     insertSessionBefore(activeDrag.accountKey as WorkspaceId, activeDrag.sessionId, anchor).catch((reason: unknown) => {
@@ -458,22 +433,13 @@ function SessionTree({
         role="tree"
         aria-label={t('section.sessions')}
       >
-        <PinnedSessionSection
-          rows={pinnedRows}
-          currentId={current}
-          now={now}
-          onOpen={open}
-          onRename={onSessionRename}
-          onFork={forkSession}
-          onArchive={onSessionArchive}
-          onTogglePinned={togglePinnedSession}
-          t={t}
-        />
-        {groups.length === 0 && pinnedRows.length === 0 && (
+        {groups.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {groups.map((group) => {
           const workspaceId = group.workspaceId
+          const collapsed = collapsedSessionRows(group.sessions)
+          const sessionsExpanded = expandedSessionGroups.includes(group.key)
           const workspaceMarker = workspaceId !== undefined && workspaceDrag?.over?.id === workspaceId
             ? workspaceDrag.over.half
             : null
@@ -483,8 +449,11 @@ function SessionTree({
               setWorkspaceDrag({ workspaceId, over: null })
             },
             end: () => {
-              if (workspaceDrag?.over) commitWorkspaceDrag(workspaceDrag, workspaceDrag.over)
-              else setWorkspaceDrag(null)
+              if (workspaceDrag?.over !== null && workspaceDrag?.over !== undefined) {
+                commitWorkspaceDrag(workspaceDrag, workspaceDrag.over)
+              } else {
+                setWorkspaceDrag(null)
+              }
               workspaceDropCommitted.current = false
             },
           }
@@ -498,7 +467,8 @@ function SessionTree({
           const dropWorkspace = workspaceId === undefined
             ? undefined
             : (half: 'before' | 'after') => {
-              commitWorkspaceDrag(workspaceDrag as WorkspaceDragState, { id: workspaceId, half })
+              if (workspaceDrag === null) return
+              commitWorkspaceDrag(workspaceDrag, { id: workspaceId, half })
             }
           return (
           // Group section: header row + expanded top-level session rows. The
@@ -539,48 +509,25 @@ function SessionTree({
                   if (group.workspaceId !== undefined) {
                     setGroupExpanded(group.key, true)
                     startSession(group.workspaceId)
-                  } else {
-                    createLooseSession()
                   }
                 }}
                 drag={workspaceDragProps}
-                actions={workspaceId === undefined
+                actions={group.workspaceId === undefined
                   ? undefined
                   : {
-                    rename: () => { onRenameRequest(workspaceId, group.label) },
-                    delete: () => { onDeleteRequest(workspaceId, group.label) },
+                    rename: () => {
+                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                      if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
+                    },
+                    delete: () => {
+                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                      if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
+                    },
                   }}
               />
-              {/* Folded group: its live rows stay reachable. They carry no drag
-                  wiring, so reorder never targets a row the fold is holding up. */}
-              {group.pinned.map(node => (
-                <SessionNodeItem
-                  key={node.id}
-                  node={node}
-                  currentId={current}
-                  now={now}
-                  onOpen={open}
-                  onRename={onSessionRename}
-                  onFork={forkSession}
-                  onArchive={onSessionArchive}
-                  onTogglePinned={togglePinnedSession}
-                  pinned
-                  t={t}
-                />
-              ))}
-              {group.pinned.length > 0 && group.sessionCount > group.pinned.length && (
-                <div className={css.foldedRemainder}>
-                  {t(
-                    group.sessionCount - group.pinned.length === 1
-                      ? 'sessions.hiddenIdle.one'
-                      : 'sessions.hiddenIdle.other',
-                    { n: group.sessionCount - group.pinned.length },
-                  )}
-                </div>
-              )}
-              {(expandedSessionGroups.includes(group.key)
+              {(sessionsExpanded
                 ? group.sessions
-                : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)
+                : collapsed.rows
               ).map((node) => {
               // Session drag never leaves its group. Ungrouped writes only the
               // browser-local account; real Workspaces may also write Host order.
@@ -593,13 +540,16 @@ function SessionTree({
                   active: sameGroupDrag,
                   marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
                   hover: (half: 'before' | 'after') => {
-                    setDrag({ ...drag as DragState, over: { id: node.id, half } })
+                  /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
+                    setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
                   },
                   drop: (half: 'before' | 'after') => {
-                    commitSessionDrag(drag as DragState, { id: node.id, half })
+                  /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
+                    if (drag === null) return
+                    commitSessionDrag(drag, { id: node.id, half })
                   },
                   end: () => {
-                    if (drag?.over) commitSessionDrag(drag, drag.over)
+                    if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
                     else setDrag(null)
                     sessionDropCommitted.current = false
                   },
@@ -614,22 +564,21 @@ function SessionTree({
                     onRename={onSessionRename}
                     onFork={forkSession}
                     onArchive={onSessionArchive}
-                    onTogglePinned={togglePinnedSession}
                     drag={dragProps}
                     t={t}
                   />
                 )
               })}
-              {group.sessions.length > COLLAPSED_SESSION_LIMIT && (
+              {collapsed.hiddenCount > 0 && (
                 <button
                   type="button"
                   className={css.sessionOverflowButton}
-                  aria-expanded={expandedSessionGroups.includes(group.key)}
+                  aria-expanded={sessionsExpanded}
                   onClick={() => { setExpandedSessionGroups(keys => toggled(keys, group.key)) }}
                 >
-                  {expandedSessionGroups.includes(group.key)
+                  {sessionsExpanded
                     ? t('sessions.collapse')
-                    : t('sessions.expand', { n: group.sessions.length - COLLAPSED_SESSION_LIMIT })}
+                    : t('sessions.expand', { n: collapsed.hiddenCount })}
                 </button>
               )}
             </div>
@@ -643,41 +592,31 @@ function SessionTree({
 
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
-  useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
-  pinnedSessionIds, togglePinnedSession, pendingInteractions,
+  useSessions, useSessionPendingInteraction, open, forkSession, onSessionRename, onSessionArchive,
+  archivedSessionIds,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
   | 'useSessions'
+  | 'useSessionPendingInteraction'
   | 'open'
   | 'forkSession'
   | 'onSessionRename'
   | 'onSessionArchive'
   | 'archivedSessionIds'
-  | 'pinnedSessionIds'
-  | 'togglePinnedSession'
   | 'orderBy'
   | 'sessionOrderByAccount'
   | 'sessionUpdatedAtByAccount'
   | 'syncSessionOrderAccount'
   | 'setSessionOrder'
-  | 'pendingInteractions'
   | 't'
 >) {
   const list = useSessions(s => s)
-  // baseRows deliberately includes user-pinned sessions: it feeds the flat
-  // order account, and dropping a pinned id there would cost the thread its
-  // manual position. Pinned rows are filtered only from the rendered list,
-  // after the stored order has been reconciled.
+  const pendingInteractions = useSessionPendingInteraction(s => s)
   const baseRows = useMemo(
     () => deriveFlat(list, archivedSessionIds, pendingInteractions),
     [list, archivedSessionIds, pendingInteractions],
   )
-  const pinnedRows = useMemo(
-    () => derivePinnedSessions(list, archivedSessionIds, pinnedSessionIds, pendingInteractions),
-    [list, archivedSessionIds, pinnedSessionIds, pendingInteractions],
-  )
-  const pinnedSet = useMemo(() => new Set<string>(pinnedSessionIds), [pinnedSessionIds])
   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
   const previousOrderBy = useRef(orderBy)
   useEffect(() => {
@@ -701,9 +640,11 @@ function FlatList({
   const rows = useMemo(() => {
     const byId = new Map(baseRows.map(row => [row.id, row]))
     return reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
-      .map(id => byId.get(id) as SessionNode)
-      .filter(row => !pinnedSet.has(row.id))
-  }, [baseRows, sessionOrderByAccount, sessionIds, pinnedSet])
+      .flatMap((id) => {
+        const row = byId.get(id)
+        return row === undefined ? [] : [row]
+      })
+  }, [baseRows, sessionOrderByAccount, sessionIds])
   const [drag, setDrag] = useState<DragState | null>(null)
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
@@ -718,32 +659,16 @@ function FlatList({
     const sourceIndex = rows.findIndex(row => row.id === activeDrag.sessionId)
     const anchorIndex = anchor === undefined ? rows.length : rows.findIndex(row => row.id === anchor)
     if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
-    // The account order — not the rendered rows — owns the edit: rendered
-    // rows omit user-pinned sessions, and rewriting the account without them
-    // would cost a pinned thread its position on unpin.
-    const accountOrder = reconciledSessionOrder(sessionIds, sessionOrderByAccount[FLAT_SESSION_ORDER_KEY])
-    const nextOrder = accountOrder.filter(id => id !== activeDrag.sessionId)
+    const nextOrder = rows.map(row => row.id).filter(id => id !== activeDrag.sessionId)
     const insertAt = anchor === undefined ? nextOrder.length : nextOrder.indexOf(anchor)
-    nextOrder.splice(insertAt, 0, activeDrag.sessionId)
+    nextOrder.splice(insertAt === -1 ? nextOrder.length : insertAt, 0, activeDrag.sessionId)
     setSessionOrder(FLAT_SESSION_ORDER_KEY, nextOrder.map(id => id as string))
   }
   const now = Date.now()
   return (
     <div className={clsx(css.treeBody, css.wide)}>
       <div className={clsx(css.list, css.flatList)} role="tree" aria-label={t('section.sessions')}>
-        <PinnedSessionSection
-          rows={pinnedRows}
-          currentId={list.current}
-          now={now}
-          onOpen={open}
-          onRename={onSessionRename}
-          onFork={forkSession}
-          onArchive={onSessionArchive}
-          onTogglePinned={togglePinnedSession}
-          flat
-          t={t}
-        />
-        {rows.length === 0 && pinnedRows.length === 0 && (
+        {rows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {rows.map((node) => {
@@ -758,7 +683,6 @@ function FlatList({
               onRename={onSessionRename}
               onFork={forkSession}
               onArchive={onSessionArchive}
-              onTogglePinned={togglePinnedSession}
               flat
               drag={{
                 start: () => {
@@ -771,7 +695,7 @@ function FlatList({
                   setDrag(current => current === null ? current : { ...current, over: { id: node.id, half } })
                 },
                 drop: (half) => {
-                  commitDrag(drag as DragState, { id: node.id, half })
+                  if (drag !== null) commitDrag(drag, { id: node.id, half })
                 },
                 end: () => {
                   if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
@@ -799,15 +723,15 @@ interface RemoteSearchState {
 /** Flat search body: local metadata matches plus the current Host result page. */
 function SearchResults({
   useSessions,
+  useSessionPendingInteraction,
   open,
   workspaces,
   archivedSessionIds,
   query,
   remote,
   resultLimit,
-  pendingInteractions,
   t,
-}: Pick<SessionTreeProps, 'useSessions' | 'open' | 't' | 'pendingInteractions'> & {
+}: Pick<SessionTreeProps, 'useSessions' | 'useSessionPendingInteraction' | 'open' | 't'> & {
   workspaces: readonly WorkspaceView[]
   archivedSessionIds: readonly SessionNode['id'][]
   query: string
@@ -815,12 +739,21 @@ function SearchResults({
   resultLimit: number
 }) {
   const list = useSessions(s => s)
+  const pendingInteractions = useSessionPendingInteraction(s => s)
   const currentRemote = remote.query === query
     ? remote
     : { query, status: 'loading' as const, items: [], hasMore: false }
   const results = useMemo(
-    () => deriveSearchResults(list, workspaces, query, archivedSessionIds, currentRemote, resultLimit, pendingInteractions),
-    [list, workspaces, query, archivedSessionIds, currentRemote, resultLimit],
+    () => deriveSearchResults(
+      list,
+      workspaces,
+      query,
+      archivedSessionIds,
+      pendingInteractions,
+      currentRemote,
+      resultLimit,
+    ),
+    [list, workspaces, query, archivedSessionIds, pendingInteractions, currentRemote, resultLimit],
   )
   const pending = currentRemote.status === 'loading'
   const failed = currentRemote.status === 'error'
@@ -861,43 +794,6 @@ function SearchResults({
   )
 }
 
-/** One navigation a reveal answers: the selected Session together with the group that renders it. */
-interface CurrentGroupReveal {
-  /** Identity of that pair; each distinct value is answered exactly once. */
-  navigation: string
-  /** Group key to open, or null when the group is already open. */
-  foldedKey: string | null
-}
-
-/**
- * Open the group holding the current Session once per navigation.
- *
- * Auto-expansion answers a navigation event — the selection moving to another
- * Session, or a freshly connected Workspace claiming the Session it just
- * created — and is never re-asserted as a standing invariant. The reveal
- * records the selection/group pair it answered, and folding that group by hand
- * changes neither term, so a deliberate fold stands until the selection moves
- * again. Pinning does not cover this case: it holds live rows only, so an idle
- * current Session in a folded group would stay unreachable. The reveal expands
- * through the persisted view store the header's `aria-expanded` renders from,
- * so the stored fold bit and the rendered state remain one fact.
- * @param reveal - the current navigation and the group to open, or null while nothing is
- * selected or the Workspace baseline cannot yet say which group renders it.
- * @param expand - persists one group's expansion.
- */
-function useCurrentGroupReveal(reveal: CurrentGroupReveal | null, expand: (key: string, expanded: boolean) => void): void {
-  const answered = useRef<string | null>(null)
-  useEffect(() => {
-    if (reveal === null) {
-      answered.current = null
-      return
-    }
-    if (reveal.navigation === answered.current) return
-    answered.current = reveal.navigation
-    if (reveal.foldedKey !== null) expand(reveal.foldedKey, true)
-  }, [reveal, expand])
-}
-
 /**
  * Render the browsing region.
  * @param props - composed slot props (shell owner share + store + injected actions).
@@ -907,11 +803,11 @@ export function WorkspaceBrowser({
   wide,
   expandSidebar,
   useSessions,
+  useSessionPendingInteraction,
   useWorkspaces,
   useStore,
   actions,
   startSession,
-  createLooseSession,
   open,
   renameSession,
   forkSession,
@@ -924,13 +820,11 @@ export function WorkspaceBrowser({
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
-  useConnectionGeneration,
-  useSessionPendingInteraction,
+  useHostInfo,
   renderSlot,
   t,
 }: WorkspaceBrowserProps) {
-  const home = useConnectionGeneration(generation => generation?.host.home)
-  const pendingInteractions = useSessionPendingInteraction(state => state)
+  const home = useHostInfo(info => info.home)
   const workspaces = useWorkspaces(state => state.items)
   const workspacePhase = useWorkspaces(state => state.phase)
   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
@@ -942,9 +836,6 @@ export function WorkspaceBrowser({
   const groupExpansion = useStore(s => s.groupExpansion)
   const sessionOrderByAccount = useStore(s => s.sessionOrderByAccount)
   const sessionUpdatedAtByAccount = useStore(s => s.sessionUpdatedAtByAccount)
-  // User pins: explicit, browser-local, persisted in the view store — never
-  // sent to the Host. Distinct from the folded-group live holdout.
-  const pinnedSessionIds = useStore(s => s.pinnedSessionIds)
   const currentBlankSessionId = useSessions((state) => {
     const current = state.current
     return current !== undefined && state.byId[current]?.blank === true ? current : undefined
@@ -959,8 +850,9 @@ export function WorkspaceBrowser({
       promotedBlank.current = undefined
       return
     }
-    if (promotedBlank.current?.sessionId === currentBlankSessionId
-      && promotedBlank.current.accountKey === currentBlankAccount) return
+    const promoted = promotedBlank.current
+    if (promoted !== undefined && promoted.sessionId === currentBlankSessionId
+      && promoted.accountKey === currentBlankAccount) return
     promotedBlank.current = { sessionId: currentBlankSessionId, accountKey: currentBlankAccount }
     for (const accountKey of new Set([currentBlankAccount, FLAT_SESSION_ORDER_KEY])) {
       const previous = sessionOrderByAccount[accountKey] ?? []
@@ -978,20 +870,6 @@ export function WorkspaceBrowser({
       ...workspaces.map(workspace => workspace.workspaceId as string),
     ])
   }, [actions.retainAccountKeys, workspacePhase, workspaces])
-  // Navigation reveal (see useCurrentGroupReveal). It lives here rather than in
-  // SessionTree because the tree unmounts with search, the flat mode, and the
-  // rail: an answered navigation must survive those remounts, or returning to
-  // the tree would undo a fold the user made in it.
-  const currentSessionId = useSessions(state => state.current)
-  const reveal = useMemo<CurrentGroupReveal | null>(() => {
-    // Workspace membership decides which group renders the Session; before the
-    // baseline lands every Session reads as Ungrouped, so the reveal waits
-    // instead of opening a group the membership will contradict.
-    if (currentSessionId === undefined || workspacePhase !== 'ready') return null
-    const key = currentGroupKey(currentSessionId, workspaces)
-    return { navigation: `${currentSessionId}\u0000${key}`, foldedKey: groupExpansion[key] === true ? null : key }
-  }, [currentSessionId, groupExpansion, workspacePhase, workspaces])
-  useCurrentGroupReveal(reveal, actions.setGroupExpanded)
   // The query outlives the tree and the input (both wide-only) so collapsing
   // does not silently drop an in-progress filter.
   const [query, setQuery] = useState('')
@@ -1173,15 +1051,16 @@ export function WorkspaceBrowser({
     setDeleteError(null)
   }
   const confirmDelete = () => {
-    const target = deleteTarget as { workspaceId: WorkspaceId }
+    /* v8 ignore next -- the Modal is absent without a target and its button is disabled while deleting. */
+    if (deleting || deleteTarget === null) return
     setDeleting(true)
     setDeleteCommittedId(null)
     setDeleteError(null)
-    deleteWorkspace(target.workspaceId).then(() => {
+    deleteWorkspace(deleteTarget.workspaceId).then(() => {
       // Keep the confirmation pending until this component has rendered the
       // committed list projection without the deleted id. Closing earlier
       // exposes one stale React frame to the next Create Workspace gesture.
-      setDeleteCommittedId(target.workspaceId)
+      setDeleteCommittedId(deleteTarget.workspaceId)
     }).catch((reason: unknown) => {
       setDeleting(false)
       setDeleteError(reason instanceof Error ? reason.message : String(reason))
@@ -1326,10 +1205,10 @@ export function WorkspaceBrowser({
           ? (
             <SearchResults
               useSessions={useSessions}
+              useSessionPendingInteraction={useSessionPendingInteraction}
               open={open}
               workspaces={workspaces}
               archivedSessionIds={archivedSessionIds}
-              pendingInteractions={pendingInteractions}
               query={normalizedQuery}
               remote={remoteSearch}
               resultLimit={searchResultLimit}
@@ -1339,13 +1218,11 @@ export function WorkspaceBrowser({
           : groupBy === 'flat'
             ? (
               <FlatList
-                useSessions={useSessions} open={open} forkSession={forkSession}
+                useSessions={useSessions} useSessionPendingInteraction={useSessionPendingInteraction}
+                open={open} forkSession={forkSession}
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                 archivedSessionIds={archivedSessionIds}
-                pendingInteractions={pendingInteractions}
                 orderBy={orderBy}
-                pinnedSessionIds={pinnedSessionIds}
-                togglePinnedSession={actions.togglePinnedSession}
                 sessionOrderByAccount={sessionOrderByAccount}
                 sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
@@ -1356,11 +1233,11 @@ export function WorkspaceBrowser({
             : (
               <SessionTree
                 useSessions={useSessions}
+                useSessionPendingInteraction={useSessionPendingInteraction}
                 onSessionRename={onSessionRename}
                 onSessionArchive={onSessionArchive}
                 forkSession={forkSession}
                 workspaces={workspaces}
-                pendingInteractions={pendingInteractions}
                 groupExpansion={groupExpansion}
                 setGroupExpanded={actions.setGroupExpanded}
                 sessionOrderByAccount={sessionOrderByAccount}
@@ -1368,10 +1245,7 @@ export function WorkspaceBrowser({
                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
                 setSessionOrder={actions.setSessionOrder}
                 archivedSessionIds={archivedSessionIds}
-                pinnedSessionIds={pinnedSessionIds}
-                togglePinnedSession={actions.togglePinnedSession}
                 startSession={startSession}
-                createLooseSession={createLooseSession}
                 open={open}
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 insertSessionBefore={insertSessionBefore}

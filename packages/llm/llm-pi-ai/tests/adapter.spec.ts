@@ -85,8 +85,7 @@ describe('PiAiAdapter provider routing', () => {
     })
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(result.finish).toEqual({ kind: 'stop' })
-    // OpenAI-completions usage always carries the reasoning split (0 here).
-    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4, reasoningTokens: 0 })
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4 })
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
@@ -136,14 +135,14 @@ describe('PiAiAdapter provider routing', () => {
       thinkingBudgets: { high: 2048 },
     })
     await assemble(ctx, {
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       messages: [],
       temperature: 0.2,
       maxTokens: 77,
       sessionId: 'session-for-pi' as never,
     })
     expect(server.requests[0]).toMatchObject({
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       temperature: 0.2,
       max_tokens: 77,
       thinking: { type: 'enabled' },
@@ -230,9 +229,7 @@ describe('PiAiAdapter provider routing', () => {
   })
 
   it('uses the catalog API implementation, including OpenAI Responses', async () => {
-    const failure = { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }
-    // The 401 earns one auth-recovery retry, so the scripted behavior repeats.
-    const server = await mockServer([failure, failure])
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
@@ -240,7 +237,7 @@ describe('PiAiAdapter provider routing', () => {
     })
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
     expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
+    expect(server.paths).toEqual(['/v1/responses'])
   })
 
   it('resolves attachment and filesystem services mounted after the adapter when dispatching an image', async () => {
@@ -332,8 +329,7 @@ describe('PiAiAdapter provider routing', () => {
       maxBytes: 1024 * 1024,
     }, expect.any(AbortSignal))
     expect(JSON.stringify(server.requests[0])).toContain(MODEL_IMAGE_PATH)
-    // One auth-recovery retry re-dispatches the image-bearing request.
-    expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
+    expect(server.paths).toEqual(['/v1/responses'])
   })
 
   it('forces one wire request for an SDK-retryable provider failure', async () => {
@@ -359,8 +355,7 @@ describe('PiAiAdapter provider routing', () => {
   })
 
   it('uses OpenAI Responses against an Azure project v1 path with its API key header', async () => {
-    const failure = { status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }
-    const server = await mockServer([failure, failure])
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
@@ -374,7 +369,7 @@ describe('PiAiAdapter provider routing', () => {
     })
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-5.5', messages: [] })
     expect(result.finish.kind).toBe('error')
-    expect(server.paths).toEqual(['/api/projects/openai/openai/v1/responses', '/api/projects/openai/openai/v1/responses'])
+    expect(server.paths).toEqual(['/api/projects/openai/openai/v1/responses'])
     expect(server.headers[0]?.['api-key']).toBe('test-key')
     expect(server.headers[0]?.authorization).toBe('')
   })
@@ -385,15 +380,11 @@ describe('PiAiAdapter provider routing', () => {
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
-    // A 401 earns one auth-recovery retry; scripting the behavior twice keeps
-    // the second attempt on the same failure instead of the script-exhaustion
-    // 500.
-    const behavior = { status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }
-    const server = await mockServer([behavior, behavior])
+    const server = await mockServer([{ status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
-    expect(server.paths).toEqual(Array(code === 'AUTH' ? 2 : 1).fill('/chat/completions'))
+    expect(server.paths).toEqual(['/chat/completions'])
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
@@ -415,9 +406,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(result.finish).toEqual({
       kind: 'error',
       failure: {
-        // The fallback surfaces the resolved catalog capacity and the
-        // input that exceeded it, not just the model name.
-        message: `pi-ai detected context overflow for model "${model.id}" at resolved context window ${model.contextWindow} tokens (input ${model.contextWindow + 1}, cache-read 0)`,
+        message: `pi-ai detected context overflow for model "${model.id}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
@@ -847,6 +836,15 @@ describe('provider profile lifecycle', () => {
       .toBe(1024)
   })
 
+  it.each([
+    ['bad header name', 'value'],
+    ['x-company', 'line\nbreak'],
+    ['x-company', '部署'],
+  ])('rejects provider header %j when Fetch cannot represent the entry', (name, value) => {
+    expect(() => resolveProfiles({ openai: { headers: { [name]: value } } }))
+      .toThrow(`provider "openai" header "${name}" is not valid for Fetch`)
+  })
+
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(
     'rejects removed profile field %s instead of silently restoring hidden SDK retries',
     async (field) => {
@@ -947,7 +945,7 @@ describe('provider profile lifecycle', () => {
   it('validates profiles at the shared resolver boundary', () => {
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: 0 },
-    })).toThrow(/streamIdleTimeoutMs.*positive integer/)
+    })).toThrow(/streamIdleTimeoutMs.*positive finite/)
     expect(() => resolveProfiles({
       openai: { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
     })).toThrow(/streamIdleTimeoutMs.*no greater/)

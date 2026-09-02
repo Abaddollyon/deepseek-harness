@@ -12,6 +12,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
@@ -30,6 +31,13 @@ import {
   testToolSignal,
   text,
 } from './harness.ts'
+
+/** Create a package-test context with the tool's required projection seam. */
+async function projectedContext(): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
+  return ctx
+}
 
 /**
  * Drives the REAL plugin body: mounts `dsh-tool-subagent` on a real
@@ -181,34 +189,11 @@ describe('dsh-tool-subagent', () => {
     )
   })
 
-  it('preserves branchable provider failure facts through the real tool pipeline', async () => {
-    const ctx = await setup({ provider: 'mock' }, {
-      diagnostic: 'rate limited',
-      failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
-      stopReason: 'error',
-    })
-    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
-    expect(result.isError).toBe(true)
-    if (!result.isError) throw new Error('expected foreground failure')
-    expect(text(result)).toContain('Failure code: RATE_LIMIT')
-    expect(text(result)).toContain('Retry after: 12000 ms')
-  })
-
-  it('omits the retry line when the provider supplied no delay', async () => {
-    const ctx = await setup({ provider: 'mock' }, {
-      failure: { code: 'QUOTA' },
-      stopReason: 'error',
-    })
-    const result = await callSubagent(ctx, { description: 'd', prompt: 'p' })
-    expect(text(result)).toContain('Failure code: QUOTA')
-    expect(text(result)).not.toContain('Retry after:')
-  })
-
   it('registers under a configurable toolName so multiple providers can coexist', async () => {
     // The defining multi-provider use case: two loads, two distinct tool names,
     // each bound to a different provider — the tool registry rejects duplicate
     // names, so a configurable name is what makes this work.
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -229,7 +214,7 @@ describe('dsh-tool-subagent', () => {
   it('treats an unknown (plugin-added) stop reason as an isError result', async () => {
     // SubagentStopReason is merge-extensible; the tool's stopReasonError default
     // arm must treat an unrecognized terminal reason as a failure, not success.
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -318,7 +303,7 @@ describe('dsh-tool-subagent', () => {
     // no-agentOptions branch are only reachable via a direct apply() that
     // bypasses schemastery — the same pattern acp-agent uses for its defaults.
     let seen: { agentOptions?: unknown } | undefined
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -353,7 +338,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('registers when the provider appears LATER — no load-order requirement (Loader starts siblings concurrently)', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -370,7 +355,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('keeps continuable guidance empty while its provider is absent', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -386,7 +371,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('mirrors the provider lifecycle: gone on backend dispose, re-derived wording on re-registration', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -405,7 +390,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('the tool PLUGIN fiber owns its lifecycle listeners: disposal unmounts, and a disposed fiber never zombie-mounts', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -441,7 +426,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('ignores lifecycle events for OTHER providers', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -481,7 +466,7 @@ describe('dsh-tool-subagent', () => {
     // Spy on the provider's run.dispose via a wrapping provider registered
     // directly on the service, then point the tool at it.
     const disposed = vi.fn()
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -504,7 +489,7 @@ describe('dsh-tool-subagent', () => {
 
   it('disposes the run on the error path too', async () => {
     const disposed = vi.fn()
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -528,7 +513,7 @@ describe('dsh-tool-subagent', () => {
 
   it('preserves independent foreground result and disposal failures', async () => {
     const disposed = vi.fn()
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -556,7 +541,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('reports a foreground disposal failure after a completed result', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -583,7 +568,7 @@ describe('dsh-tool-subagent', () => {
 
   it('passes the tool abort signal as the provider cancellation channel', async () => {
     const cancelled = vi.fn()
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -622,7 +607,7 @@ describe('dsh-tool-subagent', () => {
 
   it('skips provider startup for an already-aborted signal', async () => {
     const sawAborted = vi.fn()
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -649,10 +634,10 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('tools depend on the service: no `subagent` tool without ctx.subagents', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
-    // No SubagentRuntime mounted. The tool injects its three required services so its
+    // No SubagentRuntime mounted. The tool injects its required services so its
     // apply never runs; the tool is absent rather than half-registered.
     let booted = true
     try {
@@ -673,20 +658,20 @@ describe('dsh-tool-subagent', () => {
     // load with "cannot get property … without inject". Guard the shape directly.
     expect('default' in tool).toBe(false)
     expect(tool.name).toBe('tool-subagent')
-    expect(tool.inject).toEqual(['tools', 'subagents', 'systemPrompt'])
+    expect(tool.inject).toEqual(['tools', 'subagents', 'systemPrompt', 'sessionProjections'])
 
     const loader = Object.create(Loader.prototype) as Loader
     const unwrapped = loader.unwrapExports(tool) as Record<string, unknown>
     expect(unwrapped).toBe(tool)
     expect(unwrapped.name).toBe('tool-subagent')
-    expect(unwrapped.inject).toEqual(['tools', 'subagents', 'systemPrompt'])
+    expect(unwrapped.inject).toEqual(['tools', 'subagents', 'systemPrompt', 'sessionProjections'])
     expect(typeof unwrapped.apply).toBe('function')
     expect(unwrapped.Config).toBeDefined()
   })
 
   it('passes persona/toolFilter/maxDepth config through to the start request', async () => {
     let seen: { persona?: string; toolFilter?: unknown; maxDepth?: number } | undefined
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -731,8 +716,8 @@ describe('dsh-tool-subagent', () => {
       .rejects.toThrow()
   })
 
-  it('validates maxDepth when apply() is invoked directly without Schemastery', () => {
-    const ctx = new Context()
+  it('validates maxDepth when apply() is invoked directly without Schemastery', async () => {
+    const ctx = await projectedContext()
     expect(() => {
       tool.apply(ctx, {
         provider: 'unused',
@@ -743,7 +728,7 @@ describe('dsh-tool-subagent', () => {
 
   it('a partial toolFilter (deny only) does not materialize an empty allow-list (deny-all trap)', async () => {
     let seen: { toolFilter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] } } | undefined
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -773,7 +758,7 @@ describe('dsh-tool-subagent', () => {
     // which reads as present and puts a dishonest `agentOptions: {}` on every
     // start request.
     let seen: { agentOptions?: unknown } | undefined
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -798,7 +783,7 @@ describe('dsh-tool-subagent', () => {
   })
 
   it('an explicit empty toolFilter fails at plugin load, not at first delegation', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -874,7 +859,7 @@ describe('dsh-tool-subagent background mode', () => {
       agent: parent,
     })
 
-    expect(text(started)).toMatch(/^started background subagent job subagent-/)
+    expect(text(started)).toBe('started background subagent job subagent-1')
     expect(prepareCalls).toBe(0)
   })
 
@@ -885,16 +870,14 @@ describe('dsh-tool-subagent background mode', () => {
     const start = await callSubagent(ctx, { description: 'deep research', prompt: 'dig in', run_in_background: true }, { agent: parent })
     expect(start.isError).toBe(false)
     if (start.isError) throw new Error('expected background subagent success')
-    const { jobId } = start.value as { jobId: string }
-    expect(jobId).toMatch(/^subagent-/)
-    expect(start.value).toEqual({ kind: 'background', jobId })
-    expect(text(start)).toBe(`started background subagent job ${jobId}`)
+    expect(start.value).toEqual({ kind: 'background', jobId: 'subagent-1' })
+    expect(text(start)).toBe('started background subagent job subagent-1')
 
     const collected = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('collect-1'),
       name: 'job_output',
-      arguments: { job_id: jobId, wait: true },
+      arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
     expect(text(collected)).toBe('background answer\n[status: completed]')
@@ -904,17 +887,16 @@ describe('dsh-tool-subagent background mode', () => {
       signal: testToolSignal,
       callId: ToolCallId('collect-2'),
       name: 'job_output',
-      arguments: { job_id: jobId },
+      arguments: { job_id: 'subagent-1' },
       agent: parent,
     })
     expect(text(again)).toBe('background answer\n[status: completed]')
   })
 
-  it('preserves provider diagnostics and routing facts in one-shot background failure detail', async () => {
+  it('preserves provider diagnostics in one-shot background failure detail', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' }, {
       reply: 'not background output',
       diagnostic: 'Claude Code cancelled an unattended dialog',
-      failure: { code: 'RATE_LIMIT', retryAfterMs: 12_000 },
       stopReason: 'error',
     })
     const parent = ownerAgent(ctx, 'sess-parent')
@@ -926,20 +908,18 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { description: 'd', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    const jobId = (started.value as { jobId: string }).jobId
-    expect(text(started)).toBe(`started background subagent job ${jobId}`)
+    expect(text(started)).toBe('started background subagent job subagent-1')
 
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('diagnostic-background-output'),
       name: 'job_output',
-      arguments: { job_id: jobId, wait: true },
+      arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
     expect(text(output)).toBe(
       '(no new output)\n'
-      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog'
-      + '; failure code: RATE_LIMIT; retry after: 12000 ms]',
+      + '[status: failed, error; diagnostic: Claude Code cancelled an unattended dialog]',
     )
   })
 
@@ -1038,14 +1018,14 @@ describe('dsh-tool-subagent background mode', () => {
     expect(replacementStart).not.toHaveBeenCalled()
   })
 
-  it('settles an unrenderable asynchronous provider-start failure as a failed task', async () => {
+  it('settles an asynchronous provider-start failure as a failed task', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' })
     const parent = ownerAgent(ctx, 'sess-parent')
     ctx.subagents.registerProvider({
       name: 'broken-start',
       capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
       inheritsParentContext: false,
-      start: async () => { throw { [Symbol.toPrimitive](): never { throw new Error('coercion failed') } } },
+      start: async () => { throw new Error('setup failed') },
     })
     tool.apply(ctx, { provider: 'broken-start', toolName: 'subagent_broken' })
 
@@ -1056,16 +1036,15 @@ describe('dsh-tool-subagent background mode', () => {
       arguments: { description: 'broken', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    const jobId = (started.value as { jobId: string }).jobId
-    expect(text(started)).toBe(`started background subagent job ${jobId}`)
+    expect(text(started)).toBe('started background subagent job subagent-1')
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-output'),
       name: 'job_output',
-      arguments: { job_id: jobId, wait: true },
+      arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
-    expect(text(output)).toContain('[status: failed, <unrenderable value>]')
+    expect(text(output)).toContain('[status: failed, Error: setup failed]')
   })
 
   it('kills a subagent task while provider readiness is still pending', async () => {
@@ -1081,26 +1060,25 @@ describe('dsh-tool-subagent background mode', () => {
     })
     tool.apply(ctx, { provider: 'pending-start', toolName: 'subagent_pending' })
 
-    const started = await ctx.tools.execute({
+    await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-start'),
       name: 'subagent_pending',
       arguments: { description: 'pending', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    const jobId = (started.value as { jobId: string }).jobId
     await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-kill'),
       name: 'job_kill',
-      arguments: { job_id: jobId, reason: 'no longer needed' },
+      arguments: { job_id: 'subagent-1', reason: 'no longer needed' },
       agent: parent,
     })
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('pending-output'),
       name: 'job_output',
-      arguments: { job_id: jobId, wait: true },
+      arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
     expect(text(output)).toBe('(no new output)\n[status: killed]')
@@ -1124,26 +1102,25 @@ describe('dsh-tool-subagent background mode', () => {
     })
     tool.apply(ctx, { provider: 'broken-start-rollback', toolName: 'subagent_broken_rollback' })
 
-    const started = await ctx.tools.execute({
+    await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-start'),
       name: 'subagent_broken_rollback',
       arguments: { description: 'broken rollback', prompt: 'p', run_in_background: true },
       agent: parent,
     })
-    const jobId = (started.value as { jobId: string }).jobId
     await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-kill'),
       name: 'job_kill',
-      arguments: { job_id: jobId },
+      arguments: { job_id: 'subagent-1' },
       agent: parent,
     })
     const output = await ctx.tools.execute({
       signal: testToolSignal,
       callId: ToolCallId('broken-rollback-output'),
       name: 'job_output',
-      arguments: { job_id: jobId, wait: true },
+      arguments: { job_id: 'subagent-1', wait: true },
       agent: parent,
     })
     expect(text(output)).toContain('[status: failed, AggregateError: startup failed and cleanup also failed]')
@@ -1180,19 +1157,17 @@ describe('dsh-tool-subagent background mode', () => {
 
     const startOne = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('h1'), name: 'subagent_hang', arguments: { description: 'one', prompt: 'p', run_in_background: true }, agent: parent })
     const startTwo = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('h2'), name: 'subagent_hang', arguments: { description: 'two', prompt: 'p', run_in_background: true }, agent: parent })
-    const jobOne = (startOne.value as { jobId: string }).jobId
-    const jobTwo = (startTwo.value as { jobId: string }).jobId
-    expect(text(startOne)).toBe(`started background subagent job ${jobOne}`)
-    expect(text(startTwo)).toBe(`started background subagent job ${jobTwo}`)
+    expect(text(startOne)).toBe('started background subagent job subagent-1')
+    expect(text(startTwo)).toBe('started background subagent job subagent-2')
 
-    const withReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k1'), name: 'job_kill', arguments: { job_id: jobOne, reason: 'superseded' }, agent: parent })
-    const withoutReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k2'), name: 'job_kill', arguments: { job_id: jobTwo }, agent: parent })
-    expect(text(withReason)).toBe(`requested cancellation of job ${jobOne}`)
-    expect(text(withoutReason)).toBe(`requested cancellation of job ${jobTwo}`)
+    const withReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k1'), name: 'job_kill', arguments: { job_id: 'subagent-1', reason: 'superseded' }, agent: parent })
+    const withoutReason = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('k2'), name: 'job_kill', arguments: { job_id: 'subagent-2' }, agent: parent })
+    expect(text(withReason)).toBe('requested cancellation of job subagent-1')
+    expect(text(withoutReason)).toBe('requested cancellation of job subagent-2')
     expect(cancels).toEqual(['superseded', 'background subagent task killed'])
 
     // The aborted children settle as killed tasks.
-    const killed = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('w1'), name: 'job_output', arguments: { job_id: jobOne, wait: true }, agent: parent })
+    const killed = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('w1'), name: 'job_output', arguments: { job_id: 'subagent-1', wait: true }, agent: parent })
     expect(text(killed)).toBe('(no new output)\n[status: killed]')
   })
 
@@ -1206,7 +1181,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
 
   /** Boot the real continuable stack without any model-facing follow-up adapter. */
   async function continuableSetup() {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await mountAgentLoopTestDependencies(ctx)
     const root = mkdtempSync(path.join(tmpdir(), 'dsh-tool-subagent-continuable-'))
     roots.push(root)
@@ -1241,6 +1216,8 @@ describe('dsh-tool-subagent continuable background mode', () => {
     expect(schema.description).not.toContain('job_output')
     expect(schema.description).not.toContain('job_kill')
     expect(schema.description).toContain('send_message')
+    expect(schema.description).toContain('steers the child\'s nearest step while it is running')
+    expect(schema.description).not.toContain('send_message` starts a later turn')
     expect(schema.description).toContain('runs in the background by default')
     expect(schema.description).not.toContain('never poll or wait on it')
     const properties = (schema.parameters as {
@@ -1413,7 +1390,7 @@ describe('depth budget configuration', () => {
   /** Mount the tool over a request-capturing provider with full capabilities. */
   async function captureSetup(config: Omit<tool.Config, 'provider'> = {}) {
     const requests: SubagentStartRequest[] = []
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -1451,7 +1428,7 @@ describe('depth budget configuration', () => {
   })
 
   it('rejects a numeric maxDepth on a provider without the depthLimit capability at mount', async () => {
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)
@@ -1467,7 +1444,7 @@ describe('depth budget configuration', () => {
 
   it("'provider-managed' omits the cap so a capability-less provider mounts and starts", async () => {
     const requests: SubagentStartRequest[] = []
-    const ctx = new Context()
+    const ctx = await projectedContext()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(SubagentRuntime)

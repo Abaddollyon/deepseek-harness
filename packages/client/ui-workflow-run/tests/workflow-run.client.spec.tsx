@@ -29,7 +29,6 @@ import {
   workflowRunDefinition, type WorkflowRunChatData,
 } from '../src/client/workflow-definition.ts'
 import { apply as applyNode } from '../src/index.ts'
-import { apply as applyInvariant } from '../src/invariant.ts'
 import type {} from '../src/client/index.ts'
 
 afterEach(cleanup)
@@ -100,7 +99,7 @@ function matched(input: SessionLiveEventEntry, role: ConversationMatch['role']):
 function assembler(entries: readonly SessionLiveEventEntry[], hasMore = false): ConversationNodeAssembler {
   const value = new ConversationNodeAssembler(new TestEventDefinitions(), new TestViewDefinitions())
   value.replaceWindow(entries, hasMore)
-  value.flush()
+  value.activateTarget('chat')
   return value
 }
 
@@ -186,29 +185,6 @@ describe('workflow-run Conversation Definition', () => {
     })
   })
 
-  it('keeps a detached workflow running after its starting step closes', () => {
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'step/start', { turn: 1, step: 1 }),
-      at(3, 'tool-workflow/run-start', { runId: 'detached', name: 'detached' }),
-      at(4, 'tool-workflow/agent-start', {
-        runId: 'detached', seq: 1, label: 'worker', childId: 'child-1',
-      }),
-      at(5, 'run/detached', {
-        jobId: 'workflow-detached', kind: 'workflow', label: 'workflow: detached',
-        runId: 'detached', resumable: false,
-      }),
-      at(6, 'step/end', { turn: 1, step: 1 }),
-    ])
-    expect(workflowData(value)).toMatchObject({
-      status: 'running', phases: [{ members: [{ status: 'running' }] }],
-    })
-    value.append(at(7, 'tool-workflow/agent-end', { runId: 'detached', seq: 1, outcome: 'completed' }))
-    value.append(at(8, 'tool-workflow/run-end', { runId: 'detached', stopReason: 'completed' }))
-    value.flush()
-    expect(workflowData(value)?.status).toBe('completed')
-  })
-
   it('retains a zero-member run as its own completed node', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
@@ -218,29 +194,6 @@ describe('workflow-run Conversation Definition', () => {
     ])
     expect(workflowData(value)).toEqual({
       name: 'empty', status: 'completed', phases: [],
-    })
-  })
-
-  it('folds phase announcements and narration into the card model', () => {
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'tool-workflow/run-start', { runId: 'progress', name: 'progress' }),
-      at(3, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 1 }),
-      at(4, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 2 }),
-      at(5, 'tool-workflow/log', {
-        runId: 'progress', message: 'searching', ordinal: 3, truncated: true,
-      }),
-      at(6, 'tool-workflow/log', { runId: 'progress', message: 'done', ordinal: 4 }),
-      at(7, 'tool-workflow/run-end', { runId: 'progress', stopReason: 'completed' }),
-    ])
-    expect(workflowData(value)).toEqual({
-      name: 'progress',
-      status: 'completed',
-      phases: [{ key: 'value:8:Research', phase: 'Research', members: [] }],
-      narration: [
-        { message: 'searching', ordinal: 3, truncated: true },
-        { message: 'done', ordinal: 4 },
-      ],
     })
   })
 
@@ -738,10 +691,6 @@ describe('WorkflowRunPanel', () => {
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     member.focus()
 
-    // Navigability ends when the child rows leave the ordinary list (terminal
-    // status alone no longer removes it), so the completion arrives with the
-    // children gone to keep exercising the focused-retention path.
-    const settled = listState({ ids: [PARENT_ID] })
     view.rerender(<WorkflowRunPanel {...panelProps({
       name: 'audit', status: 'completed',
       phases: [phase({
@@ -750,7 +699,7 @@ describe('WorkflowRunPanel', () => {
           { seq: 2, label: 'second', childId: SECOND_ID, status: 'completed' },
         ],
       })],
-    }, settled)} />)
+    }, sessions)} />)
     expect(runHeader.getAttribute('aria-expanded')).toBe('true')
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     const retained = screen.getByRole('button', { name: 'worker' })
@@ -782,7 +731,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    }, listState({ ids: [PARENT_ID] }))} />)
+    })} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -811,7 +760,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    }, listState({ ids: [PARENT_ID] }))} />)
+    })} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -867,7 +816,7 @@ describe('WorkflowRunPanel', () => {
     expect(screen.getByRole('button', { name: /未分阶段/ }).getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('opens a running ordinary-list subagent proven to have this parent', () => {
+  it('opens only a running ordinary-list subagent proven to have this parent', () => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running', phases: [phase()],
     }
@@ -875,41 +824,6 @@ describe('WorkflowRunPanel', () => {
     render(<WorkflowRunPanel {...panelProps(data, listState(), openSession)} />)
     fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
     expect(openSession).toHaveBeenCalledWith('child-1')
-  })
-
-  it('opens completed and interrupted members while their child Session row exists', () => {
-    const sessions = listState({
-      ids: [PARENT_ID, CHILD_ID, SECOND_ID],
-      byId: {
-        ...listState().byId,
-        // Both child rows are settled: the row's own lifecycle must not gate
-        // navigation once the member's Session exists.
-        [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
-        [SECOND_ID]: {
-          id: SECOND_ID, displayTitle: 'second', parentId: PARENT_ID, origin: 'subagent',
-          running: false, blank: false, updatedAt: 0,
-        },
-      },
-    })
-    const data: WorkflowRunChatData = {
-      name: 'audit', status: 'interrupted',
-      phases: [phase({
-        members: [
-          { seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' },
-          { seq: 2, label: 'second', childId: SECOND_ID, status: 'interrupted' },
-          { seq: 3, label: 'ghost', childId: 'child-3' as SessionId, status: 'completed' },
-        ],
-      })],
-    }
-    const openSession = vi.fn()
-    render(<WorkflowRunPanel {...panelProps(data, sessions, openSession)} />)
-    fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
-    fireEvent.click(screen.getByRole('button', { name: '打开 second' }))
-    expect(openSession).toHaveBeenCalledWith('child-1')
-    expect(openSession).toHaveBeenCalledWith('child-2')
-    // A member whose child Session summary is gone stays a static row.
-    expect(screen.queryByRole('button', { name: '打开 ghost' })).toBeNull()
-    expect(screen.getByText('ghost')).toBeTruthy()
   })
 
   it('promotes a running member when its ordinary Session row arrives', () => {
@@ -932,10 +846,11 @@ describe('WorkflowRunPanel', () => {
       ...listState().byId,
       [CHILD_ID]: { ...listState().byId[CHILD_ID]!, parentId: 'other' as SessionId },
     } }), 'running'],
-    ['no child Session row', listState({
-      ids: [PARENT_ID],
-      byId: { [PARENT_ID]: listState().byId[PARENT_ID]! },
-    }), 'completed'],
+    ['list terminal', listState({ byId: {
+      ...listState().byId,
+      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
+    } }), 'running'],
+    ['member terminal', listState(), 'completed'],
   ] as const)('does not navigate when %s', (_name, sessions, memberStatus) => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running',
@@ -990,15 +905,7 @@ describe('plugin lifecycle', () => {
     await replacement.dispose()
   })
 
-  it('keeps the node half inert and registers invariant ownership', async () => {
+  it('keeps the node half inert', () => {
     applyNode()
-    const registered: string[] = []
-    const ctx = new Context()
-    ctx.provide('invariants')
-    ctx.set('invariants', {
-      register: (pkg: string) => { registered.push(pkg); return () => {} },
-    } as never)
-    await applyInvariant(ctx)
-    expect(registered).toEqual(['@deepseek-ai/dsh-client-ui-workflow-run'])
   })
 })

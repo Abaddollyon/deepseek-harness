@@ -121,36 +121,6 @@ function writableStore(ctx: Context): CredentialProvider {
   return credentials
 }
 
-/** Normalize an external abort or provider rejection to the store's Error contract. */
-function credentialOperationError(reason: unknown): Error {
-  return reason instanceof Error ? reason : new Error(String(reason))
-}
-
-/** Reject an in-flight credential operation as soon as its owner aborts. */
-function raceCredentialAbort<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (signal === undefined) return operation
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => {
-      operation.catch(() => {
-        // The durable operation may still acquire its lock; its mutator checks
-        // the same signal before committing, and this handler owns settlement.
-      })
-      reject(credentialOperationError(signal.reason))
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-    operation.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(value)
-      },
-      (reason: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(credentialOperationError(reason))
-      },
-    )
-  })
-}
-
 /**
  * A pi-ai `CredentialStore` over the harness credential records.
  *
@@ -190,7 +160,7 @@ export function credentialStoreFrom(ctx: Context): CredentialStore {
       }
       return mine
     },
-    async modify(providerId, mutate, options) {
+    async modify(providerId, mutate) {
       if (!isCredentialKeySegment(providerId)) {
         throw new LlmError(
           `llm-pi-ai: provider id "${providerId}" cannot address a stored credential record (a record id is a`
@@ -199,14 +169,10 @@ export function credentialStoreFrom(ctx: Context): CredentialStore {
           'UNSTORABLE_PROVIDER_ID',
         )
       }
-      options?.signal?.throwIfAborted()
-      const operation = writableStore(ctx).modifyRecord(recordKeyFor(providerId), async (current) => {
-        options?.signal?.throwIfAborted()
+      const stored = await writableStore(ctx).modifyRecord(recordKeyFor(providerId), async (current) => {
         const next = await mutate(toPiCredential(current))
-        options?.signal?.throwIfAborted()
         return next === undefined ? undefined : toRecord(next)
       })
-      const stored = await raceCredentialAbort(operation, options?.signal)
       return toPiCredential(stored)
     },
     // `async` so a missing service reaches the caller as a rejection: pi-ai's

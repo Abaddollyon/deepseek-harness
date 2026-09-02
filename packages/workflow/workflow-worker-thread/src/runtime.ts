@@ -13,8 +13,9 @@
  */
 
 import * as vm from 'node:vm'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { assertObjectJsonSchema, JsonSchemaError } from '@deepseek-ai/dsh-tools'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { isFatalWorkflowError, WorkflowError } from '@deepseek-ai/dsh-workflow'
@@ -35,22 +36,10 @@ export interface ExecutionObserver {
   agentEnd(info: WorkflowAgentEndInfo): void
 }
 
-/**
- * The `agent()` options the script may pass; everything else rejects loud.
- *
- * `reasoningEffort` carries the script-facing spelling of
- * `LlmCallConfig.reasoningEffort`: script options are JavaScript identifiers
- * written beside `provider` and `model`, so they follow the camelCase of the
- * seam type they set rather than the snake_case a tool-JSON parameter would
- * use. The bare name `effort` is deliberately NOT accepted — it names no
- * dimension and collides with the deferred Claude Code option of the same
- * spelling.
- */
-const SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model', 'reasoningEffort'])
+/** The `agent()` options the script may pass; everything else rejects loud. */
+const SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model'])
 /** Deferred Claude Code options we name explicitly in the rejection message. */
-const DEFERRED_AGENT_OPTIONS = new Set(['isolation', 'agentType'])
-/** The supported-option list every option rejection quotes, derived so it cannot drift. */
-const SUPPORTED_AGENT_OPTIONS_TEXT = [...SUPPORTED_AGENT_OPTIONS].join(', ')
+const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
 
 /** Flatten a child's final output blocks to text (the non-schema `agent()` result). */
 function outputText(blocks: ContentBlock[]): string {
@@ -288,11 +277,9 @@ export class WorkflowExecution {
       try {
         run = await this.children.startAgent({
           prompt: rawPrompt,
-          ...opts.label !== undefined ? { label: opts.label } : {},
           ...opts.schema !== undefined ? { schema: opts.schema } : {},
           ...opts.provider !== undefined ? { provider: opts.provider } : {},
           ...opts.model !== undefined ? { model: opts.model } : {},
-          ...opts.reasoningEffort !== undefined ? { reasoningEffort: opts.reasoningEffort } : {},
         })
       } catch (error: unknown) {
         // The host refuses starts once the run is cancelled — a refusal that
@@ -309,7 +296,7 @@ export class WorkflowExecution {
         await run.dispose()
         throw this.cancelledError()
       }
-      const info: WorkflowAgentInfo = { seq, label, ...phase !== undefined ? { phase } : {}, childId: SessionId(run.id) }
+      const info: WorkflowAgentInfo = { seq, label, ...phase !== undefined ? { phase } : {}, childId: brandString<SessionId>(run.id) }
       this.observer.agentStart(info)
       try {
         let result
@@ -364,7 +351,6 @@ export class WorkflowExecution {
     phase?: string
     provider?: string
     model?: string
-    reasoningEffort?: string
     schema?: ObjectJsonSchema
   } {
     if (rawOpts === undefined) return {}
@@ -383,11 +369,11 @@ export class WorkflowExecution {
     for (const key of Object.keys(record)) {
       if (SUPPORTED_AGENT_OPTIONS.has(key)) continue
       if (DEFERRED_AGENT_OPTIONS.has(key)) {
-        throw new WorkflowError(`agent() option "${key}" is deferred and not supported by this engine (supported: ${SUPPORTED_AGENT_OPTIONS_TEXT})`, 'UNSUPPORTED_OPTION')
+        throw new WorkflowError(`agent() option "${key}" is deferred and not supported by this engine (supported: label, phase, schema, provider, model)`, 'UNSUPPORTED_OPTION')
       }
-      throw new WorkflowError(`agent() option "${key}" is not recognized (supported: ${SUPPORTED_AGENT_OPTIONS_TEXT})`, 'UNSUPPORTED_OPTION')
+      throw new WorkflowError(`agent() option "${key}" is not recognized (supported: label, phase, schema, provider, model)`, 'UNSUPPORTED_OPTION')
     }
-    for (const key of ['label', 'phase', 'provider', 'model', 'reasoningEffort'] as const) {
+    for (const key of ['label', 'phase', 'provider', 'model'] as const) {
       if (record[key] !== undefined && typeof record[key] !== 'string') {
         throw new WorkflowError(`agent() option "${key}" must be a string`, 'INVALID_ARGUMENT')
       }
@@ -408,7 +394,6 @@ export class WorkflowExecution {
       ...record.phase !== undefined ? { phase: record.phase as string } : {},
       ...record.provider !== undefined ? { provider: record.provider as string } : {},
       ...record.model !== undefined ? { model: record.model as string } : {},
-      ...record.reasoningEffort !== undefined ? { reasoningEffort: record.reasoningEffort as string } : {},
       ...schema !== undefined ? { schema } : {},
     }
   }

@@ -6,11 +6,18 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { BlockAssembler, deepFreeze } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import type { LlmImageRequestPricing, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { EpochHeader, Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals, isSurfaceEvent } from '@deepseek-ai/dsh-session'
-// Type-only: resolves the optional projection registry Context declaration.
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import type {
+  EpochHeader,
+  Session,
+  SessionEvent,
+  SessionLogOffset as SessionLogOffsetType,
+  SessionSeq as SessionSeqType,
+} from '@deepseek-ai/dsh-session'
+import { canonicalHeader, headerEquals, isSurfaceEvent, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+// Type-only: activates the `ctx.sessionProjections` Context declaration.
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {
   TokenMeasurement,
@@ -18,7 +25,6 @@ import type {
   TokenMeterConfig,
 } from './types.ts'
 import { contextBreakdownProjectionDefinition } from './breakdown-projection.ts'
-import { modelRouteProjectionDefinition } from './route-projection.ts'
 import { contextPressureProjectionDefinition, tokenUsageProjectionDefinition } from './usage-projection.ts'
 import { estimateContent, estimateHeader, estimateMessage, ROLE_OVERHEAD } from './estimate.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
@@ -26,6 +32,11 @@ import type { MeterSurfaceNode } from './surface-fold.ts'
 import { priceSurface } from './route-pricing.ts'
 
 export type * from './types.ts'
+// Module-edge re-export: forces the emitted index.d.ts to import the
+// projection-unit modules, so their SessionProjectionStateMap augmentations load
+// in aggregate programs that only import the package root.
+export type * from './usage-projection.ts'
+export type * from './breakdown-projection.ts'
 
 /**
  * Raw anchor facts captured at the latest successful call; the baseline is
@@ -43,7 +54,7 @@ interface MeasurementAnchor {
 }
 
 interface ReplayState {
-  consumedEvents: number
+  consumedEvents: SessionLogOffsetType
   header: EpochHeader | undefined
   surface: MeterSurfaceNode[]
   stepStart: { turn: number; step: number; nodes: readonly MeterSurfaceNode[] } | undefined
@@ -86,20 +97,17 @@ export class TokenMeter extends Service {
   // the public type excludes settings while validateConfigKeys rejects them.
   static Config: z<TokenMeterConfig> = z.object({}) as unknown as z<TokenMeterConfig>
 
+  static inject = ['sessionProjections']
+
   private readonly states = new WeakMap<Session, ReplayState>()
 
   constructor(ctx: Context, config: TokenMeterConfig = {}) {
     super(ctx, 'tokenMeter')
     validateConfigKeys(config)
 
-    // Projection registration is an optional child: compositions without the
-    // generic registry keep the meter's standalone read shape.
-    ctx.inject(['sessionProjections'], (projectionCtx) => {
-      projectionCtx.sessionProjections.register(tokenUsageProjectionDefinition)
-      projectionCtx.sessionProjections.register(contextPressureProjectionDefinition)
-      projectionCtx.sessionProjections.register(contextBreakdownProjectionDefinition)
-      projectionCtx.sessionProjections.register(modelRouteProjectionDefinition)
-    })
+    ctx.sessionProjections.register(tokenUsageProjectionDefinition)
+    ctx.sessionProjections.register(contextPressureProjectionDefinition)
+    ctx.sessionProjections.register(contextBreakdownProjectionDefinition)
 
     // Readers catch up independently, while eager observation bounds ordinary
     // read latency without creating state for sessions no consumer has read.
@@ -174,17 +182,6 @@ export class TokenMeter extends Service {
     }))
   }
 
-  /**
-   * Heuristically price the non-surface request envelope — system prompt and
-   * tool schemas — under the same fixed heuristic `measure` applies (instance
-   * face of the pure `estimateHeader` export from `estimate.ts`).
-   * @param header - canonical envelope, or undefined before any request.
-   * @returns heuristic system plus tool tokens; 0 for an absent envelope.
-   */
-  estimateHeader(header: EpochHeader | undefined): number {
-    return estimateHeader(header)
-  }
-
   /** Resolve the routed model's image pricing, when the llm service and route declare one. */
   private _routeImagePricing(header: EpochHeader | undefined): LlmImageRequestPricing | undefined {
     const config = header?.config
@@ -207,7 +204,7 @@ export class TokenMeter extends Service {
     let state = this.states.get(session)
     if (state === undefined) {
       state = {
-        consumedEvents: 0,
+        consumedEvents: SessionLogOffset(0),
         header: undefined,
         surface: [],
         stepStart: undefined,
@@ -216,11 +213,11 @@ export class TokenMeter extends Service {
       this.states.set(session, state)
     }
 
-    while (state.consumedEvents < session.events.length) {
+    while (state.consumedEvents < session.seq) {
       // oxlint-disable-next-line typescript/no-non-null-assertion -- contiguous session seqs index the durable log
-      const event = session.events[state.consumedEvents]!
+      const event = session.eventAt(SessionSeq(state.consumedEvents))!
       this._foldEvent(session, state, event)
-      state.consumedEvents += 1
+      state.consumedEvents = SessionLogOffset(state.consumedEvents + 1)
     }
     return state
   }
@@ -313,7 +310,7 @@ export class TokenMeter extends Service {
     if (sourceSeqs === undefined) return durableEventTokens
 
     const assembler = new BlockAssembler()
-    const seen = new Set<number>()
+    const seen = new Set<SessionSeqType>()
     for (const seq of sourceSeqs) {
       if (seq >= event.seq) {
         throw new Error(`token meter: assistant/message at seq ${event.seq} source seq ${seq} is not earlier`)
@@ -324,7 +321,7 @@ export class TokenMeter extends Service {
       seen.add(seq)
       // Session construction validates contiguous seqs, and the explicit
       // earlier-than-assistant check above therefore guarantees existence.
-      const source = session.events[seq]
+      const source = session.eventAt(seq)
       // oxlint-disable-next-line typescript/no-non-null-assertion
       const sourceEvent = source!
       if (sourceEvent.type !== 'assistant/chunk') {

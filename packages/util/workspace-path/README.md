@@ -13,20 +13,10 @@ Browser-safe path helpers shared by Workspace-facing client and controller packa
 
 ## Table of Contents
 
-- [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
 - [Dev Note](#dev-note)
 
 -----
-
-<a id="model-experience"></a>
-## Model Experience
-
-None, as these browser-safe helpers format paths for callers and register nothing model-facing.
-
-#### KV Cache effect
-
-None; the package neither assembles nor sends model requests.
 
 ## Known Limitations and Deferred Work
 
@@ -45,3 +35,5 @@ None; the package neither assembles nor sends model requests.
 None.
 
 </details>
+
+**Runtime invariant:** No companion is published. This utility owns no mutable runtime relationship.

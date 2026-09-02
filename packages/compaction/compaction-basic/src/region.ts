@@ -19,7 +19,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
@@ -31,20 +31,19 @@ interface RegionDependencies {
 
 /** One validated inclusive span of current surface positions. */
 interface SurfaceSelection {
-  readonly start: number
-  readonly end: number
+  readonly start: SessionSeq
+  readonly end: SessionSeq
   readonly startIdx: number
   readonly endIdx: number
-  readonly shadowedSeqs: readonly number[]
+  readonly shadowedSeqs: readonly SessionSeq[]
 }
 
 /** A selection with its priced snapshot and the replay input built from it. */
 interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
-  /** Heuristic total persisted for token-meter replacement projection. */
   readonly shadowedTokenCount: number
-  /** Route-priced total used only to compare summary admission size. */
+  /** Route-priced total of the selected span; the shrink comparison's unit. */
   readonly shadowedRouteTokenCount: number
   readonly input: SummarizationInput
 }
@@ -67,7 +66,7 @@ interface CompactionTransactionOptions {
 interface CompactionEntryState {
   readonly openTurn: number | null
   readonly unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
-  readonly latestEndSeedSeq: number | undefined
+  readonly latestEndSeedSeq: SessionSeq | undefined
 }
 
 /**
@@ -102,7 +101,7 @@ export function selectCompactableRange(
   session: Session,
   measurement: TokenMeasurement,
   retainTokens: number,
-): { start: number; end: number } | null {
+): { start: SessionSeq; end: SessionSeq } | null {
   const pricedNodes = measurement.nodes
   if (pricedNodes.length === 0) return null
 
@@ -137,58 +136,6 @@ export function selectCompactableRange(
 }
 
 /**
- * Shrink a selected region's end so its priced replay fits the summarizer's
- * admission budget, keeping the end on a balanced tool-pairing boundary. The
- * region always keeps its head anchor and the retained tail only grows.
- * Returns `null` when even the smallest balanced head region exceeds the
- * budget: admission fails closed there instead of paying for a summarization
- * call whose replay cannot fit the resolved context window.
- * @param session - session supplying authoritative current surface positions.
- * @param measurement - the measurement range selection already aligned to the surface.
- * @param range - inclusive selected range to cap.
- * @param budgetTokens - maximum priced tokens the replayed region may carry.
- * @returns the capped inclusive range, or `null` when nothing balanced fits.
- */
-export function capRangeForReplayBudget(
-  session: Session,
-  measurement: TokenMeasurement,
-  range: { start: number; end: number },
-  budgetTokens: number,
-): { start: number; end: number } | null {
-  const nodes = session.surface.nodes
-  if (nodes.length !== measurement.nodes.length
-    || nodes.some((seq, index) => seq !== measurement.nodes[index]?.seq)) {
-    throw new Error('compaction: token-meter surface does not match the current session surface')
-  }
-  const startIdx = nodes.indexOf(range.start)
-  let endIdx = nodes.indexOf(range.end)
-  if (startIdx === -1 || endIdx === -1) {
-    throw new Error(
-      `capRangeForReplayBudget: range ${range.start}-${range.end} is not on the current surface`,
-    )
-  }
-
-  let regionTokens = 0
-  for (let index = startIdx; index <= endIdx; index += 1) {
-    // Selection aligned priced nodes with surface positions before capping.
-    // oxlint-disable-next-line typescript/no-non-null-assertion
-    regionTokens += measurement.nodes[index]!.tokens
-  }
-  while (endIdx > startIdx && regionTokens > budgetTokens) {
-    // oxlint-disable-next-line typescript/no-non-null-assertion
-    regionTokens -= measurement.nodes[endIdx]!.tokens
-    endIdx -= 1
-  }
-  if (regionTokens > budgetTokens) return null
-  // oxlint-disable-next-line typescript/no-non-null-assertion
-  while (endIdx > startIdx && !toolPairingBalancedAfter(session, nodes[endIdx]!)) endIdx -= 1
-  // oxlint-disable-next-line typescript/no-non-null-assertion
-  if (!toolPairingBalancedAfter(session, nodes[endIdx]!)) return null
-  // oxlint-disable-next-line typescript/no-non-null-assertion
-  return { start: range.start, end: nodes[endIdx]! }
-}
-
-/**
  * Run the single compaction transaction over one selected positional span.
  * Selection and validation are read-only. Idle/log validation and
  * `compaction/start` are synchronously adjacent, so the durable opening marker is
@@ -207,15 +154,15 @@ export function capRangeForReplayBudget(
 export async function compactSurfaceRegion(
   dependencies: RegionDependencies,
   session: Session,
-  start: number,
-  end: number,
+  start: SessionSeq,
+  end: SessionSeq,
   agent: Agent,
   options: CompactionTransactionOptions,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
-  signal?.throwIfAborted()
+  if (options.owner === null) signal?.throwIfAborted()
   const selection = validateSurfaceRegion(session, start, end)
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -262,7 +209,7 @@ export async function compactSurfaceRegion(
       options.sourceCommandId,
       signal,
     )
-    signal?.throwIfAborted()
+    if (options.owner === null) signal?.throwIfAborted()
     assertStable(dependencies, session, summarized)
     stage = 'commit'
     const pending = commitCompactionBody(session, startEvent, summarized)
@@ -291,7 +238,7 @@ export async function compactSurfaceRegion(
     }
   }
 
-  signal?.throwIfAborted()
+  if (options.owner === null) signal?.throwIfAborted()
   if (failure !== undefined) {
     if (options.owner === null) throwManualFailure(failure)
     throw failure.error
@@ -340,7 +287,7 @@ function throwManualFailure(failure: TransactionFailure): never {
  */
 function assertCompactionInactive(
   unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined,
-  latestEndSeedSeq: number | undefined,
+  latestEndSeedSeq: SessionSeq | undefined,
   stage: string,
 ): void {
   if (unmatchedCompactionStart === undefined
@@ -358,7 +305,7 @@ function assertCompactionInactive(
  * @param stage - operation label included in the busy diagnostic.
  */
 export function assertNoActiveCompaction(session: Session, stage: string): void {
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -367,7 +314,7 @@ export function assertNoActiveCompaction(session: Session, stage: string): void 
 }
 
 /** Validate one requested surface-position span before asynchronous work begins. */
-function validateSurfaceRegion(session: Session, start: number, end: number): SurfaceSelection {
+function validateSurfaceRegion(session: Session, start: SessionSeq, end: SessionSeq): SurfaceSelection {
   const nodes = session.surface.nodes
   const startIdx = nodes.indexOf(start)
   const endIdx = nodes.indexOf(end)
@@ -406,6 +353,10 @@ function prepareCompaction(
     ...selection,
     measurement,
     selectedNodes,
+    // The shadow-price protocol prices replacements with the fixed heuristic
+    // so the O(1) projection fold stays in agreement with its own appends;
+    // retention, range selection, and the shrink comparison read the
+    // route-priced `tokens` instead.
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
     shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
     input: buildSummarizationInput(session, selection.shadowedSeqs),
@@ -426,8 +377,9 @@ async function summarizeCompaction(
     content: frameSummary(summaryResult.summary),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
-  // The checkpoint is text-only, so its fixed-heuristic price is its route price.
-  // Compare it against the selected span route price for admission.
+  // The checkpoint is text-only, so its fixed-heuristic price IS its route
+  // price; comparing it against the span's route price asks the real
+  // question — does the replacement lower the next request's pressure.
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
   if (framedSummaryTokenCount >= prepared.shadowedRouteTokenCount) {
     throw new Error(
@@ -555,14 +507,13 @@ function completeCompaction(
  */
 function buildSummarizationInput(
   session: Session,
-  shadowedSeqs: readonly number[],
+  shadowedSeqs: readonly SessionSeq[],
 ): SummarizationInput {
   const header = session.requestHeader()
-  const events = session.events
   const regionMessages = shadowedSeqs
     // shadowedSeqs are current surface seqs, so each is a valid log index.
     // oxlint-disable-next-line typescript/no-non-null-assertion
-    .map(seq => session.deriveEventMessage(events[seq]!))
+    .map(seq => session.deriveEventMessage(session.eventAt(seq)!))
     .filter((message): message is Message => message !== null)
   return {
     ...header?.system === undefined ? {} : { system: header.system },
@@ -572,15 +523,15 @@ function buildSummarizationInput(
 }
 
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */
-function inspectCompactionEntryState(events: readonly SessionEvent[]): CompactionEntryState {
+function inspectCompactionEntryState(session: Session): CompactionEntryState {
   let openTurn: number | null = null
   let openTurnStateKnown = false
   let unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
   let compactionEntryStateKnown = false
-  let latestEndSeedSeq: number | undefined
-  for (let index = events.length - 1; index >= 0; index -= 1) {
+  let latestEndSeedSeq: SessionSeq | undefined
+  for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
     // oxlint-disable-next-line typescript/no-non-null-assertion
-    const event = events[index]!
+    const event = session.eventAt(SessionSeq(seq))!
     if (latestEndSeedSeq === undefined && event.type === 'session/end-seed') {
       latestEndSeedSeq = event.seq
     }

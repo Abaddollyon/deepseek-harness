@@ -90,11 +90,8 @@ describe.skipIf(MODE === 'record')('web e2e: background job list', () => {
       arguments: { command: COMMAND, description: 'Hold a background slot open', run_in_background: true },
       agent,
     })
-    // Durable registry ids are '<kind>-<uuid>'; assert that exact shape so a
-    // regression to counter ids (or a malformed id) fails here instead of
-    // silently re-pinning the old format.
     const reported = started.content.map(block => block.type === 'text' ? block.text : '').join('')
-    const matched = /\bbash-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.exec(reported)
+    const matched = /\bbash-\d+\b/.exec(reported)
     if (matched === null) throw new Error(`background bash reported no job id: ${reported}`)
     jobId = JobId(matched[0])
 
@@ -114,7 +111,7 @@ describe.skipIf(MODE === 'record')('web e2e: background job list', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-background-job-settled'))
     expect(scaffold.ctx.jobs.kill(jobId, agent, 'web e2e cancellation')).toBe('requested')
 
-    const idle = page.getByRole('button', { name: '1 background job' })
+    const idle = page.getByRole('button', { name: '1 background job', exact: true })
     await idle.waitFor({ timeout: 20_000 })
 
     const snapshot = await captureStableAria(page, '[class*="menu"]', scaffold.workspaceCwd)

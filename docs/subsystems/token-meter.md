@@ -12,7 +12,7 @@ Source: [`packages/llm/token-meter/src/types.ts`](../../packages/llm/token-meter
 /** Detached immutable request-pressure and surface snapshot at one consumed log revision. */
 interface TokenMeasurement {
   /** Number of durable events consumed; equal to the next unread event seq. */
-  readonly logRevision: number
+  readonly logRevision: SessionLogOffset
   /** Provider or heuristic anchor used for this measurement. */
   readonly baseline: TokenMeasurementBaseline
   /** Signed repricing of current surface content relative to the baseline anchor. */
@@ -34,7 +34,7 @@ Every measurement resolves the effective envelope's routed provider/model to tha
 /** One token-priced node in the current ordered session surface. */
 interface TokenSurfaceNode {
   /** Durable sequence number of the surface event. */
-  readonly seq: number
+  readonly seq: SessionSeq
   /**
    * Request-pressure tokens for the exact message projected by this node under
    * the measured route: image occurrences carry the route's declared visual
@@ -89,15 +89,6 @@ Replay owner for one service-wide estimator and isolated per-session folds.
  * @returns a detached deeply immutable pressure and surface measurement.
  */
 measure(session: Session, requestHeader?: EpochHeader): TokenMeasurement
-
-/**
- * Heuristically price the non-surface request envelope — system prompt and
- * tool schemas — under the same fixed heuristic `measure` applies (instance
- * face of the pure `estimateHeader` export from `estimate.ts`).
- * @param header - canonical envelope, or undefined before any request.
- * @returns heuristic system plus tool tokens; 0 for an absent envelope.
- */
-estimateHeader(header: EpochHeader | undefined): number
 
 /**
  * Heuristically price one model-visible message (instance face of the pure

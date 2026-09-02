@@ -8,20 +8,18 @@
  * @module dsh-llm-pi-ai/stream
  */
 
-import { ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
 
 /**
- * Map pi-ai usage. pi-ai keeps reasoning inside output; when the provider
- * reports the split it surfaces it as usage.reasoning, a sub-breakdown of
- * output that must not be accumulated as a fifth bucket.
+ * Map pi-ai usage (reasoning folded into output by pi-ai).
  * @param usage - cumulative usage from the terminal pi-ai event.
  * @returns harness counts with pi-ai's exact total; cache fields appear only
- *   when non-zero (pi-ai reports zeros, not absence), reasoningTokens only
- *   when the provider reports the split.
+ *   when non-zero (pi-ai reports zeros, not absence).
  */
 export function mapUsage(usage: PiUsage): TokenUsage {
   return {
@@ -30,7 +28,6 @@ export function mapUsage(usage: PiUsage): TokenUsage {
     totalTokens: usage.totalTokens,
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
-    ...usage.reasoning !== undefined ? { reasoningTokens: usage.reasoning } : {},
   }
 }
 
@@ -40,16 +37,10 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // `cause` chain before it reaches us. undici carries the actionable transport
 // detail on `cause` (e.g. `SocketError: other side closed`) but hands the fetch
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
-// If pi-ai ever forwards the original Error, classify on `code`/`cause` instead
-// of text. pi-ai 0.84's StreamOptions.fetch hook was evaluated for capturing the
-// cause and rejected: attributing a wrapper-captured `cause` to the right
-// request needs per-request side state across concurrent streams and pi-ai's own
-// client retries (see the transport-truncation Agent Note).
-/** Harness failure code for a provider credential rejection (HTTP 401/403). */
-export const AUTH_FAILURE_CODE = 'AUTH'
-
+// If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
+// us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): string {
-  if (/\b(?:401|403)\b/.test(message)) return AUTH_FAILURE_CODE
+  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   // A rejected request body (gateway or provider size cap): resending the
@@ -65,16 +56,6 @@ function classifyPiAiError(message: string): string {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
-  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
-  // stream ID N; <CODE>; received from peer`. Both fragments are required:
-  // bare `stream error` is generic phrasing application-level failures also
-  // carry, and `received from peer` alone appears in unrelated wording (TLS
-  // certificates, key material). Node renders the reset code as NGHTTP2_* and
-  // intermediaries name the RST_STREAM frame; those tokens appear only in
-  // HTTP/2 reset vocabulary. The peer reset one stream, not the connection,
-  // so resending the request can succeed.
-  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
-  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
@@ -102,15 +83,10 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
-    // The local fallback names the resolved capacity and the usage that tripped
-    // it so the reader can act without reproducing the turn. Every value is
-    // present here: pi-ai's detector only fires without provider error wording
-    // for usage-versus-window overflows, which require a resolved
-    // contextWindow, and usage is a required message field.
     return {
       kind: 'error',
       failure: {
-        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}" at resolved context window ${contextWindow} tokens (input ${message.usage.input}, cache-read ${message.usage.cacheRead})`,
+        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     }
@@ -207,7 +183,7 @@ export async function* toStreamChunks(
         yield {
           type: 'tool-call-delta',
           index: event.contentIndex,
-          id: ToolCallId(known?.id ?? ''),
+          id: brandString<ToolCallId>(known?.id ?? ''),
           ...known?.name !== undefined && known.name.length > 0 ? { name: known.name } : {},
           argumentsDelta: event.delta,
         }
@@ -219,7 +195,7 @@ export async function* toStreamChunks(
           index: event.contentIndex,
           block: {
             type: 'tool-call',
-            id: ToolCallId(event.toolCall.id),
+            id: brandString<ToolCallId>(event.toolCall.id),
             name: event.toolCall.name,
             // pi-ai hands back the PARSED arguments; the harness vocabulary
             // keeps the raw string.

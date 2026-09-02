@@ -13,17 +13,17 @@ import z from '@deepseek-ai/schemastery'
 import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import {
   assertSubagentMaxDepth,
   parentAgentOptionsForDelegation,
   settleRun,
 } from '@deepseek-ai/dsh-subagent'
-import type { SubagentFailure, SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
-import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import {
   assertAllowedModelSelection,
   hasConfiguredLlmSelection,
@@ -36,14 +36,12 @@ import { registerListSubagentModels } from './list-models.ts'
 import type {} from './model-selection-settings.ts'
 import {
   recordSubagentModelSelection,
+  subagentModelSelectionProjectionDefinition,
   subagentModelSelectionPolicy,
 } from './model-selection-state.ts'
 
 export const name = 'tool-subagent'
-export const inject = ['tools', 'subagents', 'systemPrompt']
-
-/** Prompt order after bounded delegation policy and before child reporting. */
-const SUBAGENT_SECTION_ORDER = FIRST_PARTY_SECTION_ORDER.TOOL_SUBAGENT
+export const inject = ['tools', 'subagents', 'systemPrompt', 'sessionProjections']
 
 /** Config: which registered provider this tool delegates to, plus child defaults. */
 export interface Config {
@@ -140,19 +138,6 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
-/**
- * Render a startup failure without allowing a hostile coercion hook to escape.
- * @param value - value rejected by provider startup.
- * @returns ordinary JavaScript stringification or a safe fallback.
- */
-function startupFailureDetail(value: unknown): string {
-  try {
-    return String(value)
-  } catch {
-    return errorChain(value)
-  }
-}
-
 /** Settle pending startup without rejecting the task producer contract. */
 async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
   try {
@@ -162,7 +147,7 @@ async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Pr
     // must not turn a failed cleanup into a cleanly killed Job.
     return signal.aborted && !(error instanceof AggregateError)
       ? { status: 'killed' }
-      : { status: 'failed', detail: startupFailureDetail(error) }
+      : { status: 'failed', detail: String(error) }
   }
 }
 
@@ -198,10 +183,6 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const diagnostic = result.diagnostic === undefined
     ? ''
     : `\nDiagnostic: ${result.diagnostic}`
-  const failure = result.failure === undefined
-    ? ''
-    : `\nFailure code: ${result.failure.code}`
-      + (result.failure.retryAfterMs === undefined ? '' : `\nRetry after: ${result.failure.retryAfterMs} ms`)
   const text = result.output
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
     .map(block => block.text)
@@ -209,18 +190,7 @@ function withDiagnosticAndPartialText(error: string, result: SubagentResult): st
   const partial = text.length === 0
     ? ''
     : `\nPartial output before the run ended:\n${text}`
-  return `${error}${diagnostic}${failure}${partial}`
-}
-
-/** Preserve branchable provider facts when a tool run fails. */
-class SubagentToolFailure extends Error {
-  readonly failure: SubagentFailure | undefined
-
-  constructor(message: string, result: SubagentResult) {
-    super(message, result.failure === undefined ? undefined : { cause: result.failure })
-    this.name = 'SubagentToolFailure'
-    this.failure = result.failure
-  }
+  return `${error}${diagnostic}${partial}`
 }
 
 type ForegroundToolResult = {
@@ -240,7 +210,7 @@ async function settleForegroundRun(run: SubagentRun): Promise<ForegroundToolResu
       if (error !== undefined) {
         // The registry converts this throw to isError; partial output is not
         // success, but the preserved partial answer still reaches the parent.
-        throw new SubagentToolFailure(withDiagnosticAndPartialText(error, result), result)
+        throw new Error(withDiagnosticAndPartialText(error, result))
       }
       return {
         kind: 'foreground',
@@ -346,6 +316,7 @@ export function apply(ctx: Context, config: Config): void {
   const toolName = config.toolName ?? 'subagent'
 
   const modelSelectionCapable = config.modelSelectionSettings === true
+  ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
 
   const assertSubagentProviderConfiguration = (subagentProvider: SubagentProvider): void => {
     if (typeof config.maxDepth === 'number' && !subagentProvider.capabilities.depthLimit) {
@@ -405,7 +376,7 @@ export function apply(ctx: Context, config: Config): void {
           // a separately installed capability, so this promise holds whenever the
           // continuable background path is reachable at all.
           ? continuable
-            ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result.'
+            ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` steers the child\'s nearest step while it is running and starts a turn while it is idle. Set `run_in_background: false` only when your next action depends on receiving the result.'
             : ' This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.'
           : ' This call waits for the subagent and returns its result.') + choiceDescription,
         parameters: {
@@ -619,7 +590,7 @@ export function apply(ctx: Context, config: Config): void {
       // absent, and the registration itself stays owned by this plugin fiber.
       runtimeCtx.systemPrompt.section({
         name: `tool:${toolName}`,
-        order: SUBAGENT_SECTION_ORDER,
+        order: runtimeCtx.systemPrompt.getSectionOrder('TOOL_SUBAGENT'),
         text: context => mounted === undefined || runtimeCtx.tools.get(toolName, context.scope) === undefined
           ? ''
           : `Use ${toolName} in the background by default. Start independent delegations together in one assistant message and continue useful work while they run. Set \`run_in_background: false\` only when your next action depends on that subagent's result. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message.`,
@@ -645,20 +616,26 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const selectForAgent = (agent: NonNullable<Context['agent']>): ModelSelectionPolicy | undefined => {
-    let allowedModels = subagentModelSelectionPolicy(agent.session)
+    const freshSession = agent.session.firstLiveSeq === 0
+      && agent.session.eventAt(SessionSeq(0))?.type !== 'session/end-seed'
+    let allowedModels = subagentModelSelectionPolicy(ctx.sessionProjections, agent.session)
     if (allowedModels === undefined) {
       const parentId = agent.session.header.origin === 'subagent'
         ? agent.session.header.parentSession
         : undefined
       if (parentId !== undefined) {
         const parent = ctx.get('agents')?.get(parentId)
-        allowedModels = parent === undefined ? undefined : subagentModelSelectionPolicy(parent.session)
-      } else if (agent.session.firstLiveSeq === 0) {
+        allowedModels = parent === undefined
+          ? undefined
+          : subagentModelSelectionPolicy(ctx.sessionProjections, parent.session)
+      } else if (freshSession) {
         const current = settings.current()
         allowedModels = current.enabled ? current.allowedModels : undefined
       }
     }
-    if (allowedModels !== undefined) recordSubagentModelSelection(agent.session, allowedModels)
+    if (allowedModels !== undefined) {
+      recordSubagentModelSelection(ctx.sessionProjections, agent.session, allowedModels)
+    }
     return allowedModels === undefined ? undefined : { routes: allowedModels }
   }
 
@@ -668,6 +645,7 @@ export function apply(ctx: Context, config: Config): void {
     return
   }
   const agents = ctx.get('agents')
+  /* v8 ignore next -- Agent and preset scopes are minted only by the Agent registry. */
   if (agents === undefined) throw new Error('tool-subagent: scoped model-selection settings require the Agent registry')
   const scopedInstalls = new WeakMap<Agent, ReturnType<Context['inject']>>()
   const installing = new WeakSet<Agent>()
@@ -693,7 +671,10 @@ export function apply(ctx: Context, config: Config): void {
     const fiber = scopedInstalls.get(candidate)
     if (fiber === undefined) return
     scopedInstalls.delete(candidate)
-    void fiber.dispose()
+    /* v8 ignore next 3 -- Cordis Fiber disposal contains registration cleanup failures; this is the final diagnostic sink. */
+    void fiber.dispose().catch((error: unknown) => {
+      ctx.logger.warn(`tool-subagent: failed to remove recomposed Agent "${candidate.id}" definitions: ${String(error)}`)
+    })
   }
   const reconcileComposedAgents = (): void => {
     // Every Agent and preset scope is minted by the Agent registry; the scope

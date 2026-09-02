@@ -5,6 +5,7 @@ import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { describe, expect, it } from 'vitest'
 import { SessionControlController } from '../src/control.ts'
 import type { SessionControlFrame } from '../src/types.ts'
@@ -27,7 +28,7 @@ function producer(label = 'sleep 60') {
   return { spec, reads, settle: (outcome: JobOutcome) => { settle(outcome) } }
 }
 
-async function harness(withRegistry: boolean): Promise<{
+async function harness(withJobs: boolean): Promise<{
   ctx: Context
   session: Session
   agent: Agent
@@ -36,7 +37,8 @@ async function harness(withRegistry: boolean): Promise<{
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
-  if (withRegistry) {
+  await ctx.plugin(SessionProjectionRegistry)
+  if (withJobs) {
     await ctx.plugin(LocalJobRegistry)
     ctx.jobs.attachController('session-controller-test')
   }
@@ -87,14 +89,14 @@ describe('Session control jobs baseline', () => {
 
   it('carries the visible set when the stream opens', async () => {
     const { ctx, session, agent, control } = await harness(true)
-    const id = ctx.jobs.start({ ...producer('pnpm run build').spec, owner: agent })
+    ctx.jobs.start({ ...producer('pnpm run build').spec, owner: agent })
     const frame = await baseline(control)
     const jobs = frame.value.jobs[session.id]
     expect(jobs).toHaveLength(1)
     const [job] = jobs ?? []
     expect(job?.startedAt).toBeTypeOf('number')
     expect({ ...job, startedAt: 0 }).toEqual({
-      id,
+      id: 'bash-1',
       kind: 'bash',
       label: 'pnpm run build',
       status: 'running',

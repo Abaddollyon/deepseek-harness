@@ -17,7 +17,7 @@
 | `agent-loop/` | 实现公开 `Agent` 约定的具体 driver（`ctx.agentLoop`） | 本页 |
 | `scope/` | 注册表与循环用于构建按 agent 作用域的注册原语 | [scope.md](scope.zh.md) |
 
-`scope/` 是这里唯一的非服务包：一个零依赖库（`createScope`/`scopeOf`/`scopeTarget`），在模块图中位于 `session/` 与 `system-prompt/` 之下，正是为了让它们消费它而不形成环。`agent-loop` 是公开 `Agent` 约定的唯一具体实现，放在这里因为它是 harness 的默认产品循环；它在 `ctx.agents.withInitiator()` 内运行每个 driver。扩展插件依赖 `agent`——包括需要发起 Agent 时——而绝不直接依赖 `agent-loop`，因此循环保持可替换。把这条主干接成可运行 agent 的默认组合是 [`examples/agent-spine-demo`](../../packages/examples/agent-spine-demo/README.zh.md)。
+`scope/` 是这里唯一的非服务包：一个零依赖库（`createScope`/`scopeOf`/`scopeTarget`），在模块图中位于 `session/` 与 `system-prompt/` 之下，正是为了让它们消费它而不形成环。`agent-loop` 是公开 `Agent` 约定的唯一具体实现，放在这里因为它是 harness 的默认产品循环；它在 `ctx.agents.withInitiator()` 内运行每个 driver。扩展插件依赖 `agent`——包括需要发起 Agent 时——而绝不直接依赖 `agent-loop`，因此循环保持可替换。[`dsh-base`](../../packages/bundle/base/README.zh.md) 是默认产品组合，[`dsh-sdk-minimal`](../../packages/bundle/sdk-minimal/README.zh.md) 则声明一棵更小的独立配置树。
 
 <a id="creation-and-ownership"></a>
 
@@ -48,7 +48,7 @@ interface AgentHandle {
 }
 ```
 
-`CreateAgentOptions` 携带共享标识以及新 agent 发布前所需的一切：会话元数据（`meta`——已校验的 `cwd`、fork 谱系、seed 边界、来源分类、委派深度）、fork 用的可选 `seed` 回放前缀、按 agent 的 `AgentOptions`、仅创建期有效的取消 `signal`，以及 `setup`。`ResumeAgentOptions` 是持久标识的对应项：`resumeSessionId`、`agentOptions`、`signal` 与 `setup`。`setup` 回调（`AgentSetup`）在两个 id 都尚未发布时组装 agent 的作用域世界——凡经 `agentCtx` 注册的内容都先于 `agent/created` 与第一次提示词组装存在——并可返回一个在发布前一刻调用的同步 commit；setup 拒绝、commit 抛出或所有者 dispose（资源释放）都会回滚事务，两个 id 均不发布。
+`CreateAgentOptions` 携带共享标识以及新 agent 发布前所需的一切：会话元数据（`meta`——已校验的 `cwd`、fork 谱系、`isSeeded` 标记、来源分类、委派深度与 `agentPreset`）、同级字段 `inheritedEventCount` 所表示的精确 fork cut、可选的 `seed` 回放前缀、按 agent 的 `AgentOptions`、仅创建期有效的取消 `signal`，以及 `setup`。`ResumeAgentOptions` 是持久标识的对应项：`resumeSessionId`、`agentOptions`、`signal` 与 `setup`。`setup` 回调（`AgentSetup`）在两个 id 都尚未发布时组装 agent 的作用域世界——凡经 `agentCtx` 注册的内容都先于 `agent/created` 与第一次提示词组装存在——并可返回一个在发布前一刻调用的同步 commit；setup 拒绝、commit 抛出或所有者 dispose（资源释放）都会回滚事务，两个 id 均不发布。
 
 `AgentFactory` 是注册表背后的创建接口：循环经 `ctx.agents.setFactory()` 注册其工厂，因此消费方使用 `ctx.agents` 时无需依赖具体循环包。确切的 `create`/`resume` 签名及回滚约定见下方[生成区块](#ctxagents--agentregistry)。
 
@@ -128,8 +128,7 @@ interface Agent {
    * Submit steering for the nearest step. An idle driver starts a turn;
    * a running driver consumes it at its next step boundary.
    * A rejected step leaves steering parked in the inbox until the next
-   * wake; explicit cancellation may discard pending steering, while
-   * lifecycle teardown keeps it parked for a later lifecycle.
+   * wake; cancellation or disposal may discard pending steering.
    * @param message - identified steering content and the source that supplied it.
    */
   steer(message: UserMessage): void
@@ -139,8 +138,7 @@ interface Agent {
    * driver. A running driver claims it at the nearest later step boundary;
    * idle drivers leave it pending until follow-up or steering
    * wakes them. It may miss a request whose pre-step already claimed its
-   * batch. Explicit cancellation may discard pending context, while
-   * lifecycle teardown keeps it parked for a later lifecycle.
+   * batch. Cancellation or disposal may discard pending context.
    * @param message - identified injected context and the source that supplied it.
    */
   inject(message: UserMessage): void
@@ -167,18 +165,14 @@ interface AgentOptions {
   provider?: string
   /** Model id interpreted by the selected provider adapter. */
   model?: string
-  /**
-   * Explicit reasoning effort seeded into a new loop's first request proposal.
-   * It overrides a resumed value; omission restores only an explicit value
-   * persisted for the same provider/model route.
-   */
+  /** Adapter-owned reasoning effort for the selected provider/model route. */
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
 }
 ```
 
-在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。`reasoningEffort` 为新建循环实例的首个请求提案设定种子值，并优先于恢复日志中的显式值。省略时，恢复仅会取回为同一 provider/model 记录的显式值；由适配器物化的默认值会从后续提案中移除，并基于当前适配器注册重新解析。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
+在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。显式 `reasoningEffort` 会为该路由的首次请求提供初始值；确切模型解析会校验该值，省略时则允许填入适配器默认值。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
 
 inbox 即投递词汇——agent 以持久投影形式拥有的两条有序待处理消息列表：
 
@@ -253,14 +247,7 @@ type PreStepDecision =
 type RequestErrorAction = { kind: 'retry' } | undefined
 ```
 
-`agent/request-preflight` 在规范 header 和已解析路由容量被记录之后、消息派生之前接收它们。监听器通过 `next()` 委托，或返回由循环在重新分派前验证的替换 generation：
-
-```ts type-equiv
-/** Action returned by a listener after committing a newer replacement surface. */
-type RequestPreflightAction = { kind: 'retry'; surfaceGeneration: number } | undefined
-```
-
-`agent/pre-step` 是请求推导前唯一的串行监听器链。`agent/turn-stopping` 在轮次没有工具或 steering（中途引导）后续时运行，先于最后一次 steering 排空。
+`agent/pre-step` 是请求推导前唯一的 waterfall（瀑布式）监听器链。`agent/turn-stopping` 在轮次没有工具或 steering（中途引导）后续时运行，先于最后一次 steering 排空。
 
 `agent/session-start` 携带 `SessionStartSource`（会话生命周期为何开始；桥接层据此匹配其 SessionStart）：
 
@@ -273,7 +260,7 @@ type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
 
 `Session` 是一份类型化 `SessionEvent` 的**仅追加日志**——唯一的真源。LLM 消息历史从日志*派生*（`deriveMessages()`），而非单独存储。每个条目携带单调的 `seq`、`time` 与按 `type` 判别的 `data` payload；surface 变体还可以在 `sourceEventSeqs` 中列出被引用的较早事件，并携带 `surfaceOp`。
 
-`SessionEvent` 信封的确切条件字段、十二种核心事件变体（`turn/start`、`turn/end`、`step/start`、`step/end`、`user/message`、`assistant/chunk`、`assistant/message`、`tool/call`、`tool/result`、`request/header`、`request/context`、`session/end-seed`）、`deriveMessages()` 投影规则、`TurnEndReason` 原因以及执行封闭和独立事件规则都在 **[session.md](session.zh.md)** 中。日志如何持久化——`SessionPersistence` 接口、JSONL/SQLite 后端、`session/flush` 检查点、崩溃恢复与 `SessionHeader`——则在 **[persistence.md](persistence.zh.md)** 中。
+`SessionEvent` 信封的确切条件字段、十二种核心事件变体（`turn/start`、`turn/end`、`step/start`、`step/end`、`user/message`、`assistant/chunk`、`assistant/message`、`tool/call`、`tool/result`、`request/header`、`request/context`、`session/end-seed`）、`deriveMessages()` 投影规则、`TurnEndReason` 原因以及执行封闭和独立事件规则都在 **[session.md](session.zh.md)** 中。日志如何持久化——`SessionPersistence` 接口、JSONL provider、`session/flush` 检查点、崩溃恢复与 `SessionHeader`——则在 **[persistence.md](persistence.zh.md)** 中。
 
 ## `ToolDefinition`
 
@@ -324,9 +311,9 @@ declare module '@deepseek-ai/dsh-llm' {
 
 ### 品牌化 ID
 
-在包之间传递的 ID 都经过**品牌化**——结构上是字符串，但在类型层面不可互换（不能把 `SessionId` 传给需要 `ToolCallId` 的位置）。每种类型通过各自的工厂构造；比较、日志记录和 JSON 行为与普通字符串相同。
+在包之间传递的 ID 都经过**品牌化**——结构上是字符串，但在类型层面不可互换（不能把 `SessionId` 传给需要 `ToolCallId` 的位置）。构造使用共享 `brandString<T>()` helper 或所属方自定义的校验工厂；比较、日志记录和 JSON 行为与普通字符串相同。
 
-`Branded<B>` 原语位于独立的纯类型包 [dsh-brand](../../packages/util/brand) 中（没有运行时代码，也不依赖 harness 包），因此任何包都能品牌化其拥有的 id，而无需依赖无关的能力包。
+`Branded<B>` 原语与无状态构造函数位于 [dsh-brand](../../packages/util/brand)，该包不依赖 harness 能力。`brandString<T>()` 应用仅编译期存在的字符串品牌。
 
 源码：[`packages/util/brand/src/index.ts`](../../packages/util/brand/src/index.ts)
 
@@ -434,6 +421,25 @@ async list(): Promise<AgentPreset[]>
 @Remote('list') async remoteExportList(): Promise<AgentPresetRoster>
 
 /**
+ * Every preset's composition as flattened plugin rows, for plugin-listing
+ * surfaces beside the roster's own picker.
+ *
+ * A preset with a live standing mount answers from its newest generation's
+ * Loader entries — the composition new sessions join — even when the file
+ * behind it has since been edited into an unreadable state: the mount is
+ * what sessions actually run, so the broken verdict only applies to a
+ * preset nothing composed. One never composed since boot answers from its
+ * file, with `!!js` disabled gates evaluated against the Loader context so
+ * both answers reflect the same host. Reading never mounts: an unmounted
+ * preset is parsed, not composed, so listing a preset's plugins cannot
+ * activate them early. A composition that stopped reading between
+ * discovery's health verdict and this read is reported broken with the
+ * raced reason rather than dropped.
+ * @returns one composition per roster preset, in roster order.
+ */
+async compositionInventory(): Promise<AgentPresetComposition[]>
+
+/**
  * Resolve one preset by id.
  *
  * A broken preset resolves — deleting one, reading one, and reporting one
@@ -511,8 +517,8 @@ async read(id: string): Promise<string>
  * One preset's composition text with the roster row it belongs to.
  * @param agentPreset - the preset id.
  * @returns the composition beside its trust and published metadata.
- * @throws {TypertRemoteFailure} `bad-request` for an empty id, or
- * `agent-preset-not-found` when no configured root supplies it.
+ * @throws {RemoteError} `gateway/bad-request` for an empty id, or
+ * `agent-preset/not-found` when no configured root supplies it.
  */
 @Remote('read') async readDocument(agentPreset: string): Promise<AgentPresetDocument>
 
@@ -539,8 +545,8 @@ async copy(from: string, id: string, name?: string): Promise<void>
  * @param id - the new preset id.
  * @param name - the copy's optional display name.
  * @returns once the copy is stored.
- * @throws {TypertRemoteFailure} with the corresponding stable preset code
- * and details when the copy is refused.
+ * @throws {RemoteError} with the corresponding stable preset code and
+ * details when the copy is refused.
  */
 @Remote('copy') async remoteExportCopy(from: string, id: string, name?: string): Promise<void>
 
@@ -556,8 +562,8 @@ async remove(id: string): Promise<void>
  * Delete one preset through the Remote API.
  * @param id - the preset id.
  * @returns once the preset is deleted.
- * @throws {TypertRemoteFailure} with the corresponding stable preset code
- * and details when deletion is refused.
+ * @throws {RemoteError} with the corresponding stable preset code and
+ * details when deletion is refused.
  */
 @Remote('deletePreset') async remoteExportDelete(id: string): Promise<void>
 
@@ -608,8 +614,8 @@ async recompose(agentCtx: Context, id: string): Promise<AgentPreset>
  * @param agent - the session's live agent, resolved from the wire identity.
  * @param agentPreset - the preset to compose the agent from instead.
  * @returns the preset id that was recorded.
- * @throws {TypertRemoteFailure} with `bad-request`, `agent-preset-locked`,
- * `agent-preset-not-found`, or `agent-preset-invalid` when refused.
+ * @throws {RemoteError} with `gateway/bad-request`, `agent-preset/locked`,
+ * `agent-preset/not-found`, or `agent-preset/invalid` when refused.
  */
 @Remote('select') async select(agent: Agent, agentPreset: string): Promise<string>
 
@@ -1020,49 +1026,6 @@ Handle one failed model-request attempt before the loop retries or closes its st
 ```
 
 Types: [LlmFailure](llm-streaming.zh.md) · [ResolvedRetryPolicy](llm-streaming.zh.md) · [Scoped](scope.zh.md)
-
-Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
-
-<a id="agentrequest-preflight--waterfall"></a>
-
-#### `agent/request-preflight` — waterfall
-
-Admit one exact model request before its messages are derived. The payload carries the canonical header just logged for this request and the resolved adapter capacity, so listeners price admission against the exact target request rather than a stale one. Calling `next()` admits the request. A listener that durably reduced request pressure (for example through compaction) returns `{ kind: 'retry' }` without calling `next()`; the loop then re-dispatches the preflight so every listener re-admits against the rebuilt surface, and only after that admission passes are request messages derived. The action identifies the committed replacement generation; the loop rejects stale or log-only progress. Listeners own their policy budgets, while the loop's fixed safety ceiling admits the full request after repeated productive retries so provider overflow recovery remains available. The default `undefined` admits the request unchanged; a request that still exceeds capacity is admitted and left to the provider's overflow failure and `agent/request-error` recovery, never silently truncated.
-
-```ts cordis-catalog
-/**
- * Admit one exact model request before its messages are derived. The
- * payload carries the canonical header just logged for this request and
- * the resolved adapter capacity, so listeners price admission against the
- * exact target request rather than a stale one. Calling `next()` admits
- * the request. A listener that durably reduced request pressure (for
- * example through compaction) returns `{ kind: 'retry' }` without
- * calling `next()`; the loop then re-dispatches the preflight so every
- * listener re-admits against the rebuilt surface, and only after that
- * admission passes are request messages derived. The action identifies
- * the committed replacement generation; the loop rejects stale or
- * log-only progress. Listeners own their policy budgets, while the loop's
- * fixed safety ceiling admits the full request after repeated productive
- * retries so provider overflow recovery remains available. The default
- * `undefined` admits the request unchanged; a
- * request that still exceeds capacity is admitted and left to the
- * provider's overflow failure and `agent/request-error` recovery, never
- * silently truncated.
- * @param payload.agent - the agent making the model call.
- * @param payload.turn - the open turn number.
- * @param payload.step - the step whose request this is.
- * @param payload.header - the exact canonical request header logged for this request.
- * @param payload.contextWindow - the resolved adapter context capacity, when advertised.
- * @param payload.attempt - one-based dispatch count for this canonical request.
- * @param payload.maxAttempts - fixed loop safety ceiling for this canonical request.
- * @param payload.signal - the current turn's explicit abort signal.
- * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
- * @mode waterfall
- */
-'agent/request-preflight'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; attempt: number; maxAttempts: number; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>
-```
-
-Types: [EpochHeader](session.zh.md) · [Scoped](scope.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 

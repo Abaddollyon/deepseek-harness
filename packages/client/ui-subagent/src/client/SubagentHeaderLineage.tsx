@@ -497,7 +497,6 @@ function CatalogDropdown({
   const menuRef = useRef<HTMLDivElement>(null)
   const hoverOpenTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const clickPinned = useRef(false)
   const observedCatalogs = useRef(new Set<SessionId>())
   const setCatalogOpenRef = useRef(setCatalogOpen)
   setCatalogOpenRef.current = setCatalogOpen
@@ -569,7 +568,6 @@ function CatalogDropdown({
       observeCatalog(rootSessionId, true)
     }
     else {
-      clickPinned.current = false
       setOpen(false)
       setMenuPosition(undefined)
       closeAllCatalogs()
@@ -590,7 +588,6 @@ function CatalogDropdown({
   const scheduleHoverClose = (): void => {
     cancelHoverOpen()
     cancelHoverClose()
-    if (clickPinned.current) return
     hoverCloseTimer.current = setTimeout(() => {
       hoverCloseTimer.current = undefined
       changeOpen(false)
@@ -680,7 +677,6 @@ function CatalogDropdown({
     if (visible) return
     cancelHoverOpen()
     cancelHoverClose()
-    clickPinned.current = false
     if (!open) return
     setOpen(false)
     closeAllCatalogs()
@@ -738,23 +734,17 @@ function CatalogDropdown({
             descendants.runningCount > 0 ? runningCountKey : totalCountKey,
             { count: descendants.runningCount > 0 ? descendants.runningCount : descendantCount },
           )}
-        onClick={() => {
-          cancelHoverOpen()
-          if (openTitle !== undefined) {
+        onClick={openTitle === undefined
+          ? undefined
+          : () => {
+            cancelHoverOpen()
             if (open) changeOpen(false)
             openTitle()
-            return
-          }
-          if (!open) clickPinned.current = true
-          changeOpen(!open)
-        }}
+          }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown') return
           event.preventDefault()
-          if (!open) {
-            clickPinned.current = true
-            changeOpen(true)
-          }
+          if (!open) changeOpen(true)
           queueMicrotask(() => { focusAt(0) })
         }}
       >
@@ -833,7 +823,7 @@ export function SubagentHeaderLineage({
   return (
     <>
       <CatalogDropdown
-        key={`${lineageSessionId}:switcher`}
+        key={lineageSessionId}
         rootSessionId={parentId}
         currentSessionId={lineageSessionId}
         variant="switcher"
@@ -843,7 +833,7 @@ export function SubagentHeaderLineage({
       />
       {openTitle === undefined && (
         <CatalogDropdown
-          key={`${lineageSessionId}:count`}
+          key={lineageSessionId}
           rootSessionId={lineageSessionId}
           variant="count"
           {...shared}

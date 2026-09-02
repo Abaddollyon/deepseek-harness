@@ -189,14 +189,11 @@ function navigableMembers(
   for (const phase of phases) {
     for (const member of phase.members) {
       const summary = sessions.byId[member.childId]
-      // Navigability follows the child Session row, not the member's
-      // lifecycle: sessions.open(id) works on a finished child just as on a
-      // live one, so a completed or interrupted member stays openable while
-      // its ordinary-list row still proves the child belongs to this parent.
-      if (ordinary.has(member.childId)
-        && summary !== undefined
-        && summary.origin === 'subagent'
-        && summary.parentId === parentId) {
+      if (member.status === 'running'
+        && ordinary.has(member.childId)
+        && summary?.origin === 'subagent'
+        && summary.parentId === parentId
+        && summary.running) {
         result.push(member.childId)
       }
     }

@@ -38,9 +38,7 @@ kind: "package-reference"
 
 `host` 只接受两个值：`127.0.0.1`（默认姿态，仅回环）与 `0.0.0.0`（有意向网络开放——服务器自身不携带 TLS、认证或来源策略）。`port` 为 0 时请求 OS 分配端口；之后用 `ctx.webServer.port` 读取正在监听的端口。
 
-载体通过 `compress`（默认 `true`）处理符合条件的 socket-backed 响应，而不改变 route API。它根据 `Accept-Encoding` 协商，优先 Brotli，回退到 gzip；文本与结构化文本媒体类型符合条件，已有编码、`Cache-Control: no-transform`、range 响应、SSE、ZIP 与已打包的 `.gz` Worker image 保持不变。小于 `compressMinBytes`（默认 `1024`）的响应体不压缩；较大的响应体流经所选压缩器。`brotliQuality`（默认 `5`）与 `gzipLevel`（默认 `6`）控制请求期编码。
-
-同一载体会在 route 未设置 `Cache-Control` 时补上缓存指令。只有响应 pathname 位于 `immutablePathPrefixes`（默认 `/assets/`）下时，才会得到 `public, max-age=31536000, immutable`；`?rev=<hash>` 之类的 query 参数不构成依据，而载体对 HTML 的默认指令是 `no-cache`。未带此前缀的 plugin、API、source-map 及其他响应仍使用 `no-cache`，除非 route 自己提供指令；route 提供的 `Cache-Control` 优先。
+设置 `compression: 'gzip'` 可以包装符合条件的 socket-backed 响应，而不改变 route API。客户端必须接受 gzip，且媒体类型必须可压缩；已知长度小于 `compressionThresholdBytes` 的响应保持未压缩，未知长度 stream 则立即符合条件。已有编码、`Cache-Control: no-transform`、range 响应、SSE、ZIP 与已打包的 `.gz` Worker image 均保持不变。随附 Web bundle 使用 level 1 与 1024 字节阈值；其他组合默认不压缩。
 
 ### 注册路由
 
@@ -77,9 +75,8 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的�
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | `WebServer` 服务：路由表、回退席位、index 渲染、匹配、生命周期 |
+| — | 不发布运行时不变式伴生入口；路由注册与释放通过同一服务修改同一张路由表，register/dispose 探针只会重复执行实现。真实路由与 HMR 测试负责该行为。 |
 | [`src/injections.ts`](src/injections.ts) | 结构化 `IndexInjection` 行与 `renderIndexInjections` 行渲染 |
-| [`src/response-policy.ts`](src/response-policy.ts) | 每个响应的编码与缓存 header 补丁 |
-| [`src/response-cache.ts`](src/response-cache.ts) / [`src/response-encoding.ts`](src/response-encoding.ts) | 缓存分类与内容编码协商 |
 
 </details>
 

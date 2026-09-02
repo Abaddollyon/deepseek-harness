@@ -25,13 +25,6 @@ type WorkspaceViewState = {
   sessionOrderByAccount: Record<string, string[]>
   /** Last observed update timestamps per order account for one-time promotion events. */
   sessionUpdatedAtByAccount: Record<string, Record<string, number>>
-  /**
-   * User-pinned Session ids in pin order, rendered in the sidebar's Pinned
-   * section. These are explicit, reload-surviving pins — unrelated to
-   * GroupNode.pinned, the automatic live-row holdout of a folded group.
-   * Browser-local only: pins never reach the Host.
-   */
-  pinnedSessionIds: string[]
 }
 
 /**
@@ -50,7 +43,6 @@ type WorkspaceViewActions = {
     updatedAt: Record<string, number>,
   ) => void
   setSessionOrder: (draft: WorkspaceViewState, accountKey: string, order: string[]) => void
-  togglePinnedSession: (draft: WorkspaceViewState, sessionId: string) => void
 }
 
 /**
@@ -65,12 +57,8 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       groupExpansion: {},
       sessionOrderByAccount: {},
       sessionUpdatedAtByAccount: {},
-      pinnedSessionIds: [],
     }),
-    // v6 adds pinnedSessionIds; rehydration replaces the whole snapshot, so a
-    // v5 blob would leave the new field undefined — the versioned key starts
-    // a fresh blob instead of merging one.
-    persist: 'dsh.workspace.view.v6',
+    persist: 'dsh.workspace.view.v5',
     actions: {
       setGroupBy: (d, mode: SessionGroupBy) => { d.groupBy = mode },
       setOrderBy: (d, mode: SessionOrderBy) => { d.orderBy = mode },
@@ -93,11 +81,6 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       },
       setSessionOrder: (d, accountKey: string, order: string[]) => {
         d.sessionOrderByAccount[accountKey] = order
-      },
-      togglePinnedSession: (d, sessionId: string) => {
-        d.pinnedSessionIds = d.pinnedSessionIds.includes(sessionId)
-          ? d.pinnedSessionIds.filter(id => id !== sessionId)
-          : [...d.pinnedSessionIds, sessionId]
       },
     },
   })

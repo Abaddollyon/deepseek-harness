@@ -40,7 +40,7 @@ const handle = await ctx.agents.create({
 await handle.dispose()   // stops the loop, unregisters, removes the session, unwinds the scope
 ```
 
-`AgentOptions` supplies the initial provider/model route, optional explicit `reasoningEffort`, and optional positive `maxTokens` output cap. A configured effort seeds the new loop instance's first request proposal and overrides a resumed value; when omitted, resume restores only a same-route explicit value. Later proposals preserve explicit logged efforts while re-resolving values marked as adapter defaults. The loop validates exact-model reasoning support, records the effective values in the request header, and applies them to each conversation request. An optional `setup(agentCtx)` callback composes the agent's scoped world before it is published — scoped tools, prompt sections, and listeners exist before any creation announcement. Setup is composition-only: drive the agent only after creation resolves.
+`AgentOptions` supplies the initial provider/model route, optional adapter-owned `reasoningEffort`, and optional positive `maxTokens` output cap. The loop validates exact-model reasoning support, resolves adapter defaults, records the effective values in the request header, and applies them to each conversation request. An optional `setup(agentCtx)` callback composes the agent's scoped world before it is published — scoped tools, prompt sections, and listeners exist before any creation announcement. Setup is composition-only: drive the agent only after creation resolves.
 
 ### Drive an agent's conversation
 
@@ -101,7 +101,6 @@ The package is built on one separation: the public `Agent` surface and registry 
 
 `AgentRegistry` keeps one entry per live agent with its carrier and creator relation. `register()` records an already-constructed agent; the async factory uses the split `enter()`/`announce()` pair so setup and publication stay rollback-covered. A detach requested during a creation dispatch waits for that dispatch to unwind, and each detach is bound to the exact entry, so a stale disposer cannot remove a later same-id replacement. Teardown order is stop-and-drain the loop, unwind the scope, detach the agent, detach the session; the id becomes reusable after private cleanup.
 
-<a id="initiator-scope"></a>
 ### Initiator scope
 
 Each driver runs its complete lifetime inside `ctx.agents.withInitiator(agent, ...)`, so inherited async chains observe that agent; `withoutInitiator()` hides it for unrelated process-local work such as shared timers. The boundary is process-local attribution only — ambient presence is neither liveness proof nor authorization, and explicit identity stays authoritative at worker, process, persistence, and wire boundaries. Teardown rejects new boundaries, lets returned-Promise boundaries drain, then disables the underlying storage. The [initiator-scope decision](../../../.agents/notes/implemented/architecture/2026-07-15-agent-initiator-scope.md) owns the detailed contract.

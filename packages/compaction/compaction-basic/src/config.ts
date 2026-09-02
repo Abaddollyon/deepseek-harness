@@ -4,8 +4,8 @@
  * @module @deepseek-ai/dsh-compaction-basic/config
  */
 
-import { deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   BasicCompactionConfig,
   CompactionPolicyConfig,
@@ -48,7 +48,7 @@ const MODEL_POLICY_KEYS: ReadonlySet<string> = new Set([
   ...POLICY_CONFIG_KEYS,
 ])
 
-/** Target-specific pressure configuration failure returned by budget resolution. */
+/** Target-specific pressure configuration failure eligible for warning suppression. */
 export class TargetPressureConfigError extends Error {
   /**
    * @param targetKey - exact provider/model route used as the warning key.
@@ -58,11 +58,6 @@ export class TargetPressureConfigError extends Error {
     super(message)
   }
 }
-
-/** Explicit outcome of scaling one routed compaction policy to model capacity. */
-export type CompactSpecResolution =
-  | { readonly kind: 'resolved'; readonly spec: ResolvedCompactSpec }
-  | { readonly kind: 'invalid'; readonly error: TargetPressureConfigError }
 
 /**
  * Resolve and validate service defaults plus exact-target partial overrides.
@@ -133,50 +128,41 @@ export function resolveTargetPolicy(
  * Scale one routed policy into concrete token budgets for its model capacity.
  * @param policy - merged policy for the exact routed target.
  * @param contextWindow - positive adapter-owned capacity for that target.
- * @returns an explicit resolved budget or target-specific configuration error.
+ * @returns detached immutable pressure and retention budgets.
  */
 export function resolveCompactSpec(
   policy: ResolvedTargetPolicy,
   contextWindow: number,
-): CompactSpecResolution {
+): ResolvedCompactSpec {
   const targetKey = `${policy.target.provider}/${policy.target.model}`
   if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
-    return {
-      kind: 'invalid',
-      error: new TargetPressureConfigError(
-        targetKey,
-        `BasicCompactionConfig: contextWindow (${contextWindow}) must be a positive integer`,
-      ),
-    }
+    throw new TargetPressureConfigError(
+      targetKey,
+      `BasicCompactionConfig: contextWindow (${contextWindow}) must be a positive integer`,
+    )
   }
   const thresholdTokens = Math.floor(contextWindow * policy.thresholdRatio)
   const retainTokens = policy.retainTokens === undefined
     ? Math.floor(contextWindow * policy.retainRatio)
     : policy.retainTokens
   if (retainTokens >= thresholdTokens) {
-    return {
-      kind: 'invalid',
-      error: new TargetPressureConfigError(
-        targetKey,
-        `BasicCompactionConfig: ${policy.target.provider}/${policy.target.model} retainTokens `
-        + `(${retainTokens}) must be less than threshold tokens ${thresholdTokens}`,
-      ),
-    }
+    throw new TargetPressureConfigError(
+      targetKey,
+      `BasicCompactionConfig: ${policy.target.provider}/${policy.target.model} retainTokens `
+      + `(${retainTokens}) must be less than threshold tokens ${thresholdTokens}`,
+    )
   }
   return deepFreeze({
-    kind: 'resolved',
-    spec: {
-      target: { ...policy.target },
-      contextWindow,
-      thresholdRatio: policy.thresholdRatio,
-      thresholdTokens,
-      retainTokens,
-      summarizationProvider: policy.summarizationProvider,
-      summarizationModel: policy.summarizationModel,
-      maxTokens: policy.maxTokens,
-      compactionRetries: policy.compactionRetries,
-      maxOverflowRetries: policy.maxOverflowRetries,
-    },
+    target: { ...policy.target },
+    contextWindow,
+    thresholdRatio: policy.thresholdRatio,
+    thresholdTokens,
+    retainTokens,
+    summarizationProvider: policy.summarizationProvider,
+    summarizationModel: policy.summarizationModel,
+    maxTokens: policy.maxTokens,
+    compactionRetries: policy.compactionRetries,
+    maxOverflowRetries: policy.maxOverflowRetries,
   })
 }
 

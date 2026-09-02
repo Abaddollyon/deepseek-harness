@@ -70,7 +70,7 @@ All settings are optional. The defaults start condensing at 80% of the routed mo
 | `summarizationModel` | `''` | Set together with `summarizationProvider`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
 | `maxTokens` | `8192` | Output cap for the summarization request; may include reasoning tokens. |
 | `compactionRetries` | `1` | Extra condensation attempts after the first when pressure remains above threshold. |
-| `maxOverflowRetries` | `1` | Maximum replacement retries in each preflight admission and provider-confirmed overflow sequence; `0` disables both automatic paths. |
+| `maxOverflowRetries` | `1` | Maximum retries after a confirmed context-window overflow; `0` disables recovery only. |
 | `modelPolicies` | `[]` | Exact `{ provider, model, ...partialPolicy }` overrides for individual model routes. |
 | `auto` | `true` | Enable automatic condensation and overflow recovery; set `false` for manual-only operation. |
 
@@ -109,9 +109,9 @@ The backend is built on four commitments:
 
 ### Automatic triggers and overflow recovery
 
-With `auto: true`, a serial `agent/request-preflight` listener admits each exact request after its canonical header is logged and before its messages are derived: it prices that request's durable routed envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a recent tail priced through the exact summarizer provider/model header. It reserves the configured output cap, that summary-target-priced envelope, and the final compaction-instruction message against the actual summarizer model capacity so the complete auxiliary request always fits — when no balanced span fits, admission makes no summarization call and preserves the full request for provider handling. A committed replacement redispatches admission from the new surface, bounded by the loop's fixed redispatch ceiling. Each completed assistant message ends that request's admission budget, so a tool-call continuation receives its own `maxOverflowRetries` attempts. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
+With `auto: true`, a serial `agent/pre-step` listener checks pressure before request derivation: it prices the latest durable routed request envelope through `ctx.tokenMeter`, and when pressure crosses the routed model's threshold it prunes, then summarizes the oldest balanced span while keeping a priced recent tail. The `agent/request-error` listener reacts to a provider-confirmed `CONTEXT_WINDOW_EXCEEDED`: it bypasses the normal threshold and retention policy, attempts one maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Cancellation stays authoritative throughout.
 
-Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route, or a capacity that makes the target's retention budget invalid, makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target, delegates admission, and continues with full history. Operational pruning, metering, resolution, and summarization failures reject preflight instead of being converted into admission.
+Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target and continues with full history.
 
 ### Summarization mechanics
 
@@ -123,7 +123,7 @@ The transaction validates the surface span and the durable lock, appends `compac
 
 ### Config resolution
 
-`resolveConfig` validates and detaches the defaults, `resolveTargetPolicy` merges an exact provider/model override over them, and `resolveCompactSpec` scales the merged policy using adapter-owned context capacity into an explicit `{ kind: 'resolved', spec }` or `{ kind: 'invalid', error }` result. Automatic preflight delegates the `invalid` case after its target-scoped warning; explicit pressure compaction throws the returned error. Model discovery (`listModels()`) is never consulted for policy; only the durable route's capacity matters.
+`resolveConfig` validates and detaches the defaults, `resolveTargetPolicy` merges an exact provider/model override over them, and `resolveCompactSpec` scales the merged policy into concrete token budgets using the adapter-owned context capacity. Model discovery (`listModels()`) is never consulted for policy; only the durable route's capacity matters.
 
 ### Source map
 
@@ -134,7 +134,7 @@ The transaction validates the surface span and the durable lock, appends `compac
 | [`src/summarizer.ts`](src/summarizer.ts) | Default `ctx.llm.stream()` summarization, checkpoint framing, safe-summary projection |
 | [`src/config.ts`](src/config.ts) | Load-time validation and routed-model policy resolution |
 | [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` and resolved policy vocabulary |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; the durable bracket is observable in the session log) |
+| — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
 
 </details>
 

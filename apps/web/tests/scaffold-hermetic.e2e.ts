@@ -5,7 +5,7 @@ import { expect, it } from 'vitest'
 import type {} from '@deepseek-ai/dsh-skill'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { assertFinalWorkspaceSnapshot, launchWebScaffold, type WebScaffold } from './scaffold.ts'
+import { launchWebScaffold, type WebScaffold } from './scaffold.ts'
 
 async function writeSkill(root: string, name: string): Promise<void> {
   const bundle = join(root, name)
@@ -70,37 +70,5 @@ it('isolates replay skill discovery from every ambient host root', async () => {
       else process.env.DSH_BUNDLED_SKILL_DIR = originalBundled
       await rm(ambient, { recursive: true, force: true })
     }
-  }
-})
-
-it('excludes scaffold-owned root entries from the final workspace comparison', async () => {
-  // A session connected at the scaffold root (rather than the conventional
-  // workspace/ subfolder) captures the harness state the scaffold plants there:
-  // the .git discovery marker and the pinned homes/storage. The independent
-  // workspace.expected oracle cannot carry a `.git` path (Git refuses it), so
-  // the comparison must exclude every scaffold-owned root entry.
-  const scenarioDir = await mkdtemp(join(tmpdir(), 'dsh-web-scenario-'))
-  let scaffold: WebScaffold | undefined
-  try {
-    await writeFile(join(scenarioDir, 'snapshot.yml'), [
-      'version: 1',
-      'scenario: scaffold-owned-roots',
-      'profile: web',
-      'composition: web-default',
-      'recording: live',
-      'header:',
-      '  class: web-default',
-      'workspace:',
-      '  final: true',
-      '',
-    ].join('\n'))
-    const expected = join(scenarioDir, 'workspace.expected')
-    await mkdir(expected, { recursive: true })
-    await writeFile(join(expected, '.empty'), '')
-    scaffold = await launchWebScaffold()
-    await assertFinalWorkspaceSnapshot(scenarioDir, scaffold.workspaceCwd)
-  } finally {
-    await scaffold?.close()
-    await rm(scenarioDir, { recursive: true, force: true })
   }
 })

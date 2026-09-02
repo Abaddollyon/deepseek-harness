@@ -1,7 +1,0 @@
-version: 1
-scenario: usage-reasoning-split
-profile: headless
-composition: default
-recording: authored
-header:
-  class: default

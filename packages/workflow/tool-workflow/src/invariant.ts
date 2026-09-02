@@ -14,7 +14,6 @@ export const inject = ['invariants']
 
 interface RunTrace {
   ended: boolean
-  progressOrdinal: number
   readonly members: Map<number, boolean>
 }
 
@@ -35,14 +34,6 @@ function stringId(value: unknown, label: string, fail: InvariantFailure): string
 function memberSeq(value: unknown, fail: InvariantFailure): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     fail('tool-workflow member seq must be a positive safe integer')
-  }
-  return value as number
-}
-
-/** Require one workflow progress event's 1-based ordinal. */
-function progressOrdinal(value: unknown, fail: InvariantFailure): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    fail('tool-workflow progress ordinal must be a positive safe integer')
   }
   return value as number
 }
@@ -68,7 +59,7 @@ function cloneTraceForEvent(
   const runId = stringId(data.runId, `${event.type} runId`, fail)
   const run = source.get(runId)
   if (run !== undefined) {
-    trace.set(runId, { ended: run.ended, progressOrdinal: run.progressOrdinal, members: new Map(run.members) })
+    trace.set(runId, { ended: run.ended, members: new Map(run.members) })
   }
   return trace
 }
@@ -91,29 +82,8 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       if (typeof data.name !== 'string' || data.name.length === 0) {
         fail('tool-workflow/run-start name must be a non-empty string')
       }
-      if (data.parentCallId !== undefined) {
-        stringId(data.parentCallId, 'tool-workflow/run-start parentCallId', fail)
-      }
       if (trace.has(runId)) fail(`tool-workflow/run-start repeats run ${runId}`)
-      trace.set(runId, { ended: false, progressOrdinal: 0, members: new Map() })
-      return
-    }
-    case 'tool-workflow/phase':
-    case 'tool-workflow/log': {
-      const run = openRun(trace, runId, event.type, fail)
-      const ordinal = progressOrdinal(data.ordinal, fail)
-      if (ordinal <= run.progressOrdinal) {
-        fail(`${event.type} ordinal ${ordinal} is not greater than ${run.progressOrdinal} in run ${runId}`)
-      }
-      if (event.type === 'tool-workflow/phase') {
-        if (typeof data.title !== 'string') fail('tool-workflow/phase title must be a string')
-      } else {
-        if (typeof data.message !== 'string') fail('tool-workflow/log message must be a string')
-        if (data.truncated !== undefined && data.truncated !== true) {
-          fail('tool-workflow/log truncated must be true when present')
-        }
-      }
-      run.progressOrdinal = ordinal
+      trace.set(runId, { ended: false, members: new Map() })
       return
     }
     case 'tool-workflow/agent-start': {
@@ -165,7 +135,7 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
 
   const seed = (session: Session): WorkflowTrace => {
     const trace: WorkflowTrace = new Map()
-    for (const event of session.events.filter(isWorkflowRecordEvent)) applyEvent(trace, event, fail)
+    for (const event of session.snapshotEvents().filter(isWorkflowRecordEvent)) applyEvent(trace, event, fail)
     traces.set(session, trace)
     return trace
   }

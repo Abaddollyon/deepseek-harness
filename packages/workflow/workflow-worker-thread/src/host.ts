@@ -12,8 +12,7 @@ import type { WorkerOptions } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { assertNever, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { assertNever, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowMeta, WorkflowResult, WorkflowRun, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
@@ -22,53 +21,6 @@ import type { ExecutionObserver } from './runtime.ts'
 import { HostToWorkerType, WorkerToHostType } from './protocol.ts'
 import type { HostToWorkerPayloads, WorkerToHostMessage } from './protocol.ts'
 import type { ChildResult, ChildStartRequest, WorkerInit } from './types.ts'
-
-/**
- * Validate one `agent({ reasoningEffort })` request against the route that child
- * will actually run on, before any child exists.
- *
- * The route is resolved exactly as the subagent seam resolves it — a
- * per-call `provider`/`model` override, otherwise the inherited parent route —
- * so an effort passed alone is checked against what it will really apply to.
- *
- * The policy is the LLM seam's own: `LlmRuntime.resolveCallConfig` REJECTS an
- * explicitly requested effort the exact model does not offer and performs no
- * clamping or aliasing (its only substitution materializes an adapter default
- * for a caller that requested none). Reproducing that rejection here is what
- * keeps a workflow's cost and quality predictable: validating inside the child
- * instead would surface as an ordinary child failure, which `agent()` reports
- * as a per-item `null`.
- * @param ctx - the run's context; the LLM capability is read optionally.
- * @param parent - the agent whose route an unoverridden child inherits.
- * @param request - the child start request carrying the requested effort.
- * @param signal - cancellation for the adapter-owned capability lookup.
- * @returns fulfillment once the route accepts the effort.
- * @throws when the capability is absent, the route is incomplete, or the model
- *   does not offer the requested effort.
- */
-async function assertRouteAcceptsEffort(
-  ctx: Context,
-  parent: Agent,
-  request: ChildStartRequest,
-  signal: AbortSignal,
-): Promise<void> {
-  const effort = request.reasoningEffort
-  if (effort === undefined) return
-  const llm = ctx.get('llm')
-  if (llm === undefined) {
-    throw new Error(`agent() reasoningEffort "${effort}" cannot be honored: this deployment composes no LLM capability to validate it against`)
-  }
-  const provider = request.provider ?? parent.options.provider
-  const model = request.model ?? parent.options.model
-  if (provider === undefined || model === undefined) {
-    throw new Error(`agent() reasoningEffort "${effort}" needs a complete route: pass both provider and model, or call it from an agent that has them`)
-  }
-  try {
-    await llm.resolveCallConfig({ provider, model, reasoningEffort: ReasoningEffortId(effort) }, signal)
-  } catch (error: unknown) {
-    throw new Error(`agent() reasoningEffort "${effort}" was refused by the selected route: ${renderThrown(error)}`, { cause: error })
-  }
-}
 
 /** One published child and its shared quiescent-disposal transaction. */
 interface ChildRecord {
@@ -157,7 +109,6 @@ export class WorkerRun implements WorkflowRun {
   private workerDeathObserved = false
   private cancelReason: string | undefined
   private graceTimer: NodeJS.Timeout | undefined
-  private wallTimer: NodeJS.Timeout | undefined
   private readonly worker: Worker
   /** Set on `exit`: the thread is gone, so posting has nowhere to go. */
   private workerGone = false
@@ -186,7 +137,6 @@ export class WorkerRun implements WorkflowRun {
     init: WorkerInit,
     private readonly provider: string,
     private readonly disposeGraceMs: number,
-    maxRunWallMs: number,
     private readonly observer: ExecutionObserver,
     signal: AbortSignal | undefined,
   ) {
@@ -214,12 +164,6 @@ export class WorkerRun implements WorkflowRun {
       this.inputSignal = signal
       this.inputSignalAbort = onAbort
       signal.addEventListener('abort', onAbort, { once: true })
-    }
-    if (maxRunWallMs > 0) {
-      this.wallTimer = setTimeout(() => {
-        this.cancel(`workflow run exceeded maxRunWallMs (${maxRunWallMs}ms)`)
-      }, maxRunWallMs)
-      this.wallTimer.unref()
     }
   }
 
@@ -325,7 +269,7 @@ export class WorkerRun implements WorkflowRun {
     // emit `exit`. The first death signal is the host's logical delivery
     // barrier: nothing arriving afterward may create a child, narrate after
     // workflow/end, or compete with the chosen outcome.
-    if (this.workerDeathObserved || this.terminalClaimed) return
+    if (this.workerDeathObserved) return
     switch (message.type) {
       case WorkerToHostType.Ready:
         this.post(HostToWorkerType.Go, {})
@@ -404,23 +348,16 @@ export class WorkerRun implements WorkflowRun {
   private async startChild(callId: number, request: ChildStartRequest): Promise<void> {
     let run: SubagentRun
     try {
-      await assertRouteAcceptsEffort(this.ctx, this.parent, request, this.controller.signal)
       run = await this.subagents.start(this.provider, {
         prompt: [{ type: 'text', text: request.prompt }],
         parent: this.parent,
         signal: this.controller.signal,
-        // An explicit label persists on the child's descriptor, which is what
-        // the session sidebar projection reads for the row's display title.
-        ...request.label !== undefined ? { label: request.label } : {},
         ...request.schema !== undefined ? { outputSchema: request.schema } : {},
-        ...request.provider !== undefined || request.model !== undefined || request.reasoningEffort !== undefined
+        ...request.provider !== undefined || request.model !== undefined
           ? {
             agentOptions: {
               ...request.provider !== undefined ? { provider: request.provider } : {},
               ...request.model !== undefined ? { model: request.model } : {},
-              ...request.reasoningEffort !== undefined
-                ? { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }
-                : {},
             },
           }
           : {},
@@ -546,8 +483,9 @@ export class WorkerRun implements WorkflowRun {
   }
 
   private onResult(result: WorkflowResult): void {
-    // The message admission barrier excludes a late duplicate or a Result
-    // queued behind another terminal source before this handler runs.
+    // The owned worker session sends one Result. Keep a late duplicate or a
+    // Result queued behind another terminal source completely side-effect-free.
+    if (this.terminalClaimed) return
     // First-wins is decided when the Result message reaches the host. If no
     // external cancellation was already in flight, this result won. Reaping a
     // stray child below may synchronously reenter cancel() through provider
@@ -660,7 +598,7 @@ export class WorkerRun implements WorkflowRun {
     signal.removeEventListener('abort', onAbort)
   }
 
-  /** First settle wins; disarms run timers and releases the caller signal. */
+  /** First settle wins; disarms the grace timer and releases the caller signal. */
   private settleResult(result: WorkflowResult): void {
     // Every current terminal source claims ownership before calling here; keep
     // the fallback local so a future caller cannot resolve twice.
@@ -670,7 +608,6 @@ export class WorkerRun implements WorkflowRun {
     this.settled = true
     this.detachInputSignal()
     clearTimeout(this.graceTimer)
-    clearTimeout(this.wallTimer)
     this.settleResolve(result)
   }
 }

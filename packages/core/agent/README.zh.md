@@ -40,7 +40,7 @@ const handle = await ctx.agents.create({
 await handle.dispose()   // stops the loop, unregisters, removes the session, unwinds the scope
 ```
 
-`AgentOptions` 提供初始 provider/model 路由、可选的显式 `reasoningEffort`，以及可选的正数 `maxTokens` 输出上限。配置的推理强度会为新建循环实例的首个请求提案设定种子值，并覆盖恢复日志中的值；省略时，恢复仅会取回同一路由的显式值。后续提案会保留已记录的显式推理强度，同时重新解析标记为适配器默认值的值。循环会校验确切模型的推理支持、把有效值记录在请求头中，并将它们应用到每个对话请求。可选的 `setup(agentCtx)` 回调会在 agent 发布之前组合其作用域世界——作用域工具、提示词段与监听器在任何创建公告之前就已存在。Setup 只做组合：创建完成后才能驱动 agent。
+`AgentOptions` 提供初始 provider/model 路由、可选的适配器所有 `reasoningEffort`，以及可选的正数 `maxTokens` 输出上限。循环会校验确切模型的推理支持、解析适配器默认值、把有效值记录在请求头中，并将它们应用到每个对话请求。可选的 `setup(agentCtx)` 回调会在 agent 发布之前组合其作用域世界——作用域工具、提示词段与监听器在任何创建公告之前就已存在。Setup 只做组合：创建完成后才能驱动 agent。
 
 ### 驱动 agent 的对话
 
@@ -101,7 +101,6 @@ await handle.agent.whenIdle()
 
 `AgentRegistry` 为每个实时 agent 保留一个条目，含其载体与创建者关系。`register()` 记录一个已构造完成的 agent；异步工厂使用拆分的 `enter()`/`announce()` 对，使 setup 与发布始终处于回滚保护之下。创建分发期间请求的 detach 会等待该次分发退栈，且每次 detach 都绑定到确切条目，因此陈旧 disposer 无法移除之后出现的同 id 替代项。Teardown 顺序是停止并排空循环、撤销作用域、detach agent、detach 会话；私有清理完成后该 id 即可复用。
 
-<a id="initiator-scope"></a>
 ### 发起方作用域
 
 每个驱动器在 `ctx.agents.withInitiator(agent, ...)` 内运行其完整生命周期，因此继承的异步链会观察到该 agent；`withoutInitiator()` 为共享定时器等无关的进程本地工作隐藏它。该边界只是进程本地归因——环境中的身份既不是存活证明，也不是授权，显式身份在 worker、进程、持久化与 wire 边界保持权威。Teardown 拒绝新边界，让返回 Promise 的边界排空，然后禁用底层存储。[发起方作用域决策](../../../.agents/notes/implemented/architecture/2026-07-15-agent-initiator-scope.zh.md) 拥有详细约定。

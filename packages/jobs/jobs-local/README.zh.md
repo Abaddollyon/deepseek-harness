@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它以进程本地实时状态和全新快照实现 `dsh-jobs` 约定。启用 `persist: true` 并挂载 `ctx.jobStore` 后，记录可跨宿主重启，用于诚实结算或由生产方控制的重新采用；生产方执行本身仍是进程本地的。
+`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它用内存记录实现 `dsh-jobs` 约定，并且只交出全新快照，从不交出实时状态。按所有者的并发上限（默认 10）约束一个 agent 同时处于运行或停止中的任务数量；任务会随 harness 进程终止而消失，无法跨重启持久。
 
 ## 目录
 
@@ -29,11 +29,11 @@ kind: "package-reference"
 
 ### 何时选择
 
-当生产方在进程本地运行时选择它；若需要重启核算，可再配合持久记录 store 与运行监督器。当需要跨进程延续的是生产方执行本身，而不只是记录与恢复载荷时，应使用其他 provider。
+当任务应存活于 harness 进程内、并随进程终止时选择它。当工作必须跨重启存活或跨进程存在时避免它：记录保存在内存中，持久或跨进程后端必须以不同方式实现同一约定。
 
 ### 最小配置
 
-加载插件会注册 `ctx.jobs`。持久注册要求启用 `persist: true` 并挂载 `ctx.jobStore`；普通任务不需要这两项。
+加载插件即注册 `ctx.jobs`；`maxConcurrentJobsPerOwner` 可选，默认为 `10`。
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -41,11 +41,7 @@ kind: "package-reference"
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享无所有者桶中，`running` 加 `stopping` 任务的最大数量。 |
-| `persist` | `false` | 将记录镜像到已挂载的 `ctx.jobStore`，并启用有确认的持久启动。 |
-| `maxSettledJobs` | `100` | 每个所有者保留的已报告终态记录；未报告记录不会因容量压力被逐出。 |
-| `teardownGraceMs` | `10000` | teardown 中等待生产方释放以及最终持久镜像落位的界限。 |
-| `maxPersistedOutputBytes` | `65536` | 存入持久记录的输出 UTF-8 字节上限。 |
+| `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享的无主桶中，`running` 加 `stopping` 任务的最大数量 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
 
@@ -84,11 +80,11 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、`LocalJobRegistry`、准入、生命周期、销毁 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；快照检查位于 `dsh-jobs/invariant`） |
+| — | 不发布运行时不变式伴生入口；快照检查位于 `dsh-jobs/invariant`。 |
 
 ### scope 分层
 
-`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是宿主范围的，因为重启核算跨越会话。resumer 返回延迟生产方计划：registry 先提交采用标记并等待观察者，账目接受所有权后才启动生产方。观察者返回 `true` 确认其持久账目后，registry 会丢弃内存中的标记，防止后续报告与结算镜像复活 supervisor 已清除的证明；若只有观察性监听器，则保留标记。store 缺失、标记写入被拒或观察者显式否决时，生产方工作因此不会启动；多次重启之间，最早尚未核算的标记继续保持权威。
+`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。
 
 ### 准入与结算
 
@@ -132,7 +128,7 @@ kind: "package-reference"
 
 这些限制说明注册表何时不合适。它们是当前包约束，不是任务积压。
 
-- **生产方执行是进程本地的**——持久化保留记录和恢复载荷，而不是运行中的 JavaScript 生产方；可恢复种类必须提供幂等的延迟 resumer。
+- **任务只存在于进程本地**——记录会随 harness 进程终止而消失；持久或跨重启执行需要一个单独实现该 seam 的后端。
 - **静默无效的取消可能使销毁停滞并持续占用容量**——如果 `cancel` 返回后始终未结算 `done`，注册表就无法将其与缓慢停止区分开；该任务会在服务剩余生命周期内持续占用一个桶名额，只有显式抛出异常才能安全地强制标为失败。
 
 <a id="dev-note"></a>

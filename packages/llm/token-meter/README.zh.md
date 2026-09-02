@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`@deepseek-ai/dsh-token-meter` 是具备回放感知的 token 计量服务：`ctx.tokenMeter` 从持久事件日志为每个会话推进一个隔离 fold，因此压缩（compaction）与其他压力敏感插件可以共享同一份计量，无需依赖压缩引擎。借助它，你可以测量当前请求与上下文压力、为单条消息计价，并且在挂载会话投影 seam 时读取 `tokenUsage`、`contextPressure` 与 `contextBreakdown` 投影。文本和未声明图片定价的路由使用固定启发式规则，存在时则应用适配器声明的视觉 token 定价；只有请求 envelope 完全匹配时才复用提供方报告的用量。它不添加任何自己的提示词、消息、schema 或工具，也绝不为 loop 做决定。可选的 `modelRoute` 投影会从持久请求上下文重新发布最近解析出的提供方、模型与上下文窗口。
+`@deepseek-ai/dsh-token-meter` 是具备回放感知的 token 计量服务：`ctx.tokenMeter` 从持久事件日志为每个会话推进一个隔离 fold，因此压缩（compaction）与其他压力敏感插件可以共享同一份计量，无需依赖压缩引擎。借助它，你可以测量当前请求与上下文压力、为单条消息计价，并且在挂载会话投影 seam 时读取 `tokenUsage`、`contextPressure` 与 `contextBreakdown` 投影。文本和未声明图片定价的路由使用固定启发式规则，存在时则应用适配器声明的视觉 token 定价；只有请求 envelope 完全匹配时才复用提供方报告的用量。它不添加任何自己的提示词、消息、schema 或工具，也绝不为 loop 做决定。
 
 ## 目录
 
@@ -148,3 +148,5 @@ const price = ctx.tokenMeter.estimateMessage(message)
 - 按提供方的精确分词器尚未决定；保持单一确定性启发式规则，正是让每个消费方的测量一致且回放稳定的原因。
 
 </details>
+
+**运行时不变式：** 不发布伴生入口。token estimate 是按调用输出，私有 Session cache 在事件变更处失效；其 projection 与计价均来自同一 schema 和 heuristic，没有可独立交叉核对的运行时关系。

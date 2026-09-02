@@ -218,20 +218,7 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics. `LlmFailureCodeMap` supplies known provider-neutral routing values while the derived open string type admits provider extensions; consumers treat every unknown value as non-retryable.
-
-```ts type-equiv
-/** Merge-extensible provider failure codes; unknown codes are not retry-safe. */
-interface LlmFailureCodeMap {
-  quota: 'QUOTA'
-  rateLimit: 'RATE_LIMIT'
-}
-```
-
-```ts type-equiv
-/** Provider failure code used for machine routing; consumers must default unknown codes to non-retryable. */
-type LlmFailureCode = LlmFailureCodeMap[keyof LlmFailureCodeMap] | (string & {})
-```
+Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -239,7 +226,7 @@ interface LlmFailure {
   /** Human-readable provider or transport failure. */
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
-  readonly code: LlmFailureCode
+  readonly code: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
@@ -942,7 +929,7 @@ async discoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, sig
  * @param request - endpoint, protocol, and one-shot credential to use.
  * @param signal - caller cancellation supplied by the Remote carrier.
  * @returns advertised models in endpoint order.
- * @throws TypertRemoteFailure with `model-discovery-failed` when discovery refuses or fails.
+ * @throws RemoteError with `llm/model-discovery-rejected` when discovery refuses or fails.
  */
 @Remote('discoverModels') async remoteDiscoverModels( settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal, ): Promise<LlmDiscoveredModel[]>
 

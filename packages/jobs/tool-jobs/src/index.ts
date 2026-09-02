@@ -15,7 +15,6 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
-import { FIRST_PARTY_SECTION_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 export const name = 'tool-jobs'
@@ -55,8 +54,6 @@ export const Config: z<Config> = z.object({
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
 export interface PublicJobSnapshot {
   id: string
-  /** Per-owner display ordinal; the short model-facing handle beside the durable id. */
-  ordinal: number
   kind: string
   label: string
   status: JobSnapshot['status']
@@ -71,7 +68,6 @@ const PUBLIC_TASK_SCHEMA = {
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
-    ordinal: { type: 'integer', required: true },
     kind: { type: 'string', required: true },
     label: { type: 'string', required: true },
     status: {
@@ -89,7 +85,6 @@ const PUBLIC_TASK_SCHEMA = {
 function publicJob(snapshot: JobSnapshot): PublicJobSnapshot {
   return {
     id: snapshot.id,
-    ordinal: snapshot.ordinal,
     kind: snapshot.kind,
     label: snapshot.label,
     status: snapshot.status,
@@ -266,7 +261,7 @@ export function apply(ctx: Context, config: Config): void {
   // Cross-call guidance follows the filesystem sections and precedes product sections.
   ctx.systemPrompt.section({
     name: 'tool:jobs',
-    order: FIRST_PARTY_SECTION_ORDER.TOOL_JOBS,
+    order: ctx.systemPrompt.getSectionOrder('TOOL_JOBS'),
     text: 'Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job\'s work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.',
   })
 
@@ -351,12 +346,9 @@ export function apply(ctx: Context, config: Config): void {
       schema: { type: 'array', items: PUBLIC_TASK_SCHEMA },
       render: (_args, jobs) => [{
         type: 'text',
-        // The ordinal+kind handle keeps rows scannable now that ids carry a
-        // uuid; the full id stays present because it is what the other job
-        // tools accept.
         text: jobs.length === 0
           ? '(no background jobs)'
-          : jobs.map(t => `#${t.ordinal} [${t.kind}] ${t.status} — ${t.label} (id: ${t.id})`).join('\n'),
+          : jobs.map(t => `${t.id} [${t.kind}] ${t.status} — ${t.label}`).join('\n'),
       }],
     },
     execute(_args, exec) {

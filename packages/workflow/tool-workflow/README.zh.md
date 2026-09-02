@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-tool-workflow` 把 `workflow` 工具交给模型：JavaScript 编排脚本通过 `ctx.workflowEngine` 将工作扇出到多个 subagent。采用调用方所有权时，父级轮次等待最终值；采用监督器所有权时，工具先持久注册运行并记录 `run/detached`，然后立即返回任务 id，有界执行继续进行。仅当用户明确要求工作流或大型多 agent 编排时选择它；一两项委派时优先使用普通 subagent 调用。
+`dsh-tool-workflow` 把 `workflow` 工具交给模型：以 JavaScript 编排脚本、身份块与可选参数调用它，它会在 `ctx.workflowEngine` 上运行脚本，把工作扇出到多个 subagent，直到脚本的最终值返回。该工具拥有模型侧 schema、系统提示词中的使用指导与结果包络；脚本解析、执行、上限与取消位于引擎之后。执行为前台：父级轮次会阻塞到整个工作流结算，非正常结束是错误，绝不是部分输出。仅当用户明确要求工作流式或大型多 agent 编排时选择它；一两项委派时优先使用普通 subagent 调用。
 
 ## 目录
 
@@ -31,11 +31,11 @@ kind: "package-reference"
 
 模型提交三个参数：`meta`（必需的身份数据：`name`、`description`，以及可选的 `whenToUse` 与 `phases`）、`script`（必需的纯 JavaScript 脚本体——不含 `export const meta` 语句；工具描述携带完整的编写约定）与 `args`（可选 JSON 对象，作为全局变量 `args` 向脚本公开；裸列表应包装到字段中，使协议 schema 如实表达形态）。
 
-调用方所有权在结算后返回 `{ runId, agentsStarted, result }` 并渲染最终 JSON。监督器所有权只有在初始任务记录持久化且 `run/detached` 已记录后才返回 `{ runId, jobId, status: 'running' }`；完成通过后台任务通知与 `job_output` 送达。解析、校验、取消、执行和清理失败仍是显式错误，不会伪装成部分成功。
+成功返回规范包络 `{ runId, agentsStarted, result }`，向模型渲染为 `workflow "<name>" completed (<count> agent<optional-s>).`，后接 `Return value:` 与美化打印的 JSON。无法启动的工作流——脚本解析或 meta 校验失败——返回模型可以修正的错误。取消与执行失败返回 `Error: workflow run was cancelled` 或 `Error: workflow run failed: <error>`；部分输出绝不会被报告为成功。
 
 ### 运行期间的预期
 
-采用 `ownership: caller` 时，工具等待结果、桥接父级步骤的中止信号，并在返回前 dispose（资源释放）运行。采用 `ownership: supervisor` 时，必须提供有限的 `workflowEngine.maxRunWallMs`、`ctx.jobs` 与持久 store；交接后不再保留父级信号，而任务取消会停止运行，结算会完成 dispose。两种模式下，子 agent 消息都不会进入父级对话。
+脚本运行期间，父级轮次会等待：工具启动运行、等待其结果，并始终 dispose（资源释放）它，因此脚本及其子 agent 在每条路径上完全停稳——包括从父级步骤中止信号桥接而来的取消。模型只看到最终结果，永远不会看到中间子 agent 消息；子 agent 自己的工作不会进入父级对话。
 
 ### 配置
 
@@ -43,7 +43,6 @@ kind: "package-reference"
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
 | `maxResultChars` | `50000` | 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
-| `ownership` | `caller` | `caller` 在工具调用中等待；`supervisor` 将有界运行持久交接给 `ctx.jobs`。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-workflow)是每个受支持字段的穷尽式真源。
 
@@ -157,7 +156,7 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 这些限制说明该工具尚未支持什么。它们是当前约束，不是任务积压。
 
-- **监督器所有权提供持久核算，而不恢复工作流执行**——当前工作流记录在宿主死亡后不可恢复，并会在重启时诚实结算；实时监督运行仅在宿主进程存活期间继续。
+- **父级轮次会阻塞到整个工作流结算**——没有后台启动／轮询接口，取消会丢弃局部输出并返回错误。
 - **`args` 必须是对象，Native 结果文本有界**——调用方把顶层数组／标量包装到字段中；规范工作流结果保持完整，超过 `maxResultChars` 的 JSON 会在面向模型的投影中截断，而不是存储在检索句柄背后。
 - **每次工具注册的工作流策略固定**——提供方选择、上限与工具名称属于部署配置，不是模型调用参数。
 - **持久记录只覆盖顶层且只供观察**——嵌套 PTC mode dispatch 不记录；记录故障会刻意退化为不完整前缀，而不改变执行。
@@ -170,6 +169,6 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 本开发备注是维护者的工作上下文：尚未决定的开放方向。它明确不具权威性——已交付的行为、限制与既定理由以上文、包代码与相关 Agent Note 为准。
 
-开放方向：可恢复的工作流生产方；把截断的 JSON 存储在检索句柄背后，而不是剪裁投影；记录超出顶层的嵌套 dispatch。
+开放方向：让父级轮次不再阻塞的后台启动／轮询路径；把截断的 JSON 存储在检索句柄背后，而不是剪裁投影；记录超出顶层的嵌套 dispatch。
 
 </details>

@@ -17,21 +17,19 @@
  * seam and passes it as the request's `apiKey` option, which pi-ai treats as
  * the highest-priority auth override — that is what keeps the fail-loud
  * reference semantics. Everything that override does not cover reaches pi-ai
- * through an attempt-local collection whose credential-store proxy records the
- * exact grant lazy auth supplies. The proxy still delegates every operation to
- * the durable store, while the frozen profile supplies the same provider object
- * as the operation snapshot. A retry can therefore compare the rejected grant
- * under serialized modification without mixing concurrent request identities.
+ * through the collection's own auth: the credential store holds the records a
+ * login wrote and a refresh rotates, and the auth context answers the ambient
+ * questions a provider asks while resolving. Both are stable across snapshots,
+ * so a configuration change rebuilds the collection without forgetting who is
+ * signed in.
  *
  * @module dsh-llm-pi-ai/adapter
  */
 
-import { isDeepStrictEqual } from 'node:util'
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
   Api,
   AuthContext,
-  Credential,
   CredentialStore,
   Model,
   Models,
@@ -47,11 +45,9 @@ import {
   LlmError,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import { catalogProvider } from './catalog.ts'
 import type {
   GenerateOptions,
   ImageAttachmentAccess,
-  LlmFailure,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
@@ -64,35 +60,9 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
-import { AUTH_FAILURE_CODE, toStreamChunks } from './stream.ts'
+import { toStreamChunks } from './stream.ts'
 
 /** One resolution's frozen view: the profiles and the collection built from them. */
-interface AttemptCredentialCapture {
-  credential: Credential | undefined
-}
-
-/** Capture the exact stored credential pi-ai resolves for one lazy request attempt. */
-function capturingCredentialStore(
-  source: CredentialStore,
-  provider: string,
-  capture: AttemptCredentialCapture,
-): CredentialStore {
-  return {
-    read: (_id, options) => source.read(provider, options).then((credential) => {
-      capture.credential = credential
-      return credential
-    }),
-    list: options => source.list(options),
-    modify: (_id, mutate, options) => source.modify(provider, mutate, options).then((credential) => {
-      capture.credential = credential
-      return credential
-    }),
-    delete: (_id, options) => source.delete(provider, options).then(() => {
-      capture.credential = undefined
-    }),
-  }
-}
-
 interface PiAiSnapshot {
   /** The resolved profiles this collection was built from, used as its identity. */
   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
@@ -122,11 +92,6 @@ export interface PiAiAdapterOptions {
    * every request no matter how often the human signed in.
    */
   auth: PiAiAuthInjection
-  /**
-   * Observe one pre-content auth-recovery cycle: the stored OAuth credential's
-   * forced refresh outcome before the adapter retries the request.
-   */
-  onAuthRecovery?: (detail: { provider: string; refreshed: boolean; error?: string }) => void
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Bridge one attachment reference into the current model-tool execution world. */
@@ -144,27 +109,6 @@ export interface PiAiAuthInjection {
   credentials: CredentialStore
   /** Ambient lookups a provider performs while resolving its own auth. */
   authContext: AuthContext
-}
-
-/**
- * Wait out one auth-recovery delay.
- * @param delayMs - the resolved pre-attempt delay.
- * @param signal - the caller's cancellation.
- * @returns false when the caller aborted before the delay elapsed.
- */
-function authRecoveryDelay(delayMs: number, signal: AbortSignal | undefined): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false)
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve(true)
-    }, delayMs)
-    function onAbort(): void {
-      clearTimeout(timer)
-      resolve(false)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
@@ -398,129 +342,6 @@ export class PiAiAdapter extends LlmAdapter {
     )
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
 
-    // Auth recovery replays the whole attempt. A provider credential
-    // rejection (HTTP 401/403) arrives either as the terminal finish chunk of
-    // an otherwise empty stream or as a thrown error during setup; both are
-    // safe to replay only while the caller has received nothing, and both
-    // resolve against the credential store afresh on the next attempt, which
-    // is where the forced refresh below lands its rotated token.
-    let retriesLeft = profile.authRecovery.retries
-    let refreshAttempted = false
-    for (;;) {
-      let emitted = false
-      let heldUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
-      let authFailure: LlmFailure | undefined
-      // Thrown setup failures (aborts, idle timeouts, local credential-store
-      // errors) keep their own classification and propagate; pi-ai delivers
-      // provider rejections as terminal error events, never as throws. The
-      // attempt-local store records the credential lazy auth actually supplied.
-      const attemptCredential: AttemptCredentialCapture = { credential: undefined }
-      for await (const chunk of this.streamAttempt(options, profile, model, reasoning, apiKey, attemptCredential)) {
-        // The terminal `usage` chunk is held back one step: on a
-        // pre-content auth rejection it belongs to the abandoned attempt;
-        // on success or exhausted failure it still precedes `finish`.
-        if (chunk.type === 'usage') {
-          heldUsage = chunk
-          continue
-        }
-        if (!emitted
-          && chunk.type === 'finish'
-          && chunk.reason.kind === 'error'
-          && chunk.reason.failure.code === AUTH_FAILURE_CODE) {
-          authFailure = chunk.reason.failure
-          break
-        }
-        if (heldUsage !== undefined) {
-          emitted = true
-          yield heldUsage
-          heldUsage = undefined
-        }
-        emitted = true
-        yield chunk
-      }
-      if (authFailure === undefined) return
-      if (retriesLeft === 0) {
-        yield heldUsage as Extract<StreamChunk, { readonly type: 'usage' }>
-        yield { type: 'finish', reason: { kind: 'error', failure: authFailure } }
-        return
-      }
-      retriesLeft--
-      if (!refreshAttempted) {
-        refreshAttempted = true
-        let recovery: { refreshed: boolean; error?: string } = { refreshed: false }
-        if (apiKey === undefined) {
-          const timeout = AbortSignal.timeout(profile.streamIdleTimeoutMs)
-          const signal = options.signal === undefined
-            ? timeout
-            : AbortSignal.any([options.signal, timeout])
-          recovery = await this.refreshStoredAuth(options.provider, attemptCredential.credential, signal)
-          if (options.signal?.aborted) {
-            throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
-          }
-          if (timeout.aborted) {
-            throw new LlmError(`pi-ai auth recovery idle timeout after ${profile.streamIdleTimeoutMs}ms`, 'TIMEOUT')
-          }
-        }
-        this.config.onAuthRecovery?.({ provider: options.provider, ...recovery })
-      }
-      if (!await authRecoveryDelay(profile.authRecovery.delayMs, options.signal)) {
-        throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
-      }
-    }
-  }
-
-  /**
-   * Best-effort refresh of the route's stored OAuth credential, run once per
-   * stream call before the first auth-recovery retry. pi-ai's own refresh
-   * path only fires on an expired credential, so a token the provider
-   * rejects early — revoked after another client rotated the shared session,
-   * or dropped in an auth-backend restart — never earns one; this forces the
-   * refresh while the store's `modify` exclusion still serializes it against
-   * pi-ai's own.
-   * @param provider - the route whose catalog OAuth handler performs the refresh.
-   * @param failedCredential - exact stored credential supplied to the rejected request.
-   * @param signal - combined caller and idle-timeout cancellation for lock acquisition and refresh.
-   * @returns the refresh outcome; never throws, because a token-endpoint
-   *   failure says nothing about whether the resource endpoint still rejects
-   *   the stored credential — the retried request answers that definitively.
-   */
-  private async refreshStoredAuth(
-    provider: string,
-    failedCredential: Credential | undefined,
-    signal: AbortSignal,
-  ): Promise<{ refreshed: boolean; error?: string }> {
-    const oauth = catalogProvider(provider)?.auth.oauth
-    if (oauth === undefined) return { refreshed: false }
-    try {
-      // The store answers a declined mutation with the unchanged credential, so
-      // the mutator itself records whether a rotation actually happened.
-      let refreshed = false
-      await this.config.auth.credentials.modify(provider, (current) => {
-        if (current?.type !== 'oauth' || !isDeepStrictEqual(current, failedCredential)) {
-          return Promise.resolve(undefined)
-        }
-        return oauth.refresh(current, signal).then((rotated) => {
-          refreshed = true
-          return rotated
-        })
-      }, { signal })
-      return { refreshed }
-    } catch (refreshError) {
-      return {
-        refreshed: false,
-        error: refreshError instanceof Error ? refreshError.message : String(refreshError),
-      }
-    }
-  }
-
-  private async * streamAttempt(
-    options: GenerateOptions,
-    profile: ResolvedPiAiProviderProfile,
-    model: Model<Api>,
-    reasoning: ModelThinkingLevel | undefined,
-    apiKey: string | undefined,
-    attemptCredential: AttemptCredentialCapture,
-  ): AsyncGenerator<StreamChunk> {
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -551,12 +372,7 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade)
-      const attemptModels = createModels({
-        credentials: capturingCredentialStore(this.config.auth.credentials, options.provider, attemptCredential),
-        authContext: this.config.auth.authContext,
-      })
-      attemptModels.setProvider(profile.piProvider)
-      const events = attemptModels.streamSimple(model, context, {
+      const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },

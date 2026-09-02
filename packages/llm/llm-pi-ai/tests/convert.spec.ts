@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestPolicy, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { toPiContext } from '../src/context.ts'
@@ -742,24 +742,6 @@ describe('toStreamChunks', () => {
     })
   })
 
-  it('lets caller cancellation override retryable reset classification', async () => {
-    // An aborted caller turns any in-band terminal error into an aborted
-    // finish; the HTTP/2 reset wording must not route to TRANSPORT here.
-    const error = assistant({
-      stopReason: 'error',
-      errorMessage: 'stream error: stream ID 1; INTERNAL_ERROR; received from peer',
-    })
-    const chunks = await collect(toStreamChunks(
-      feed({ type: 'error', reason: 'error', error }),
-      undefined,
-      AbortSignal.abort('caller gone'),
-    ))
-    expect(chunks.at(-1)).toMatchObject({
-      type: 'finish',
-      reason: { kind: 'aborted', failure: { code: 'ABORTED' } },
-    })
-  })
-
   it('rejects a stream that ends without done or error', async () => {
     await expect(collect(toStreamChunks(feed({ type: 'start', partial: assistant() }))))
       .rejects.toThrow(/without done\/error/)
@@ -867,41 +849,9 @@ describe('mapStopReason / mapUsage', () => {
     'OpenAI Responses stream ended before a terminal response event',
     'openrouter stream ended without a terminal event',
     'Stream ended without finish_reason',
-    // HTTP/2 stream resets: nghttp2's `stream ID N; CODE; received from peer`
-    // wording, Node's NGHTTP2_* error-code rendering, and the RST_STREAM frame
-    // name. The peer reset one stream, not the connection, so a retry can succeed.
-    'stream error: stream ID 1; INTERNAL_ERROR; received from peer',
-    'Stream closed with error code NGHTTP2_REFUSED_STREAM',
-    'HTTP/2 stream 0 was reset with RST_STREAM',
   ])('maps pi-ai transport wording %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
-  })
-
-  it('feeds HTTP/2 stream resets to the default retry policy as TRANSPORT', () => {
-    expect(mapStopReason(assistant({
-      stopReason: 'error',
-      errorMessage: 'stream error: stream ID 3; REFUSED_STREAM; received from peer',
-    }))).toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
-    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
-    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
-    expect(policy.retryableCodes).toContain('TRANSPORT')
-  })
-
-  it.each([
-    // A locally reset or otherwise truncated nghttp2 message without the
-    // peer-attribution half of the composite is not proven transient.
-    'stream error: stream ID 1; INTERNAL_ERROR',
-    // Application-level wording that happens to say `stream error`.
-    'gRPC call failed with stream error: payload decode failed',
-    // `received from peer` without `stream error` is not reset vocabulary.
-    'certificate received from peer failed validation',
-  ])('keeps non-reset wording %j out of the retry loop', (errorMessage) => {
-    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
-      .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
-    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
-    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
-    expect(policy.retryableCodes).not.toContain('PI_AI_ERROR')
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
@@ -923,28 +873,16 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(silent, 100)).toEqual({
       kind: 'error',
       failure: {
-        // The actionable fallback names the resolved capacity and the usage
-        // that tripped it, so the reader can act without reproducing the turn.
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"' +
-          ' at resolved context window 100 tokens (input 101, cache-read 0)',
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"',
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
 
-    // Boundary: usage exactly at the window is not an overflow (the detector
-    // trips strictly above it), so the stop stays successful.
-    const atWindow = assistant({ stopReason: 'stop', usage: usage(100, 0), content: [{ type: 'text', text: 'x' }] })
-    expect(mapStopReason(atWindow, 100)).toEqual({ kind: 'stop' })
-
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
-    expect(mapStopReason(truncated, 100)).toEqual({
+    expect(mapStopReason(truncated, 100)).toMatchObject({
       kind: 'error',
-      failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"' +
-          ' at resolved context window 100 tokens (input 80, cache-read 19)',
-        code: CONTEXT_WINDOW_EXCEEDED_CODE,
-      },
+      failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
     })
   })
 
@@ -955,26 +893,6 @@ describe('mapStopReason / mapUsage', () => {
       totalTokens: 25,
       cacheReadTokens: 8,
       cacheWriteTokens: 2,
-    })
-    expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
-  })
-
-  it('maps the provider-reported reasoning split without adding it to output', () => {
-    // pi-ai keeps reasoning inside output; reasoningTokens is a sub-breakdown,
-    // so outputTokens must not grow by the split.
-    expect(mapUsage({ ...usage(10, 12), reasoning: 7 })).toEqual({
-      inputTokens: 10,
-      outputTokens: 12,
-      totalTokens: 22,
-      reasoningTokens: 7,
-    })
-    // Providers that expose the breakdown report zero as a number; only
-    // providers without one leave the field absent.
-    expect(mapUsage({ ...usage(10, 5), reasoning: 0 })).toEqual({
-      inputTokens: 10,
-      outputTokens: 5,
-      totalTokens: 15,
-      reasoningTokens: 0,
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
   })

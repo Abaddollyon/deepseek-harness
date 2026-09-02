@@ -600,26 +600,6 @@ describe('LocalPtySession readiness and output', () => {
     expect(() => session.startSend({ text: '', submit: false })).toThrow('has exited')
   })
 
-  it('defers pwsh silence after output and resets deferral on new output', async () => {
-    vi.useFakeTimers()
-    const terminal = new FakeTerminal()
-    const inspector = new FakeInspector()
-    const session = makeSession(terminal, inspector, config({ shellDialect: 'pwsh', idleSilenceMs: 20, handoffGraceMs: 5, timeoutMs: 300 }))
-    await initialize(session, terminal)
-    inspector.pgid = undefined
-    const operation = session.startSend({ text: '', submit: false })
-    terminal.emitData('first')
-    await vi.advanceTimersByTimeAsync(45)
-    let settled = false
-    void operation.done.then(() => { settled = true })
-    expect(settled).toBe(false)
-    terminal.emitData('second')
-    await vi.advanceTimersByTimeAsync(45)
-    expect(settled).toBe(false)
-    await vi.advanceTimersByTimeAsync(45)
-    expect((await operation.done).waitReason).toBe('inferred_idle')
-  })
-
   it('cancels with foreground-group SIGINT, observes AbortSignal, and contains write failures', async () => {
     vi.useFakeTimers()
     const terminal = new FakeTerminal()

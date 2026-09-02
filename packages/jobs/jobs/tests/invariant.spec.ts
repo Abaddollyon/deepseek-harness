@@ -8,27 +8,31 @@ import * as JobsInvariant from '@deepseek-ai/dsh-jobs/invariant'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 
 const BASE: JobSnapshot = {
-  id: JobId('bash-8c54d7a4-88ff-4bff-9df3-cb1b86d1c583'),
-  ordinal: 1,
+  id: JobId('bash-1'),
   kind: 'bash',
   label: 'compile',
   status: 'completed',
-  resumable: false,
-  incarnation: 'proc-1',
   startedAt: 10,
   finishedAt: 20,
   reported: false,
 }
 
-const { finishedAt: _baseFinishedAt, ...UNFINISHED } = BASE
-
 const RUNNING: JobSnapshot = {
-  ...UNFINISHED,
+  id: JobId('bash-1'),
+  kind: 'bash',
+  label: 'compile',
   status: 'running',
+  startedAt: 10,
+  reported: false,
 }
 
 const TERMINAL_WITHOUT_FINISH: JobSnapshot = {
-  ...UNFINISHED,
+  id: JobId('bash-1'),
+  kind: 'bash',
+  label: 'compile',
+  status: 'completed',
+  startedAt: 10,
+  reported: false,
 }
 
 async function setup(seed: JobSnapshot[] = []): Promise<(snapshot: unknown, owner?: Agent) => void> {
@@ -58,17 +62,13 @@ describe('job-registry invariants', () => {
     const owner = { id: SessionId('owner') } as Agent
     expect(() => { notify({ ...BASE, id: JobId('subagent-2'), kind: 'subagent', ownerSession: owner.id }, owner) })
       .not.toThrow()
-    // A restored record announces with an ownerSession but no live owner.
-    expect(() => { notify({ ...BASE, ownerSession: SessionId('restored') }, undefined) }).not.toThrow()
   })
 
   it.each([
-    [{ ...BASE, id: JobId('-1'), kind: '' }, undefined, /non-empty fragment/],
-    [{ ...BASE, id: JobId('other-1') }, undefined, /must be "bash-" followed by a non-empty fragment/],
-    [{ ...BASE, id: JobId('bash-') }, undefined, /non-empty fragment/],
-    [{ ...BASE, ordinal: 0 }, undefined, /ordinal must be a positive integer/],
-    [{ ...BASE, ordinal: 1.5 }, undefined, /ordinal must be a positive integer/],
-    [{ ...BASE, incarnation: '' }, undefined, /incarnation must be non-empty/],
+    [{ ...BASE, id: JobId('-1'), kind: '' }, undefined, /positive ordinal/],
+    [{ ...BASE, id: JobId('other-1') }, undefined, /must be "bash-" followed by a positive ordinal/],
+    [{ ...BASE, id: JobId('bash-x') }, undefined, /positive ordinal/],
+    [{ ...BASE, id: JobId('bash-0') }, undefined, /positive ordinal/],
     [{ ...BASE, startedAt: -1 }, undefined, /startedAt must be a non-negative epoch integer/],
     [{ ...BASE, startedAt: 0.5 }, undefined, /startedAt must be a non-negative epoch integer/],
     [{ ...BASE, status: 'running' }, undefined, /finishedAt must be present exactly for a terminal status/],

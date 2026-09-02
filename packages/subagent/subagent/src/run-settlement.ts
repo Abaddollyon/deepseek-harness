@@ -6,7 +6,6 @@
  * @module @deepseek-ai/dsh-subagent/run-settlement
  */
 
-import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { SubagentResult, SubagentRun } from './types.ts'
@@ -19,12 +18,12 @@ function finalText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Render a failed stop reason with provider-authored detail and routing facts. */
+/** Render a failed stop reason with optional provider-authored detail. */
 function failureDetail(result: SubagentResult): string {
-  const diagnostic = result.diagnostic === undefined ? '' : `; diagnostic: ${result.diagnostic}`
-  const failure = result.failure === undefined ? '' : `; failure code: ${result.failure.code}`
-  const retry = result.failure?.retryAfterMs === undefined ? '' : `; retry after: ${result.failure.retryAfterMs} ms`
-  return `${result.stopReason}${diagnostic}${failure}${retry}`
+  const stopReason = result.stopReason
+  return result.diagnostic === undefined
+    ? stopReason
+    : `${stopReason}; diagnostic: ${result.diagnostic}`
 }
 
 /**
@@ -54,19 +53,6 @@ function runOutcome(result: SubagentResult): JobOutcome {
 }
 
 /**
- * Render a task failure without allowing a hostile coercion hook to escape.
- * @param value - value rejected by result or disposal.
- * @returns ordinary JavaScript stringification or a safe fallback.
- */
-function rejectionDetail(value: unknown): string {
-  try {
-    return String(value)
-  } catch {
-    return errorChain(value)
-  }
-}
-
-/**
  * Await the child result, dispose the run, then return its task outcome. Result
  * and disposal failures become `failed`; when both fail, both details survive.
  * @param run - live run to settle and release.
@@ -77,13 +63,13 @@ export async function settleRun(run: SubagentRun): Promise<JobOutcome> {
   try {
     outcome = runOutcome(await run.result)
   } catch (error: unknown) {
-    outcome = { status: 'failed', detail: rejectionDetail(error) }
+    outcome = { status: 'failed', detail: String(error) }
   }
   try {
     await run.dispose()
   } catch (error: unknown) {
     const prefix = outcome.detail === undefined ? '' : `${outcome.detail}; `
-    return { status: 'failed', detail: `${prefix}dispose failed: ${rejectionDetail(error)}` }
+    return { status: 'failed', detail: `${prefix}dispose failed: ${String(error)}` }
   }
   return outcome
 }

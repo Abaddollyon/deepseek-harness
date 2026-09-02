@@ -42,16 +42,10 @@
       "path": "../../core/session"
     },
     {
-      "path": "../../jobs/run-supervisor"
-    },
-    {
       "path": "../../workflow/workflow"
     },
     {
       "path": "../../workflow/tool-workflow"
-    },
-    {
-      "path": "../../runtime-diagnostics/invariants"
     }
   ]
 }

@@ -34,7 +34,7 @@ describe('validateMeta', () => {
       whenToUse: 'large mechanical sweeps',
       phases: [
         { title: 'Discover', provider: 'openai' },
-        { title: 'Transform', detail: 'one agent per file', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
+        { title: 'Transform', detail: 'one agent per file', model: 'deepseek-v4-pro' },
       ],
     })
     expect(meta).toEqual({
@@ -43,7 +43,7 @@ describe('validateMeta', () => {
       whenToUse: 'large mechanical sweeps',
       phases: [
         { title: 'Discover', provider: 'openai' },
-        { title: 'Transform', detail: 'one agent per file', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
+        { title: 'Transform', detail: 'one agent per file', model: 'deepseek-v4-pro' },
       ],
     })
   })
@@ -75,7 +75,6 @@ describe('validateMeta', () => {
     expectInvalid({ name: 'x', description: 'd', phases: [{ title: 'Scan', detail: 9 }] }, 'meta.phases[0].detail must be a string')
     expectInvalid({ name: 'x', description: 'd', phases: [{ title: 'Scan', provider: 9 }] }, 'meta.phases[0].provider must be a string')
     expectInvalid({ name: 'x', description: 'd', phases: [{ title: 'Scan', model: 9 }] }, 'meta.phases[0].model must be a string')
-    expectInvalid({ name: 'x', description: 'd', phases: [{ title: 'Scan', reasoningEffort: 9 }] }, 'meta.phases[0].reasoningEffort must be a string')
   })
 
   it('names EVERY violation in one throw, not just the first', () => {

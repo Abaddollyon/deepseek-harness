@@ -49,7 +49,7 @@ An owning consumer may set `WorkflowStartRequest.subagentProvider` and `Workflow
 
 ### What a run gives you
 
-When a run starts, the script body executes in the worker with top-level `await` and the hooks `agent()`, `parallel()`, `pipeline()`, `phase()`, and `log()`; `meta` and `args` arrive as plain JSON data, never evaluated code. Every `agent()` call starts a host-side subagent under the configured provider, with the run's parent as the parent of every child. An explicit `label` persists on the child Session descriptor for sidebar naming; omitted labels keep today's descriptor behavior. The run settles with the script's final JSON value; an ordinary child failure resolves `agent()` to `null` so the script can handle it.
+When a run starts, the script body executes in the worker with top-level `await` and the hooks `agent()`, `parallel()`, `pipeline()`, `phase()`, and `log()`; `meta` and `args` arrive as plain JSON data, never evaluated code. Every `agent()` call starts a host-side subagent under the configured provider, with the run's parent as the parent of every child. The run settles with the script's final JSON value; an ordinary child failure resolves `agent()` to `null` so the script can handle it.
 
 A malformed meta block, a body that does not parse, an unavailable provider route, or a per-run cap above the ceiling is rejected synchronously before a worker exists, so the caller sees a violation list and can correct the call. During execution, hook misuse and tripped caps kill the script with a fatal workflow error. Cancellation is bounded: a script that ignores it is force-settled as cancelled and its worker terminated after `disposeGraceMs`.
 
@@ -85,7 +85,7 @@ One worker thread per run keeps a misbehaving script from stalling the host and 
 | [`src/protocol.ts`](src/protocol.ts) | Typed host/worker message protocol |
 | [`src/meta.ts`](src/meta.ts) | `meta` shape validation and normalization |
 | [`src/session.ts`](src/session.ts) | Child run projection and snapshotting before crossing to the worker |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; worker tests cover the boundary) |
+| — | No runtime invariant companion is published; this process-boundary implementation exposes no same-process event relation; worker protocol and built-worker tests cover it. |
 
 ### Run sequence
 
