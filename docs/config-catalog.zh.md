@@ -883,18 +883,24 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-webserver`
 
 ```ts config-catalog
-/** Web server listen and response-compression config. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
-  /** Response compression for socket-backed HTTP requests. @default 'none' */
-  compression?: 'none' | 'gzip'
-  /** Gzip DEFLATE level from 0 through 9. @default 1 */
-  compressionLevel?: number
-  /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
-  compressionThresholdBytes?: number
+  /** Whether responses are compressed at all. */
+  compress?: boolean
+  /** Smallest body the carrier encodes. */
+  compressMinBytes?: number
+  /** Brotli quality, 0-11. */
+  brotliQuality?: number
+  /** Deflate level for gzip, 0-9. */
+  gzipLevel?: number
+  /** Content-hashed asset pathname prefixes. */
+  immutablePathPrefixes?: string[]
+  /** Lifetime for immutable responses, in seconds. */
+  immutableMaxAgeSeconds?: number
 }
 ```
 
@@ -1125,6 +1131,15 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Recovery from a provider auth rejection (HTTP 401/403) that arrives before
+   * any content: the adapter refreshes the route's stored OAuth credential
+   * once, then retries after {@link PiAiAuthRecovery.delayMs}. Only a failure
+   * with nothing emitted is eligible — once content has streamed, the turn
+   * owns recovery. Omission enables one recovery attempt; `retries: 0`
+   * disables it.
+   */
+  authRecovery?: PiAiAuthRecovery
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1263,6 +1278,14 @@ export interface PiAiCompatProfile {
 
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
+
+/** Adapter-level recovery from a pre-content provider auth rejection. */
+export interface PiAiAuthRecovery {
+  /** Additional attempts after an auth-classified failure (default 1). */
+  retries?: number
+  /** Delay before each additional attempt in milliseconds (default 1000). */
+  delayMs?: number
+}
 
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
@@ -2817,7 +2840,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/shell/tool-pwsh-persistent/src/index.ts:472`](../packages/shell/tool-pwsh-persistent/src/index.ts)
+来源：[`packages/shell/tool-pwsh-persistent/src/index.ts:522`](../packages/shell/tool-pwsh-persistent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-ralph"></a>
 

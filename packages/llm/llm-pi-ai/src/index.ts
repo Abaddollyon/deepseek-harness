@@ -211,6 +211,20 @@ export function apply(ctx: Context, config: Config): void {
         + ` sending that message as provider-neutral content (${reason})`,
       )
     },
+    onAuthRecovery: ({ provider, refreshed, error }) => {
+      if (error !== undefined) {
+        ctx.logger.warn(
+          `llm-pi-ai: auth recovery for route "${provider}" could not refresh the stored OAuth`
+          + ` credential (${error}); retrying the request with the current credential`,
+        )
+        return
+      }
+      ctx.logger.info(
+        refreshed
+          ? `llm-pi-ai: auth recovery for route "${provider}" refreshed the stored OAuth credential; retrying the request`
+          : `llm-pi-ai: auth recovery for route "${provider}" is proceeding without stored OAuth rotation; retrying current auth`,
+      )
+    },
   })
   // Independent of the route set: signing in is what makes a route worth
   // adding, so the flows are offered before any profile names their provider.
