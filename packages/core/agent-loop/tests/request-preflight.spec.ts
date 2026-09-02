@@ -105,7 +105,7 @@ describe('agent/request-preflight', () => {
     await agent.whenIdle()
 
     expect(adapter.requests).toHaveLength(0)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'error' } },
     })

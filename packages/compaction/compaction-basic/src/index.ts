@@ -9,8 +9,9 @@ import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
-import type { EpochHeader, Session } from '@deepseek-ai/dsh-session'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
+import type { EpochHeader, Session, SessionSeq } from '@deepseek-ai/dsh-session'
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { Agent, RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
@@ -57,7 +58,7 @@ type RegionSummarize = (input: SummarizationInput, agent: Agent, signal?: AbortS
 type AdmissionAttempt = { key: string; count: number }
 
 function canonicalRequestKey(session: Session, header: EpochHeader): string {
-  const series = session.events.filter(event => event.type === 'request/header'
+  const series = session.snapshotEvents().filter(event => event.type === 'request/header'
     && (event.data.reason === 'initial' || event.data.reason === 'resume'
       || event.data.reason === 'series' || event.data.startsSeries === true)).length
   return JSON.stringify(header) + ':' + String(series)
@@ -443,8 +444,8 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @returns the successful durable compaction result.
    */
   override async compactRegion(
-    start: number,
-    end: number,
+    start: SessionSeq,
+    end: SessionSeq,
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<CompactionResult> {

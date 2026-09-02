@@ -149,9 +149,9 @@ export function selectCompactableRange(
 export function capRangeForReplayBudget(
   session: Session,
   measurement: TokenMeasurement,
-  range: { start: number; end: number },
+  range: { start: SessionSeq; end: SessionSeq },
   budgetTokens: number,
-): { start: number; end: number } | null {
+): { start: SessionSeq; end: SessionSeq } | null {
   const nodes = session.surface.nodes
   if (nodes.length !== measurement.nodes.length
     || nodes.some((seq, index) => seq !== measurement.nodes[index]?.seq)) {

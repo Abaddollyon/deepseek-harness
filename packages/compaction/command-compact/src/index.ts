@@ -6,6 +6,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 
 export const name = 'command-compact'
 export const inject = ['commands', 'compaction']
@@ -68,7 +69,7 @@ async function executeCompact(
     return {
       kind: 'success',
       text: `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`,
-      sourceEventSeq: result.summarySeq,
+      sourceEventSeq: SessionSeq(result.summarySeq),
     }
   } catch (error: unknown) {
     if (invocation.signal.aborted) return { kind: 'error', text: 'Compaction cancelled.' }

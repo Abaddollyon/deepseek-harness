@@ -116,7 +116,7 @@ describe('agent loop', () => {
     await waitForIdle(ctx, agent)
 
     expect(adapter.requests[0]?.reasoningEffort).toBe(option)
-    const header = agent.session.events.find(event => event.type === 'request/header')
+    const header = agent.session.snapshotEvents().find(event => event.type === 'request/header')
     expect(header?.type === 'request/header' && header.data.header.config.reasoningEffort).toBe(option)
     expect(header?.type === 'request/header' && header.data.header.adapterDefaults?.reasoningEffort)
       .not.toBe(true)

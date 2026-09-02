@@ -286,7 +286,7 @@ describe('Agent.cancel()', () => {
 
     expect(adapter.requests).toHaveLength(0)
     expect(agent.inbox.nextStep.map(message => message.id)).toEqual([prompt.id])
-    expect(agent.session.events.findLast(event => event.type === 'turn/end')?.data.reason)
+    expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
       .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
   })
 
