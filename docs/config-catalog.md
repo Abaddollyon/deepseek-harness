@@ -902,22 +902,28 @@ Source: [`packages/host/frontend-static/src/index.ts:30`](../packages/host/front
 ## `@deepseek-ai/dsh-host-webserver`
 
 ```ts config-catalog
-/** Web server listen and response-compression config. */
+/** Gateway config: the listen address plus the response-policy knobs. */
 export interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
-  /** Response compression for socket-backed HTTP requests. @default 'none' */
-  compression?: 'none' | 'gzip'
-  /** Gzip DEFLATE level from 0 through 9. @default 1 */
-  compressionLevel?: number
-  /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
-  compressionThresholdBytes?: number
+  /** Whether responses are compressed at all. */
+  compress?: boolean
+  /** Smallest body the carrier encodes. */
+  compressMinBytes?: number
+  /** Brotli quality, 0-11. */
+  brotliQuality?: number
+  /** Deflate level for gzip, 0-9. */
+  gzipLevel?: number
+  /** Content-hashed asset pathname prefixes. */
+  immutablePathPrefixes?: string[]
+  /** Lifetime for immutable responses, in seconds. */
+  immutableMaxAgeSeconds?: number
 }
 ```
 
-Source: [`packages/host/webserver/src/index.ts:59`](../packages/host/webserver/src/index.ts)
+Source: [`packages/host/webserver/src/index.ts:58`](../packages/host/webserver/src/index.ts)
 
 <a id="deepseek-aidsh-invariants"></a>
 

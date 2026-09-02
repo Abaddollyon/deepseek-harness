@@ -26,6 +26,7 @@ import SessionProjectionCache, { projectionCacheDomainSpec } from '@deepseek-ai/
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import { SessionControlController } from '@deepseek-ai/dsh-api-session-controller/src/control.ts'
 import type { SessionControlFrame, SessionFollowFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 import { createSessionTestRemote, type TestSessionRemote } from './test-remote.ts'
 
@@ -98,6 +99,8 @@ const internalCountUnit = () => ({
   stateVersion: 1,
 }) satisfies ProjectionDefinition<'test/internal-count', number>
 
+
+
 const privatePromptUnit = () => ({
   key: 'test/private-prompt',
   stateSchema: z.string().nullable(),
@@ -107,6 +110,7 @@ const privatePromptUnit = () => ({
     : state),
   stateVersion: 1,
 }) satisfies ProjectionDefinition<'test/private-prompt', string | null>
+
 
 async function harness(withRegistry: boolean): Promise<{ ctx: Context; session: Session }> {
   const ctx = new Context()
@@ -446,7 +450,7 @@ describe('session.list projections column', () => {
       cachedSnapshot: (meta: { id: unknown; createdAt: number }) =>
         (meta.id === coldId && meta.createdAt === 5
           ? {
-            asOfSeq: SessionSeq(7),
+            asOfSeq: 7,
             values: {
               'test/last-user': { text: 'cached' },
               sessionListMetadata: { blank: false, lastPromptAt: 6 },
@@ -523,6 +527,7 @@ describe('session.list projections column', () => {
     }
   })
 
+
   it('cold rows without a cache plugin (or without a stored row) just lack the column', async () => {
     const { ctx } = await harness(true)
     const coldId = SessionId('session-cold-uncached')
@@ -570,23 +575,33 @@ describe('Session control projection frames', () => {
     return frames
   }
 
-  it('broadcasts changed view references with the causing seq and skips same-reference applies', async () => {
+  /**
+   * Let the open stream drain before the next append. A live agent loop awaits
+   * between committed events, so this is the delivery cadence the per-unit push
+   * contract below is written against; appending several events in one
+   * synchronous run instead exercises the control queue's coalescing, which
+   * control-coalescing.host.spec.ts owns.
+   */
+  const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
+
+  it('broadcasts a frame per changed unit with the causing seq, and none for same-reference applies', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())
     const proxy = remote(ctx)
     // The controller's onChanged subscription lives in an inject child whose
     // fiber activates asynchronously; yield until it lands before appending.
-    await new Promise(resolve => setTimeout(resolve, 0))
+    await settle()
     const abort = new AbortController()
     const stream = proxy.control(abort.signal)
     const collected = collect(stream, 5, abort)
 
     const now = vi.spyOn(Date, 'now').mockReturnValue(100)
     seedMessages(session, 1)
+    await settle()
     now.mockReturnValue(200)
     session.append('turn/start', { turn: 1 })
+    await settle()
     now.mockReturnValue(300)
-    // The equal payload is a new object, so Object.is still treats its view as changed.
     seedMessages(session, 1)
     now.mockRestore()
 
@@ -610,5 +625,20 @@ describe('Session control projection frames', () => {
     // Frame seq aligns with the tail block's asOfSeq vocabulary (higher-seq-wins compatible).
     const tail = await opening(proxy, session.id)
     expect(tail.projections.asOfSeq).toBe(pushes.at(-1)?.seq)
+  })
+
+  it('emits no projection frames when the composition has no registry', async () => {
+    const { ctx, session } = await harness(false)
+    const control = new SessionControlController(ctx)
+    const abort = new AbortController()
+    const iterator = control.control(abort.signal)[Symbol.asyncIterator]()
+    const baseline = await iterator.next()
+    const next = iterator.next()
+    seedMessages(session, 2)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    abort.abort()
+    if (baseline.done) throw new Error('Control stream ended before its baseline')
+    expect(baseline.value.type).toBe('baseline')
+    await expect(next).resolves.toEqual({ done: true, value: undefined })
   })
 })
