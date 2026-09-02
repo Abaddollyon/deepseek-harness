@@ -3179,7 +3179,7 @@ Requires: `tools` · `workflowEngine` · `systemPrompt`
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Serialized-result ceiling; longer JSON spills and returns recovery metadata (default 50000). */
   maxResultChars?: number
   /** Durable phase/log event ceiling per run (default 2000). */
   maxProgressEvents?: number
@@ -3190,7 +3190,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/tool-workflow/src/index.ts:44`](../packages/workflow/tool-workflow/src/index.ts)
+Source: [`packages/workflow/tool-workflow/src/index.ts:46`](../packages/workflow/tool-workflow/src/index.ts)
 
 <a id="deepseek-aidsh-tools"></a>
 

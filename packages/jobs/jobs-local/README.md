@@ -45,7 +45,7 @@ Loading the plugin registers `ctx.jobs`. Durable registration requires `persist:
 | `persist` | `false` | Mirror records to a mounted `ctx.jobStore` and enable acknowledged durable starts. |
 | `maxSettledJobs` | `100` | Retained reported terminal records per owner; unreported records are never pressure-evicted. |
 | `teardownGraceMs` | `10000` | Bound for producer release and final durable-mirror drain during teardown. |
-| `maxPersistedOutputBytes` | `65536` | UTF-8 byte cap for output stored in a durable record. |
+| `maxPersistedOutputBytes` | `65536` | UTF-8 byte budget for durable output; recoverable truncation markers keep `originalChars` and `spillPath` while only `preview` is reduced (essential metadata may exceed an impossibly small budget). |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for accepted fields.
 

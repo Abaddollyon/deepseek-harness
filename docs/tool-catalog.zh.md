@@ -2130,7 +2130,7 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 
 如果误用钩子（参数错误、未知选项、不受支持的 schema、触发上限），抛出的错误**总会**终止脚本，绝不会退化为单个条目的 `null`。
 
-约束：并发上限和 agent 总数上限均会生效；不提供文件系统、网络、定时器或 Node.js API。具体工作由 agent 完成，脚本只负责编排。该运行在前台执行：整个脚本完成后，调用才会返回。
+约束：并发上限和 agent 总数上限均会生效；不提供文件系统、网络、定时器或 Node.js API。具体工作由 agent 完成，脚本只负责编排。当序列化返回值超过 `maxResultChars` 时，结果为 `{ truncated: true, originalChars, spillPath, preview }`；`spillPath` 包含精确完整的 JSON。该运行在前台执行：整个脚本完成后，调用才会返回。
 
 ```json
 {

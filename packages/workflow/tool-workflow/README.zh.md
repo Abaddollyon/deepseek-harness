@@ -42,7 +42,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
-| `maxResultChars` | `50000` | 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
+| `maxResultChars` | `50000` | 序列化返回值上限；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`。 |
 | `ownership` | `caller` | `caller` 在工具调用中等待；`supervisor` 将有界运行持久交接给 `ctx.jobs`。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-workflow)是每个受支持字段的穷尽式真源。
@@ -63,7 +63,7 @@ kind: "package-reference"
 
 ### 运行生命周期
 
-`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会 dispose 运行。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果；完成时渲染 `{ runId, agentsStarted, result }`，Native 渲染器只会在 `maxResultChars` 处截断该投影。
+`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会 dispose 运行。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果。完成时，如果返回值的格式化 JSON 超过 `maxResultChars`，工具会通过会话范围的 `ctx.spillStore` 保存它；`result` 会变成 `{ truncated: true, originalChars, spillPath, preview }`，引用文件包含精确、完整的 JSON。若超大值无法 spill，工具会明确失败，而不会发出不可恢复的残片。
 
 ### 持久会话记录
 

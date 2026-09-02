@@ -42,7 +42,7 @@ With `ownership: caller`, the tool awaits the result, bridges the parent step's 
 | Field | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
+| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. |
 | `ownership` | `caller` | `caller` waits in the tool call; `supervisor` durably hands the bounded run to `ctx.jobs`. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
@@ -63,7 +63,7 @@ The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt g
 
 ### Run lifecycle
 
-`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason; completion renders `{ runId, agentsStarted, result }`, with the Native renderer truncating only that projection at `maxResultChars`.
+`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason. On completion, a return value whose pretty-printed JSON exceeds `maxResultChars` is saved through the session-scoped `ctx.spillStore`; `result` becomes `{ truncated: true, originalChars, spillPath, preview }`, and the referenced file contains the exact complete JSON. The tool fails explicitly if an oversized value cannot be spilled rather than emitting an unrecoverable fragment.
 
 ### Durable session records
 
