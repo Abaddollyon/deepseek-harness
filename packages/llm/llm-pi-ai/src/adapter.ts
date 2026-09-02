@@ -71,6 +71,10 @@ interface AttemptCredentialCapture {
   credential: Credential | undefined
 }
 
+type CredentialReadOptions = Parameters<CredentialStore['read']>[1]
+type CredentialMutate = Parameters<CredentialStore['modify']>[1]
+type CredentialModifyOptions = Parameters<CredentialStore['modify']>[2]
+
 /** Capture the exact stored credential pi-ai resolves for one lazy request attempt. */
 function capturingCredentialStore(
   source: CredentialStore,
@@ -80,11 +84,11 @@ function capturingCredentialStore(
   // Request auth only reads and conditionally modifies the route credential.
   // Do not manufacture list/delete stubs for operations this proxy cannot serve.
   return {
-    read: (_id, options) => source.read(provider, options).then((credential) => {
+    read: (_id: string, options: CredentialReadOptions) => source.read(provider, options).then((credential) => {
       capture.credential = credential
       return credential
     }),
-    modify: (_id, mutate, options) => source.modify(provider, mutate, options).then((credential) => {
+    modify: (_id: string, mutate: CredentialMutate, options: CredentialModifyOptions) => source.modify(provider, mutate, options).then((credential) => {
       capture.credential = credential
       return credential
     }),
@@ -438,7 +442,7 @@ export class PiAiAdapter extends LlmAdapter {
       }
       if (authFailure === undefined) return
       if (retriesLeft === 0) {
-        yield heldUsage!
+        yield heldUsage as Extract<StreamChunk, { type: 'usage' }>
         yield { type: 'finish', reason: { kind: 'error', failure: authFailure } }
         return
       }
