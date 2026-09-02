@@ -1,13 +1,13 @@
 import { PassThrough } from 'node:stream'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
-import { describe, expect, it } from 'vitest'
+import { expect, it } from 'vitest'
 import { CodexSearchWire } from '../src/wire.ts'
 
 it('replays the Codex handshake and web search turn', async () => {
   const input = new PassThrough()
   const output = new PassThrough()
   const peer = new JsonRpcLineTransport(output, input)
-  peer.onRequest(async (method, params) => {
+  peer.onRequest(async (method) => {
     if (method === 'initialize') return {}
     if (method === 'thread/start') return { thread: { id: 't1', ephemeral: true } }
     if (method === 'turn/start') {

@@ -1,0 +1,4 @@
+# Bilingual-pair consistency record. Regenerate with:
+# pnpm run verify-translation-pairing --write packages/web/web-search-codex/README.md
+README.md:
+README.zh.md:

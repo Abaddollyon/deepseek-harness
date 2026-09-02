@@ -67,6 +67,9 @@ export class CodexSearchWire {
         new Error(`Codex web search rejects interactive request ${JSON.stringify(method)}`),
       )
     })
+    this.transport.onMalformed(() => {
+      this.fatal.reject(new Error('Codex app-server returned a malformed JSON-RPC frame'))
+    })
     this.transport.onNotification((method, params) => {
       try {
         this.handleNotification(method, params)
@@ -164,7 +167,7 @@ export class CodexSearchWire {
   private handleNotification(method: string, params: JsonObject): void {
     if (method === 'item/completed') {
       const threadId = identifier(params.threadId, 'item/completed thread id')
-      if (threadId !== this.threadId) return
+      if (this.threadId !== undefined && threadId !== this.threadId) return
       const turnId = identifier(params.turnId, 'item/completed turn id')
       const item = object(params.item, 'item/completed item')
       if (item.type !== 'webSearch') return
@@ -173,7 +176,7 @@ export class CodexSearchWire {
     }
     if (method !== 'turn/completed') return
     const threadId = identifier(params.threadId, 'turn/completed thread id')
-    if (threadId !== this.threadId) return
+    if (this.threadId !== undefined && threadId !== this.threadId) return
     const turn = object(params.turn, 'turn/completed turn')
     const turnId = identifier(turn.id, 'turn/completed turn id')
     this.completedByTurn.set(turnId, turn)
