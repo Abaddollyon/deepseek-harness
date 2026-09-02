@@ -1,0 +1,73 @@
+name: CI fork master
+
+# Fork-only gate. The upstream master workflow delegates its push jobs to
+# private self-hosted pools and the upstream pull-request workflow delegates
+# its static and coverage lanes to private enterprise pools, so neither
+# executes a code gate on a fork (ci-master.yml's only hosted push job is the
+# Wine cache seeder). This workflow gives fork master pushes and master-bound
+# pull requests an executing hosted static/unit signal. It must stay keyless
+# on public hosted runners; ci.yml and ci-master.yml remain the full gates
+# where their pools exist.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  # CI runs must never report to the production telemetry endpoint baked
+  # into apps/cli/cordis.yml (AppCLIEntry disables the row when set).
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  fork-master-gate:
+    # Fork-only: the job reports skipped instead of consuming minutes where
+    # the file travels with the repository (upstream or another fork). Manual
+    # dispatch is pinned to master so it cannot target an arbitrary ref.
+    if: >-
+      github.repository == 'Abaddollyon/deepseek-harness'
+      && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/master')
+    name: fork master / static and unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Complete history so the archived-note seal gate can read the trusted
+      # pre-change commit (pull-request base or pre-push commit) below.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      # Keep this gate aligned with scripts/run-gates.ts so build-backed
+      # static checks remain one definition. The archived-note seal gate
+      # compares against the trusted pre-change commit: the pull-request base
+      # on pull_request, the pre-push commit on push, and the checked-out HEAD
+      # on manual dispatch, which has no pre-change side.
+      - name: Run static gates
+        env:
+          DSH_ARCHIVE_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: pnpm run check:ci:static
+
+      - name: Run unit test suite
+        run: pnpm test
