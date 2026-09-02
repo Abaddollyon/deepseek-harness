@@ -177,6 +177,7 @@ describe('dsh-tool-subagent', () => {
     const ctx = await setup({ provider: 'mock' }, {
       reply: 'partial assistant text',
       diagnostic: 'Claude Code denied a tool request',
+      failure: { code: 'QUOTA' },
       stopReason: 'error',
     })
 
@@ -185,6 +186,7 @@ describe('dsh-tool-subagent', () => {
     expect(text(result)).toBe(
       'Error: subagent run failed\n'
       + 'Diagnostic: Claude Code denied a tool request\n'
+      + 'Failure code: QUOTA\n'
       + 'Partial output before the run ended:\npartial assistant text',
     )
   })

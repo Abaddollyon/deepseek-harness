@@ -336,7 +336,9 @@ export function settlementSummary(childId: SessionId, stopReason: SubagentResult
         const wait = failure.retryAfterMs === undefined ? 'wait before retrying' : `wait ${Math.ceil(failure.retryAfterMs / 1000)} seconds before retrying`
         return `The provider is rate-limited; ${wait}.`
       }
-      return diagnostic === undefined || diagnostic.startsWith('SubagentError:') ? `${subject} failed before it finished.` : `${subject} failed before it finished. Reason: ${diagnostic}`
+      return diagnostic === undefined || diagnostic.startsWith('SubagentError:')
+        ? `${subject} failed before it finished.`
+        : `The provider route could not serve ${subject}. Reason: ${diagnostic}`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */

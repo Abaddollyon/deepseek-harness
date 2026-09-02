@@ -69,7 +69,8 @@ describe('outcome mapping helpers', () => {
     const hostile = { toString(): never { throw new Error('coercion') } }
     await expect(settleRun({
       id: SessionId('child-hostile'), localAgent: undefined,
-      result: Promise.reject(hostile), dispose: () => Promise.reject(hostile),
+      result: Promise.reject(hostile), // oxlint-disable-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
+      dispose: () => Promise.reject(hostile), // oxlint-disable-line typescript/prefer-promise-reject-errors -- hostile rejection fixture
     })).resolves.toEqual({ status: 'failed', detail: '<unrenderable value>; dispose failed: <unrenderable value>' })
   })
 
@@ -80,12 +81,13 @@ describe('outcome mapping helpers', () => {
       result: Promise.resolve({
         output: [{ type: 'text', text: 'partial assistant text' }],
         diagnostic: 'Claude Code denied a tool request',
+        failure: { code: 'RATE_LIMIT' as const, retryAfterMs: 2500 },
         stopReason: 'error',
       }),
       dispose: () => Promise.resolve(),
     })).resolves.toEqual({
       status: 'failed',
-      detail: 'error; diagnostic: Claude Code denied a tool request',
+      detail: 'error; diagnostic: Claude Code denied a tool request; failure code: RATE_LIMIT; retry after 2500ms',
     })
   })
 
