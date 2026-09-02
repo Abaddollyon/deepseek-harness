@@ -315,7 +315,7 @@ function continuableInitialPrompt(parentId: SessionId, prompt: ContentBlock[]): 
  * @param stopReason - how the child's last ordinary turn ended.
  * @returns the model-facing opening line of the settlement notice.
  */
-function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason']): string {
+export function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopReason'], diagnostic?: string, failure?: { readonly code: string; readonly retryAfterMs?: number }): string {
   const subject = `Background subagent ${childId}`
   switch (stopReason) {
     case 'completed':
@@ -329,7 +329,12 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
     case 'refusal':
       return `${subject} declined the task.`
     case 'error':
-      return `${subject} failed before it finished.`
+      if (failure?.code === 'QUOTA') return `${subject} failed before it finished: the provider's quota for this route is exhausted; do not retry this route.`
+      if (failure?.code === 'RATE_LIMIT') {
+        const wait = failure.retryAfterMs === undefined ? 'wait before retrying' : `wait ${Math.ceil(failure.retryAfterMs / 1000)} seconds before retrying`
+        return `${subject} failed before it finished: the provider is rate-limited; ${wait}.`
+      }
+      return diagnostic === undefined ? `${subject} failed before it finished.` : `${subject} failed before it finished. Reason: ${diagnostic}`
     /* v8 ignore next 4 -- `SubagentResult['stopReason']` is merge-extensible, so this arm
      * needs a backend that adds a variant; an unnameable ending is reported as unfinished
      * rather than silently as success. */

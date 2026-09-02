@@ -10,7 +10,7 @@
 import type { Readable, Writable } from 'node:stream'
 import { QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentFailure, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import type { CodexPermissionMode } from './run.ts'
 import { thrown } from './error.ts'
@@ -29,6 +29,7 @@ export interface CodexWireFailureFacts {
     | 'invalid-result'
     | 'unknown'
   readonly httpStatus?: number | undefined
+  readonly failure?: SubagentFailure
 }
 
 const THREAD_PERMISSION_PARAMS: Readonly<Record<CodexPermissionMode, JsonObject>> = {

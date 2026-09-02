@@ -13,7 +13,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { ContentBlock, GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,6 +22,8 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
+import { createActivationObserver, createLifecycleEmitter } from '../src/lifecycle.ts'
+import { settlementSummary } from '../src/continuation.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 
@@ -1532,14 +1534,14 @@ describe('continuable review regressions', () => {
     observer.start(child)
     child.session.append('turn/start', { turn: 1 })
     child.session.append('step/start', { turn: 1, step: 1 })
-    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } })
+    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } as never })
     observer.capture(child)
 
     expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
   })
 
   it('renders a future backend stop reason as an abnormal settlement', () => {
-    expect(settlementSummary(SessionId('future-child'), 'test-future')).toBe(
+    expect(settlementSummary(SessionId('future-child'), 'test-future' as never)).toBe(
       'Background subagent future-child ended abnormally (test-future) before it finished.',
     )
   })

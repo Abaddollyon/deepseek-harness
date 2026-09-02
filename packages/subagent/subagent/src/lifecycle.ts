@@ -19,11 +19,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
 import type { SubagentFailure, SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
-import { ownDataProperty, subagentFailureFromLlmFailure, subagentFailureFromUnknown } from './failure.ts'
+import { ownDataProperty, subagentFailureFromUnknown } from './failure.ts'
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -250,7 +251,7 @@ export function createActivationObserver(
   // A cold resume replays earlier turns, so this epoch's telemetry must come
   // from the suffix it actually produced — never the whole session, which
   // would report a previous epoch's answer when this one opened no turn.
-  let boundary = 0
+  let boundary: SessionLogOffsetType = SessionLogOffset(0)
   // Assigned by `capture()`, which the disposal path always runs before
   // `settle()`; a resident epoch therefore always has its facts by then.
   let captured: ActivationTerminal = { stopReason: 'completed' }
@@ -261,15 +262,15 @@ export function createActivationObserver(
     : { stopReason: 'error', ...terminalDiagnostic(failure) }
   return {
     start: (child: Agent): void => {
-      boundary = child.session.events.length
+      boundary = SessionLogOffset(child.session.seq)
       emit('subagent/start', identity, parent)
     },
     capture: (child: Agent): void => {
-      const own = child.session.events.slice(boundary)
+      const own = child.session.snapshotEvents(boundary)
       const output = finalAssistantOutput(own)
       const end = foldConsumedWork(own).end
       const failure = end?.data.reason.kind === 'error'
-        ? subagentFailureFromLlmFailure(end.data.reason.error)
+        ? subagentFailureFromUnknown(end.data.reason.error)
         : undefined
       captured = {
         stopReason: epochStopReason(own),

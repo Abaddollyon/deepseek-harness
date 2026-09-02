@@ -80,11 +80,13 @@ import { queueSubagentPrompt } from './internal.ts'
 export * from './out-of-process.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
+export { subagentFailureFromLlmFailure, subagentFailureFromUnknown } from './failure.ts'
 export type {
   ContinuableCreateRequest,
   ContinuableCreateSpec,
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
+  SubagentFailure,
   SubagentProvider,
   SubagentResult,
   SubagentRun,

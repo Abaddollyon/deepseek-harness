@@ -70,6 +70,8 @@ export interface SubagentRunEndInfo {
    * the child produced none.
    */
   readonly lastAssistantMessage?: ContentBlock[]
+  /** Structured provider failure facts when available. */
+  readonly failure?: SubagentFailure
 }
 
 /**
@@ -221,6 +223,12 @@ export interface SubagentStopReasonMap {
 /** The union over {@link SubagentStopReasonMap} — widens automatically as backends merge in variants. */
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
+/** Typed provider facts safe to expose to a parent agent. */
+export interface SubagentFailure {
+  readonly code: 'QUOTA' | 'RATE_LIMIT'
+  readonly retryAfterMs?: number
+}
+
 /**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
@@ -248,6 +256,8 @@ export interface SubagentResult {
    * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
    */
   readonly diagnostic?: string
+  /** Structured provider failure facts, when safely classified. */
+  readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
 }
