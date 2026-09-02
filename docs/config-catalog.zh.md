@@ -406,7 +406,7 @@ export interface Config {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
+  /** Enable automatic exact-request pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -426,7 +426,7 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
+  /** Maximum replacement retries per preflight or provider-overflow sequence; `0` disables both. Defaults to `1`. */
   maxOverflowRetries?: number
 }
 

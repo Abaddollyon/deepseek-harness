@@ -10,12 +10,12 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, foldRequestHeader } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter, persona = 'stable base') {
@@ -234,24 +234,21 @@ describe('request stability across the loop', () => {
     ])
     expect(headers.map(event => event.data.reason)).toEqual(['initial', 'change'])
 
-    for (const [model, effort] of [
-      ['mock', ReasoningEffortId('max')],
-      ['replacement', ReasoningEffortId('high')],
-    ] as const) {
+    for (const model of ['mock', 'replacement'] as const) {
       const resumedAdapter = new MockAdapter([textResponse('resumed')], reasoning)
       const resumedCtx = await harness(resumedAdapter)
       const resumedHandle = await resumedCtx.agents.create({
         sessionId: SessionId(`effort-${model}`),
         seed: structuredClone(agent.session.snapshotEvents()),
-        agentOptions: { provider: 'mock', model },
+        agentOptions: { provider: 'mock', model, reasoningEffort: ReasoningEffortId('high') },
       })
       send(resumedHandle.agent, 'resumed')
       await waitForIdle(resumedCtx, resumedHandle.agent)
 
       expect(resumedAdapter.requests[0]?.model).toBe(model)
-      expect(resumedAdapter.requests[0]?.reasoningEffort).toBe(effort)
+      expect(resumedAdapter.requests[0]?.reasoningEffort).toBe(ReasoningEffortId('high'))
       const resumedHeaders = resumedHandle.agent.session.snapshotEvents().filter(event => event.type === 'request/header')
-      expect(resumedHeaders.at(-1)?.data.header.config.reasoningEffort).toBe(effort)
+      expect(resumedHeaders.at(-1)?.data.header.config.reasoningEffort).toBe(ReasoningEffortId('high'))
       expect(resumedHeaders.at(-1)?.data.reason).toBe('resume')
     }
   })
@@ -369,7 +366,7 @@ describe('request stability across the loop', () => {
       defaultEffort: ReasoningEffortId('max'),
     })
     const disposeFirst = ctx.llm.registerAdapter(['mock'], first)
-    const agent = ctx.agentLoop.create(SessionId('effort-hmr'), { provider: 'mock', model: 'mock' })
+    const agent = (await ctx.agents.create({ sessionId: SessionId('effort-hmr'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
 
     send(agent, 'go')
     await started.promise
@@ -473,10 +470,7 @@ describe('request stability across the loop', () => {
         yield* textResponse('owned')
       })()
     })
-    const agent = ctx.agentLoop.create(SessionId('listener-owned'), {
-      provider: 'listener',
-      model: 'virtual',
-    })
+    const agent = (await ctx.agents.create({ sessionId: SessionId('listener-owned'), agentOptions: { provider: 'listener', model: 'virtual' } })).agent
 
     send(agent, 'go')
     await waitForIdle(ctx, agent)
@@ -650,7 +644,7 @@ describe('request stability across the loop', () => {
     const ctx2 = await harness(adapter2)
     const handle = await ctx2.agents.create({
       sessionId: SessionId('gen2-session'),
-      seed: agent.session.snapshotEvents(),
+      seed: [...agent.session.snapshotEvents()],
       agentOptions: { provider: 'mock', model: 'mock' },
     })
     const agent2 = handle.agent

@@ -316,9 +316,9 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
  */
 'compaction/prune': {
   /** The replaced range's first and last surface-node seqs (a surface-position span, like {@link CompactionResult.shadowedRange}). */
-  shadowedRange: { start: SessionSeq; end: SessionSeq }
+  shadowedRange: { start: number; end: number }
   /** The seqs of all shadowed surface nodes, in surface order. */
-  shadowedSeqs: SessionSeq[]
+  shadowedSeqs: number[]
   /** Heuristic price of the shadowed content under the token-meter's fixed estimator. */
   shadowedTokenCount: number
 }
@@ -359,8 +359,9 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
   compactionId: CompactionId
   sourceCommandId?: CommandId
   summary: ContentBlock[]
-  shadowedRange: { start: SessionSeq; end: SessionSeq }
-  shadowedSeqs: SessionSeq[]
+  shadowedRange: { start: number; end: number }
+  shadowedSeqs: number[]
+  /** Heuristic price of the shadowed content under the token-meter fixed estimator. */
   shadowedTokenCount: number
   /** The provider route that wrote the summary. */
   provider: string

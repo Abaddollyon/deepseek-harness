@@ -2526,6 +2526,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a detached deeply immutable pressure and surface measurement.',
       },
       {
+        signature: 'estimateHeader(header: EpochHeader | undefined): number',
+        description: 'Estimate the non-surface tokens in one canonical request envelope.',
+        parameters: [{ name: 'header', description: 'canonical request envelope, when one is available.' }],
+        returns: 'estimated request-header tokens.',
+      },
+      {
         signature: 'estimateMessage(message: Message): number',
         description: 'Heuristically price one model-visible message (instance face of the pure `estimateMessage` export from `estimate.ts`).',
         parameters: [{ name: 'message', description: 'message to price without mutation.' }],
@@ -3020,6 +3026,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'Handle one failed model-request attempt before the loop retries or closes its step.',
     description: 'Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: \'retry\' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal.',
     parameters: [{ name: 'payload', description: '.signal - the turn abort signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
+    name: 'agent/request-preflight',
+    mode: 'waterfall',
+    signature: '\'agent/request-preflight\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; header: EpochHeader; contextWindow: number | undefined; attempt: number; maxAttempts: number; signal: AbortSignal }, next: () => Promise<RequestPreflightAction>): Promise<RequestPreflightAction>',
+    summary: 'Admit one exact model request before its messages are derived.',
+    description: 'Admit one exact model request before its messages are derived. The payload carries the canonical header just logged for this request and the resolved adapter capacity, so listeners price admission against the exact target request rather than a stale one. Calling `next()` admits the request. A listener that durably reduced request pressure (for example through compaction) returns `{ kind: \'retry\' }` without calling `next()`; the loop then re-dispatches the preflight so every listener re-admits against the rebuilt surface, and only after that admission passes are request messages derived. The action identifies the committed replacement generation; the loop rejects stale or log-only progress. Listeners own their policy budgets, while the loop\'s fixed safety ceiling admits the full request after repeated productive retries so provider overflow recovery remains available. The default `undefined` admits the request unchanged; a request that still exceeds capacity is admitted and left to the provider\'s overflow failure and `agent/request-error` recovery, never silently truncated.',
+    parameters: [{ name: 'payload', description: '.signal - the current turn\'s explicit abort signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
     name: 'agent/session-start',
@@ -3759,7 +3773,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CompactionResult',
-    declaration: 'export interface CompactionResult {\n    compactionId: CompactionId;\n    sourceCommandId?: CommandId;\n    startSeq: SessionSeq;\n    summarySeq: SessionSeq;\n    endSeq: SessionSeq;\n    summary: ContentBlock[];\n    shadowedRange: {\n        start: SessionSeq;\n        end: SessionSeq;\n    };\n    shadowedSeqs: SessionSeq[];\n    shadowedTokenCount: number;\n}',
+    declaration: 'export interface CompactionResult {\n    compactionId: CompactionId;\n    sourceCommandId?: CommandId;\n    startSeq: number;\n    summarySeq: number;\n    endSeq: number;\n    summary: ContentBlock[];\n    shadowedRange: {\n        start: number;\n        end: number;\n    };\n    shadowedSeqs: number[];\n    shadowedTokenCount: number;\n}',
   },
   {
     name: 'CompactionTrigger',
@@ -4772,6 +4786,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RequestImageAttachment',
     declaration: 'export interface RequestImageAttachment {\n    variantId: ImageVariantId;\n    attachment: ImageAttachmentRef;\n    data: Uint8Array;\n    mediaType: ImageMediaType;\n    bytes: number;\n    width: number;\n    height: number;\n    depth: \'uchar\';\n    space: \'srgb\';\n    hasAlpha: boolean;\n}',
+  },
+  {
+    name: 'RequestPreflightAction',
+    declaration: 'export type RequestPreflightAction = {\n    kind: \'retry\';\n    surfaceGeneration: number;\n} | undefined;',
   },
   {
     name: 'RequestRunOutcome',
