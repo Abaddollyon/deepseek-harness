@@ -139,7 +139,7 @@ function recordHeaders(pending: OutgoingHttpHeaders, provided: unknown): void {
       if (previous === undefined) {
         pending[name] = values.length === 1 ? values[0] : values
       } else {
-        const existing = Array.isArray(previous) ? previous.map(item => String(item)) : [String(previous)]
+        const existing = Array.isArray(previous) ? previous.map(item => item) : [String(previous)]
         pending[name] = [...existing, ...values]
       }
     }
