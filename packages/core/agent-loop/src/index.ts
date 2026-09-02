@@ -567,8 +567,20 @@ export class AgentLoop extends Service implements AgentFactory {
         // to drop the agent, so nothing should still hold it.
         if (machine === undefined) await machineReady.promise
         if (machine !== undefined) {
-          machine.cancel({ kind: 'disposed' })
+          // Pending inbox work is durable session state, not runtime residue:
+          // keep it so a later resume of the same session can claim it again.
+          machine.cancel({ kind: 'disposed' }, { keepInbox: true })
           await machine.whenIdle()
+          try {
+            // The write-behind store drains a disposed session on its own,
+            // but that drain is unawaited: only a flush here makes a settled
+            // dispose() a durability barrier for the driver's closing events
+            // (final tool results, turn/end). Teardown must not break, so a
+            // flush failure warns instead of throwing.
+            await this.runtime.ctx.sessions.flush(machine.session)
+          } catch (error: unknown) {
+            this.ctx.logger.warn(`agent "${id}": teardown session flush failed: ${errorChain(error)}`)
+          }
           await machine.scope.dispose()
         }
       } finally {

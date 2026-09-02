@@ -18,11 +18,32 @@ const statRace = vi.hoisted(() => ({
   path: undefined as string | undefined,
   reads: 0,
 }))
+const listingRace = vi.hoisted(() => ({
+  enabled: false,
+  active: 0,
+  max: 0,
+  started: 0,
+  abort: undefined as { after: number; controller: AbortController; reason: Error } | undefined,
+}))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    readdir: (async (...args: Parameters<typeof actual.readdir>) => {
+      const result = await actual.readdir(...args)
+      if (listingRace.enabled && String(args[0]).includes('/--')) {
+        listingRace.active += 1
+        listingRace.started += 1
+        listingRace.max = Math.max(listingRace.max, listingRace.active)
+        if (listingRace.started === listingRace.abort?.after) {
+          listingRace.abort.controller.abort(listingRace.abort.reason)
+        }
+        await new Promise<void>(resolve => setTimeout(resolve, 10))
+        listingRace.active -= 1
+      }
+      return result
+    }) as typeof actual.readdir,
     stat: (async (...args: Parameters<typeof actual.stat>) => {
       const identity = await actual.stat(...args)
       if (String(args[0]) !== statRace.path || !('mtimeNs' in identity)) return identity
@@ -87,6 +108,11 @@ function rawLogPath(root: string, cwd: string | undefined, id: SessionId): strin
 afterEach(async () => {
   statRace.path = undefined
   statRace.reads = 0
+  listingRace.enabled = false
+  listingRace.active = 0
+  listingRace.max = 0
+  listingRace.started = 0
+  listingRace.abort = undefined
   vi.restoreAllMocks()
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
@@ -873,6 +899,128 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await walk(root)
     expect(all.length).toBeGreaterThan(0)
     expect(all.every(p => p.startsWith(root))).toBe(true)
+  })
+
+  it('returns borrowed sessions through the coordinator', async () => {
+    const m = meta('borrow-forwarded', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const borrowed = await ctx.sessionPersistence.borrowSession(m.id)
+    expect(borrowed.inspection.meta.id).toBe(m.id)
+    borrowed[Symbol.dispose]()
+  })
+
+  it('bounds public list in-flight probes and returns every entry', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      const m = meta(`list-bound-${i}`, `/bound-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    listingRace.enabled = true
+    const listed = await limited.sessionPersistence.list()
+    expect(listed).toHaveLength(5)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('bounds and aborts cold existing-root encoding probes', async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const m = meta(`list-cold-abort-${i}`, `/cold-abort-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('stop cold encoding probes')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    const first = limited.sessionPersistence.list(controller.signal)
+    const concurrent = limited.sessionPersistence.list()
+    await expect(first).rejects.toBe(reason)
+    await expect(concurrent).resolves.toHaveLength(8)
+    expect(listingRace.max).toBe(4)
+    expect(listingRace.started).toBeGreaterThan(8)
+
+    listingRace.abort = undefined
+    listingRace.started = 0
+    listingRace.max = 0
+    const listed = await limited.sessionPersistence.list()
+    expect(listed).toHaveLength(8)
+    expect(listingRace.started).toBeGreaterThan(0)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('lets an earlier root validation succeed when a later caller aborts', async () => {
+    for (let i = 0; i < 8; i += 1) {
+      const m = meta(`list-later-abort-${i}`, `/later-abort-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('abort later cold encoding attempt')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    let firstSettled = false
+    const first = limited.sessionPersistence.list().then((result) => {
+      firstSettled = true
+      return result
+    }, (error: unknown) => {
+      firstSettled = true
+      throw error
+    })
+    const later = limited.sessionPersistence.list(controller.signal)
+    await expect(later).rejects.toBe(reason)
+    expect(firstSettled).toBe(false)
+    await expect(first).resolves.toHaveLength(8)
+    await limited.fiber.dispose()
+  })
+
+  it('retries cold encoding validation after an aborted attempt', async () => {
+    for (let i = 0; i < 6; i += 1) {
+      const m = meta(`list-cold-retry-${i}`, `/cold-retry-${i}`)
+      await ctx.sessionPersistence.create(m)
+      await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    }
+    const limited = new Context()
+    await limited.plugin(SessionStore)
+    await limited.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
+    const controller = new AbortController()
+    const reason = new Error('abort first cold encoding attempt')
+    listingRace.enabled = true
+    listingRace.abort = { after: 2, controller, reason }
+
+    await expect(limited.sessionPersistence.list(controller.signal)).rejects.toBe(reason)
+    listingRace.abort = undefined
+    listingRace.started = 0
+    listingRace.max = 0
+    await expect(limited.sessionPersistence.list()).resolves.toHaveLength(6)
+    expect(listingRace.max).toBe(2)
+    await limited.fiber.dispose()
+  })
+
+  it('reports the earliest listing failure when concurrent probes fail', async () => {
+    const first = SessionId('list-failure-first')
+    const second = SessionId('list-failure-second')
+    for (const [id, cwd] of [[first, '/b'], [second, '/a']] as const) {
+      const path = rawLogPath(root, cwd, id)
+      await mkdir(dirname(path), { recursive: true })
+      const badCwd = '/wrong' + (cwd === '/a' ? 'x'.repeat(1_000_000) : '')
+      await writeFile(path, JSON.stringify({ ...toHeaderLine(meta(id, cwd)), cwd: badCwd }) + '\n')
+    }
+    const failure = await ctx.sessionPersistence.list().then(() => undefined, (error: unknown) => error as Error)
+    expect(failure?.message).toContain(`header id "${second}" and cwd identify`)
+    expect(failure?.message).not.toContain(`header id "${first}" and cwd identify`)
   })
 })
 

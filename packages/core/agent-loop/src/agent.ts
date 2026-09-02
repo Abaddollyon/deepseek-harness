@@ -235,20 +235,51 @@ export class ReactLoopAgent implements Agent {
     /* v8 ignore next -- private callers establish the running phase before proposing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
+    const steeringCount = this.inbox.nextStep.length
     const claimed = this.inbox.claim(target, position.turn)
-    const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
-    signal.throwIfAborted()
-    const sections = renderContextSections(assembly)
-    const context = this.runtimeContext.project(joinContextSections(sections), sections)
-    const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
-      (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
-        kind: 'enter',
-        messages: context === undefined ? claimed : [...claimed, context],
-      }),
-    )
-    signal.throwIfAborted()
-    return decision.kind === 'reject' ? decision : { ...decision, assembly }
+    try {
+      const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
+      signal.throwIfAborted()
+      const sections = renderContextSections(assembly)
+      const context = this.runtimeContext.project(joinContextSections(sections), sections)
+      const decision = await this.dispatch.waterfall(
+        'agent/pre-step', { messages: claimed, ...position, signal },
+        (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
+          kind: 'enter',
+          messages: context === undefined ? claimed : [...claimed, context],
+        }),
+      )
+      signal.throwIfAborted()
+      return decision.kind === 'reject' ? decision : { ...decision, assembly }
+    } catch (error: unknown) {
+      // The claim is a durable deletion committed before assembly and the
+      // waterfall run; an abort before the step starts would otherwise drop
+      // input no model request ever saw. A non-abort failure stays terminal
+      // with the batch removed: owning listeners already restored what they
+      // keep, and a silent requeue would replay a rejected proposal.
+      if (signal.aborted) this.restoreClaimed(claimed, steeringCount)
+      throw error
+    }
+  }
+
+  /**
+   * Return a claimed-but-unstarted batch to the inbox after an abort, keeping
+   * each message ahead of input that arrived after the claim. Messages a
+   * listener re-queued or restored itself are skipped, since pending
+   * identities must stay unique across both lists.
+   * @param claimed - the batch {@link Inbox.claim} removed for the aborted step.
+   * @param steeringCount - how many leading entries of `claimed` came from `next-step`.
+   */
+  private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
+    const restore = (messages: readonly UserMessage[], target: InboxTarget): void => {
+      for (const message of messages.toReversed()) {
+        if (this.inbox.nextStep.some(candidate => candidate.id === message.id)
+          || this.inbox.nextTurn.some(candidate => candidate.id === message.id)) continue
+        this.inbox.prepend(target, message)
+      }
+    }
+    restore(claimed.slice(steeringCount), 'next-turn')
+    restore(claimed.slice(0, steeringCount), 'next-step')
   }
 
   /** Open one turn before claiming its first proposed step. */
