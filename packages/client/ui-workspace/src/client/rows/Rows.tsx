@@ -578,7 +578,7 @@ function areSessionNodeItemPropsEqual(
     || a.untitledNumber !== b.untitledNumber || a.blank !== b.blank
     || a.pendingInteraction !== b.pendingInteraction || a.running !== b.running
     || a.runningSubagentCount !== b.runningSubagentCount || a.completed !== b.completed
-    || a.updatedAt !== b.updatedAt
+    || a.hasActiveSchedule !== b.hasActiveSchedule || a.updatedAt !== b.updatedAt
     || (previous.node.id === previous.currentId) !== (next.node.id === next.currentId)
     || previous.flat !== next.flat || previous.pinned !== next.pinned
     || previous.userPinned !== next.userPinned || previous.t !== next.t) return false
