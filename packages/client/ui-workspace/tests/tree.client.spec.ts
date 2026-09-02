@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { ScheduleId } from '@deepseek-ai/dsh-schedule'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import {
   deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel, relativeTime,
@@ -175,9 +176,10 @@ describe('deriveGroups', () => {
   it('derives one active-Schedule fact for grouped, flat, and search rows', () => {
     const now = Date.now()
     const absent = summary('absent', 4)
-    const empty = { ...summary('empty', 3), projectionValues: { schedule: [] } } as SessionSummary
-    const future = { ...summary('future', 2), projectionValues: { schedule: [{ id: 'future', at: new Date(now + 60_000).toISOString() }] } } as SessionSummary
-    const overdue = { ...summary('overdue', 1), projectionValues: { schedule: [{ id: 'overdue', at: new Date(now - 60_000).toISOString() }] } } as SessionSummary
+    type ScheduledFixture = SessionSummary & { projectionValues: { schedule: readonly unknown[] } }
+    const empty: ScheduledFixture = { ...summary('empty', 3), projectionValues: { schedule: [] } }
+    const future: ScheduledFixture = { ...summary('future', 2), projectionValues: { schedule: [{ id: ScheduleId('future'), kind: 'at', prompt: 'future', scheduledAt: new Date(now + 60_000).toISOString() }] } }
+    const overdue: ScheduledFixture = { ...summary('overdue', 1), projectionValues: { schedule: [{ id: ScheduleId('overdue'), kind: 'at', prompt: 'overdue', scheduledAt: new Date(now - 60_000).toISOString() }] } }
     const sessions = list(absent, empty, future, overdue)
     const workspaces = [workspace('project', ['absent', 'empty', 'future', 'overdue'], 'Project')]
     const expected = [[sid('absent'), false], [sid('empty'), false], [sid('future'), true], [sid('overdue'), true]]

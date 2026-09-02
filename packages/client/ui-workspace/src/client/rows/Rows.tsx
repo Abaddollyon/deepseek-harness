@@ -248,7 +248,6 @@ function IconPinOutline16() {
   )
 }
 
-/* v8 ignore next 3 -- closed-union backstop; only reached if the status is forged */
 function assertNever(value: never): never {
   throw new Error(`unknown pending interaction: ${String(value)}`)
 }
