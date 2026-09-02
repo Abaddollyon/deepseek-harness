@@ -596,7 +596,11 @@ describe('runScenario', () => {
       { steps: [...boot, { op: 'prompt', text: 'ls' }] },
       { agent: AGENT, mode: 'replay', fixtureFile, workspaceDir },
     )
-    expect(result.rawStdout).toContain('workspace:seeded.txt')
+    expect(result.rawStdout).toContain('workspace:.git,seeded.txt')
+    // The agent's own listing shows the harness-planted marker, but captured
+    // workspace state excludes harness-owned root entries.
+    expect(result.initialWorkspace).toEqual([{ path: 'seeded.txt', kind: 'text', content: 'hello' }])
+    expect(result.finalWorkspace).toEqual(result.initialWorkspace)
   })
 
   it('prepares the generated workspace after copying committed fixtures', { timeout: 20_000 }, async () => {
@@ -620,7 +624,12 @@ describe('runScenario', () => {
       },
     )
 
-    expect(result.rawStdout).toContain('workspace:committed.txt,runtime.txt')
+    expect(result.rawStdout).toContain('workspace:.git,committed.txt,runtime.txt')
+    expect(result.initialWorkspace).toEqual([
+      { path: 'committed.txt', kind: 'text', content: 'committed' },
+      { path: 'runtime.txt', kind: 'text', content: 'runtime' },
+    ])
+    expect(result.finalWorkspace).toEqual(result.initialWorkspace)
   })
 
   it('creates the generated workspace under an explicit parent', { timeout: 20_000 }, async () => {
