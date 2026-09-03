@@ -12,11 +12,28 @@ import type {
 } from '@deepseek-ai/dsh-session'
 import type {
   BorrowedSessionSource,
+  SessionPersistence,
   SessionPersistenceRevision,
+  SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type {} from '@deepseek-ai/dsh-session-projection-cache'
+import type { ProjectionCheckpoint, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
+import type SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import type SessionProjectionCache from '@deepseek-ai/dsh-session-projection-cache'
 import { SessionQueryError } from './config.ts'
+
+/**
+ * How many times a cold tail refolds when the durable revision moved under it.
+ * A log that keeps moving declines to the borrow path rather than publishing a
+ * revision that does not describe the observed events.
+ */
+const COLD_TAIL_REVISION_ATTEMPTS = 3
+
+/** The three services one cold tail fold reads, resolved once by the caller. */
+interface ColdTailServices {
+  readonly persistence: SessionPersistence
+  readonly registry: SessionProjectionRegistry
+  readonly cache: SessionProjectionCache
+}
 
 /** One exact immutable Session cut retained for the caller's read lifetime. */
 export interface SessionObservation extends Disposable {
@@ -168,19 +185,92 @@ export class SessionObservationReader {
     }
   }
 
-  private async coldTail(sessionId: SessionId, signal: AbortSignal | undefined, maxMessages: number): Promise<SessionObservation | undefined> {
+  /**
+   * Open one detached history tail from the durable snapshot, the projection
+   * cache, and a suffix read, or decline so the caller falls back to the
+   * always-correct borrow path.
+   *
+   * The point snapshot precedes the suffix read, so an append or an artifact
+   * replacement in between would publish a revision that does not describe the
+   * events this observation carries. The revision is therefore revalidated
+   * after the fold, and a log that keeps moving under a bounded number of
+   * attempts declines instead of publishing an incoherent cut.
+   */
+  private async coldTail(
+    sessionId: SessionId,
+    signal: AbortSignal | undefined,
+    maxMessages: number,
+  ): Promise<SessionObservation | undefined> {
     const persistence = this.ctx.get('sessionPersistence')
     const registry = this.ctx.get('sessionProjections')
     const cache = this.ctx.get('sessionProjectionCache')
     if (persistence === undefined || registry === undefined || cache === undefined) return undefined
     if (typeof persistence.readFrom !== 'function') return undefined
-    const found = typeof persistence.snapshot === 'function'
-      ? await persistence.snapshot(sessionId, signal)
-      : (typeof persistence.listSnapshots === 'function'
-        ? (await persistence.listSnapshots(signal)).find(item => item.header.id === sessionId)
-        : undefined)
-    if (found === undefined || found.header.isSeeded) return undefined
-    const rows = cache.checkpointFor(found.header, SessionLogOffset(0)) ?? {}
+    try {
+      return await this.coldAttempts({ persistence, registry, cache }, sessionId, maxMessages, signal)
+    } catch (error: unknown) {
+      // A backend that rejects because the caller cancelled must read as
+      // cancellation here, exactly as a cancelled borrow does.
+      throwIfObservationAborted(signal)
+      throw error
+    }
+  }
+
+  /**
+   * Fold the cold tail until it is coherent with an unmoved durable revision.
+   * @param services - the persistence, projection registry, and cache resolved by the caller.
+   * @param sessionId - logical Session identity being observed.
+   * @param maxMessages - requested opening page size.
+   * @param signal - optional cancellation for the cold reads.
+   * @returns the cold observation, or undefined to fall back to the borrow path.
+   */
+  private async coldAttempts(
+    services: ColdTailServices,
+    sessionId: SessionId,
+    maxMessages: number,
+    signal: AbortSignal | undefined,
+  ): Promise<SessionObservation | undefined> {
+    const { persistence } = services
+    for (let attempt = 0; attempt < COLD_TAIL_REVISION_ATTEMPTS; attempt += 1) {
+      const found = await pointSnapshot(persistence, sessionId, signal)
+      throwIfObservationAborted(signal)
+      if (found === undefined || found.header.isSeeded) return undefined
+      const folded = await this.coldFold(services, sessionId, found, maxMessages, signal)
+      if (folded === undefined) return undefined
+      // A Session that attached during the cold I/O owns sequences this
+      // detached cut cannot see; publishing the cut would open the follow
+      // stream at a cursor the live event feed has already passed.
+      if (this.ctx.sessions.get(sessionId) !== undefined) {
+        folded[Symbol.dispose]()
+        return undefined
+      }
+      const current = await pointSnapshot(persistence, sessionId, signal)
+      throwIfObservationAborted(signal)
+      if (current !== undefined && current.revision === found.revision) return folded
+      folded[Symbol.dispose]()
+    }
+    return undefined
+  }
+
+  /**
+   * Fold one cold observation over the narrowest suffix that still contains the
+   * complete opening page.
+   * @param services - the persistence, projection registry, and cache resolved by the caller.
+   * @param sessionId - logical Session identity being observed.
+   * @param found - the point snapshot whose revision this fold is bound to.
+   * @param maxMessages - requested opening page size.
+   * @param signal - optional cancellation for suffix reads.
+   * @returns the cold observation, or undefined when the registry serves no unit.
+   */
+  private async coldFold(
+    services: ColdTailServices,
+    sessionId: SessionId,
+    found: SessionPersistenceSnapshot,
+    maxMessages: number,
+    signal: AbortSignal | undefined,
+  ): Promise<SessionObservation | undefined> {
+    const { persistence, registry, cache } = services
+    let rows: ProjectionCheckpoint = cache.checkpointFor(found.header, SessionLogOffset(0)) ?? {}
     const restoreFloor = registry.restoreFloor(rows)
     if (restoreFloor === undefined) return undefined
 
@@ -193,41 +283,59 @@ export class SessionObservationReader {
       throwIfObservationAborted(signal)
       const suffix = await persistence.readFrom(sessionId, base, signal)
       throwIfObservationAborted(signal)
+      // Cached rows are bound to ONE stored lifecycle, and the registry's
+      // restore only checks version and watermark — never identity. Revalidate
+      // the rows against the header this suffix actually came from, so an
+      // artifact replaced between the point snapshot and this read cannot seed
+      // projections from the previous lifecycle's rows.
+      rows = cache.checkpointFor(suffix.meta, suffix.inheritedEventCount) ?? {}
+      const safeFloor = registry.restoreFloor(rows) ?? SessionLogOffset(0)
+      if (base > safeFloor) { base = safeFloor; continue }
+      // A row claiming events this read does not contain is stale-by-shrink or
+      // future. Only the complete log can discard one, so go there in a single
+      // step instead of halving the anchor across repeated whole-file reads.
+      if (base > 0 && claimsBeyond(rows, suffix.events.at(-1)?.seq ?? -1)) {
+        base = SessionLogOffset(0)
+        continue
+      }
       const page = tailPageBoundary(suffix.events, maxMessages)
       if ((page.complete && page.cut >= base) || base === 0) {
         let restored: ReturnType<typeof registry.restore>
         try {
           restored = registry.restore(rows, suffix.events, suffix.fromSeq, suffix.meta, suffix.inheritedEventCount)
         } catch (error: unknown) {
-          // Stale/future rows are disposable. A non-zero anchored read cannot
-          // safely discard one, so retry from the complete log.
-          if (base !== 0) { base = SessionLogOffset(0); width = 1; continue }
+          // Stale and future rows are disposable, but discarding one is only
+          // sound over the complete log, so restore refuses above seq 0. Read
+          // everything and refold; at seq 0 the row is dropped for init.
+          if (base > 0) { base = SessionLogOffset(0); continue }
           throw error
         }
         // Await write-back before publishing the observation. It is fail-soft
         // but guarantees a successful first-frame-only read heals the cache.
-        if (typeof cache.writeBack === 'function') await cache.writeBack(suffix.meta, suffix.inheritedEventCount, restored.checkpoint)
+        if (typeof cache.writeBack === 'function') {
+          await cache.writeBack(suffix.meta, suffix.inheritedEventCount, restored.checkpoint, rows)
+          throwIfObservationAborted(signal)
+        }
         const events = suffix.events
+        const cursor: SessionSeqCursor = events.at(-1)?.seq ?? -1
         let disposed = false
         return {
           source: 'cold', header: suffix.meta, events,
-          inheritedEventCount: suffix.inheritedEventCount, cursor: events.at(-1)?.seq ?? -1,
+          inheritedEventCount: suffix.inheritedEventCount, cursor,
           revision: found.revision, projections: restored.snapshot,
           retain: () => {
             if (disposed) throw new Error(`session observation "${sessionId}" is disposed`)
-            return this.coldLease(suffix.meta, events, suffix.inheritedEventCount, events.at(-1)?.seq ?? -1, found.revision, restored.snapshot)
+            return this.coldLease(
+              suffix.meta, events, suffix.inheritedEventCount, cursor, found.revision, restored.snapshot,
+            )
           },
           [Symbol.dispose]: () => { disposed = true },
         }
       }
-      if (base === 0) return undefined
-      const next = Math.max(0, Number(base) - width)
-      if (next === base) base = SessionLogOffset(0)
-      else base = SessionLogOffset(next)
-      width = Math.min(Number.MAX_SAFE_INTEGER, width * 2)
+      base = SessionLogOffset(Math.max(0, base - width))
+      width *= 2
     }
   }
-
 
   private coldLease(
     header: SessionHeader,
@@ -284,6 +392,31 @@ export class SessionObservationReader {
       ? registry.hydrate(prepared, {}, events, SessionLogOffset(0))
       : cache.hydratePrepared(prepared, events)
   }
+}
+
+/**
+ * Read one durable snapshot for a single session without a corpus listing when
+ * the backend offers a point lookup.
+ * @param persistence - the mounted persistence service.
+ * @param sessionId - the session to look up.
+ * @param signal - optional cancellation for the lookup.
+ * @returns the header and revision, or undefined when nothing is stored.
+ */
+async function pointSnapshot(
+  persistence: SessionPersistence,
+  sessionId: SessionId,
+  signal: AbortSignal | undefined,
+): Promise<SessionPersistenceSnapshot | undefined> {
+  if (typeof persistence.snapshot === 'function') return persistence.snapshot(sessionId, signal)
+  if (typeof persistence.listSnapshots !== 'function') return undefined
+  const listed = await persistence.listSnapshots(signal)
+  return listed.find(item => item.header.id === sessionId)
+}
+
+/** Whether any cached row claims a watermark past the supplied log end. */
+function claimsBeyond(rows: ProjectionCheckpoint, endSeq: SessionSeqCursor): boolean {
+  for (const row of Object.values(rows)) if (row.seq > endSeq) return true
+  return false
 }
 
 function tailPageBoundary(events: readonly SessionEvent[], maxMessages: number): { complete: boolean; cut: SessionLogOffsetType } {

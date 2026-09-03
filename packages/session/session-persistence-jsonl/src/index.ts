@@ -627,23 +627,43 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return snapshots
   }
 
-  /** Point lookup without enumerating unrelated session artifacts. */
+  /**
+   * Point lookup without enumerating unrelated session artifacts: it resolves
+   * one id's physical log and reads only that log's header line, so its cost
+   * is independent of how many other sessions the root holds and of how large
+   * the log itself is. Encoding mismatches surface exactly as they do on every
+   * other targeted read; an absent artifact reads as `undefined`.
+   *
+   * Header and revision describe ONE file state. A writer appending, or a
+   * repair replacing the artifact, between the header read and the stat would
+   * otherwise pair a header with a revision taken from different bytes, so the
+   * read runs under the same stat/read/stat discipline as
+   * {@link readStableFile}. Continuous external writers may delay convergence.
+   * @param id - the persisted session to look up.
+   * @param signal - optional cancellation for the resolve/read/stat work.
+   * @returns the stored header with its stat-derived revision, or `undefined`.
+   */
   override async snapshot(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceSnapshot | undefined> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding(signal)
+    signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
     try {
-      const first = this.compression === 'zstd'
-        ? await this.readFirstZstdLine(path, signal)
-        : await this.readFirstLine(path, signal)
-      if (first === undefined) return undefined
-      const header = parseHeaderMeta(first)
-      if (header === undefined) return undefined
-      await this.assertStoredIdentity(path, header, id, signal)
-      const identity = await stat(path, { bigint: true })
-      signal?.throwIfAborted()
-      return { header, revision: fileRevision(identity) }
+      for (;;) {
+        signal?.throwIfAborted()
+        const before = fileRevision(await stat(path, { bigint: true }))
+        const first = this.compression === 'zstd'
+          ? await this.readFirstZstdLine(path, signal)
+          : await this.readFirstLine(path, signal)
+        if (first === undefined) return undefined
+        const header = parseHeaderMeta(first)
+        if (header === undefined) return undefined
+        await this.assertStoredIdentity(path, header, id, signal)
+        signal?.throwIfAborted()
+        const after = fileRevision(await stat(path, { bigint: true }))
+        if (before === after) return { header, revision: after }
+      }
     } catch (error: unknown) {
       signal?.throwIfAborted()
       if (isENOENT(error)) return undefined

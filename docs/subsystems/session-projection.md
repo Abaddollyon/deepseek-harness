@@ -180,6 +180,27 @@ async write(session: Session): Promise<void>
  * @returns the projection cut at the log end.
  */
 coldSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): ProjectionSnapshot
+
+/**
+ * Persist a cold restore result before its first frame is published, without
+ * ever regressing a fresher checkpoint.
+ *
+ * Cold reads are slow and their result is old the moment the log moves, so
+ * the write is a compare-and-set rather than a replacement: it lands only
+ * while the stored record is still the exact cut the cold read restored from
+ * — or is absent, or belongs to another lifecycle. A checkpoint written by a
+ * Session that attached during the read therefore wins, while the stale or
+ * future row the cold read itself discarded is healed (that row IS the cut
+ * this call restored from). Writes for one session are serialized so
+ * concurrent write-backs cannot interleave their read-modify-write.
+ * Fail-soft: a lost write only costs a longer tail replay next time.
+ * @param meta - the stored session header (identity witness).
+ * @param inheritedEventCount - exact inherited prefix length completing the identity.
+ * @param checkpoint - the refreshed rows at the restored cut.
+ * @param restoredFrom - the exact rows this restore was seeded from.
+ * @returns resolution after the write attempt settles.
+ */
+async writeBack( meta: SessionHeader, inheritedEventCount: SessionLogOffset, checkpoint: ProjectionCheckpoint, restoredFrom: ProjectionCheckpoint, ): Promise<void>
 ```
 
 Types: [Session](session.md) · [SessionEvent](session.md) · [SessionHeader](persistence.md) · [SessionLogOffset](session.md)

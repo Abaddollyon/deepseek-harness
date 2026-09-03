@@ -303,7 +303,22 @@ export abstract class SessionPersistence extends Service {
    */
   abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
 
-  /** Point lookup; compatibility default scans the lightweight snapshot list. */
+  /**
+   * One materialized session's header and change token, without a full-log
+   * parse. Consistent with {@link listSnapshots}: a quiescent log answers here
+   * exactly as it does there, and the header and revision describe one file
+   * state.
+   *
+   * The default implementation is a COMPATIBILITY shim that scans
+   * {@link listSnapshots}, so an unoverridden backend still costs a corpus
+   * listing per lookup and inherits that listing's failure modes (one corrupt
+   * unrelated artifact fails every lookup). Backends that can resolve a single
+   * id directly — the shipped JSONL backend does — override it so callers on
+   * the detached-history path pay a single header read.
+   * @param id - the persisted session to look up.
+   * @param signal - optional cancellation for backend lookup work.
+   * @returns the header and opaque revision, or `undefined` when nothing is stored.
+   */
   async snapshot(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceSnapshot | undefined> {
     signal?.throwIfAborted()
     return (await this.listSnapshots(signal)).find(item => item.header.id === id)

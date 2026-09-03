@@ -1,7 +1,8 @@
 import { MessageId, createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
+import { appendFile, mkdtemp, mkdir, open, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -103,6 +104,41 @@ async function freshRoot(): Promise<string> {
 
 function rawLogPath(root: string, cwd: string | undefined, id: SessionId): string {
   return logPath(root, cwd, id, 'none')
+}
+
+/** The FileHandle read signature, spied on to measure how much a read consumes. */
+type HandleRead = (
+  this: FileHandle,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number | null,
+) => Promise<{ bytesRead: number; buffer: Buffer }>
+
+/** Count the bytes every FileHandle read consumes while `work` runs. */
+async function countReadBytes(work: () => Promise<void>): Promise<number> {
+  const probe = await open(__filename, 'r')
+  const prototype = Object.getPrototypeOf(probe) as { read: HandleRead }
+  const original = prototype.read
+  await probe.close()
+  let bytes = 0
+  const spy = vi.spyOn(prototype, 'read').mockImplementation(async function (
+    this: FileHandle,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ) {
+    const result = await original.call(this, buffer, offset, length, position)
+    bytes += result.bytesRead
+    return result
+  })
+  try {
+    await work()
+  } finally {
+    spy.mockRestore()
+  }
+  return bytes
 }
 
 afterEach(async () => {
@@ -521,9 +557,84 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     const point = await ctx.sessionPersistence.snapshot(m.id)
     const listed = (await ctx.sessionPersistence.listSnapshots()).find(item => item.header.id === m.id)
     expect(point).toEqual(listed)
-    await ctx.sessionPersistence.append(m.id, [{ type: 'turn/end', seq: SessionSeq(6), time: 8, data: { turn: 2, reason: { kind: 'completed' } } } as SessionEvent])
+    await ctx.sessionPersistence.append(m.id, [{ type: 'turn/end', seq: SessionSeq(6), time: 8, data: { turn: 2, reason: { kind: 'completed' } } }])
     expect((await ctx.sessionPersistence.snapshot(m.id))?.revision).not.toBe(point?.revision)
     expect(await ctx.sessionPersistence.snapshot(SessionId('point-missing'))).toBeUndefined()
+  })
+
+  it('point snapshot retries when the file revision changes during the header read', async () => {
+    const m = meta('point-snapshot-race', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    statRace.path = rawLogPath(root, '/work', m.id)
+
+    const point = await ctx.sessionPersistence.snapshot(m.id)
+
+    // Two stats per iteration; the mocked revision change forces exactly one
+    // retry, so the published header and revision describe one file state.
+    expect(statRace.reads).toBe(4)
+    statRace.path = undefined
+    expect(point).toEqual((await ctx.sessionPersistence.listSnapshots()).find(item => item.header.id === m.id))
+  })
+
+  it('point snapshot answers while an unrelated artifact makes the listing fail', async () => {
+    const m = meta('point-snapshot-isolated', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    // A sibling session under the same project holding the OPPOSITE encoding:
+    // any corpus enumeration must refuse the whole root, so a point lookup that
+    // still answers proves it never enumerated.
+    const sibling = SessionId('point-snapshot-sibling')
+    await mkdir(sessionDir(root, '/work', sibling), { recursive: true })
+    await writeFile(logPath(root, '/work', sibling, 'zstd'), 'not really zstd')
+
+    await expect(ctx.sessionPersistence.listSnapshots()).rejects.toThrow(/configured for compression "none"/)
+    expect((await ctx.sessionPersistence.snapshot(m.id))?.header.id).toBe(m.id)
+  })
+
+  it('point snapshot reads the header line, not the event body, of a large log', async () => {
+    const m = meta('point-snapshot-header-only', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    await ctx.sessionPersistence.append(m.id, Array.from({ length: 400 }, (_unused, index) => ({
+      type: 'assistant/chunk' as const,
+      seq: SessionSeq(index + 6),
+      time: index + 8,
+      data: { turn: 2, step: 1, chunk: { type: 'text-delta' as const, index: 0, text: 'x'.repeat(600) } },
+    })))
+    expect((await stat(rawLogPath(root, '/work', m.id))).size).toBeGreaterThan(200_000)
+
+    let point: Awaited<ReturnType<typeof ctx.sessionPersistence.snapshot>>
+    const bytes = await countReadBytes(async () => {
+      point = await ctx.sessionPersistence.snapshot(m.id)
+    })
+
+    expect(point?.header.id).toBe(m.id)
+    // One 8 KiB probe window covers the header line; the 200 KB body is never
+    // read, so the lookup cost is independent of log size.
+    expect(bytes).toBeLessThanOrEqual(8192)
+  })
+
+  it('point snapshot surfaces an encoding mismatch instead of reporting absence', async () => {
+    const m = meta('point-snapshot-mismatch', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const zstdCtx = new Context()
+    await zstdCtx.plugin(SessionStore)
+    await zstdCtx.plugin(JsonlSessionPersistence, { root, compression: 'zstd' })
+
+    await expect(zstdCtx.sessionPersistence.snapshot(m.id)).rejects.toThrow(/configured for compression "zstd"/)
+    await zstdCtx.fiber.dispose()
+  })
+
+  it('point snapshot honors cancellation before it touches the filesystem', async () => {
+    const m = meta('point-snapshot-abort', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const abort = new AbortController()
+    abort.abort()
+
+    await expect(ctx.sessionPersistence.snapshot(m.id, abort.signal)).rejects.toThrow()
   })
 
   it('binds a full stored prefix to the same revision as a lightweight read', async () => {
