@@ -240,7 +240,7 @@ describe('SessionObservationReader', () => {
     await ctx.plugin(SessionStore)
     ctx.provide('sessionPersistence', {
       // Exercise containment of a backend that violates the Error rejection convention.
-      borrowSession: () => Promise.reject('offline'),
+      borrowSession: () => Promise.reject('offline'), // oxlint-disable-line typescript/prefer-promise-reject-errors
     } as never)
 
     await expect(new SessionObservationReader(ctx).read(SessionId('failed'))).rejects.toMatchObject({
@@ -526,6 +526,32 @@ describe('SessionObservationReader: cold history tail', () => {
 
     using observation = await new SessionObservationReader(ctx).read(meta.id, { historyTail: true })
 
+    expect(observation.source).toBe('live')
+    await ctx.fiber.dispose()
+  })
+
+  it('declines a detached cut when a Session attaches during final revision validation', async () => {
+    const meta = header('cold-attached-during-revision-check')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const snapshot = vi.fn(async () => {
+      if (snapshot.mock.calls.length === 2) ctx.sessions.create(meta.id, { meta })
+      return { header: meta, revision: SessionPersistenceRevision('attached-final') }
+    })
+    ctx.provide('sessionPersistence', {
+      snapshot,
+      readFrom: async (_id: SessionId, fromSeq: number) => ({
+        fromSeq: SessionLogOffset(fromSeq), meta,
+        inheritedEventCount: SessionLogOffset(0), events: messageLog(4),
+      }),
+      borrowSession: async () => preparedSource(meta),
+    } as never)
+    ctx.provide('sessionProjectionCache', { checkpointFor: () => ({}), writeBack: async () => {} } as never)
+    ctx.provide('sessionProjections', { ...fakeRegistry(), snapshot: () => ({ asOfSeq: 3, values: {} }) } as never)
+
+    using observation = await new SessionObservationReader(ctx).read(meta.id, { historyTail: true })
+
+    expect(snapshot).toHaveBeenCalledTimes(2)
     expect(observation.source).toBe('live')
     await ctx.fiber.dispose()
   })

@@ -246,6 +246,10 @@ export class SessionObservationReader {
       }
       const current = await pointSnapshot(persistence, sessionId, signal)
       throwIfObservationAborted(signal)
+      if (this.ctx.sessions.get(sessionId) !== undefined) {
+        folded[Symbol.dispose]()
+        return undefined
+      }
       if (current !== undefined && current.revision === found.revision) return folded
       folded[Symbol.dispose]()
     }
