@@ -341,6 +341,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       } finally { decoder.close() }
       selected.push(plaintext)
       if (frameMinSeq(plaintext) <= fromSeq) covered = true
+      if (!covered) await scheduler.yield()
     }
     if (!covered && scanned.frames.length > 1) throw new Error('corrupt Zstandard session log: requested sequence is outside the stored frame index')
     const baseSeq = selected.length === 0 ? 0 : frameMinSeq(selected[selected.length - 1] as Buffer)

@@ -76,8 +76,15 @@ export class SessionObservationReader {
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
       if (options.historyTail === true && projectionMode === 'all') {
-        const cold = await this.coldTail(sessionId, signal)
-        if (cold !== undefined) return cold
+        try {
+          const cold = await this.coldTail(sessionId, signal)
+          if (cold !== undefined) return cold
+        } catch (error: unknown) {
+          // SDK replay may dispose its synthetic Context before delayed follow work.
+          // A cold optimization failure must never turn a readable session into a lifecycle error.
+          throwIfObservationAborted(signal)
+          if (!/inactive context|disposed context/i.test(errorMessage(error))) throw error
+        }
       }
 
       let borrowed: BorrowedSessionSource
