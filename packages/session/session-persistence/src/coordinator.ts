@@ -1011,7 +1011,16 @@ export class PersistenceCoordinator<TornMarker = unknown> {
         throw error
       }
       signal?.throwIfAborted()
-      if (suffix === undefined) throw new SessionPersistenceNotFoundError(id)
+      // An optional seek hook may decline an artifact; retain the complete-read fallback.
+      if (suffix === undefined) {
+        const whole = await this.readStoredPrefix(id, signal)
+        return {
+          meta: whole.meta,
+          inheritedEventCount: whole.inheritedEventCount,
+          fromSeq,
+          events: whole.events.filter(event => event.seq >= fromSeq),
+        }
+      }
       this.assertStoredId(id, suffix.meta)
       this.assertVersion(suffix.meta)
       if (suffix.events.some(needsLegacyPrefix)) {

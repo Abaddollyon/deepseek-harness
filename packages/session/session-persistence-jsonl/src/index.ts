@@ -23,6 +23,7 @@ import {
   type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
   type SessionStorageMetadata,
   type StoredPrefix,
+  type StoredSuffix,
 } from '@deepseek-ai/dsh-session-persistence'
 import type {
   Session,
@@ -39,6 +40,7 @@ import {
 } from './format.ts'
 import {
   compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
+  type ZstdFrameRange,
 } from './zstd.ts'
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 
@@ -116,6 +118,21 @@ interface FileRevisionIdentity {
   readonly size: bigint
   readonly mtimeNs: bigint
   readonly ctimeNs: bigint
+}
+
+
+/** Find the first logical sequence in one independently encoded event frame. */
+function frameMinSeq(plaintext: Buffer): number {
+  const newline = plaintext.indexOf(0x0A)
+  const firstLine = newline === -1 ? plaintext : plaintext.subarray(0, newline)
+  if (firstLine.length === 0) throw new Error('corrupt Zstandard session log: empty event frame')
+  let parsed: unknown
+  try { parsed = JSON.parse(firstLine.toString('utf8')) } catch { throw new Error('corrupt Zstandard session log: event frame contains invalid JSON') }
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('corrupt Zstandard session log: event frame contains a non-object record')
+  const record = parsed as { seq?: unknown; seq0?: unknown }
+  const seq = typeof record.seq === 'number' ? record.seq : record.seq0
+  if (!Number.isSafeInteger(seq) || (seq as number) < 0) throw new Error('corrupt Zstandard session log: event frame lacks a valid sequence')
+  return seq as number
 }
 
 /** Build the source-qualified revision shared by full and lightweight reads. */
@@ -284,6 +301,59 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
     return this.readPrefix(path, id, signal)
+  }
+
+  /** Read only the zstd frames needed to cover a requested sequence. */
+  async loadStoredFrom(id: SessionId, fromSeq: SessionLogOffset, signal?: AbortSignal): Promise<StoredSuffix | undefined> {
+    if (this.compression !== 'zstd') return undefined
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding(signal)
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    const { buffer } = await this.readStableFile(path, signal)
+    const scanned = scanZstdFrames(buffer)
+    if (scanned.tornStart !== undefined) throw new Error('corrupt Zstandard session log: truncated tail frame')
+    if (scanned.frames.length === 0) throw new Error('corrupt Zstandard session log: no complete frames')
+    const headerDecoder = createZstdFrameDecoder()
+    let header: Buffer
+    try {
+      const [headerRange] = scanned.frames as [ZstdFrameRange, ...ZstdFrameRange[]]
+      header = Buffer.concat([...headerDecoder.decode(buffer, [headerRange])])
+    } finally { headerDecoder.close() }
+    assertZstdHeaderFrame(header)
+    const selected: Buffer[] = []
+    let covered = false
+    for (let index = scanned.frames.length - 1; index >= 1 && !covered; index -= 1) {
+      signal?.throwIfAborted()
+      const decoder = createZstdFrameDecoder()
+      let plaintext: Buffer
+      try {
+        const range = (scanned.frames as [ZstdFrameRange, ...ZstdFrameRange[]])[index] as ZstdFrameRange
+        plaintext = Buffer.concat([...decoder.decode(buffer, [range])])
+      } finally { decoder.close() }
+      selected.push(plaintext)
+      if (frameMinSeq(plaintext) <= fromSeq) covered = true
+      // Decoding and sequence inspection are synchronous. Yield after every
+      // frame, including the covering frame, before incremental JSONL parsing.
+      await scheduler.yield()
+    }
+    if (!covered && scanned.frames.length > 1) throw new Error('corrupt Zstandard session log: requested sequence is outside the stored frame index')
+    const baseSeq = selected.length === 0 ? 0 : frameMinSeq(selected[selected.length - 1] as Buffer)
+    const scanner = new SessionLogScanner(header, baseSeq)
+    const parseChunkBytes = 256 * 1024
+    for (let index = selected.length - 1; index >= 0; index -= 1) {
+      const plaintext = selected[index] as Buffer
+      for (let offset = 0; offset < plaintext.length; offset += parseChunkBytes) {
+        scanner.write(plaintext.subarray(offset, Math.min(offset + parseChunkBytes, plaintext.length)))
+        if (offset + parseChunkBytes < plaintext.length) await scheduler.yield()
+      }
+    }
+    const complete = scanner.finish()
+    return {
+      meta: complete.meta,
+      inheritedEventCount: complete.inheritedEventCount,
+      events: complete.events.filter(event => event.seq >= fromSeq),
+    }
   }
 
   /**

@@ -164,6 +164,68 @@ describe('SessionObservationReader', () => {
     await ctx.fiber.dispose()
   })
 
+  it.each([
+    ['missing listing', 'missing-listing'],
+    ['missing snapshot', 'missing-snapshot'],
+    ['seeded snapshot', 'seeded-snapshot'],
+    ['missing checkpoint', 'missing-checkpoint'],
+    ['missing restore floor', 'missing-floor'],
+  ] as const)('falls back from a %s cold-tail prerequisite', async (_label, mode) => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const meta = header('cold-fallback-' + mode)
+    const prepared = preparedSource(meta)
+    const revision = SessionPersistenceRevision('cold-fallback')
+    const listedHeader = mode === 'seeded-snapshot' ? { ...meta, isSeeded: true } : meta
+    ctx.provide('sessionPersistence', {
+      borrowSession: async () => prepared,
+      ...(mode === 'missing-listing' ? {} : {
+        listSnapshots: async () => mode === 'missing-snapshot' ? [] : [{ header: listedHeader, revision }],
+      }),
+    } as never)
+    ctx.provide('sessionProjectionCache', {
+      checkpointFor: () => mode === 'missing-checkpoint' ? undefined : {},
+      hydratePrepared: () => ({ asOfSeq: -1, values: {} }),
+    } as never)
+    ctx.provide('sessionProjections', {
+      restoreFloor: () => mode === 'missing-floor' ? undefined : SessionLogOffset(0),
+    } as never)
+
+    using observation = await new SessionObservationReader(ctx).read(meta.id, { historyTail: true })
+    expect(observation.source).toBe('prepared')
+    await ctx.fiber.dispose()
+  })
+
+  it('owns independent cold-tail leases and rejects retaining disposed leases', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const meta = header('cold-leases')
+    const revision = SessionPersistenceRevision('cold-leases')
+    const snapshot = { asOfSeq: -1, values: {} }
+    ctx.provide('sessionPersistence', {
+      listSnapshots: async () => [{ header: meta, revision }],
+      readFrom: async () => ({
+        fromSeq: SessionLogOffset(0), meta, inheritedEventCount: SessionLogOffset(0), events: [],
+      }),
+    } as never)
+    ctx.provide('sessionProjectionCache', { checkpointFor: () => ({}) } as never)
+    ctx.provide('sessionProjections', {
+      restoreFloor: () => SessionLogOffset(0),
+      restore: () => ({ snapshot }),
+    } as never)
+
+    const observation = await new SessionObservationReader(ctx).read(meta.id, { historyTail: true })
+    expect(observation).toMatchObject({ source: 'cold', cursor: -1, projections: snapshot })
+    const retained = observation.retain()
+    const nested = retained.retain()
+    retained[Symbol.dispose]()
+    expect(() => retained.retain()).toThrow(/disposed/)
+    nested[Symbol.dispose]()
+    observation[Symbol.dispose]()
+    expect(() => observation.retain()).toThrow(/disposed/)
+    await ctx.fiber.dispose()
+  })
+
   it('contains a non-Error persistence rejection', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

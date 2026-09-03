@@ -119,6 +119,15 @@ export class SessionProjectionCache extends Service {
     return identityMatches(record.identity, expected) ? record : undefined
   }
 
+  /** Return identity-checked rows for a cold reader.
+   * @param meta - stored session header used as lifecycle identity witness.
+   * @param inheritedEventCount - exact inherited prefix in the stored lifecycle.
+   * @returns matching rows, or undefined when no row exists.
+   */
+  checkpointFor(meta: SessionHeader, inheritedEventCount: SessionLogOffset): ProjectionCheckpoint | undefined {
+    return this.recordFor(meta.id, identityOf(meta, inheritedEventCount))?.rows
+  }
+
   /**
    * The zero-I/O listing read: whole values viewed straight from the stored
    * rows (version-matching keys only), each cut carried with its watermark so

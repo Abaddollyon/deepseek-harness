@@ -338,6 +338,7 @@ export class SessionLogScanner {
   private readonly meta: SessionHeader
   private readonly inheritedEventCount: SessionLogOffsetType
   private readonly events: SessionEvent[] = []
+  private nextSeq: number
   private fragments: Buffer[] = []
   private fragmentBytes = 0
   private inputBytes: number
@@ -350,10 +351,11 @@ export class SessionLogScanner {
    * Create an event scanner from exactly one newline-terminated header record.
    * @param headerRecord - the complete first JSONL record, including its newline.
    */
-  constructor(headerRecord: Buffer) {
+  constructor(headerRecord: Buffer, baseSeq = 0) {
     const parsed = parseHeaderRecord(headerRecord)
     this.meta = parsed.meta
     this.inheritedEventCount = parsed.inheritedEventCount
+    this.nextSeq = baseSeq
     this.inputBytes = headerRecord.length
     this.committedBytes = headerRecord.length
   }
@@ -438,8 +440,8 @@ export class SessionLogScanner {
 
     const rowStart = this.events.length
     for (const event of decoded) {
-      if (event.seq !== this.events.length) {
-        const expected = this.events.length
+      if (event.seq !== this.nextSeq) {
+        const expected = this.nextSeq
         this.events.length = rowStart
         this.issue = new Error(
           `corrupt session log: seq gap in committed region at line ${this.eventLine} `
@@ -449,6 +451,7 @@ export class SessionLogScanner {
         return
       }
       this.events.push(event)
+      this.nextSeq += 1
     }
     this.committedBytes = endByte
   }
