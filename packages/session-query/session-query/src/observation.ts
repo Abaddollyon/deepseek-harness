@@ -75,21 +75,9 @@ export class SessionObservationReader {
       if (live !== undefined) return this.live(live, projectionMode)
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
-      const fiber = (this.ctx as unknown as { fiber?: { store?: Record<string, unknown> } }).fiber
-      const services = fiber?.store
-      const hasProjectionServices = services !== undefined
-        && 'sessionProjectionCache' in services && 'sessionProjections' in services
-      if (options.historyTail === true && projectionMode === 'all' && hasProjectionServices) {
-        try {
-          const cold = await this.coldTail(sessionId, signal)
-          if (cold !== undefined) return cold
-        } catch (error: unknown) {
-          // SDK replay may dispose its synthetic Context before delayed follow work.
-          // A cold optimization failure must never turn a readable session into a lifecycle error.
-          throwIfObservationAborted(signal)
-          // Cache availability is an optimization; all errors fall back to the authoritative reader.
-          void error
-        }
+      if (options.historyTail === true && projectionMode === 'all') {
+        const cold = await this.coldTail(sessionId, signal)
+        if (cold !== undefined) return cold
       }
 
       let borrowed: BorrowedSessionSource

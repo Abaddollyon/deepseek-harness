@@ -40,6 +40,7 @@ import {
 } from './format.ts'
 import {
   compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
+  type ZstdFrameRange,
 } from './zstd.ts'
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 
@@ -122,19 +123,16 @@ interface FileRevisionIdentity {
 
 /** Find the first logical sequence in one independently encoded event frame. */
 function frameMinSeq(plaintext: Buffer): number {
-  let min = Number.POSITIVE_INFINITY
-  for (const line of plaintext.toString('utf8').split('\n')) {
-    if (line.length === 0) continue
-    let parsed: unknown
-    try { parsed = JSON.parse(line) } catch { throw new Error('corrupt Zstandard session log: event frame contains invalid JSON') }
-    if (typeof parsed !== 'object' || parsed === null) throw new Error('corrupt Zstandard session log: event frame contains a non-object record')
-    const record = parsed as { seq?: unknown; seq0?: unknown }
-    const seq = typeof record.seq === 'number' ? record.seq : record.seq0
-    if (!Number.isSafeInteger(seq) || (seq as number) < 0) throw new Error('corrupt Zstandard session log: event frame lacks a valid sequence')
-    min = Math.min(min, seq as number)
-  }
-  if (!Number.isFinite(min)) throw new Error('corrupt Zstandard session log: empty event frame')
-  return min
+  const newline = plaintext.indexOf(0x0A)
+  const firstLine = newline === -1 ? plaintext : plaintext.subarray(0, newline)
+  if (firstLine.length === 0) throw new Error('corrupt Zstandard session log: empty event frame')
+  let parsed: unknown
+  try { parsed = JSON.parse(firstLine.toString('utf8')) } catch { throw new Error('corrupt Zstandard session log: event frame contains invalid JSON') }
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('corrupt Zstandard session log: event frame contains a non-object record')
+  const record = parsed as { seq?: unknown; seq0?: unknown }
+  const seq = typeof record.seq === 'number' ? record.seq : record.seq0
+  if (!Number.isSafeInteger(seq) || (seq as number) < 0) throw new Error('corrupt Zstandard session log: event frame lacks a valid sequence')
+  return seq as number
 }
 
 /** Build the source-qualified revision shared by full and lightweight reads. */
@@ -319,11 +317,8 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const headerDecoder = createZstdFrameDecoder()
     let header: Buffer
     try {
-      const headerRange = scanned.frames[0]
-      if (headerRange === undefined) throw new Error('corrupt Zstandard session log: missing header frame')
-      const first = headerDecoder.decode(buffer, [headerRange]).next()
-      if (first.done) throw new Error('corrupt Zstandard session log: missing header frame')
-      header = Buffer.from(first.value)
+      const [headerRange] = scanned.frames as [ZstdFrameRange, ...ZstdFrameRange[]]
+      header = Buffer.concat([...headerDecoder.decode(buffer, [headerRange])])
     } finally { headerDecoder.close() }
     assertZstdHeaderFrame(header)
     const selected: Buffer[] = []
@@ -333,20 +328,26 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       const decoder = createZstdFrameDecoder()
       let plaintext: Buffer
       try {
-        const range = scanned.frames[index]
-        if (range === undefined) throw new Error('corrupt Zstandard session log: missing tail frame')
-        const item = decoder.decode(buffer, [range]).next()
-        if (item.done) throw new Error('corrupt Zstandard session log: tail frame produced no plaintext')
-        plaintext = Buffer.from(item.value)
+        const range = (scanned.frames as [ZstdFrameRange, ...ZstdFrameRange[]])[index] as ZstdFrameRange
+        plaintext = Buffer.concat([...decoder.decode(buffer, [range])])
       } finally { decoder.close() }
       selected.push(plaintext)
       if (frameMinSeq(plaintext) <= fromSeq) covered = true
-      if (!covered) await scheduler.yield()
+      // Decoding and sequence inspection are synchronous. Yield after every
+      // frame, including the covering frame, before incremental JSONL parsing.
+      await scheduler.yield()
     }
     if (!covered && scanned.frames.length > 1) throw new Error('corrupt Zstandard session log: requested sequence is outside the stored frame index')
     const baseSeq = selected.length === 0 ? 0 : frameMinSeq(selected[selected.length - 1] as Buffer)
     const scanner = new SessionLogScanner(header, baseSeq)
-    for (let index = selected.length - 1; index >= 0; index -= 1) scanner.write(selected[index] as Buffer)
+    const parseChunkBytes = 256 * 1024
+    for (let index = selected.length - 1; index >= 0; index -= 1) {
+      const plaintext = selected[index] as Buffer
+      for (let offset = 0; offset < plaintext.length; offset += parseChunkBytes) {
+        scanner.write(plaintext.subarray(offset, Math.min(offset + parseChunkBytes, plaintext.length)))
+        if (offset + parseChunkBytes < plaintext.length) await scheduler.yield()
+      }
+    }
     const complete = scanner.finish()
     return {
       meta: complete.meta,

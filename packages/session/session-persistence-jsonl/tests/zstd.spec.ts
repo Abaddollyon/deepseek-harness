@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks'
 import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { logPath, scanLog, sessionDir, toHeaderLine, type JsonlCompression } from '../src/format.ts'
+import { eventLines, logPath, scanLog, sessionDir, toHeaderLine, type JsonlCompression } from '../src/format.ts'
 import {
   compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
   type ZstdFrameDecoder,
@@ -749,13 +749,21 @@ describe('opt-in cold history benchmark', () => {
     const timer = setInterval(() => ticks.push(performance.now()), 5)
     const began = performance.now()
     const tail = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(total - 100))
-    const elapsed = performance.now() - began
+    const ended = performance.now()
     clearInterval(timer)
+    const coldMs = ended - began
+    const checkpoints = [began, ...ticks, ended]
+    const maxStallMs = Math.max(...checkpoints.slice(1).map((time, index) => time - (checkpoints[index] as number)))
+    const warmBegan = performance.now()
+    const warm = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(total - 100))
+    const warmMs = performance.now() - warmBegan
     const whole = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0))
     expect(tail.events).toEqual(whole.events.slice(-100))
+    expect(warm.events).toEqual(tail.events)
     expect(Buffer.byteLength(JSON.stringify(whole.events))).toBeGreaterThan(30_000_000)
-    expect(elapsed).toBeLessThan(250)
-    expect(ticks.length === 0 ? elapsed : Math.max(...ticks) - began).toBeLessThan(250)
+    console.info('cold-history benchmark cold=' + coldMs.toFixed(1) + 'ms warm=' + warmMs.toFixed(1) + 'ms max-stall=' + maxStallMs.toFixed(1) + 'ms')
+    expect(coldMs).toBeLessThan(250)
+    expect(maxStallMs).toBeLessThan(50)
   })
 })
 
@@ -807,6 +815,40 @@ describe('JsonlSessionPersistence: encoding selection', () => {
     expect(suffix.events[0]?.seq).toBe(3)
   })
 
+  it('reads an indexed frame whose first packed row uses seq0', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('indexed-packed-seq0')
+    const chunks = [
+      { type: 'assistant/chunk', seq: SessionSeq(0), time: 1, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } } },
+      { type: 'assistant/chunk', seq: SessionSeq(1), time: 2, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'b' } } },
+      { type: 'assistant/chunk', seq: SessionSeq(2), time: 3, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'c' } } },
+    ] as SessionEvent[]
+    const first = chunks[0]
+    if (first === undefined) throw new Error('chunk fixture is empty')
+    await mkdir(sessionDir(root, header.cwd, header.id), { recursive: true })
+    await writeFile(logPath(root, header.cwd, header.id, 'zstd'), Buffer.concat([
+      await compressZstdFrame(JSON.stringify(toHeaderLine(header)) + '\n'),
+      await compressZstdFrame(eventLines(chunks, true) + '\n'),
+    ]))
+    await expect(ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(first.seq)))
+      .resolves.toMatchObject({ events: chunks })
+  })
+
+  it('parses a large indexed frame in cooperative chunks', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('cooperative-indexed-frame')
+    const payload = deterministicNoise(300_000)
+    const events = [0, 1].map(seq => ({
+      type: 'turn/start', seq: SessionSeq(seq), time: seq + 1, data: { turn: seq + 1, payload },
+    })) as SessionEvent[]
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, events)
+    await expect(ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0)))
+      .resolves.toMatchObject({ events })
+  })
+
   it('handles a header-only single-frame artifact', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
@@ -814,6 +856,43 @@ describe('JsonlSessionPersistence: encoding selection', () => {
     await mkdir(sessionDir(root, header.cwd, header.id), { recursive: true })
     await writeFile(logPath(root, header.cwd, header.id, 'zstd'), await compressZstdFrame(JSON.stringify(toHeaderLine(header)) + '\n'))
     expect((await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0))).events).toEqual([])
+  })
+
+  it.each([
+    ['empty', '', /empty event frame/],
+    ['invalid-json', '{', /invalid JSON/],
+    ['non-object', 'null\n', /non-object record/],
+    ['invalid-sequence', '{"seq":-1}\n', /valid sequence/],
+  ] as const)('rejects a %s indexed event frame', async (suffix, plaintext, expected) => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('invalid-frame-' + suffix)
+    await mkdir(sessionDir(root, header.cwd, header.id), { recursive: true })
+    await writeFile(logPath(root, header.cwd, header.id, 'zstd'), Buffer.concat([
+      await compressZstdFrame(JSON.stringify(toHeaderLine(header)) + '\n'),
+      await compressZstdFrame(plaintext),
+    ]))
+    await expect(ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0))).rejects.toThrow(expected)
+  })
+
+  it('covers absent, empty, and out-of-range indexed suffixes', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const backend = ctx.sessionPersistence as JsonlSessionPersistence
+    await expect(backend.loadStoredFrom(SessionId('absent-suffix'), SessionLogOffset(0))).resolves.toBeUndefined()
+
+    const empty = meta('empty-suffix-file')
+    await mkdir(sessionDir(root, empty.cwd, empty.id), { recursive: true })
+    await writeFile(logPath(root, empty.cwd, empty.id, 'zstd'), Buffer.alloc(0))
+    await expect(backend.loadStoredFrom(empty.id, SessionLogOffset(0))).rejects.toThrow(/no complete frames/)
+
+    const outside = meta('outside-frame-index')
+    await mkdir(sessionDir(root, outside.cwd, outside.id), { recursive: true })
+    await writeFile(logPath(root, outside.cwd, outside.id, 'zstd'), Buffer.concat([
+      await compressZstdFrame(JSON.stringify(toHeaderLine(outside)) + '\n'),
+      await compressZstdFrame(JSON.stringify({ ...oneTurnLog()[0], seq: 3 }) + '\n'),
+    ]))
+    await expect(backend.loadStoredFrom(outside.id, SessionLogOffset(0))).rejects.toThrow(/outside the stored frame index/)
   })
 
   it('reports a clear error for a truncated tail frame', async () => {

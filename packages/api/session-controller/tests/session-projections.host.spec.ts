@@ -18,8 +18,9 @@ import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import SessionProjectionCache, { projectionCacheDomainSpec } from '@deepseek-ai/dsh-session-projection-cache'
@@ -540,6 +541,72 @@ describe('session.list projections column', () => {
     const row = response.value.items.find(item => item.sessionId === coldId)
     expect(row).toBeDefined()
     expect(row !== undefined && 'projections' in row).toBe(false)
+  })
+
+  it('matches the real JSONL cold-tail follow page to a full-restore follow page', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-api-cold-tail-oracle-'))
+    const coldCtx = new Context()
+    const fullCtx = new Context()
+    try {
+      await coldCtx.plugin(Storage)
+      await coldCtx.plugin(StorageJson, { root })
+      await coldCtx.plugin(StorageDomain, { backend: 'json' })
+      await coldCtx.plugin(SessionStore)
+      await coldCtx.plugin(AgentRegistry)
+      await coldCtx.plugin(JsonlSessionPersistence, { root })
+      await coldCtx.plugin(SessionProjectionRegistry)
+      coldCtx.sessionProjections.register(lastUserUnit())
+      await coldCtx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+      const coldRemote = remote(coldCtx)
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      const id = SessionId('session-cold-tail-oracle')
+      let session: Session | undefined
+      const owner = await coldCtx.plugin(Object.assign((sessionCtx: Context) => {
+        session = sessionCtx.sessions.create(id, { meta: { createdAt: 5, cwd: '/workspace' } })
+      }, { inject: ['sessions'] }))
+      if (session === undefined) throw new Error('session was not created')
+      seedMessages(session, 2)
+      await coldCtx.sessionProjectionCache.write(session)
+      await owner.dispose()
+      expect(coldCtx.sessions.get(id)).toBeUndefined()
+
+      const suffix = [2, 3].map(seq => ({
+        type: 'user/message',
+        seq: SessionSeq(seq),
+        time: seq + 10,
+        data: createUserMessage({
+          content: [{ type: 'text', text: `m${seq}` }],
+          source: { kind: 'user' },
+        }),
+        surfaceOp: 'append',
+      })) as SessionEvent[]
+      await coldCtx.sessionPersistence.append(id, suffix)
+
+      await fullCtx.plugin(SessionStore)
+      await fullCtx.plugin(AgentRegistry)
+      await fullCtx.plugin(JsonlSessionPersistence, { root })
+      await fullCtx.plugin(SessionProjectionRegistry)
+      fullCtx.sessionProjections.register(lastUserUnit())
+      const fullRemote = remote(fullCtx)
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      const full = await opening(fullRemote, id, 2)
+      const readFrom = vi.spyOn(coldCtx.sessionPersistence, 'readFrom')
+      const cold = await opening(coldRemote, id, 2)
+
+      // Projection restore floors are inclusive so the checkpoint watermark is replayed once.
+      expect(readFrom).toHaveBeenCalledWith(id, SessionLogOffset(1), expect.any(AbortSignal))
+      expect(cold).toEqual(full)
+      expect(cold.records.map(record => record.event.seq)).toEqual([2, 3])
+      expect(cold.cursor).toBe(3)
+      expect(cold.hasMore).toBe(true)
+      expect(cold.projections.asOfSeq).toBe(3)
+      expect(cold.projections.values['test/last-user']).toEqual({ text: 'm3' })
+    } finally {
+      await Promise.all([coldCtx.fiber.dispose(), fullCtx.fiber.dispose()])
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('a throwing column read degrades that row, never the listing', async () => {
