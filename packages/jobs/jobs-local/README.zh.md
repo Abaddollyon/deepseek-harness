@@ -45,7 +45,7 @@ kind: "package-reference"
 | `persist` | `false` | 将记录镜像到已挂载的 `ctx.jobStore`，并启用有确认的持久启动。 |
 | `maxSettledJobs` | `100` | 每个所有者保留的已报告终态记录；未报告记录不会因容量压力被逐出。 |
 | `teardownGraceMs` | `10000` | teardown 中等待生产方释放以及最终持久镜像落位的界限。 |
-| `maxPersistedOutputBytes` | `65536` | 存入持久记录的输出 UTF-8 字节上限。 |
+| `maxPersistedOutputBytes` | `65536` | 持久输出的 UTF-8 字节预算；工作流结构化 JSON 标记会保留 `originalChars` 与 `spillPath`，只缩短 `preview`（必要元数据可能超过极小预算）。原始流生产者保留既有尾部截断语义，其流级截断元数据仍对调用者可见。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
 

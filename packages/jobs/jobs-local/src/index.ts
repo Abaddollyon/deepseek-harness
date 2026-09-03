@@ -823,8 +823,36 @@ export class LocalJobRegistry extends JobRegistry {
     }
   }
 
-  /** Bound persisted final output to `maxPersistedOutputBytes` (tail retention). */
+  /** Bound persisted final output while retaining a workflow spill marker intact. */
   private clipPersistedOutput(output: string): string {
+    if (Buffer.byteLength(output, 'utf8') <= this.maxPersistedOutputBytes) return output
+    const markerPrefix = 'Return value:\n'
+    const markerAt = output.lastIndexOf(markerPrefix)
+    if (markerAt >= 0) {
+      try {
+        const envelope = output.slice(0, markerAt + markerPrefix.length)
+        const parsed: unknown = JSON.parse(output.slice(markerAt + markerPrefix.length))
+        if (typeof parsed === 'object' && parsed !== null
+          && (parsed as { truncated?: unknown }).truncated === true
+          && typeof (parsed as { originalChars?: unknown }).originalChars === 'number'
+          && typeof (parsed as { spillPath?: unknown }).spillPath === 'string'
+          && typeof (parsed as { preview?: unknown }).preview === 'string') {
+          const marker = parsed as { truncated: true; originalChars: number; spillPath: string; preview: string }
+          const withoutPreview = `${envelope}${JSON.stringify({ ...marker, preview: '' }, null, 2)}`
+          let previewBudget = Math.max(0, this.maxPersistedOutputBytes - Buffer.byteLength(withoutPreview, 'utf8'))
+          while (true) {
+            const preview = new TextRetainer({ kind: 'head', maxBytes: previewBudget })
+            preview.push(marker.preview)
+            const candidate = `${envelope}${JSON.stringify({ ...marker, preview: preview.finish().text }, null, 2)}`
+            const excess = Buffer.byteLength(candidate, 'utf8') - this.maxPersistedOutputBytes
+            if (excess <= 0 || previewBudget === 0) return candidate
+            previewBudget = Math.max(0, previewBudget - excess)
+          }
+        }
+      } catch {
+        // A producer-owned non-JSON suffix is ordinary text and uses tail retention below.
+      }
+    }
     const retainer = new TextRetainer({ kind: 'tail', maxBytes: this.maxPersistedOutputBytes })
     retainer.push(output)
     return retainer.finish().text

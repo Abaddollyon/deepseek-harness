@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -19,6 +21,12 @@ import { JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import * as toolWorkflow from '../src/index.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import LocalSpillStore from '@deepseek-ai/dsh-spill-local'
+
+const spillBase = join(process.env.HOME ?? '.', '.cache/rebaseline/b14')
+mkdirSync(spillBase, { recursive: true })
+const spillRoot = mkdtempSync(join(spillBase, 'dsh-tool-workflow-spec-'))
+afterAll(() => { rmSync(spillRoot, { recursive: true, force: true }) })
 
 const testToolSignal = new AbortController().signal
 
@@ -96,14 +104,15 @@ class UnboundedStubEngine extends StubEngine {
   override readonly maxRunWallMs = 0
 }
 
-async function setup(config?: toolWorkflow.Config) {
+async function setup(config?: toolWorkflow.Config, withSpill = true) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(StubEngine)
+  if (withSpill) await ctx.plugin(LocalSpillStore, { root: spillRoot, cleanupPeriodDays: 0 })
+  const records = new Map<string, { id: JobId; output?: string | null }>()
   if (config?.ownership === 'supervisor') {
     await ctx.plugin(AgentRegistry)
-    const records = new Map<string, { id: JobId }>()
     ctx.provide('jobStore', {
       incarnation: PROCESS_INCARNATION,
       list: () => [...records.values()],
@@ -122,7 +131,7 @@ async function setup(config?: toolWorkflow.Config) {
     ...config?.ownership === 'supervisor' ? { ctx, status: 'idle' as const } : {},
   } as unknown as Agent
   if (config?.ownership === 'supervisor') ctx.agents.register(parent)
-  return { ctx, engine, parent, session }
+  return { ctx, engine, parent, session, records }
 }
 
 function supervisedValue(result: ToolExecutionResult): { runId: WorkflowRunIdType; jobId: JobId; status: 'running' } {
@@ -178,6 +187,7 @@ describe('dsh-tool-workflow', () => {
     const { ctx } = await setup({ ownership: 'supervisor' })
     const description = ctx.tools.get('workflow')?.description
     expect(description).toContain('supervised background job')
+    expect(description).toContain('{ truncated: true, originalChars, spillPath, preview }')
     expect(description).not.toContain('returns when the whole script finishes')
   })
 
@@ -240,6 +250,29 @@ describe('dsh-tool-workflow', () => {
     expect(session.snapshotEvents().at(-1)).toMatchObject({
       type: 'tool-workflow/run-end', data: { runId, stopReason: 'completed' },
     })
+  })
+
+  it('persists a supervised oversized result as a marker with a readable spill reference', async () => {
+    const { ctx, engine, parent, records } = await setup({ ownership: 'supervisor' })
+    const value = { blob: 'z'.repeat(60_000) }
+    const fullJson = JSON.stringify(value, null, 2)
+    const started = await execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    const { runId, jobId } = supervisedValue(started)
+    engine.settleRun(runId, { value, stopReason: 'completed', agentsStarted: 0 })
+    await ctx.jobs.wait(jobId, 1000, parent)
+    await vi.waitFor(() => { expect(records.get(jobId)?.output).toContain('\"truncated\": true') })
+    const persisted = records.get(jobId)?.output ?? ''
+    const marker = JSON.parse(persisted.split('Return value:\n')[1]!) as {
+      truncated: true
+      originalChars: number
+      spillPath: string
+      preview: string
+    }
+    expect(typeof marker.spillPath).toBe('string')
+    expect({ ...marker, spillPath: '<spill>' }).toEqual({
+      truncated: true, originalChars: fullJson.length, spillPath: '<spill>', preview: fullJson.slice(0, 50_000),
+    })
+    expect(readFileSync(marker.spillPath, 'utf8')).toBe(fullJson)
   })
 
   it('routes a workflow job kill through run.cancel and closes after disposal', async () => {
@@ -605,17 +638,33 @@ describe('dsh-tool-workflow', () => {
     expect(engine.disposed).toBe(0)
   })
 
-  it('truncates an oversized rendered value with a notice (maxResultChars)', async () => {
-    const { ctx, engine, parent } = await setup({ maxResultChars: 40 })
+  it('spills an over-50,000-character structured return and reports exact recovery metadata', async () => {
+    const { ctx, engine, parent } = await setup()
+    const value = { items: Array.from({ length: 22 }, (_, index) => ({ index, text: 'x'.repeat(2_500) })) }
+    const fullJson = JSON.stringify(value, null, 2)
+    expect(fullJson.length).toBeGreaterThan(50_000)
     const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
     await vi.waitFor(() => { expect(engine.requests.length).toBe(1) })
-    engine.settle({ value: { blob: 'x'.repeat(500) }, stopReason: 'completed', agentsStarted: 1 })
+    engine.settle({ value, stopReason: 'completed', agentsStarted: 1 })
     const result = await pending
     if (result.isError) throw new Error('expected workflow success')
-    expect(result.value).toEqual({ runId: 'run-1', agentsStarted: 1, result: { blob: 'x'.repeat(500) } })
-    const rendered = (result.content[0] as { text: string }).text
-    expect(rendered).toContain('[truncated:')
-    expect(rendered.length).toBeLessThan(400)
+    const projected = (result.value as { result: { truncated: true; originalChars: number; spillPath: string; preview: string } }).result
+    expect(typeof projected.spillPath).toBe('string')
+    expect({ ...projected, spillPath: '<spill>' }).toEqual({
+      truncated: true, originalChars: fullJson.length, spillPath: '<spill>', preview: fullJson.slice(0, 50_000),
+    })
+    expect(readFileSync(projected.spillPath, 'utf8')).toBe(fullJson)
+    expect(JSON.parse((result.content[0] as { text: string }).text.split('Return value:\n')[1]!)).toEqual(projected)
+  })
+
+  it('fails explicitly rather than clipping when an oversized result has no spill backend', async () => {
+    const { ctx, engine, parent } = await setup({ maxResultChars: 10 }, false)
+    const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    await vi.waitFor(() => { expect(engine.requests.length).toBe(1) })
+    engine.settle({ value: { blob: 'long result' }, stopReason: 'completed', agentsStarted: 0 })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect((result.content[0] as { text: string }).text).toContain('no ctx.spillStore backend is mounted')
   })
 
   it('registers under a configured toolName and unregisters on fiber dispose (HMR safety)', async () => {

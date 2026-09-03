@@ -2122,7 +2122,7 @@ Script-body hooks:
 
 Misused hooks (bad arguments, unknown options, unsupported schemas, tripped caps) throw errors that ALWAYS kill the script — they never dissolve into a per-item `null`.
 
-Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The run executes in the foreground: this call returns when the whole script finishes.
+Constraints: concurrency and total-agent caps apply; no filesystem, network, timers, or Node.js APIs are provided — the agents do the work, the script only coordinates them. The cap applies to the serialized return value only. When it exceeds `maxResultChars`, the result is `{ truncated: true, originalChars, spillPath, preview }`; the explicit marker envelope may exceed `maxResultChars`, and the full value is readable at `spillPath`. The run executes in the foreground: this call returns when the whole script finishes.
 
 ```json
 {
