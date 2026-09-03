@@ -1,0 +1,90 @@
+- banner:
+  - navigation "Session hierarchy":
+    - button "Use web_search once with queries" [disabled]
+  - img
+  - text: Standard mode
+  - button "Session log":
+    - text: Session log
+    - img
+  - tablist:
+    - tab "Chat" [selected]
+    - tab "Trajectory"
+- button "System prompt":
+  - img
+  - img
+  - text: System prompt
+- text: Use web_search once with queries ["DeepSeek Harness snapshot search","DeepSeek Harness multi-query search"]. Then reply exactly SEARCH_DONE and stop. {{clock}}
+- button "Copy":
+  - img
+- button "1 tool call":
+  - text: 1 tool call
+  - img
+- button "Context injection @deepseek-ai/dsh-system-prompt":
+  - img
+  - img
+  - text: Context injection @deepseek-ai/dsh-system-prompt
+- button "Search DeepSeek Harness snapshot search, DeepSeek Harness multi-query search" [expanded]:
+  - img
+  - text: Search DeepSeek Harness snapshot search, DeepSeek Harness multi-query search
+- heading "DeepSeek Harness snapshot search" [level=3]
+- paragraph: Offline Codex answer for DeepSeek Harness snapshot search.
+- heading "DeepSeek Harness multi-query search" [level=3]
+- paragraph: Offline Codex answer for DeepSeek Harness multi-query search.
+- list:
+  - listitem:
+    - link "Subscription result 1":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20snapshot%20search/1
+    - text: Offline subscription replay source 1 for DeepSeek Harness snapshot search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 1":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20multi-query%20search/1
+    - text: Offline subscription replay source 1 for DeepSeek Harness multi-query search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 2":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20snapshot%20search/2
+    - text: Offline subscription replay source 2 for DeepSeek Harness snapshot search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 2":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20multi-query%20search/2
+    - text: Offline subscription replay source 2 for DeepSeek Harness multi-query search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 3":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20snapshot%20search/3
+    - text: Offline subscription replay source 3 for DeepSeek Harness snapshot search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 3":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20multi-query%20search/3
+    - text: Offline subscription replay source 3 for DeepSeek Harness multi-query search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 4":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20snapshot%20search/4
+    - text: Offline subscription replay source 4 for DeepSeek Harness snapshot search. {{timestamp}}
+  - listitem:
+    - link "Subscription result 4":
+      - /url: https://subscription.example.test/DeepSeek%20Harness%20multi-query%20search/4
+    - text: Offline subscription replay source 4 for DeepSeek Harness multi-query search. {{timestamp}}
+- text: Source list truncated
+- button "Inspect"
+- paragraph: SEARCH_DONE
+- button "Copy":
+  - img
+- button "Good response":
+  - img
+- button "Bad response":
+  - img
+- button "Branch into a new conversation":
+  - img
+- button "Ran for {{duration}}":
+  - img
+  - text: Ran for {{duration}}
+- text: {{clock}}
+- textbox "Message or run a task... / commands, @ files or sessions"
+- button "Commands":
+  - img
+- 'button "Access mode, current: Workspace Write"': Workspace Write
+- button "Select model, current DeepSeek-V4-Flash":
+  - text: DeepSeek-V4-Flash
+  - img
+- button "0% of context used"
+- button "Send message" [disabled]
+- text: 1 turns · 2 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 0% Input 22 tok · Output 7 tok

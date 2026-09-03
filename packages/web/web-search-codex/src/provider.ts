@@ -15,7 +15,7 @@ import type {
   WebSearchResult,
   WebSearchSource,
 } from '@deepseek-ai/dsh-web'
-import { CodexProtocolError, CodexSearchWire } from './wire.ts'
+import { CodexAuthError, CodexProtocolError, CodexSearchWire } from './wire.ts'
 
 /** Stable web-provider id. */
 export const CODEX_PROVIDER_ID = 'codex'
@@ -216,17 +216,17 @@ export class CodexSearchProvider implements WebSearchProvider {
         throw timeoutError(this.options.requestTimeoutMs, diagnostic)
       }
       if (controller.signal.aborted) throw abortedError(diagnostic)
-      if (error instanceof CodexProtocolError) {
-        throw new WebError(
-          'Codex returned invalid web search protocol data',
-          WEB_PROVIDER_PROTOCOL,
-          { cause: diagnostic },
-        )
-      }
       if (isAuthEvidence(error)) {
         throw new WebError(
           CODEX_AUTH_MESSAGE,
           'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
+          { cause: diagnostic },
+        )
+      }
+      if (error instanceof CodexProtocolError) {
+        throw new WebError(
+          'Codex returned invalid web search protocol data',
+          WEB_PROVIDER_PROTOCOL,
           { cause: diagnostic },
         )
       }
@@ -300,6 +300,7 @@ async function raceChild<T>(pending: Promise<T>, child: SubprocessHandle): Promi
 }
 
 function isAuthEvidence(error: unknown): boolean {
+  if (error instanceof CodexAuthError) return true
   if (!(error instanceof CodexProcessError)) return false
   if (error.outcome.exitCode === 0) return false
   return /(?:login required|authentication required|not authenticated|run codex login)/iu.test(error.diagnostic)

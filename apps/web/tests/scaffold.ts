@@ -327,6 +327,18 @@ export interface LaunchOptions {
     apiKeyEnv: string
   }
   /**
+   * Select and install one test-owned search provider after the shipped tree
+   * settles. Subscription-provider browser tests use this seam to drive the
+   * real provider classes with package-owned offline replay transports without
+   * adding either optional provider to the product bundle.
+   */
+  subscriptionSearch?: {
+    /** Provider id written to the real `web` profile row. */
+    id: 'codex' | 'claude-code'
+    /** Install the real provider against a deterministic test transport. */
+    install(ctx: Context, workspaceCwd: string): Promise<void> | void
+  }
+  /**
    * Replace the roster row the scaffold pins by default (no configured roots,
    * default `standard` — the plugin's own shipped presets). Supply this only
    * to change WHICH presets a scenario sees beyond the shipped set — a
@@ -475,6 +487,9 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
       },
     },
     { id: 'session-persistence-jsonl', config: { root: persistenceRoot } },
+    ...options.subscriptionSearch === undefined
+      ? []
+      : [{ id: 'web', config: { searchProvider: options.subscriptionSearch.id, fetchProvider: 'http' } }],
     // Content search is enabled here although the shipped bundles default it
     // off (`openAt: never`, pinned by apps/cli/tests/lazy-search-startup):
     // the seeded-session scenarios navigate by content search, and these e2e
@@ -647,6 +662,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     })
     await ctx.loader.await()
     assertEntriesLoaded(ctx, 'web e2e scaffold')
+    await options.subscriptionSearch?.install(ctx, workspaceCwd)
     if (options.welcomeNoticePending !== true) {
       await ctx.settings.mutate(WELCOME_NOTICE_SETTINGS_NAMESPACE, [{
         op: 'set', path: [WELCOME_NOTICE_ACK_FIELD], value: WELCOME_NOTICE_VERSION,

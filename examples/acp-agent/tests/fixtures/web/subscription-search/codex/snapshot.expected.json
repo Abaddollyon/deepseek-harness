@@ -1,0 +1,32 @@
+{
+  "provider": "codex",
+  "result": {
+    "sources": [
+      {
+        "url": "https://subscription.example.test/subscription%20fixture%20query/1",
+        "title": "Subscription result 1",
+        "snippet": "Offline subscription replay source 1 for subscription fixture query.",
+        "publishedAt": "2001-01-01T00:00:00Z"
+      },
+      {
+        "url": "https://subscription.example.test/subscription%20fixture%20query/2",
+        "title": "Subscription result 2",
+        "snippet": "Offline subscription replay source 2 for subscription fixture query.",
+        "publishedAt": "2001-01-02T00:00:00Z"
+      },
+      {
+        "url": "https://subscription.example.test/subscription%20fixture%20query/3",
+        "title": "Subscription result 3",
+        "snippet": "Offline subscription replay source 3 for subscription fixture query.",
+        "publishedAt": "2001-01-03T00:00:00Z"
+      }
+    ],
+    "truncated": true,
+    "content": "Offline Codex answer for subscription fixture query."
+  },
+  "process": {
+    "active": 0,
+    "spawned": 1,
+    "settled": 1
+  }
+}
