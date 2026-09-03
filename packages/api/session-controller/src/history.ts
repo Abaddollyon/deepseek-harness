@@ -68,7 +68,7 @@ export class SessionHistoryController {
     const beforeSeq = request.beforeSeq === undefined
       ? undefined
       : SessionLogOffset(request.beforeSeq)
-    using source = await this.sourceFor(request.address, signal, false)
+    using source = await this.sourceFor(request.address, signal, false, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
     signal.throwIfAborted()
     const sourceLog = source.events
     const sourceCursor: SessionSeqCursor = sourceLog.at(-1)?.seq ?? -1
@@ -141,7 +141,7 @@ export class SessionHistoryController {
     const onAbort = (): void => { notify() }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      using source = await this.sourceFor(address, signal, true)
+      using source = await this.sourceFor(address, signal, true, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
       const events = source.events
       signal.throwIfAborted()
       const cursor = source.cursor
@@ -157,7 +157,7 @@ export class SessionHistoryController {
           ? { asOfSeq: cursor, values: {} }
           : projectionBlock(source.projections),
       }
-      if (address.kind === 'session' && source.source === 'prepared') {
+      if (address.kind === 'session' && (source.source === 'prepared' || source.source === 'cold')) {
         const promotion = source.retain()
         try {
           this.promote(promotion)
@@ -193,13 +193,14 @@ export class SessionHistoryController {
     address: SessionAddress,
     signal: AbortSignal,
     withProjections: boolean,
+    maxMessages: number,
   ): Promise<SessionObservation> {
     const sessionId = addressId(address)
     try {
       const observation = await this.ctx.sessionQuery.observeSession(sessionId, {
         signal,
         projectionMode: withProjections || address.kind === 'subagent' ? 'all' : 'none',
-        ...withProjections && address.kind === 'session' ? { historyTail: true } : {},
+        ...withProjections && address.kind === 'session' ? { historyTail: true, maxMessages } : {},
       })
       if (observation.header.cwd === undefined) {
         observation[Symbol.dispose]()

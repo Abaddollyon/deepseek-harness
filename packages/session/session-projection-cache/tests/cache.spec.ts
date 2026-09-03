@@ -629,3 +629,96 @@ describe('SessionProjectionCache cold-read seeding', () => {
     }, { timeout: 5_000 })
   })
 })
+describe('SessionProjectionCache cold write-back', () => {
+  const rows = (seq: number, value: string[]): CheckpointRecord['rows'] => ({
+    'cache-test/marks': { ver: 1, seq: SessionSeq(seq), val: { marks: value } },
+  })
+
+  it('creates the record when no row exists for the lifecycle', async () => {
+    const { cache, root } = await harness()
+    const meta = headerOf(SessionId('writeback-create'), 0)
+
+    await cache.writeBack(meta, SessionLogOffset(0), rows(4, ['cold']), {})
+
+    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['cold']))
+  })
+
+  it('replaces the exact cut it restored from, healing a row that claimed the future', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    // A row claiming seq 999 over a log that ends at 4: unusable, and only a
+    // full refold can discard it. The refold's write-back must land.
+    await seedRecord(root, 'writeback-heal', rows(999, ['future']))
+    const { cache } = await harness({ root })
+    const meta = headerOf(SessionId('writeback-heal'), 0)
+
+    await cache.writeBack(meta, SessionLogOffset(0), rows(4, ['healed']), rows(999, ['future']))
+
+    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['healed']))
+  })
+
+  it('never regresses a checkpoint written while the cold read was in flight', async () => {
+    const { cache, ctx, root } = await harness()
+    let session: Session | undefined
+    const owner = await ctx.plugin(Object.assign((inner: Context) => {
+      session = inner.sessions.create(SessionId('writeback-race'))
+    }, { inject: ['sessions'] }))
+    if (session === undefined) throw new Error('session was not created')
+    // The cold read observed no record at all, then a Session attached and
+    // checkpointed a strictly fresher cut before the cold write-back landed.
+    const observed = {}
+    mark(session, ['live'])
+    await cache.write(session)
+    const fresh = await storedRows(root, session.id)
+    expect(fresh?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
+
+    await cache.writeBack(session.header, SessionLogOffset(0), rows(0, ['stale']), observed)
+
+    expect(await storedRows(root, session.id)).toEqual(fresh)
+    await owner.dispose()
+  })
+
+  it('admits only the first of two concurrent write-backs for one session', async () => {
+    const { cache, root } = await harness()
+    const meta = headerOf(SessionId('writeback-concurrent'), 0)
+
+    await Promise.all([
+      cache.writeBack(meta, SessionLogOffset(0), rows(4, ['first']), {}),
+      cache.writeBack(meta, SessionLogOffset(0), rows(4, ['second']), {}),
+    ])
+
+    // Both restored from the empty cut; serialization makes the second observe
+    // the first's record and stand down instead of interleaving read and write.
+    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['first']))
+  })
+
+  it('replaces a record bound to a different lifecycle under the same id', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'writeback-relifecycle', rows(7, ['old']), {
+      createdAt: 1, isSeeded: false, inheritedEventCount: SessionLogOffset(0),
+    })
+    const { cache } = await harness({ root })
+    const meta = headerOf(SessionId('writeback-relifecycle'), 2)
+
+    await cache.writeBack(meta, SessionLogOffset(0), rows(1, ['new']), {})
+
+    expect(await storedRecord(root, meta.id)).toEqual({
+      identity: { createdAt: 2, isSeeded: false, inheritedEventCount: SessionLogOffset(0) },
+      rows: rows(1, ['new']),
+    })
+  })
+
+  it('is fail-soft when the checkpoint identity itself is impossible', async () => {
+    const { cache, ctx, root } = await harness()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const meta = headerOf(SessionId('writeback-bad-identity'), 0)
+
+    // An unseeded lifecycle cannot inherit events; identityOf refuses it and
+    // the write-back must log rather than throw into the cold read.
+    await expect(cache.writeBack(meta, SessionLogOffset(3), rows(1, ['x']), {})).resolves.toBeUndefined()
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "writeback-bad-identity" failed'))
+    expect(await storedRows(root, meta.id)).toBeUndefined()
+  })
+})

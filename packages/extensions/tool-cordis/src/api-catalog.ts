@@ -1592,6 +1592,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'signal', description: 'optional cancellation for backend snapshot-listing work.' }],
         returns: 'one header and opaque revision per materialized session without loading full logs.',
       },
+      {
+        signature: 'async snapshot(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceSnapshot | undefined>',
+        description: 'One materialized session\'s header and change token, without a full-log parse. Consistent with listSnapshots: a quiescent log answers here exactly as it does there, and the header and revision describe one file state.\n\nThe default implementation is a COMPATIBILITY shim that scans listSnapshots, so an unoverridden backend still costs a corpus listing per lookup and inherits that listing\'s failure modes (one corrupt unrelated artifact fails every lookup). Backends that can resolve a single id directly — the shipped JSONL backend does — override it so callers on the detached-history path pay a single header read.',
+        parameters: [{ name: 'id', description: 'the persisted session to look up.' }, { name: 'signal', description: 'optional cancellation for backend lookup work.' }],
+        returns: 'the header and opaque revision, or `undefined` when nothing is stored.',
+      },
     ],
   },
   {
@@ -1628,6 +1634,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Cold-read one session\'s projections from its complete log. Each unit is seeded from the identity-checked cached rows — the registry skips `apply` for the already-folded prefix (events at or below the row\'s `seq`) — and the refreshed checkpoint is written back (fail-soft, fire-and-forget), so the first cold read creates the cache row and later ones seed from it. The caller supplies the complete log in seq order: this service never consults the persistence layer.',
         parameters: [{ name: 'meta', description: 'the stored session header (identity witness).' }, { name: 'inheritedEventCount', description: 'exact inherited prefix length for projection initialization and identity.' }, { name: 'events', description: 'the session\'s complete log, in seq order.' }],
         returns: 'the projection cut at the log end.',
+      },
+      {
+        signature: 'async writeBack( meta: SessionHeader, inheritedEventCount: SessionLogOffset, checkpoint: ProjectionCheckpoint, restoredFrom: ProjectionCheckpoint, ): Promise<void>',
+        description: 'Persist a cold restore result before its first frame is published, without ever regressing a fresher checkpoint.\n\nCold reads are slow and their result is old the moment the log moves, so the write is a compare-and-set rather than a replacement: it lands only while the stored record is still the exact cut the cold read restored from — or is absent, or belongs to another lifecycle. A checkpoint written by a Session that attached during the read therefore wins, while the stale or future row the cold read itself discarded is healed (that row IS the cut this call restored from). Writes for one session are serialized so concurrent write-backs cannot interleave their read-modify-write. Fail-soft: a lost write only costs a longer tail replay next time.',
+        parameters: [{ name: 'meta', description: 'the stored session header (identity witness).' }, { name: 'inheritedEventCount', description: 'exact inherited prefix length completing the identity.' }, { name: 'checkpoint', description: 'the refreshed rows at the restored cut.' }, { name: 'restoredFrom', description: 'the exact rows this restore was seeded from.' }],
+        returns: 'resolution after the write attempt settles.',
       },
     ],
   },
@@ -5103,7 +5115,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionObservationOptions',
-    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n    readonly historyTail?: boolean;\n}',
+    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n    readonly historyTail?: boolean;\n    readonly maxMessages?: number;\n}',
   },
   {
     name: 'SessionOpenWorkspacePathRequest',

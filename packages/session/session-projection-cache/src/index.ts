@@ -88,6 +88,7 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  private readonly writes = new Map<SessionId, Promise<void>>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
@@ -222,11 +223,11 @@ export class SessionProjectionCache extends Service {
     // already gone; persistence's own retirement drain covers that path and
     // any residual overreach is caught by the cold read's anchored floor.
     if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
-    await this.put(
+    await this.serialize(session.id, () => this.put(
       session.id,
       identityOf(session.header, session.inheritedEventCount),
       rows,
-    )
+    ))
   }
 
   /**
@@ -248,8 +249,9 @@ export class SessionProjectionCache extends Service {
     events: readonly SessionEvent[],
   ): ProjectionSnapshot {
     const identity = identityOf(meta, inheritedEventCount)
+    const seeded = this.recordFor(meta.id, identity)?.rows ?? {}
     const restored = this.ctx.sessionProjections.restore(
-      this.recordFor(meta.id, identity)?.rows ?? {},
+      seeded,
       events,
       SessionLogOffset(0),
       meta,
@@ -257,13 +259,46 @@ export class SessionProjectionCache extends Service {
     )
     // Refresh the row so the next cold read seeds from it; fail-soft and
     // fire-and-forget — a failed write-back only costs a longer tail replay.
-    void this.put(meta.id, identity, restored.checkpoint).catch((error: unknown) => {
-      this.ctx.logger.warn(`session projection cache: cold-read write-back for "${meta.id}" failed (cache stays stale): ${String(error)}`)
-    })
+    void this.writeBack(meta, inheritedEventCount, restored.checkpoint, seeded)
     return restored.snapshot
   }
 
-
+  /**
+   * Persist a cold restore result before its first frame is published, without
+   * ever regressing a fresher checkpoint.
+   *
+   * Cold reads are slow and their result is old the moment the log moves, so
+   * the write is a compare-and-set rather than a replacement: it lands only
+   * while the stored record is still the exact cut the cold read restored from
+   * — or is absent, or belongs to another lifecycle. A checkpoint written by a
+   * Session that attached during the read therefore wins, while the stale or
+   * future row the cold read itself discarded is healed (that row IS the cut
+   * this call restored from). Writes for one session are serialized so
+   * concurrent write-backs cannot interleave their read-modify-write.
+   * Fail-soft: a lost write only costs a longer tail replay next time.
+   * @param meta - the stored session header (identity witness).
+   * @param inheritedEventCount - exact inherited prefix length completing the identity.
+   * @param checkpoint - the refreshed rows at the restored cut.
+   * @param restoredFrom - the exact rows this restore was seeded from.
+   * @returns resolution after the write attempt settles.
+   */
+  async writeBack(
+    meta: SessionHeader,
+    inheritedEventCount: SessionLogOffset,
+    checkpoint: ProjectionCheckpoint,
+    restoredFrom: ProjectionCheckpoint,
+  ): Promise<void> {
+    try {
+      const identity = identityOf(meta, inheritedEventCount)
+      await this.serialize(meta.id, async () => {
+        const stored = this.recordFor(meta.id, identity)?.rows
+        if (stored !== undefined && !sameCut(stored, restoredFrom)) return
+        await this.put(meta.id, identity, checkpoint)
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`session projection cache: cold-read write-back for "${meta.id}" failed (cache stays stale): ${String(error)}`)
+    }
+  }
   // --- write-behind (throttle + mandatory points) ---
 
   private installWritePath(): void {
@@ -343,6 +378,22 @@ export class SessionProjectionCache extends Service {
     }
   }
 
+  /**
+   * Run one session's durable write after every write already admitted for it.
+   * The compare-and-set write-back reads the stored record and writes it back,
+   * which is only atomic while no other write for the same session interleaves.
+   */
+  private async serialize<Value>(id: SessionId, work: () => Promise<Value>): Promise<Value> {
+    const prior = this.writes.get(id) ?? Promise.resolve()
+    const result = prior.then(work, work)
+    const settled = result.then(() => undefined, () => undefined)
+    this.writes.set(id, settled)
+    void settled.then(() => {
+      if (this.writes.get(id) === settled) this.writes.delete(id)
+    })
+    return result
+  }
+
   /** Replace one session's stored record with its log identity and a detached snapshot of `rows`. */
   private async put(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint): Promise<void> {
     const detached = snapshotJsonValue(rows)
@@ -357,6 +408,27 @@ export class SessionProjectionCache extends Service {
     if (this.table === undefined) throw new Error('session projection cache is not initialized')
     return this.table
   }
+}
+
+/**
+ * Whether two checkpoints name the same cut: the same keys, each at the same
+ * state version and watermark. Values are not compared — a row's `(ver, seq)`
+ * already identifies which fold produced it, and the states behind equal
+ * coordinates are equal by construction.
+ */
+function sameCut(
+  stored: Readonly<Record<string, { readonly ver: number; readonly seq: SessionSeqCursor }>>,
+  expected: Readonly<Record<string, { readonly ver: number; readonly seq: SessionSeqCursor }>>,
+): boolean {
+  const storedKeys = Object.keys(stored)
+  if (storedKeys.length !== Object.keys(expected).length) return false
+  for (const key of storedKeys) {
+    const left = stored[key]
+    const right = expected[key]
+    if (right === undefined || left === undefined) return false
+    if (left.ver !== right.ver || left.seq !== right.seq) return false
+  }
+  return true
 }
 
 /** Project a header onto the identity fields a record is bound to. */
