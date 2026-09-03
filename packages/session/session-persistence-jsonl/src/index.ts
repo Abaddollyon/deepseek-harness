@@ -627,6 +627,30 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return snapshots
   }
 
+  /** Point lookup without enumerating unrelated session artifacts. */
+  override async snapshot(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceSnapshot | undefined> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding(signal)
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    try {
+      const first = this.compression === 'zstd'
+        ? await this.readFirstZstdLine(path, signal)
+        : await this.readFirstLine(path, signal)
+      if (first === undefined) return undefined
+      const header = parseHeaderMeta(first)
+      if (header === undefined) return undefined
+      await this.assertStoredIdentity(path, header, id, signal)
+      const identity = await stat(path, { bigint: true })
+      signal?.throwIfAborted()
+      return { header, revision: fileRevision(identity) }
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      if (isENOENT(error)) return undefined
+      throw error
+    }
+  }
+
   private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding(signal)

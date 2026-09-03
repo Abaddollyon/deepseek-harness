@@ -1,7 +1,7 @@
 /** Shared live/prepared observations for Session page and lifecycle consumers. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { isAppendSurfaceEvent, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type {
   Session,
   SessionEvent,
@@ -51,6 +51,8 @@ export interface SessionObservationOptions {
   readonly projectionMode?: 'all' | 'none'
   /** Prefer the keyed projection-cache tail for detached history opening. */
   readonly historyTail?: boolean
+  /** Requested message page size; used to choose a sufficiently wide cold read. */
+  readonly maxMessages?: number
 }
 
 /** Builds point observations without a corpus listing preflight. */
@@ -76,7 +78,7 @@ export class SessionObservationReader {
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
       if (options.historyTail === true && projectionMode === 'all') {
-        const cold = await this.coldTail(sessionId, signal)
+        const cold = await this.coldTail(sessionId, signal, options.maxMessages ?? 50)
         if (cold !== undefined) return cold
       }
 
@@ -166,43 +168,66 @@ export class SessionObservationReader {
     }
   }
 
-  private async coldTail(sessionId: SessionId, signal?: AbortSignal): Promise<SessionObservation | undefined> {
+  private async coldTail(sessionId: SessionId, signal: AbortSignal | undefined, maxMessages: number): Promise<SessionObservation | undefined> {
     const persistence = this.ctx.get('sessionPersistence')
     const registry = this.ctx.get('sessionProjections')
     const cache = this.ctx.get('sessionProjectionCache')
     if (persistence === undefined || registry === undefined || cache === undefined) return undefined
-    if (typeof persistence.listSnapshots !== 'function') return undefined
-    // listSnapshots reads headers and revisions only; unlike borrowSession it never decodes the body.
-    const listed = await persistence.listSnapshots(signal)
-    const found = listed.find(item => item.header.id === sessionId)
+    if (typeof persistence.readFrom !== 'function') return undefined
+    const found = typeof persistence.snapshot === 'function'
+      ? await persistence.snapshot(sessionId, signal)
+      : (typeof persistence.listSnapshots === 'function'
+        ? (await persistence.listSnapshots(signal)).find(item => item.header.id === sessionId)
+        : undefined)
     if (found === undefined || found.header.isSeeded) return undefined
-    const rows = cache.checkpointFor(found.header, SessionLogOffset(0))
-    if (rows === undefined) return undefined
-    const floor = registry.restoreFloor(rows)
-    if (floor === undefined) return undefined
-    const suffix = await persistence.readFrom(sessionId, floor, signal)
-    throwIfObservationAborted(signal)
-    const restored = registry.restore(rows, suffix.events, suffix.fromSeq, suffix.meta, suffix.inheritedEventCount)
-    const events = suffix.events
-    let disposed = false
-    return {
-      source: 'cold',
-      header: suffix.meta,
-      events,
-      inheritedEventCount: suffix.inheritedEventCount,
-      cursor: events.at(-1)?.seq ?? -1,
-      revision: found.revision,
-      projections: restored.snapshot,
-      retain: () => {
-        if (disposed) throw new Error(`session observation "${sessionId}" is disposed`)
-        return this.coldLease(
-          suffix.meta, events, suffix.inheritedEventCount, suffix.events.at(-1)?.seq ?? -1,
-          found.revision, restored.snapshot,
-        )
-      },
-      [Symbol.dispose]: () => { disposed = true },
+    const rows = cache.checkpointFor(found.header, SessionLogOffset(0)) ?? {}
+    const restoreFloor = registry.restoreFloor(rows)
+    if (restoreFloor === undefined) return undefined
+
+    // A projection restore floor is not a history-page floor. Widen the read
+    // until the complete append-surface message group at the page boundary is
+    // present; otherwise paginate() would report a false short page/hasMore.
+    let base = restoreFloor
+    let width = Math.max(8, maxMessages * 4)
+    for (;;) {
+      throwIfObservationAborted(signal)
+      const suffix = await persistence.readFrom(sessionId, base, signal)
+      throwIfObservationAborted(signal)
+      const page = tailPageBoundary(suffix.events, maxMessages)
+      if ((page.complete && page.cut >= base) || base === 0) {
+        let restored: ReturnType<typeof registry.restore>
+        try {
+          restored = registry.restore(rows, suffix.events, suffix.fromSeq, suffix.meta, suffix.inheritedEventCount)
+        } catch (error: unknown) {
+          // Stale/future rows are disposable. A non-zero anchored read cannot
+          // safely discard one, so retry from the complete log.
+          if (base !== 0) { base = SessionLogOffset(0); width = 1; continue }
+          throw error
+        }
+        // Await write-back before publishing the observation. It is fail-soft
+        // but guarantees a successful first-frame-only read heals the cache.
+        if (typeof cache.writeBack === 'function') await cache.writeBack(suffix.meta, suffix.inheritedEventCount, restored.checkpoint)
+        const events = suffix.events
+        let disposed = false
+        return {
+          source: 'cold', header: suffix.meta, events,
+          inheritedEventCount: suffix.inheritedEventCount, cursor: events.at(-1)?.seq ?? -1,
+          revision: found.revision, projections: restored.snapshot,
+          retain: () => {
+            if (disposed) throw new Error(`session observation "${sessionId}" is disposed`)
+            return this.coldLease(suffix.meta, events, suffix.inheritedEventCount, events.at(-1)?.seq ?? -1, found.revision, restored.snapshot)
+          },
+          [Symbol.dispose]: () => { disposed = true },
+        }
+      }
+      if (base === 0) return undefined
+      const next = Math.max(0, Number(base) - width)
+      if (next === base) base = SessionLogOffset(0)
+      else base = SessionLogOffset(next)
+      width = Math.min(Number.MAX_SAFE_INTEGER, width * 2)
     }
   }
+
 
   private coldLease(
     header: SessionHeader,
@@ -259,6 +284,20 @@ export class SessionObservationReader {
       ? registry.hydrate(prepared, {}, events, SessionLogOffset(0))
       : cache.hydratePrepared(prepared, events)
   }
+}
+
+function tailPageBoundary(events: readonly SessionEvent[], maxMessages: number): { complete: boolean; cut: SessionLogOffsetType } {
+  let count = 0
+  let cut = SessionLogOffset(0)
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i] as SessionEvent
+    if (!isAppendSurfaceEvent(event) || (event.type !== 'user/message' && event.type !== 'assistant/message')) continue
+    count++
+    let groupStart = event.seq
+    for (const source of event.sourceEventSeqs ?? []) if (source < groupStart) groupStart = source
+    if (count >= maxMessages) { cut = SessionLogOffset(groupStart); return { complete: true, cut } }
+  }
+  return { complete: false, cut }
 }
 
 function throwIfObservationAborted(signal: AbortSignal | undefined): void {

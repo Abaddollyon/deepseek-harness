@@ -302,6 +302,12 @@ export abstract class SessionPersistence extends Service {
    * @returns one header and opaque revision per materialized session without loading full logs.
    */
   abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
+
+  /** Point lookup; compatibility default scans the lightweight snapshot list. */
+  async snapshot(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceSnapshot | undefined> {
+    signal?.throwIfAborted()
+    return (await this.listSnapshots(signal)).find(item => item.header.id === id)
+  }
 }
 
 export default SessionPersistence

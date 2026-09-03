@@ -514,6 +514,18 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await otherCtx.fiber.dispose()
   })
 
+  it('point snapshot matches listing and changes after append', async () => {
+    const m = meta('point-snapshot')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const point = await ctx.sessionPersistence.snapshot(m.id)
+    const listed = (await ctx.sessionPersistence.listSnapshots()).find(item => item.header.id === m.id)
+    expect(point).toEqual(listed)
+    await ctx.sessionPersistence.append(m.id, [{ type: 'turn/end', seq: SessionSeq(6), time: 8, data: { turn: 2, reason: { kind: 'completed' } } } as SessionEvent])
+    expect((await ctx.sessionPersistence.snapshot(m.id))?.revision).not.toBe(point?.revision)
+    expect(await ctx.sessionPersistence.snapshot(SessionId('point-missing'))).toBeUndefined()
+  })
+
   it('binds a full stored prefix to the same revision as a lightweight read', async () => {
     const m = meta('stored-prefix-revision')
     await ctx.sessionPersistence.create(m)

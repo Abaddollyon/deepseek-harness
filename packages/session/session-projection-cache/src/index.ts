@@ -264,6 +264,19 @@ export class SessionProjectionCache extends Service {
   }
 
 
+
+  /** Persist a cold restore result before publishing its first frame. Fail-soft. */
+  async writeBack(
+    meta: SessionHeader,
+    inheritedEventCount: SessionLogOffset,
+    checkpoint: ProjectionCheckpoint,
+  ): Promise<void> {
+    try {
+      await this.put(meta.id, identityOf(meta, inheritedEventCount), checkpoint)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`session projection cache: cold-read write-back for "${meta.id}" failed (cache stays stale): ${String(error)}`)
+    }
+  }
   // --- write-behind (throttle + mandatory points) ---
 
   private installWritePath(): void {

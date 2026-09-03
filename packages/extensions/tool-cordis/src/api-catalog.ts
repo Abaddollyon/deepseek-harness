@@ -5103,7 +5103,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionObservationOptions',
-    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n    readonly historyTail?: boolean;\n}',
+    declaration: 'export interface SessionObservationOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionMode?: \'all\' | \'none\';\n    readonly historyTail?: boolean;\n    readonly maxMessages?: number;\n}',
   },
   {
     name: 'SessionOpenWorkspacePathRequest',
