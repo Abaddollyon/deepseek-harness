@@ -730,6 +730,35 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
   })
 })
 
+describe('opt-in cold history benchmark', () => {
+  it.runIf(process.env.DSH_SESSION_COLD_PERF === '1')('cold tail benchmark: large multi-frame logs stay bounded', async () => {
+    const root = await freshRoot('dsh-jsonl-cold-perf-')
+    const ctx = await mount(root)
+    const header = meta('cold-perf')
+    await ctx.sessionPersistence.create(header)
+    const payload = deterministicNoise(12_000)
+    const total = 3_000
+    for (let start = 0; start < total; start += 100) {
+      const batch = Array.from({ length: Math.min(100, total - start) }, (_, offset) => ({
+        type: 'turn/start', seq: SessionSeq(start + offset), time: start + offset + 1,
+        data: { turn: start + offset, payload },
+      })) as SessionEvent[]
+      await ctx.sessionPersistence.append(header.id, batch)
+    }
+    const ticks: number[] = []
+    const timer = setInterval(() => ticks.push(performance.now()), 5)
+    const began = performance.now()
+    const tail = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(total - 100))
+    const elapsed = performance.now() - began
+    clearInterval(timer)
+    const whole = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0))
+    expect(tail.events).toEqual(whole.events.slice(-100))
+    expect(Buffer.byteLength(JSON.stringify(whole.events))).toBeGreaterThan(30_000_000)
+    expect(elapsed).toBeLessThan(250)
+    expect(ticks.length === 0 ? elapsed : Math.max(...ticks) - began).toBeLessThan(250)
+  })
+})
+
 describe('JsonlSessionPersistence: encoding selection', () => {
   it('rejects roots owned by the opposite encoding in both directions', async () => {
     const rawRoot = await freshRoot('dsh-jsonl-raw-mismatch-')
