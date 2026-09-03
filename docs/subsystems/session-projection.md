@@ -120,6 +120,13 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.
 
 ```ts cordis-catalog
+/** Return identity-checked rows for a cold reader.
+ * @param meta - stored session header used as lifecycle identity witness.
+ * @param inheritedEventCount - exact inherited prefix in the stored lifecycle.
+ * @returns matching rows, or undefined when no row exists.
+ */
+checkpointFor(meta: SessionHeader, inheritedEventCount: SessionLogOffset): ProjectionCheckpoint | undefined
+
 /**
  * The zero-I/O listing read: whole values viewed straight from the stored
  * rows (version-matching keys only), each cut carried with its watermark so
