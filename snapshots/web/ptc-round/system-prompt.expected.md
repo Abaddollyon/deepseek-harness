@@ -360,6 +360,7 @@ interface ToolOutputMap {
     outcome: "cancellation-requested" | "already-finished";
     job: {
       id: string;
+      ordinal: number;
       kind: string;
       label: string;
       status: "running" | "stopping" | "completed" | "killed" | "failed";
@@ -370,6 +371,7 @@ interface ToolOutputMap {
   };
   job_list: ({
     id: string;
+    ordinal: number;
     kind: string;
     label: string;
     status: "running" | "stopping" | "completed" | "killed" | "failed";
@@ -381,6 +383,7 @@ interface ToolOutputMap {
     text: string;
     job: {
       id: string;
+      ordinal: number;
       kind: string;
       label: string;
       status: "running" | "stopping" | "completed" | "killed" | "failed";

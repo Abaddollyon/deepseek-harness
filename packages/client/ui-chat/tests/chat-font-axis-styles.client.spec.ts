@@ -19,6 +19,16 @@ function declarationsFrom(source: string, selector: string): string[] {
 }
 
 describe('chat flow font-size axis', () => {
+  it('keeps row containment local to ChatView-owned scrollports', () => {
+    const css = read('ChatView.module.css')
+    // The ancestor scroll owner must not receive content-visibility on rows:
+    // skipped geometry breaks hidden-until-found and scroll anchoring.
+    expect(css).toContain('.root:not(:global([data-conversation-scroll] *)) .flowItem {')
+    expect(css).toContain('content-visibility: auto;')
+    expect(css).toContain('contain-intrinsic-size: auto 240px;')
+    expect(css).toContain(':global([data-conversation-scroll]) .scroll {')
+  })
+
   it('think text reads the secondary tier (one step under the body size)', () => {
     const css = read('ReasoningRow.module.css')
     for (const selector of ['.summary', '.thinkBody']) {

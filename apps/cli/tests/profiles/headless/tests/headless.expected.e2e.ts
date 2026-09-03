@@ -624,6 +624,9 @@ describe('headless stream-json snapshots', () => {
       env: {
         DSH_SNAPSHOT: 'replay',
         DSH_SNAPSHOT_FILE: join(goalScenarioDir, 'session.jsonl'),
+        // Preflight admission can issue the session-title request before the
+        // scripted turn. Keep the title response first in replay.override.json
+        // so it cannot consume the goal tool response.
         DSH_SNAPSHOT_OVERRIDE: join(goalScenarioDir, 'replay.override.json'),
         NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
       },
@@ -683,8 +686,9 @@ describe('headless stream-json snapshots', () => {
       binArgs: [settlementConfigPath, task],
       tsconfigPath,
       env: {
-        // The override fully supplies the parent script; the child fixture
-        // remains separate so replay binds it to the fresh child Session.
+        // Preflight admission races the async title request with the parent
+        // turn; parent.override.json therefore starts with the title response.
+        // The child fixture remains separate so replay binds it to fresh child Session.
         DSH_SNAPSHOT_FILE: parentReplay,
         DSH_SNAPSHOT_OVERRIDE: parentOverride,
         DSH_SNAPSHOT_CHILD_FILES: childReplay,
