@@ -23,6 +23,7 @@ import {
   type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
   type SessionStorageMetadata,
   type StoredPrefix,
+  type StoredSuffix,
 } from '@deepseek-ai/dsh-session-persistence'
 import type {
   Session,
@@ -116,6 +117,24 @@ interface FileRevisionIdentity {
   readonly size: bigint
   readonly mtimeNs: bigint
   readonly ctimeNs: bigint
+}
+
+
+/** Find the first logical sequence in one independently encoded event frame. */
+function frameMinSeq(plaintext: Buffer): number {
+  let min = Number.POSITIVE_INFINITY
+  for (const line of plaintext.toString('utf8').split('\n')) {
+    if (line.length === 0) continue
+    let parsed: unknown
+    try { parsed = JSON.parse(line) } catch { throw new Error('corrupt Zstandard session log: event frame contains invalid JSON') }
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('corrupt Zstandard session log: event frame contains a non-object record')
+    const record = parsed as { seq?: unknown; seq0?: unknown }
+    const seq = typeof record.seq === 'number' ? record.seq : record.seq0
+    if (!Number.isSafeInteger(seq) || (seq as number) < 0) throw new Error('corrupt Zstandard session log: event frame lacks a valid sequence')
+    min = Math.min(min, seq as number)
+  }
+  if (!Number.isFinite(min)) throw new Error('corrupt Zstandard session log: empty event frame')
+  return min
 }
 
 /** Build the source-qualified revision shared by full and lightweight reads. */
@@ -284,6 +303,54 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
     return this.readPrefix(path, id, signal)
+  }
+
+  /** Read only the zstd frames needed to cover a requested sequence. */
+  async loadStoredFrom(id: SessionId, fromSeq: SessionLogOffset, signal?: AbortSignal): Promise<StoredSuffix | undefined> {
+    if (this.compression !== 'zstd') return undefined
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding(signal)
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    const { buffer } = await this.readStableFile(path, signal)
+    const scanned = scanZstdFrames(buffer)
+    if (scanned.frames.length === 0) throw new Error('corrupt Zstandard session log: no complete frames')
+    const headerDecoder = createZstdFrameDecoder()
+    let header: Buffer
+    try {
+      const headerRange = scanned.frames[0]
+      if (headerRange === undefined) throw new Error('corrupt Zstandard session log: missing header frame')
+      const first = headerDecoder.decode(buffer, [headerRange]).next()
+      if (first.done) throw new Error('corrupt Zstandard session log: missing header frame')
+      header = Buffer.from(first.value)
+    } finally { headerDecoder.close() }
+    assertZstdHeaderFrame(header)
+    const selected: Buffer[] = []
+    let covered = false
+    for (let index = scanned.frames.length - 1; index >= 1 && !covered; index -= 1) {
+      signal?.throwIfAborted()
+      const decoder = createZstdFrameDecoder()
+      let plaintext: Buffer
+      try {
+        const range = scanned.frames[index]
+        if (range === undefined) throw new Error('corrupt Zstandard session log: missing tail frame')
+        const item = decoder.decode(buffer, [range]).next()
+        if (item.done) throw new Error('corrupt Zstandard session log: tail frame produced no plaintext')
+        plaintext = Buffer.from(item.value)
+      } finally { decoder.close() }
+      selected.push(plaintext)
+      if (frameMinSeq(plaintext) <= fromSeq) covered = true
+    }
+    if (!covered && scanned.frames.length > 1) throw new Error('corrupt Zstandard session log: requested sequence is outside the stored frame index')
+    const baseSeq = selected.length === 0 ? 0 : frameMinSeq(selected[selected.length - 1] as Buffer)
+    const scanner = new SessionLogScanner(header, baseSeq)
+    for (let index = selected.length - 1; index >= 0; index -= 1) scanner.write(selected[index] as Buffer)
+    const complete = scanner.finish()
+    return {
+      meta: complete.meta,
+      inheritedEventCount: complete.inheritedEventCount,
+      events: complete.events.filter(event => event.seq >= fromSeq),
+    }
   }
 
   /**
