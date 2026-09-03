@@ -20,8 +20,10 @@ import { SessionQueryError } from './config.ts'
 
 /** One exact immutable Session cut retained for the caller's read lifetime. */
 export interface SessionObservation extends Disposable {
-  /** Whether the cut came from an attached Session or a retained preparation. */
-  readonly source: 'live' | 'prepared'
+  /** Whether the cut came from an attached Session, retained preparation, or keyed cold tail. */
+  readonly source: 'live' | 'prepared' | 'cold'
+  /** Complete preparation/promotion deferred until after a cold first frame. */
+  readonly activate?: () => Promise<void>
   /** Immutable Session identity metadata. */
   readonly header: SessionHeader
   /** Immutable contiguous events at {@link cursor}. */
@@ -47,6 +49,8 @@ export interface SessionObservationOptions {
   readonly signal?: AbortSignal
   /** Whether to compute every projection or leave projection state untouched. */
   readonly projectionMode?: 'all' | 'none'
+  /** Prefer the keyed projection-cache tail for detached history opening. */
+  readonly historyTail?: boolean
 }
 
 /** Builds point observations without a corpus listing preflight. */
@@ -71,6 +75,10 @@ export class SessionObservationReader {
       if (live !== undefined) return this.live(live, projectionMode)
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
+      if (options.historyTail === true && projectionMode === 'all') {
+        const cold = await this.coldTail(sessionId, signal)
+        if (cold !== undefined) return cold
+      }
 
       let borrowed: BorrowedSessionSource
       try {
@@ -155,6 +163,60 @@ export class SessionObservationReader {
         borrowed[Symbol.dispose]()
         throw error
       }
+    }
+  }
+
+  private async coldTail(sessionId: SessionId, signal?: AbortSignal): Promise<SessionObservation | undefined> {
+    const persistence = this.ctx.get('sessionPersistence')
+    const registry = this.ctx.get('sessionProjections')
+    const cache = this.ctx.get('sessionProjectionCache')
+    if (persistence === undefined || registry === undefined || cache === undefined) return undefined
+    if (typeof persistence.listSnapshots !== 'function') return undefined
+    // listSnapshots reads headers and revisions only; unlike borrowSession it never decodes the body.
+    const listed = await persistence.listSnapshots(signal)
+    const found = listed.find(item => item.header.id === sessionId)
+    if (found === undefined || found.header.isSeeded) return undefined
+    const rows = cache.checkpointFor(found.header, SessionLogOffset(0))
+    if (rows === undefined) return undefined
+    const floor = registry.restoreFloor(rows)
+    if (floor === undefined) return undefined
+    const suffix = await persistence.readFrom(sessionId, floor, signal)
+    throwIfObservationAborted(signal)
+    const restored = registry.restore(rows, suffix.events, suffix.fromSeq, suffix.meta, suffix.inheritedEventCount)
+    const events = suffix.events
+    let disposed = false
+    return {
+      source: 'cold',
+      header: suffix.meta,
+      events,
+      inheritedEventCount: suffix.inheritedEventCount,
+      cursor: events.at(-1)?.seq ?? -1,
+      revision: found.revision,
+      projections: restored.snapshot,
+      retain: () => {
+        if (disposed) throw new Error(`session observation "${sessionId}" is disposed`)
+        return this.coldLease(
+          suffix.meta, events, suffix.inheritedEventCount, suffix.events.at(-1)?.seq ?? -1,
+          found.revision, restored.snapshot,
+        )
+      },
+      [Symbol.dispose]: () => { disposed = true },
+    }
+  }
+
+  private coldLease(
+    header: SessionHeader,
+    events: readonly SessionEvent[],
+    inheritedEventCount: SessionLogOffsetType,
+    cursor: SessionSeqCursor,
+    revision: SessionPersistenceRevision,
+    projections: ProjectionSnapshot,
+  ): SessionObservation {
+    let disposed = false
+    return {
+      source: 'cold', header, events, inheritedEventCount, cursor, revision, projections,
+      retain: () => { if (disposed) throw new Error(`session observation "${header.id}" is disposed`); return this.coldLease(header, events, inheritedEventCount, cursor, revision, projections) },
+      [Symbol.dispose]: () => { disposed = true },
     }
   }
 

@@ -199,6 +199,7 @@ export class SessionHistoryController {
       const observation = await this.ctx.sessionQuery.observeSession(sessionId, {
         signal,
         projectionMode: withProjections || address.kind === 'subagent' ? 'all' : 'none',
+        ...withProjections && address.kind === 'session' ? { historyTail: true } : {},
       })
       if (observation.header.cwd === undefined) {
         observation[Symbol.dispose]()
@@ -324,9 +325,9 @@ function paginate(
   const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
   let count = 0
   let cut = SessionLogOffset(0)
-  for (let index = end - 1; index >= 0; index--) {
+  for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index] as SessionEvent
-    if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
+    if (event.seq >= end || !MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
     count++
     const sources = event.sourceEventSeqs
     let groupStart = event.seq
@@ -340,7 +341,7 @@ function paginate(
       break
     }
   }
-  return { events: events.slice(cut, end), hasMore: cut > 0 }
+  return { events: events.filter(event => event.seq >= cut && event.seq < end), hasMore: cut > 0 }
 }
 
 /** Translate logical Session metadata to the unchanged v0 browser wire. */
