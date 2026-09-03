@@ -796,6 +796,59 @@ describe('JsonlSessionPersistence: encoding selection', () => {
     await expect(ctx.sessionPersistence.list()).rejects.toThrow(/uses \.jsonl/)
   })
 
+  it('reads a suffix beginning exactly at a zstd frame boundary', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('frame-boundary')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog().slice(0, 3))
+    await ctx.sessionPersistence.append(header.id, oneTurnLog().slice(3).map((event, index) => ({ ...event, seq: SessionSeq(index + 3) })))
+    const suffix = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(3))
+    expect(suffix.events[0]?.seq).toBe(3)
+  })
+
+  it('handles a header-only single-frame artifact', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('single-frame')
+    await mkdir(sessionDir(root, header.cwd, header.id), { recursive: true })
+    await writeFile(logPath(root, header.cwd, header.id, 'zstd'), await compressZstdFrame(JSON.stringify(toHeaderLine(header)) + '\n'))
+    expect((await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(0))).events).toEqual([])
+  })
+
+  it('reports a clear error for a truncated tail frame', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('truncated-tail')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const path = logPath(root, header.cwd, header.id, 'zstd')
+    const bytes = await readFile(path)
+    await writeFile(path, bytes.subarray(0, bytes.length - 1))
+    await expect(ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(1))).rejects.toThrow(/Zstandard session log/)
+  })
+
+  it('falls back for plain JSONL artifacts without a frame index', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root, 'none')
+    const header = meta('plain-fallback')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const suffix = await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(1))
+    expect(suffix.events[0]?.seq).toBe(1)
+  })
+
+  it('falls back when a backend declines frame indexing', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const backend = ctx.sessionPersistence as JsonlSessionPersistence
+    vi.spyOn(backend, 'loadStoredFrom').mockResolvedValue(undefined)
+    const header = meta('no-index-fallback')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    expect((await ctx.sessionPersistence.readFrom(header.id, SessionLogOffset(1))).events[0]?.seq).toBe(1)
+  })
+
   it('refuses materialization when an opposite artifact appears after create', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)

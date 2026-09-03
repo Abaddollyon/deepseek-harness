@@ -314,6 +314,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     if (path === undefined) return undefined
     const { buffer } = await this.readStableFile(path, signal)
     const scanned = scanZstdFrames(buffer)
+    if (scanned.tornStart !== undefined) throw new Error('corrupt Zstandard session log: truncated tail frame')
     if (scanned.frames.length === 0) throw new Error('corrupt Zstandard session log: no complete frames')
     const headerDecoder = createZstdFrameDecoder()
     let header: Buffer
