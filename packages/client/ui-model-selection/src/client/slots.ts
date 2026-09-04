@@ -16,6 +16,8 @@ export interface ModelSelectInjected {
   directory: SnapshotStore<ModelDirectoryState>
   /** Ensure the shared advisory catalog is loaded (errors land on the store). */
   load: () => void
+  /** Refresh enabled automatic-discovery routes, then re-read the shared catalog. */
+  refresh: () => void
   /**
    * Select a complete provider/model/reasoning selection.
    * @param selection - model selection and optional adapter-owned effort.

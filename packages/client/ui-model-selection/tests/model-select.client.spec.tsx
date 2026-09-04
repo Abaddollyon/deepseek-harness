@@ -45,6 +45,7 @@ function state(overrides: Partial<ModelDirectoryState> = {}): ModelDirectoryStat
     }],
     failures: [],
     status: 'ready',
+    refreshing: false,
     error: null,
     ...overrides,
   }
@@ -64,6 +65,7 @@ describe('ModelSelect reasoning effort', () => {
       available
       directory={directory}
       load={vi.fn()}
+      refresh={vi.fn()}
       select={select}
       t={t}
     />)
@@ -106,6 +108,7 @@ describe('ModelSelect reasoning effort', () => {
       available
       directory={directory}
       load={vi.fn()}
+      refresh={vi.fn()}
       select={vi.fn().mockResolvedValue(true)}
       t={t}
     />)
@@ -128,6 +131,7 @@ describe('ModelSelect reasoning effort', () => {
       available
       directory={directory}
       load={vi.fn()}
+      refresh={vi.fn()}
       select={select}
       t={t}
     />)
@@ -154,6 +158,7 @@ describe('ModelSelect reasoning effort', () => {
       available
       directory={directory}
       load={vi.fn()}
+      refresh={vi.fn()}
       select={vi.fn().mockResolvedValue(true)}
       t={t}
     />)
@@ -187,6 +192,7 @@ describe('ModelSelect reasoning effort', () => {
       available
       directory={directory}
       load={vi.fn()}
+      refresh={vi.fn()}
       select={select}
       t={t}
     />)
@@ -207,11 +213,80 @@ describe('ModelSelect reasoning effort', () => {
       available={false}
       directory={createSnapshotStore(state())}
       load={load}
+      refresh={vi.fn()}
       select={vi.fn().mockResolvedValue(false)}
       t={t}
     />)
 
     expect(screen.queryByRole('button')).toBeNull()
     expect(load).not.toHaveBeenCalled()
+  })
+
+  it('filters models by model and provider names or ids without losing the selection', () => {
+    const directory = createSnapshotStore(state({
+      groups: [
+        {
+          id: 'deepseek-official', name: 'DeepSeek', models: [
+            { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', reasoning },
+            { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+          ],
+        },
+        { id: 'acme-route', name: 'Acme Cloud', models: [{ id: 'model-42', name: 'Nimbus' }] },
+      ],
+    }))
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={directory}
+      load={vi.fn()}
+      refresh={vi.fn()}
+      select={vi.fn().mockResolvedValue(true)}
+      t={t}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: /选择模型，当前/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /模型/ }))
+    const search = screen.getByRole('searchbox', { name: zh['search.aria'] })
+    fireEvent.change(search, { target: { value: 'acme-route' } })
+    expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual(['Nimbus'])
+    expect(screen.getByRole('menuitemradio', { name: 'Nimbus' }).getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.change(search, { target: { value: 'v4-pro' } })
+    expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual(['DeepSeek-V4-Pro'])
+    fireEvent.change(search, { target: { value: 'missing' } })
+    expect(screen.getByText(zh['empty.search'])).toBeTruthy()
+  })
+
+  it('refreshes explicitly, keeps rows during the request, and preserves Escape navigation', async () => {
+    const directory = createSnapshotStore(state())
+    const refresh = vi.fn(() => {
+      directory.set(state({ refreshing: true }))
+    })
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={directory}
+      load={vi.fn()}
+      refresh={refresh}
+      select={vi.fn().mockResolvedValue(true)}
+      t={t}
+    />)
+
+    const trigger = screen.getByRole('button', { name: /选择模型，当前/ })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: /模型/ }))
+    fireEvent.click(screen.getByRole('button', { name: zh['action.refresh'] }))
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(screen.getByRole('menuitemradio', { name: 'DeepSeek-V4-Flash' })).toBeTruthy()
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: zh['action.refresh'] }).disabled).toBe(true)
+
+    const search = screen.getByRole('searchbox', { name: zh['search.aria'] })
+    search.focus()
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    await waitFor(() => { expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /模型/ })) })
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    await waitFor(() => { expect(trigger.getAttribute('aria-expanded')).toBe('false') })
+    expect(document.activeElement).toBe(trigger)
   })
 })

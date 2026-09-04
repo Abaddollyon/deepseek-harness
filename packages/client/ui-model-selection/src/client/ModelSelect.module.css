@@ -97,6 +97,18 @@
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
+@media (max-width: 520px) {
+  .menu {
+    position: fixed;
+    right: 16px;
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    left: 16px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
+}
+
 .status,
 .empty {
   padding: 10px;
@@ -139,6 +151,64 @@
 .groups {
   min-height: 0;
   overflow-y: auto;
+}
+
+.catalogTools {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+}
+
+.search {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 9px;
+  outline: none;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.search::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.search:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-border-l3);
+}
+
+.refresh {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.refresh:hover:not(:disabled),
+.refresh:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.refresh:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-l3);
+  outline-offset: -2px;
+}
+
+.refresh:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
 }
 
 .group + .group {

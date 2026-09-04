@@ -63,11 +63,21 @@ export interface SubagentModelSelectionCardFace {
   toggleModel: (key: string) => void
   /** Retry the adapter directory. */
   retryCatalog: () => void
+  /** Revalidate the directory when an enabled card opens with stale data. */
+  openCatalog: () => void
   /** Persist the switch and exact routes as one revision-fenced mutation. */
   save: () => void
   /** Drop the staged enabled state and route choices. */
   discard: () => void
 }
+
+/** Freshness policy for the delegation card's separate staged catalog. */
+export interface SubagentCatalogOptions {
+  staleAfterMs?: number
+  now?: () => number
+}
+
+const DEFAULT_STALE_AFTER_MS = 30_000
 
 /**
  * Stable identity for one exact route; callers resolve it by lookup and never parse it.
@@ -138,6 +148,9 @@ export class SubagentModelSelectionCardController {
   private disposed = false
   private saveGeneration = 0
   private catalogGeneration = 0
+  private catalogLoadedAt: number | undefined
+  private readonly staleAfterMs: number
+  private readonly now: () => number
   private readonly store: SnapshotStore<SubagentModelSelectionCardState>
   private readonly unsubscribe: () => void
 
@@ -149,7 +162,10 @@ export class SubagentModelSelectionCardController {
   constructor(
     private readonly scope: SettingsScope<SubagentModelSelectionSettings>,
     private readonly ctx: ClientContext,
+    options: SubagentCatalogOptions = {},
   ) {
+    this.staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS
+    this.now = options.now ?? Date.now
     this.store = createSnapshotStore(this.projection())
     this.unsubscribe = scope.subscribe(() => {
       if (!this.saving && this.draftRoutes !== undefined
@@ -182,9 +198,18 @@ export class SubagentModelSelectionCardController {
       toggleEnabled: () => { this.toggleEnabled() },
       toggleModel: (key) => { this.toggleModel(key) },
       retryCatalog: () => { void this.loadCatalog() },
+      openCatalog: () => { this.openCatalog() },
       save: () => { void this.save() },
       discard: () => { this.discard() },
     }
+  }
+
+  private openCatalog(): void {
+    if (!this.enabled() || this.catalogStatus === 'loading') return
+    const stale = this.catalogLoadedAt === undefined || this.now() - this.catalogLoadedAt > this.staleAfterMs
+    if (!stale) return
+    this.catalogStatus = 'idle'
+    void this.loadCatalog()
   }
 
   private currentRoutes(): AllowedSubagentModel[] {
@@ -325,6 +350,7 @@ export class SubagentModelSelectionCardController {
       this.catalogGroups = response.value.groups
       this.catalogPartial = response.value.failures.length > 0
       this.catalogStatus = 'ready'
+      this.catalogLoadedAt = this.now()
     } else {
       this.catalogStatus = 'error'
     }

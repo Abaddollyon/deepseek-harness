@@ -100,6 +100,7 @@ function renderSubagentModelSelection(state: Partial<SubagentModelSelectionCardS
     toggleEnabled: vi.fn(),
     toggleModel: vi.fn(),
     retryCatalog: vi.fn(),
+    openCatalog: vi.fn(),
     save: vi.fn(),
     discard: vi.fn(),
   }

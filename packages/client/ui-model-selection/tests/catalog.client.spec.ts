@@ -10,9 +10,12 @@ const catalog = (model: string): ModelCatalog => ({
   failures: [],
 })
 
-function directory(models: () => Promise<unknown>): ModelCatalogDirectory {
+function directory(
+  models: () => Promise<unknown>,
+  options?: ConstructorParameters<typeof ModelCatalogDirectory>[1],
+): ModelCatalogDirectory {
   // The providing plugin's context, scripted down to the one method it calls.
-  return new ModelCatalogDirectory({ remote: { session: { modelCatalog: models } } } as never)
+  return new ModelCatalogDirectory({ remote: { session: { modelCatalog: models } } } as never, options)
 }
 
 describe('ModelCatalogDirectory', () => {
@@ -90,6 +93,46 @@ describe('ModelCatalogDirectory', () => {
       expect(subject.store.getSnapshot()).toEqual({
         value: null, status: 'error', error: 'reset failed',
       })
+    })
+  })
+
+  it('revalidates a stale picker read once while keeping a fresh catalog local', async () => {
+    let now = 0
+    const next = Promise.withResolvers<unknown>()
+    const models = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: catalog('old') })
+      .mockReturnValueOnce(next.promise)
+    const subject = directory(models, { staleAfterMs: 1_000, now: () => now })
+    await subject.load()
+
+    now = 999
+    await subject.load({ freshIfStale: true })
+    expect(models).toHaveBeenCalledTimes(1)
+
+    now = 1_001
+    const first = subject.load({ freshIfStale: true })
+    const shared = subject.load({ freshIfStale: true })
+    expect(shared).toBe(first)
+    expect(subject.store.getSnapshot()).toMatchObject({
+      value: catalog('old'), status: 'loading', error: null,
+    })
+    next.resolve({ ok: true, value: catalog('new') })
+    await expect(first).resolves.toEqual(catalog('new'))
+    expect(models).toHaveBeenCalledTimes(2)
+  })
+
+  it('returns the last good catalog when stale revalidation fails', async () => {
+    let now = 0
+    const models = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: catalog('old') })
+      .mockRejectedValueOnce(new Error('refresh offline'))
+    const subject = directory(models, { staleAfterMs: 10, now: () => now })
+    await subject.load()
+
+    now = 11
+    await expect(subject.load({ freshIfStale: true })).resolves.toEqual(catalog('old'))
+    expect(subject.store.getSnapshot()).toEqual({
+      value: catalog('old'), status: 'error', error: 'refresh offline',
     })
   })
 })

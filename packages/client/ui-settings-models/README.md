@@ -33,9 +33,13 @@ The primary field on an editor card is a single **API key** input — the page n
 
 ### Editing a provider
 
+Pi-ai profiles expose **Automatic model discovery** in the collapsed custom-settings fold. Toggling it writes only `modelDiscovery.enabled`, preserving explicit models and unknown sibling fields.
+
 The collapsed 自定义设置 fold carries the curated extras: `baseURL` for both families (the deepseek placeholder shows the public endpoint), each adapter's model catalog, and the **display name** and **API protocol** of a pi-ai route the adapter does not ship. Profile `headers` remain deployment configuration in `settings.yaml` or Cordis config and have no Models-page editor. The Provider ID stays fixed: it is the settings key, the name every other namespace and every logged session references, and the stem of a credential reference the page cannot read back to move. Reasoning effort is deliberately not among the editable fields: it is a per-model capability, so a provider-scoped control could only be set to a value some models reject. Each DeepSeek row edits `id`, optional display `name`, and optional `contextWindow`/`maxTokens`; existing fields outside that curated set survive edits.
 
 ### Adding and deleting providers
+
+**Fetch available models** remains a draft/adoption flow: it offers rows for explicit addition and writes nothing until **Add selected**. Automatic discovery is separate; it refreshes the live effective catalog without changing settings.
 
 The add flow is a card carrying the dormant-directory provider select — a bare-mounted `llm-pi-ai` offers its whole installed catalog before any route exists. **Add a custom provider** declares a route pi-ai does not ship; the create card asks for a unique **Provider ID**, an endpoint, a protocol, and at least one uniquely-identified model, because nothing can default those. **Fetch available models** asks the `llm/discoverModels` Remote about the endpoint the form shows, so adding a provider is one pass instead of save-then-return; the reply opens a searchable picker rather than being written, and nothing is written until **Add selected**. Search matches model ids and optional display names without clearing hidden selections, while **Select all** and **Deselect all** affect only the visible results. A row is deletable only when the user layer alone carries it (removal restores the composition base), and its confirmation dialog names the provider.
 

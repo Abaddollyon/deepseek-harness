@@ -342,6 +342,7 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     const models = modelDrafts(modelsOverridden ? customModels : inheritedModels())
     const defaultContextWindow = schema.getPath(fallback, ['defaultContextWindow'])
     const defaultMaxTokens = schema.getPath(fallback, ['maxTokens'])
+    const automaticDiscovery = schema.getPath(draft, ['modelDiscovery', 'enabled']) === true
     const keyPlaceholder = keyLocked
       ? t('keyEnvLocked')
       : keyState?.configured === true && props.credentialRequired !== true
@@ -380,6 +381,30 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
         {props.credentialOnly === true ? null : <details className={styles['customized']}>
           <summary className={styles['customizedSummary']}>{t('customized')}</summary>
           <div className={styles['customizedBody']}>
+            {family === 'pi-ai'
+              ? (
+                <label className={styles['checkField']}>
+                  <input
+                    type="checkbox"
+                    aria-label={t('automaticDiscovery')}
+                    checked={automaticDiscovery}
+                    disabled={disabled}
+                    onChange={(event) => {
+                      const enabled = event.currentTarget.checked
+                      setDraft(current => schema.setPath(
+                        current,
+                        ['modelDiscovery', 'enabled'],
+                        enabled,
+                      ))
+                    }}
+                  />
+                  <span>
+                    <span className={styles['checkLabel']}>{t('automaticDiscovery')}</span>
+                    <span className={styles['checkHint']}>{t('automaticDiscoveryHint')}</span>
+                  </span>
+                </label>
+              )
+              : null}
             {/* The name and the protocol are the create card's two remaining
                 profile fields; a route the adapter ships defaults both from
                 its catalog entry and neither belongs on its card. */}

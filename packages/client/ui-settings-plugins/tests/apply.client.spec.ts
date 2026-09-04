@@ -191,7 +191,7 @@ describe('ui-settings-plugins apply', () => {
     await vi.waitFor(() => { expect(describeCredentials).toHaveBeenCalledTimes(1) })
   })
 
-  it('refreshes the subagent catalog after model inputs change or the connection resets', async () => {
+  it('refreshes the subagent catalog after model or credential inputs change or the connection resets', async () => {
     const refresh = vi.spyOn(SubagentModelSelectionCardController.prototype, 'refreshCatalog')
     const reset = vi.spyOn(SubagentModelSelectionCardController.prototype, 'resetConnection')
     const { ctx, slots, remote } = await bench(['subagent-model-selection'])
@@ -204,6 +204,8 @@ describe('ui-settings-plugins apply', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
     remote.emit('settings/document-updated', ['llm-deepseek', 1])
     expect(refresh).toHaveBeenCalledTimes(2)
+    remote.emit('credentials/reference-updated', ['OPENAI_API_KEY'])
+    expect(refresh).toHaveBeenCalledTimes(3)
     ctx.emit('connection/reset')
     expect(reset).toHaveBeenCalledTimes(1)
   })
