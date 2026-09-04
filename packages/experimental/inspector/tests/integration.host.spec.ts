@@ -370,6 +370,14 @@ describe('experimental Inspector real Worker', () => {
     await Promise.all([cdp.call('Runtime.enable'), secondCdp.call('Runtime.enable')])
     const firstContext = await clientContext(cdp)
     const secondContext = await clientContext(secondCdp)
+    // Client Runtime commands share the source socket with Console enable frames, so these
+    // round-trips establish hook readiness before the fixture logs over its independent port.
+    const [firstReady, secondReady] = await Promise.all([
+      cdp.call('Runtime.evaluate', { expression: 'undefined', contextId: firstContext }),
+      secondCdp.call('Runtime.evaluate', { expression: 'undefined', contextId: secondContext }),
+    ])
+    expect(firstReady.result?.result).toMatchObject({ type: 'undefined' })
+    expect(secondReady.result?.result).toMatchObject({ type: 'undefined' })
     const value = { owner: 'client-console' }
     const marker = 'client-console-event'
     await client.log(value, marker)
