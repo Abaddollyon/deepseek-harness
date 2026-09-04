@@ -57,6 +57,7 @@ export class ModelCatalogDirectory {
 
   /**
    * Return the current generation's catalog, sharing its one in-flight load.
+   * @param options - whether a loaded catalog should be revalidated once stale.
    * @returns the loaded global catalog.
    */
   load(options: ModelCatalogLoadOptions = {}): Promise<ModelCatalog> {
@@ -124,7 +125,10 @@ export class ModelCatalogDirectory {
     void this.reload()
   }
 
-  /** Re-read the Host catalog immediately while retaining its last good value. */
+  /**
+   * Re-read the Host catalog immediately while retaining its last good value.
+   * @returns the refreshed global catalog, or the shared in-flight refresh.
+   */
   reload(): Promise<ModelCatalog> {
     if (this.inflight !== undefined) return this.inflight
     this.invalidate()
@@ -137,7 +141,10 @@ export class ModelCatalogDirectory {
     this.store.set({ ...state, status: 'loading', error: null })
   }
 
-  /** Surface a partial explicit-refresh failure without discarding catalog rows. */
+  /**
+   * Surface a partial explicit-refresh failure without discarding catalog rows.
+   * @param message - sanitized provider-local failures to expose beside retained rows.
+   */
   reportRefreshFailure(message: string): void {
     const state = this.store.getSnapshot()
     this.store.set({ ...state, status: 'error', error: message })

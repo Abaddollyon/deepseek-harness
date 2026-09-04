@@ -72,6 +72,7 @@ export class ModelDirectory {
 
   /**
    * Ensure the Host generation's shared advisory catalog is loaded.
+   * @param options - whether opening this directory should revalidate a stale shared catalog.
    * @returns the fresh directory value.
    */
   async load(options: ModelCatalogLoadOptions = {}): Promise<ModelDirectoryState> {
