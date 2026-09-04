@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import * as yaml from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
@@ -746,10 +747,11 @@ describe('Python release workflows', () => {
 })
 
 describe('Issue lifecycle workflow', () => {
-  it('runs the lifecycle job on every PR/review event but gates token and board steps', () => {
+  it('runs policy only upstream and keeps fork lifecycle jobs visible without writes', () => {
     const lifecycle = loadWorkflow('.github/workflows/issue-lifecycle.yml')
     const policy = loadWorkflow('.github/workflows/issue-policy.yml')
     const lifecycleJob = workflowJob(lifecycle, 'lifecycle')
+    const policyJob = workflowJob(policy, 'policy')
     if (!Array.isArray(lifecycleJob.steps)) throw new TypeError('Issue lifecycle job must define steps')
 
     // The job has no job-level `if`, so it is listed on every pull_request /
@@ -768,12 +770,59 @@ describe('Issue lifecycle workflow', () => {
     expect(lifecyclePullRequest.types).not.toContain('ready_for_review')
     expect(lifecyclePullRequest.types).toContain('review_requested')
     expect(lifecycleReview.types).toEqual(['submitted'])
-    const gated = "${{ github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested' }}"
     const steps = lifecycleJob.steps.filter(isRecord)
     const tokenStep = steps.find(s => s.name === 'Create project token')
     const handleStep = steps.find(s => s.name === 'Handle repository event')
-    expect(tokenStep).toMatchObject({ if: gated })
-    expect(handleStep).toMatchObject({ if: gated })
+    if (typeof policyJob.if !== 'string' || typeof tokenStep?.if !== 'string' || typeof handleStep?.if !== 'string') {
+      throw new TypeError('Issue policy and lifecycle write steps must define repository guards')
+    }
+
+    const cases: Array<{ context: IssueGuardContext; lifecycle: boolean; policy: boolean }> = [
+      {
+        context: issueGuardContext('deepseek-harness/deepseek-harness', 'pull_request'),
+        lifecycle: true,
+        policy: true,
+      },
+      {
+        context: issueGuardContext('deepseek-harness/deepseek-harness', 'pull_request_review', 'changes_requested'),
+        lifecycle: true,
+        policy: true,
+      },
+      {
+        context: issueGuardContext('deepseek-harness/deepseek-harness', 'pull_request_review', 'approved'),
+        lifecycle: false,
+        policy: true,
+      },
+      {
+        context: issueGuardContext('deepseek-harness/deepseek-harness', 'pull_request_review', 'commented'),
+        lifecycle: false,
+        policy: true,
+      },
+      {
+        context: issueGuardContext('Abaddollyon/deepseek-harness', 'pull_request'),
+        lifecycle: false,
+        policy: false,
+      },
+      {
+        context: issueGuardContext('another-user/deepseek-harness', 'pull_request_review', 'changes_requested'),
+        lifecycle: false,
+        policy: false,
+      },
+    ]
+    expectIssueGuardCases(policyJob.if, cases.map(({ context, policy: allowed }) => ({ context, allowed })))
+    for (const guard of [tokenStep.if, handleStep.if]) {
+      const lifecycleCases = cases.map(({ context, lifecycle: allowed }) => ({ context, allowed }))
+      expectIssueGuardCases(guard, lifecycleCases)
+
+      // Mutation control: without the repository clause, a changes-requested
+      // review in another fork reaches the write-capable steps.
+      const withoutRepositoryGuard = guard.replace(
+        /github\.repository\s*==\s*'deepseek-harness\/deepseek-harness'\s*&&\s*/,
+        '',
+      )
+      expect(withoutRepositoryGuard).not.toBe(guard)
+      expect(() => expectIssueGuardCases(withoutRepositoryGuard, lifecycleCases)).toThrow()
+    }
 
     // issue-policy owns PR validation; it is read-only and a real gate.
     const policyPullRequest = workflowEvent(policy, 'pull_request')
@@ -894,6 +943,31 @@ function workflowJob(workflow: Record<string, unknown>, job: string): Record<str
     throw new TypeError(`workflow must define the ${job} job`)
   }
   return workflow.jobs[job]
+}
+
+interface IssueGuardContext {
+  repository: string
+  event_name: string
+  event: { review: { state: string } }
+}
+
+function issueGuardContext(repository: string, eventName: string, reviewState = ''): IssueGuardContext {
+  return { repository, event_name: eventName, event: { review: { state: reviewState } } }
+}
+
+function evaluateIssueGuard(expression: string, github: IssueGuardContext): boolean {
+  const body = expression.match(/^\s*\$\{\{\s*([\s\S]*?)\s*\}\}\s*$/)?.[1] ?? expression
+  if (!/^[\s\w.'=!&|()\/-]+$/.test(body)) throw new TypeError(`Unsupported Issue workflow guard: ${body}`)
+  return runInNewContext(`Boolean(${body})`, { github }, { timeout: 100 }) as boolean
+}
+
+function expectIssueGuardCases(
+  expression: string,
+  cases: Array<{ context: IssueGuardContext; allowed: boolean }>,
+): void {
+  for (const { context, allowed } of cases) {
+    expect(evaluateIssueGuard(expression, context), JSON.stringify(context)).toBe(allowed)
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
