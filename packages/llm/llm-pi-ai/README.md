@@ -78,6 +78,7 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 | `baseURL` | catalog endpoint | Endpoint of every model on the route |
 | `models` | installed catalog | Replaces the route's catalog wholesale; each entry defaults from the installed model |
 | `modelOverrides` | none | Reshapes individual installed-catalog models without replacing the rest |
+| `modelDiscovery` | disabled | Opt-in metadata refresh; `refreshIntervalMs: 21600000`, `timeoutMs: 15000` |
 | `compat` | catalog detection | Wire-compatibility switches for unrecognized endpoints |
 | `defaultContextWindow` | `262,144` | Capacity fallback for undescribed models |
 | `defaultMaxTokens` | `32,768` | Output-cap fallback for undescribed models |
@@ -107,7 +108,11 @@ Profiles are re-read once per operation through the optional settings seam: the 
 
 ### Discover models from endpoints
 
-The plugin answers "which models can this provider serve?" for a route a configuration surface is editing or drafting. A route the installed catalog ships is answered from that catalog with no network call; only a route the catalog does not describe is interrogated over the wire (`openai-completions` and `openai-responses` shapes). A named configured route supplies its stored credential and profile `headers` inside the Host, so deployment headers configured through `settings.yaml` or Cordis config reach `GET /models` without becoming discovery-request or Models-page fields; a key typed into the form still wins over the stored credential. The reply is candidate metadata a surface may offer for adoption — nothing is stored, and `settings.yaml` remains the only thing that decides what a route serves.
+Set `modelDiscovery: { enabled: true }` on a route to extend its catalog with authenticated metadata at activation, after credential changes, and every six hours. Kimi Code and OpenAI-compatible routes use `/models`; Anthropic uses its paginated Models API, and `openai-codex` uses subscription metadata with pi-ai's serialized OAuth refresh. Explicit `models` entries and `modelOverrides` keep their fields; discovery never writes settings or chooses a replacement model. New metadata uses the existing immutable adapter snapshots, so list/resolve/dispatch agree and in-flight calls keep their captured model. Successful publication emits `llm/adapters-updated`.
+
+`ctx.llm.discoverModels('llm-pi-ai', { provider })` explicitly refreshes an enabled configured route. A request containing a replacement key or a different endpoint/protocol remains a draft probe and does not publish. Failed or empty refreshes reject with `DISCOVERY_FAILED` while the last good catalog stays available; concurrent refreshes share one request. Without opt-in, installed routes return their static catalog and custom OpenAI-compatible routes return draft candidates.
+
+Each refresh allows at most fifteen seconds, four MiB across replies, ten pages, and 2,000 entries. Normalized metadata is atomically cached with owner-only file permissions under `$DSH_HOME/cache/llm-pi-ai`, keyed by configuration and credential fingerprints; offline activation restores it. Disposal aborts requests, stops timers, and awaits pending I/O. Codex resolves a stable version from public official npm package metadata without sending provider credentials, retaining the last successful version if that lookup fails. This version negotiates metadata only and does not change execution headers or certify new models' protocol compatibility. Unknown capacities use route fallbacks, unknown modalities remain conservative, and only pi-ai-supported advertised effort levels are offered. Remote prompts and instructions are discarded. [The decision note](../../../.agents/notes/implemented/architecture/2026-09-04-automatic-model-discovery.md) records ownership and tradeoffs.
 
 ### Failures and recovery
 

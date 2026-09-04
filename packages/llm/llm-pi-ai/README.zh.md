@@ -78,6 +78,7 @@ kind: "package-reference"
 | `baseURL` | 目录端点 | 路由上所有模型的端点 |
 | `models` | 已安装目录 | 整体替换路由目录；每个条目从已安装模型取默认值 |
 | `modelOverrides` | 无 | 重塑个别已安装目录模型，而不替换其余模型 |
+| `modelDiscovery` | 禁用 | 显式启用元数据刷新；`refreshIntervalMs: 21600000`、`timeoutMs: 15000` |
 | `compat` | 目录检测 | 无法识别端点的协议兼容开关 |
 | `defaultContextWindow` | `262,144` | 未描述模型的容量回退 |
 | `defaultMaxTokens` | `32,768` | 未描述模型的输出上限回退 |
@@ -107,7 +108,11 @@ profile 通过可选 settings seam 每次操作重新读取：base 与用户的 
 
 ### 从端点发现模型
 
-插件会回答"该提供方可以提供哪些模型？"，供配置界面正在编辑或起草的路由使用。已安装目录提供的路由直接由目录回答，不发网络请求；只有目录未描述的路由才会经网络询问（`openai-completions` 与 `openai-responses` 形状）。已配置且具名的路由会在 Host 内部提供已存凭据与 profile `headers`，因此通过 `settings.yaml` 或 Cordis 配置设置的部署标头可以到达 `GET /models`，但不会成为发现请求或 Models 页面的字段；表单中新键入的密钥仍优先于已存凭据。回答是界面可以提供给用户采纳的候选元数据——不存储任何内容，`settings.yaml` 仍然是决定路由服务内容的唯一事实。
+在路由上设置 `modelDiscovery: { enabled: true }`，即可在激活时、凭据变更后和每六小时通过经过认证的元数据扩展目录。Kimi Code 与 OpenAI 兼容路由使用 `/models`；Anthropic 使用分页 Models API，`openai-codex` 则通过 pi-ai 的串行 OAuth 刷新获取订阅元数据。显式 `models` 条目与 `modelOverrides` 保留自身字段；发现操作不会写入设置或选择替代模型。新元数据使用既有不可变适配器快照，因此列举、解析和请求发送保持一致，进行中的调用保留其捕获的模型。成功发布会发出 `llm/adapters-updated`。
+
+`ctx.llm.discoverModels('llm-pi-ai', { provider })` 会显式刷新已启用的配置路由。携带替换密钥或不同端点／协议的请求仍作为草稿探测，不会发布目录。失败或空结果以 `DISCOVERY_FAILED` 拒绝请求，但保留最后有效目录；并发刷新共享同一请求。未显式启用时，已安装路由返回静态目录，自定义 OpenAI 兼容路由返回草稿候选项。
+
+每次刷新最多允许十五秒、全部回复合计四 MiB、十页和 2,000 个条目。规范化元数据以仅属主可访问的文件权限原子缓存到 `$DSH_HOME/cache/llm-pi-ai`，以配置和凭据指纹作为键；离线激活可恢复缓存。dispose 会中止请求、停止定时器并等待待处理 I/O。Codex 从公开官方 npm 包元数据解析稳定版本，不向该服务发送提供方凭据；查询失败时保留最后成功版本。该版本仅用于元数据协商，不改变执行标头，也不证明新模型的协议兼容性。未知容量使用路由回退值，未知模态保持保守，仅提供 pi-ai 支持且提供方明确公布的推理强度。远程提示词和指令会被丢弃。[决策记录](../../../.agents/notes/implemented/architecture/2026-09-04-automatic-model-discovery.zh.md)说明归属和取舍。
 
 ### 失败与恢复
 

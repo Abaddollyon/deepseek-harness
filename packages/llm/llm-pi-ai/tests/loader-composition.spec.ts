@@ -47,6 +47,7 @@ afterEach(async () => {
 /** Boot the dormant composition: a bare `llm-pi-ai` row with no config at all. */
 async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
+  vi.stubEnv('DSH_HOME', root)
   const settingsPath = join(root, 'settings.yaml')
   await writeFile(settingsPath, '# personal settings\n')
   await writeFile(join(root, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_COMPOSITION_KEY: key-from-store\n', { mode: 0o600 })
@@ -97,6 +98,33 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
+  it('discovers a custom Kimi route through Loader and dispatches the discovered selection', async () => {
+    vi.stubEnv('PI_COMPOSITION_KEY', '')
+    const server = await mockServer([
+      { body: JSON.stringify({ data: [{ id: 'new-kimi', context_length: 131072, think_efforts: ['low', 'high'] }] }) },
+      { events: textEvents },
+    ])
+    const { ctx } = await loadComposition()
+    await ctx.settings.update('llm-pi-ai', {
+      providers: { 'kimi-code': {
+        api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
+        modelDiscovery: { enabled: true },
+        models: [{ id: 'existing-kimi', contextWindow: 90000 }],
+        compat: { thinkingFormat: 'deepseek', supportsDeveloperRole: false },
+      } },
+    })
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('kimi-code')).map(model => model.id)).toContain('new-kimi')
+    })
+    const result = await assemble(ctx, { provider: 'kimi-code', model: 'new-kimi', messages: [] })
+    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(server.paths).toEqual(['/models', '/chat/completions'])
+    expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
+    expect(server.requests[1]).toMatchObject({ model: 'new-kimi' })
+    const stored = ctx.settings.get('llm-pi-ai')
+    expect(JSON.stringify(stored)).not.toContain('new-kimi')
+  })
+
   it('boots with zero routes and registers one the moment settings supply a profile', async () => {
     vi.stubEnv('PI_COMPOSITION_KEY', '')
     const server = await mockServer([{ events: textEvents }])

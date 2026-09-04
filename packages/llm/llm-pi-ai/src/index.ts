@@ -57,6 +57,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { credentialKeyId, credentialKeyScope } from '@deepseek-ai/dsh-credentials'
 import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -70,6 +72,7 @@ import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 import type { StoredModelDiscoveryProfile } from './discovery.ts'
 import { registerPiAiFlows } from './login.ts'
+import { LiveCatalog } from './live-catalog.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
@@ -80,6 +83,7 @@ export type {
   PiAiModelOverride,
   PiAiModelProfile,
   PiAiProviderProfile,
+  PiAiModelDiscovery,
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
@@ -142,9 +146,8 @@ function directoryEntries(
 
 /** Register one generic pi-ai adapter for all configured provider routes. */
 export function apply(ctx: Context, config: Config): void {
+  let registration: AdapterRegistrationHandle | undefined
   let current: () => Config = () => config
-  let lastRaw: Config | undefined
-  let memoized: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
   /**
    * The resolved profiles for the current configuration, memoized by the raw
    * snapshot's identity — which is also what makes the adapter's own snapshot
@@ -157,14 +160,9 @@ export function apply(ctx: Context, config: Config): void {
    * point has already resolved once.
    */
   const profiles = (): ReadonlyMap<string, ResolvedPiAiProviderProfile> => {
-    const raw = current()
-    if (raw === lastRaw && memoized !== undefined) return memoized
-    const next = resolveProfiles(raw.providers)
-    lastRaw = raw
-    memoized = next
-    return next
+    return catalog.profiles()
   }
-  profiles()
+  resolveProfiles(config.providers)
 
   const resolveApiKey = async (
     provider: string,
@@ -195,6 +193,21 @@ export function apply(ctx: Context, config: Config): void {
   // through `ctx` per call, so they stay correct across the collection rebuilds
   // a configuration change causes, and a sign-in survives one.
   const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
+  const catalog = new LiveCatalog({
+    current: () => current(),
+    auth,
+    resolveApiKey,
+    home: resolveDshHome(undefined, { DSH_HOME: launchEnvironmentOf(ctx).get('DSH_HOME')?.value }),
+    warn: (provider) =>{  ctx.logger.warn(`llm-pi-ai: model discovery failed for "${provider}"; keeping available models`) },
+    changed: () => registration?.replace([...profiles().keys()]),
+  })
+  ctx.effect(() => () => catalog.dispose())
+  ctx.on('credentials/record-updated', (key) => {
+    if (credentialKeyScope(key) === NS) catalog.invalidate(credentialKeyId(key))
+  })
+  ctx.on('credentials/reference-updated', (ref) => {
+    for (const [provider, profile] of profiles()) if (profile.apiKeyEnv === ref) catalog.invalidate(provider)
+  })
   const adapter = new PiAiAdapter({
     profiles,
     resolveApiKey,
@@ -272,15 +285,27 @@ export function apply(ctx: Context, config: Config): void {
   // except the stored credential and deployment-owned headers: the curated UI
   // accepts neither, so an already-configured route supplies both inside the
   // Host rather than widening the discovery request.
-  ctx.llm.registerModelDiscovery(NS, (request, signal) => discoverModels(
-    { ...request, ...signal === undefined ? {} : { signal } },
-    () => storedDiscoveryProfile(request.provider),
-  ))
+  ctx.llm.registerModelDiscovery(NS, async (request, signal) => {
+    const profile = request.provider === undefined ? undefined : profiles().get(request.provider)
+    if (profile?.modelDiscovery?.enabled === true && request.apiKey === undefined
+      && (request.baseURL === undefined || request.baseURL === profile.baseURL)
+      && (request.api === undefined || request.api === profile.api)) {
+      await catalog.refresh(profile.provider, signal)
+      const refreshed = profiles().get(profile.provider)
+      if (refreshed === undefined) throw new LlmError('model discovery route was removed', 'DISCOVERY_FAILED')
+      return refreshed.piProvider.getModels().map(model => ({
+        id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens,
+      }))
+    }
+    return discoverModels(
+      { ...request, ...signal === undefined ? {} : { signal } },
+      () => storedDiscoveryProfile(request.provider),
+    )
+  })
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below. A bare
   // mount (zero routes) is the dormant posture: nothing registers until a
   // settings section supplies profiles, and routes drop when it empties.
-  let registration: AdapterRegistrationHandle | undefined
   let registeredFacts: unknown
   const ensureRegistrationFacts = (): void => {
     const facts = registrationFacts(profiles())
