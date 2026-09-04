@@ -93,6 +93,8 @@ type StubMode =
   | 'end-only'
   | 'init-exit'
   | 'init-timeout'
+  | 'init-owned-prompt-idle'
+  | 'init-idle-without-prompt'
   | 'init-idle-then-prompt'
   | 'spawn-error'
   | 'send-error'
@@ -132,9 +134,11 @@ class StubTerminalSession implements TerminalBackendSession {
   historyTruncated = false
   throwOnSend = false
   partialBody = 'partial data'
+  readonly initializationPollObserved: () => void
 
-  constructor(mode: StubMode) {
+  constructor(mode: StubMode, initializationPollObserved: () => void) {
     this.mode = mode
+    this.initializationPollObserved = initializationPollObserved
   }
 
   startSend(request: TerminalSendRequest): TerminalSendOperation {
@@ -147,11 +151,27 @@ class StubTerminalSession implements TerminalBackendSession {
       if (this.mode === 'init-timeout') {
         return this.operation(Promise.resolve(this.result('', 'timeout')))
       }
-      if (this.mode === 'init-idle-then-prompt') {
-        this.mode = 'normal'
+      if (this.mode === 'init-owned-prompt-idle') {
         return this.operation(Promise.resolve(this.result(this.motd, 'inferred_idle')))
       }
+      if (this.mode === 'init-idle-without-prompt' || this.mode === 'init-idle-then-prompt') {
+        const backendPrompt = 'dsh> '
+        this.scrollback = backendPrompt
+        if (this.mode === 'init-idle-then-prompt') this.mode = 'normal'
+        return this.operation(Promise.resolve(this.result(backendPrompt, 'inferred_idle')))
+      }
       return this.operation(Promise.resolve(this.result(this.motd, 'stdin_read')))
+    }
+    if (request.text.length === 0
+      && (this.mode === 'init-owned-prompt-idle' || this.mode === 'init-idle-without-prompt')) {
+      return this.waitForInitializationAbort(request)
+    }
+    if (request.text.length > 0 && this.mode === 'init-idle-without-prompt') {
+      throw new Error('command dispatched before the owned prompt')
+    }
+    if (request.text.length === 0 && this.mode === 'normal' && this.scrollback === 'dsh> ') {
+      this.scrollback = this.motd
+      return this.operation(Promise.resolve(this.result(this.motd, 'inferred_idle')))
     }
     if (this.mode === 'send-error') throw new Error('stub send failed')
     if (this.throwOnSend) throw new Error('PTY session has exited')
@@ -334,20 +354,39 @@ class StubTerminalSession implements TerminalBackendSession {
       cancel: () => false,
     }
   }
+
+  private waitForInitializationAbort(request: TerminalSendRequest): TerminalSendOperation {
+    this.initializationPollObserved()
+    const done = new Promise<ReturnType<StubTerminalSession['result']>>((_resolve, reject) => {
+      const rejectAborted = () => {
+        const reason: unknown = request.signal?.reason
+        reject(reason instanceof Error
+          ? reason
+          : new Error('initialization poll aborted', { cause: reason }))
+      }
+      if (request.signal?.aborted) rejectAborted()
+      else request.signal?.addEventListener('abort', rejectAborted, { once: true })
+    })
+    return this.operation(done)
+  }
 }
 
 function stubBackend(initialMode: StubMode = 'normal') {
   const sessions: StubTerminalSession[] = []
+  const initializationPollObserved = Promise.withResolvers<undefined>()
   const backend: TerminalBackend = {
     type: 'stub',
     async spawn() {
       if (initialMode === 'spawn-error') throw new Error('stub spawn failed')
-      const session = new StubTerminalSession(initialMode)
+      const session = new StubTerminalSession(
+        initialMode,
+        () => { initializationPollObserved.resolve(undefined) },
+      )
       sessions.push(session)
       return session
     },
   }
-  return { backend, sessions }
+  return { backend, sessions, initializationPollObserved: initializationPollObserved.promise }
 }
 
 async function setup(
@@ -667,7 +706,33 @@ describe('tool-pwsh-persistent', () => {
     },
   )
 
-  it('retries init-idle-then-prompt with an empty observation', async () => {
+  it('accepts an inferred-idle initialization only with the owned prompt', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-owned-prompt-idle')
+    const controller = new AbortController()
+    void stub.initializationPollObserved.then(() => {
+      controller.abort(new Error('initialization retried after the owned prompt'))
+    })
+
+    expect(text(await call(ctx, owner, 'Write-Output hi', controller.signal)))
+      .toBe('hello from stub')
+    expect(stub.sessions[0]?.sends).toBe(2)
+  })
+
+  it('waits past inferred idle without the owned prompt', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-idle-without-prompt')
+    const controller = new AbortController()
+    void stub.initializationPollObserved.then(() => {
+      controller.abort(new Error('stop after observing the initialization retry'))
+    })
+
+    const result = await call(ctx, owner, 'Write-Output hi', controller.signal)
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('stop after observing the initialization retry')
+    expect(stub.sessions[0]?.sends).toBe(2)
+    expect(stub.sessions[0]?.closed).toContain('persistent pwsh initialization failed')
+  })
+
+  it('waits for the owned prompt before dispatching the first command', async () => {
     const { ctx, owner, stub } = await setup({ backendType: 'stub' }, 'init-idle-then-prompt')
     expect(text(await call(ctx, owner, 'Write-Output hi'))).toBe('hello from stub')
     expect(stub.sessions[0]?.sends).toBe(3)
