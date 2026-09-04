@@ -96,6 +96,29 @@ describe('ModelCatalogDirectory', () => {
     })
   })
 
+  it('contains direct and queued event refresh failures before any last-good catalog', async () => {
+    const first = Promise.withResolvers<unknown>()
+    const models = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockRejectedValueOnce(new Error('queued offline'))
+    const subject = directory(models)
+
+    const initial = subject.load()
+    subject.refresh()
+    first.reject(new Error('initial offline'))
+    await expect(initial).rejects.toThrow('initial offline')
+    await vi.waitFor(() => {
+      expect(models).toHaveBeenCalledTimes(2)
+      expect(subject.store.getSnapshot()).toMatchObject({ status: 'error', error: 'queued offline' })
+    })
+
+    const direct = directory(vi.fn().mockRejectedValue(new Error('direct offline')))
+    direct.refresh()
+    await vi.waitFor(() => {
+      expect(direct.store.getSnapshot()).toMatchObject({ status: 'error', error: 'direct offline' })
+    })
+  })
+
   it('revalidates a stale picker read once while keeping a fresh catalog local', async () => {
     let now = 0
     const next = Promise.withResolvers<unknown>()

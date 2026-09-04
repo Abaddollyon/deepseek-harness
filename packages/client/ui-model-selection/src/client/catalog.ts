@@ -95,7 +95,7 @@ export class ModelCatalogDirectory {
         this.inflight = undefined
         if (this.refreshQueued) {
           this.refreshQueued = false
-          void this.reload()
+          void this.reload().catch(() => { /* the observable store owns refresh errors */ })
         }
       }
     })
@@ -122,7 +122,7 @@ export class ModelCatalogDirectory {
       return
     }
     if (this.store.getSnapshot().status === 'loading') return
-    void this.reload()
+    void this.reload().catch(() => { /* the observable store owns refresh errors */ })
   }
 
   /**

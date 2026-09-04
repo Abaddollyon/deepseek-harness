@@ -20,6 +20,7 @@ describe('web e2e: model picker search and refresh', () => {
   let browser: Browser
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
+  const consoleErrors: string[] = []
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({ extraOverlayPath: OVERLAY })
@@ -45,6 +46,9 @@ describe('web e2e: model picker search and refresh', () => {
     browser = await chromium.launch()
     page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
     tripwire = watchConsole(page)
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
@@ -59,12 +63,14 @@ describe('web e2e: model picker search and refresh', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-model-picker-discovery'))
     const trigger = page.getByRole('button', { name: /^选择模型/ })
     await trigger.waitFor({ timeout: 15_000 })
-    await trigger.click()
-    await page.getByRole('menuitem', { name: /模型/ }).click()
+    await trigger.press('Enter')
+    const modelEntry = page.getByRole('menuitem', { name: /模型/ })
+    await expect.poll(() => modelEntry.evaluate(node => node === document.activeElement)).toBe(true)
+    await page.keyboard.press('Enter')
 
     const menu = page.getByRole('menu', { name: '模型与推理等级' })
     const search = menu.getByRole('searchbox', { name: '搜索模型或提供方' })
-    await search.focus()
+    await expect.poll(() => search.evaluate(node => node === document.activeElement)).toBe(true)
     await search.pressSequentially('acme', { delay: 35 })
     await expect.poll(() => search.inputValue()).toBe('acme')
     const acme = menu.getByRole('menuitemradio', { name: 'Acme Large' })
@@ -89,7 +95,9 @@ describe('web e2e: model picker search and refresh', () => {
     const refresh = menu.getByRole('button', { name: '刷新模型' })
     await refresh.click()
     await expect.poll(() => refresh.isEnabled(), { timeout: 15_000 }).toBe(true)
-    await menu.getByRole('menuitemradio', { name: 'Origin Large' }).waitFor()
+    const selected = menu.getByRole('menuitemradio', { name: 'Origin Large' })
+    await selected.waitFor()
+    expect(await selected.getAttribute('aria-checked')).toBe('true')
 
     await page.setViewportSize({ width: 390, height: 844 })
     const narrowSearch = menu.getByRole('searchbox', { name: '搜索模型或提供方' })
@@ -106,5 +114,7 @@ describe('web e2e: model picker search and refresh', () => {
     await writeFile(ARIA_RECEIPT, `${await menu.ariaSnapshot()}\n`)
 
     expect(tripwire.pageErrors).toEqual([])
+    expect(tripwire.warnings).toEqual([])
+    expect(consoleErrors).toEqual([])
   }, 60_000)
 })

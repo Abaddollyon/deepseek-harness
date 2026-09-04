@@ -61,6 +61,7 @@ export function ModelSelect(
   const toastSeq = useRef(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const id = useId()
 
@@ -125,7 +126,10 @@ export function ModelSelect(
   }, [open])
 
   useEffect(() => {
-    if (open && pane === 'root') itemRefs.current[0]?.focus()
+    if (!open) return
+    if (pane === 'root') itemRefs.current[0]?.focus()
+    else if (pane === 'model') searchRef.current?.focus()
+    else itemRefs.current[0]?.focus()
   }, [open, pane])
 
   if (!available) return null
@@ -284,6 +288,7 @@ export function ModelSelect(
             <>
               <div className={css.catalogTools}>
                 <input
+                  ref={searchRef}
                   type="search"
                   className={css.search}
                   value={search}

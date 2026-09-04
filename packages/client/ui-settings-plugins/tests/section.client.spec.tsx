@@ -353,6 +353,18 @@ describe('BashCard', () => {
 })
 
 describe('SubagentModelSelectionCard', () => {
+  it('revalidates only when the collapsed card opens', () => {
+    const actions = renderSubagentModelSelection()
+    expect(actions.openCatalog).not.toHaveBeenCalled()
+
+    const header = screen.getByRole('button', { name: `${en.expand}: ${en.subagentModelSelectionTitle}` })
+    fireEvent.click(header)
+    expect(actions.openCatalog).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: `${en.collapse}: ${en.subagentModelSelectionTitle}` }))
+    fireEvent.click(screen.getByRole('button', { name: `${en.expand}: ${en.subagentModelSelectionTitle}` }))
+    expect(actions.openCatalog).toHaveBeenCalledTimes(2)
+  })
+
   it('renders the default-off preference in its staged plugin card', () => {
     const actions = renderSubagentModelSelection()
     fireEvent.click(screen.getByText(en.subagentModelSelectionTitle))

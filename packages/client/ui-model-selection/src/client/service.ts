@@ -120,17 +120,28 @@ export class ModelDirectoryResolver extends Service {
     if (this.discoveryInflight !== undefined) return
     this.catalog.beginRefresh()
     directory.resetConnected()
-    const operation = this.runDiscoveryRefresh().finally(() => {
+    const operation = this.runDiscoveryRefresh().catch((error: unknown) => {
+      this.catalog.reportRefreshFailure(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
       if (this.discoveryInflight === operation) this.discoveryInflight = undefined
     })
     this.discoveryInflight = operation
   }
 
   private async runDiscoveryRefresh(): Promise<void> {
+    const enumerationFailures: string[] = []
     const [settings, configurable] = await Promise.all([
-      this.ctx.remote.settings.describe().catch(() => undefined),
-      this.ctx.remote.llm.listConfigurableProviders().catch(() => undefined),
+      this.ctx.remote.settings.describe().catch((error: unknown) => {
+        enumerationFailures.push(`settings: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }),
+      this.ctx.remote.llm.listConfigurableProviders().catch((error: unknown) => {
+        enumerationFailures.push(`providers: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }),
     ])
+    if (settings !== undefined && !settings.ok) enumerationFailures.push(`settings: ${settings.error.message}`)
+    if (configurable !== undefined && !configurable.ok) enumerationFailures.push(`providers: ${configurable.error.message}`)
     const routes: string[] = []
     if (settings?.ok === true && configurable?.ok === true) {
       const namespace = settings.value.namespaces.find(row => row.ns === 'llm-pi-ai')
@@ -151,7 +162,10 @@ export class ModelDirectoryResolver extends Service {
       }
     }))
     await this.catalog.reload().catch(() => { /* the directory already retains and exposes the last good catalog */ })
-    const failures = outcomes.filter((failure): failure is string => failure !== undefined)
+    const failures = [
+      ...enumerationFailures,
+      ...outcomes.filter((failure): failure is string => failure !== undefined),
+    ]
     if (failures.length > 0) this.catalog.reportRefreshFailure(failures.join('; '))
   }
 }

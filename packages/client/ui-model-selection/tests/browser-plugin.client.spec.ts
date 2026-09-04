@@ -63,6 +63,8 @@ async function bench() {
   let groups = GROUPS
   let discoveryFailure: string | undefined
   let automaticDiscovery = true
+  let settingsFailure: 'throw' | 'result' | undefined
+  let providerEnumerationFailure: 'throw' | 'result' | undefined
   const projections = new Map<SessionId, SnapshotStore<ModelSelectionProjection | undefined>>()
   // Whether the Host reports an adapter for the current route; the composer
   // block follows this, never catalog membership.
@@ -94,12 +96,16 @@ async function bench() {
     },
   }
   const llmRemote = {
-    listConfigurableProviders: () => Promise.resolve({
-      ok: true as const,
-      value: [{
-        provider: 'openai', displayName: 'OpenAI', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'],
-      }],
-    }),
+    listConfigurableProviders: () => providerEnumerationFailure === 'throw'
+      ? Promise.reject(new Error('provider enumeration offline'))
+      : Promise.resolve(providerEnumerationFailure === 'result'
+        ? { ok: false as const, error: { message: 'provider enumeration refused' } }
+        : {
+          ok: true as const,
+          value: [{
+            provider: 'openai', displayName: 'OpenAI', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'],
+          }],
+        }),
     discoverModels: () => {
       calls.discover += 1
       return Promise.resolve(discoveryFailure === undefined
@@ -108,16 +114,20 @@ async function bench() {
     },
   }
   const settingsRemote = {
-    describe: () => Promise.resolve({
-      ok: true as const,
-      value: {
-        writable: true,
-        namespaces: [{
-          ns: 'llm-pi-ai', schema: {}, base: {}, user: {}, applies: 'live' as const, secrets: [], revision: 0,
-          value: { providers: { openai: { modelDiscovery: { enabled: automaticDiscovery } } } },
-        }],
-      },
-    }),
+    describe: () => settingsFailure === 'throw'
+      ? Promise.reject(new Error('settings enumeration offline'))
+      : Promise.resolve(settingsFailure === 'result'
+        ? { ok: false as const, error: { message: 'settings enumeration refused' } }
+        : {
+          ok: true as const,
+          value: {
+            writable: true,
+            namespaces: [{
+              ns: 'llm-pi-ai', schema: {}, base: {}, user: {}, applies: 'live' as const, secrets: [], revision: 0,
+              value: { providers: { openai: { modelDiscovery: { enabled: automaticDiscovery } } } },
+            }],
+          },
+        }),
   }
   const remote = Object.assign(new TestRemote(ctx), {
     llm: llmRemote, session: sessionRemote, settings: settingsRemote,
@@ -199,6 +209,8 @@ async function bench() {
     setGroups: (next: typeof GROUPS) => { groups = next },
     setDiscoveryFailure: (next: string | undefined) => { discoveryFailure = next },
     setAutomaticDiscovery: (next: boolean) => { automaticDiscovery = next },
+    setSettingsFailure: (next: typeof settingsFailure) => { settingsFailure = next },
+    setProviderEnumerationFailure: (next: typeof providerEnumerationFailure) => { providerEnumerationFailure = next },
     blockOf: (key: string) => blocks.get(sid(key)),
   }
 }
@@ -338,6 +350,42 @@ describe('ui-model-selection dual entry', () => {
     await vi.waitFor(() => { expect(b.calls.models).toBe(2) })
     expect(b.calls.discover).toBe(0)
     expect(face.directory.getSnapshot()).toMatchObject({ status: 'ready', error: null })
+  })
+
+  it('reports thrown settings enumeration failures while retaining last-good rows', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setSettingsFailure('throw')
+
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot()).toMatchObject({
+        status: 'error', error: 'settings: settings enumeration offline', groups: GROUPS,
+      })
+    })
+    expect(b.calls.discover).toBe(0)
+  })
+
+  it('reports non-OK provider enumeration failures while retaining last-good rows', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setProviderEnumerationFailure('result')
+
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot()).toMatchObject({
+        status: 'error', error: 'providers: provider enumeration refused', groups: GROUPS,
+      })
+    })
+    expect(b.calls.discover).toBe(0)
   })
 
   it('keeps the durable projected selection while the eager catalog reconnects', async () => {

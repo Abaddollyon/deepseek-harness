@@ -1,6 +1,5 @@
 /** User control for model-selectable subagent delegation in new sessions. */
 
-import { useEffect } from 'react'
 import clsx from 'clsx'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -25,7 +24,6 @@ export type SubagentModelSelectionCardProps =
 export function SubagentModelSelectionCard(props: SubagentModelSelectionCardProps) {
   const { t } = props
   const state = props.useSubagentModelSelectionCard(snapshot => snapshot)
-  useEffect(() => { props.openCatalog() }, [props.openCatalog])
   const availableGroups = new Map<string, {
     providerName: string
     candidates: SubagentModelCandidate[]
@@ -71,6 +69,7 @@ export function SubagentModelSelectionCard(props: SubagentModelSelectionCardProp
       state={state}
       onSave={props.save}
       onDiscard={props.discard}
+      onOpen={props.openCatalog}
     >
       <div className={css.permission}>
         <div className={css.toggleRow}>
