@@ -202,14 +202,16 @@ export function apply(ctx: Context, config: Config): void {
     changed: () => registration?.replace([...profiles().keys()]),
   })
   ctx.effect(() => () => catalog.dispose())
+  ctx.inject(['credentials'], () => { catalog.credentialsReady() })
   ctx.on('credentials/record-updated', (key) => {
     if (credentialKeyScope(key) === NS) catalog.invalidate(credentialKeyId(key))
   })
   ctx.on('credentials/reference-updated', (ref) => {
-    for (const [provider, profile] of profiles()) if (profile.apiKeyEnv === ref) catalog.invalidate(provider)
+    catalog.invalidateReference(ref)
   })
   const adapter = new PiAiAdapter({
     profiles,
+    ensureModel: (provider, model, signal) => catalog.ensureModel(provider, model, signal),
     resolveApiKey,
     auth,
     resolveAttachments: () => ctx.get('attachments'),

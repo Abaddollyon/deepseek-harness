@@ -42,14 +42,15 @@ afterEach(async () => {
   root = undefined
   await closeMockServers()
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
 })
 
 /** Boot the dormant composition: a bare `llm-pi-ai` row with no config at all. */
-async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
+async function loadComposition(existingRoot?: string): Promise<{ ctx: Context; settingsPath: string }> {
+  root = existingRoot ?? await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
   vi.stubEnv('DSH_HOME', root)
   const settingsPath = join(root, 'settings.yaml')
-  await writeFile(settingsPath, '# personal settings\n')
+  if (existingRoot === undefined) await writeFile(settingsPath, '# personal settings\n')
   await writeFile(join(root, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_COMPOSITION_KEY: key-from-store\n', { mode: 0o600 })
 
   const configPath = join(root, 'cordis.yml')
@@ -98,6 +99,54 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
+  it('R3 cold dispatch resolves cached selection without waiting for an offline metadata endpoint', async () => {
+    const nativeFetch = globalThis.fetch
+    let offline = false
+    vi.stubGlobal('fetch', (url: string | URL | Request, init?: RequestInit) => {
+      const address = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url
+      if (address.endsWith('/models')) {
+        return offline ? new Promise<Response>(() => {}) : Promise.resolve(Response.json({ data: [{ id: 'cold-model' }] }))
+      }
+      return nativeFetch(url, init)
+    })
+    const server = await mockServer([{ events: textEvents }])
+    const first = await loadComposition()
+    await first.ctx.settings.update('llm-pi-ai', { providers: { 'cold-route': {
+      api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
+      modelDiscovery: { enabled: true, timeoutMs: 60_000 }, models: [{ id: 'configured' }],
+    } } })
+    await first.ctx.llm.discoverModels('llm-pi-ai', { provider: 'cold-route' })
+    const savedConfig = JSON.stringify(first.ctx.settings.get('llm-pi-ai'))
+    await first.ctx.fiber.dispose()
+    offline = true
+    const second = await loadComposition(root)
+    expect(JSON.stringify(second.ctx.settings.get('llm-pi-ai'))).toBe(savedConfig)
+    // No listModels, explicit refresh, polling, or network completion primes this process.
+    const [resolved, prepared, dispatched] = await Promise.all([
+      second.ctx.llm.resolveModelInfo('cold-route', 'cold-model'),
+      second.ctx.llm.prepareCall({ provider: 'cold-route', model: 'cold-model' }),
+      assemble(second.ctx, { provider: 'cold-route', model: 'cold-model', messages: [] }),
+    ])
+    expect(resolved.id).toBe('cold-model')
+    expect(prepared.config.model).toBe('cold-model')
+    expect(dispatched.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('R3 cold unknown selection receives a discovery opportunity without picker priming', async () => {
+    const server = await mockServer([
+      { body: JSON.stringify({ data: [{ id: 'cold-new' }] }) }, { events: textEvents },
+    ])
+    const { ctx } = await loadComposition()
+    await ctx.settings.update('llm-pi-ai', { providers: { 'cold-route': {
+      api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
+      modelDiscovery: { enabled: true }, models: [{ id: 'configured' }],
+    } } })
+    const result = await assemble(ctx, { provider: 'cold-route', model: 'cold-new', messages: [] })
+    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(server.paths).toEqual(['/models', '/chat/completions'])
+  })
+
   it('discovers a custom Kimi route through Loader and dispatches the discovered selection', async () => {
     vi.stubEnv('PI_COMPOSITION_KEY', '')
     const server = await mockServer([
