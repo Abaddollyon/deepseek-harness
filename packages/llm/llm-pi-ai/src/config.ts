@@ -14,7 +14,7 @@
  * @module dsh-llm-pi-ai/config
  */
 
-import type { CacheRetention, ChatTemplateKwargValue, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
+import type { Api, CacheRetention, ChatTemplateKwargValue, Model, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
@@ -253,6 +253,8 @@ export interface ResolvedPiAiProviderProfile
    * serving requests.
    */
   piProvider: Provider
+  /** Selectable catalog projection; piProvider retains descriptors for existing selections. */
+  selectableModels: readonly Model<Api>[]
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    * The seam materializes one only into a request that names no cap of its
@@ -456,11 +458,13 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
  * fallback, and each route's models and pi-ai provider are materialized once.
  * @param providers - configured provider profiles keyed by route.
  * @param discovered - normalized metadata, applied beneath explicit configuration.
+ * @param excludedIds - normalized discovery exclusions, scoped to each route's configuration and credential.
  * @returns validated profiles in configuration order.
  */
 export function resolveProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>> | undefined,
   discovered: ReadonlyMap<string, readonly PiAiModelProfile[]> = new Map(),
+  excludedIds: ReadonlyMap<string, readonly string[]> = new Map(),
 ): Map<string, ResolvedPiAiProviderProfile> {
   if (Array.isArray(providers)) {
     throw new Error('llm-pi-ai: providers is now a dict keyed by provider route, not an array of profiles')
@@ -530,6 +534,7 @@ export function resolveProfiles(
     const catalog = resolveRouteModels({
       provider,
       ...source.modelDiscovery?.enabled !== true ? {} : { discovered: discovered.get(provider) ?? [] },
+      ...source.modelDiscovery?.enabled !== true ? {} : { excludedIds: excludedIds.get(provider) ?? [] },
       ...source.api === undefined ? {} : { api: source.api },
       ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
       ...source.models === undefined ? {} : { models: source.models },
@@ -554,6 +559,7 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog.configuredMaxTokens,
+      selectableModels: catalog.selectableModels,
       piProvider: buildProvider({
         provider,
         displayName,

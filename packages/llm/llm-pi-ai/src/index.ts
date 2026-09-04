@@ -295,7 +295,7 @@ export function apply(ctx: Context, config: Config): void {
       await catalog.refresh(profile.provider, signal)
       const refreshed = profiles().get(profile.provider)
       if (refreshed === undefined) throw new LlmError('model discovery route was removed', 'DISCOVERY_FAILED')
-      return refreshed.piProvider.getModels().map(model => ({
+      return refreshed.selectableModels.map(model => ({
         id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens,
       }))
     }

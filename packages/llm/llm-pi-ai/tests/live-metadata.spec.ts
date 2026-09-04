@@ -10,7 +10,7 @@ function profile(provider: string) {
 
 describe('provider metadata protocols', () => {
   it('maps explicit Kimi and Anthropic capabilities without guessing from model names', () => {
-    expect(normalizeMetadata([{ id: 'new-kimi', supports_image_in: true, supports_reasoning: false }]))
+    expect(normalizeMetadata([{ id: 'new-kimi', supports_image_in: true, supports_reasoning: false }]).models)
       .toEqual([{ id: 'new-kimi', input: ['text', 'image'], reasoningEfforts: false }])
     expect(normalizeMetadata([{
       id: 'new-claude', max_input_tokens: 500000, max_tokens: 20000,
@@ -18,7 +18,7 @@ describe('provider metadata protocols', () => {
         image_input: { supported: true },
         effort: { supported: true, low: { supported: true }, high: { supported: true }, max: { supported: false } },
       },
-    }])).toEqual([{
+    }]).models).toEqual([{
       id: 'new-claude', contextWindow: 500000, maxTokens: 20000,
       input: ['text', 'image'], reasoningEfforts: { low: 'low', high: 'high' },
     }])
@@ -55,7 +55,7 @@ describe('provider metadata protocols', () => {
     })
     const token = `fake.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } })).toString('base64url')}.sig`
     const result = await fetchLiveMetadata(profile('openai-codex'), { apiKey: token }, new AbortController().signal)
-    expect(result).toEqual({ clientVersion: '0.153.3', models: [{ id: 'new-codex', contextWindow: 1000000, reasoningEfforts: { high: 'high' } }] })
+    expect(result).toEqual({ clientVersion: '0.153.3', models: [{ id: 'new-codex', contextWindow: 1000000, reasoningEfforts: { high: 'high' } }], excludedIds: ['hidden', 'unsupported'] })
     expect(requests[0]?.headers.get('authorization')).toBeNull()
     expect(requests[0]?.headers.get('chatgpt-account-id')).toBeNull()
     expect(requests[1]?.url).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.153.3')

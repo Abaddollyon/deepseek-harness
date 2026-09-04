@@ -15,6 +15,7 @@ const STABLE_VERSION = /^\d+\.\d+\.\d+$/
 /** Sanitized metadata fetch result and the public Codex client version, when used. */
 export interface LiveMetadata {
   models: PiAiModelProfile[]
+  excludedIds: string[]
   clientVersion?: string
 }
 
@@ -35,18 +36,29 @@ function label(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= 512 ? value : undefined
 }
 
-/** Normalize a complete provider page, filtering unsupported Codex entries and effort levels.
+/** Normalize a complete provider page, retaining explicit Codex exclusions separately from capabilities.
  * @param rows - Untrusted provider model rows.
  * @param codex - Whether rows use Codex's catalog fields.
  * @returns Metadata suitable for configuration resolution and disk persistence.
  */
-export function normalizeMetadata(rows: unknown, codex = false): PiAiModelProfile[] {
+export function normalizeMetadata(rows: unknown, codex = false): LiveMetadata {
   if (!Array.isArray(rows) || rows.length > MAX_ENTRIES) throw failed()
-  return rows.flatMap((raw): PiAiModelProfile[] => {
+  const excludedIds: string[] = []
+  const seen = new Set<string>()
+  const models = rows.flatMap((raw): PiAiModelProfile[] => {
     const row = object(raw)
-    if (codex && (row['visibility'] !== 'list' || row['supported_in_api'] === false)) return []
     const id = label(codex ? row['slug'] : row['id'])
-    if (id === undefined) throw failed()
+    if (id === undefined || seen.has(id)) throw failed()
+    seen.add(id)
+    if (codex) {
+      if (row['supported_in_api'] !== undefined && typeof row['supported_in_api'] !== 'boolean') throw failed()
+      const visibility = row['visibility']
+      if (visibility !== 'list' && visibility !== 'hide' && visibility !== 'internal') throw failed()
+      if (visibility !== 'list' || row['supported_in_api'] === false) {
+        excludedIds.push(id)
+        return []
+      }
+    }
     const name = label(row['display_name'] ?? row['name'])
     if (row['type'] !== undefined && row['type'] !== 'model') throw failed()
     const contextWindow = positive(row['context_window'] ?? row['max_context_window'] ?? row['context_length'] ?? row['max_input_tokens'])
@@ -80,6 +92,7 @@ export function normalizeMetadata(rows: unknown, codex = false): PiAiModelProfil
       ...row['supports_reasoning'] === false || capabilities['thinking'] !== undefined && !supported(capabilities['thinking']) ? { reasoningEfforts: false } : {},
     }]
   })
+  return { models, excludedIds }
 }
 
 /** Fetch authenticated metadata within one caller-owned deadline and aggregate byte budget.
@@ -182,16 +195,23 @@ export async function fetchLiveMetadata(
     }
   }
   const models = new Map<string, PiAiModelProfile>()
+  const excludedIds = new Set<string>()
   const cursors = new Set<string>()
   for (let page = 0; page < MAX_PAGES; page++) {
     const body = await read(url, headers)
-    for (const model of normalizeMetadata(provider === 'openai-codex' ? body['models'] : body['data'], provider === 'openai-codex')) {
+    const normalized = normalizeMetadata(provider === 'openai-codex' ? body['models'] : body['data'], provider === 'openai-codex')
+    for (const id of normalized.excludedIds) {
+      if (models.has(id)) throw failed()
+      excludedIds.add(id)
+    }
+    for (const model of normalized.models) {
+      if (excludedIds.has(model.id)) throw failed()
       models.set(model.id, model)
     }
-    if (models.size > MAX_ENTRIES) throw failed()
+    if (models.size + excludedIds.size > MAX_ENTRIES) throw failed()
     if (body['has_more'] !== true) {
-      if (models.size === 0) throw failed()
-      return { models: [...models.values()], ...clientVersion === undefined ? {} : { clientVersion } }
+      if (models.size + excludedIds.size === 0) throw failed()
+      return { models: [...models.values()], excludedIds: [...excludedIds], ...clientVersion === undefined ? {} : { clientVersion } }
     }
     const cursor = label(body['last_id'])
     if (cursor === undefined || cursors.has(cursor)) throw failed()

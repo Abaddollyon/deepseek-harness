@@ -22,6 +22,7 @@ interface RouteState {
   references: Set<string>
   identified: boolean
   metadata?: readonly PiAiModelProfile[]
+  excludedIds?: readonly string[]
   cacheKey?: string
   persistedKey?: string
   writeSequence: number
@@ -116,7 +117,8 @@ export class LiveCatalog {
     }
     if (this.snapshot === undefined) {
       this.snapshot = resolveProfiles(raw.providers, new Map([...this.states].flatMap(([provider, state]) =>
-        state.metadata === undefined ? [] : [[provider, state.metadata]])))
+        state.metadata === undefined ? [] : [[provider, state.metadata]])),
+      new Map([...this.states].map(([provider, state]) => [provider, state.excludedIds ?? []])))
     }
     return this.snapshot
   }
@@ -199,7 +201,7 @@ export class LiveCatalog {
     const signal = AbortSignal.any([caller, state.controller.signal, timeout.signal])
     try {
       const sequence = await this.persist(state, JSON.stringify({
-        version: 1, models: state.metadata, clientVersion: state.clientVersion,
+        version: 2, models: state.metadata, excludedIds: state.excludedIds ?? [], clientVersion: state.clientVersion,
       }), signal)
       if (this.valid(provider, state) && state.writeSequence === sequence && state.cacheKey === key) state.persistedKey = key
     } finally {
@@ -230,14 +232,21 @@ export class LiveCatalog {
       if ((await within(signal, () => stat(filename))).size > 4 * 1024 * 1024) return
       const body: unknown = JSON.parse(await within(signal, () => readFile(filename, { encoding: 'utf8', signal })))
       if (typeof body !== 'object' || body === null) return
-      const cached = body as { version?: unknown; models?: unknown; clientVersion?: unknown }
-      if (cached.version !== 1 || !Array.isArray(cached.models) || cached.models.length === 0 || cached.models.length > 2000) return
+      const cached = body as { version?: unknown; models?: unknown; excludedIds?: unknown; clientVersion?: unknown }
+      if (cached.version !== 2 || !Array.isArray(cached.models) || !Array.isArray(cached.excludedIds)
+        || cached.models.length > 2000 || cached.excludedIds.length > 2000
+        || cached.models.length + cached.excludedIds.length === 0) return
+      const excludedIds = cached.excludedIds as unknown[]
+      if (excludedIds.some(id => typeof id !== 'string' || id.length === 0 || id.length > 512)) return
       // Resolve durable metadata through the same model validator as profile JSON.
       const models = cached.models as PiAiModelProfile[]
-      resolveProfiles(this.raw?.providers, new Map([[provider, models]]))
+      const exclusions = excludedIds as string[]
+      if (new Set([...models.map(model => model.id), ...exclusions]).size > 2000) return
+      resolveProfiles(this.raw?.providers, new Map([[provider, models]]), new Map([[provider, exclusions]]))
       signal.throwIfAborted()
       if (!this.valid(provider, state)) return
       state.metadata = models
+      state.excludedIds = exclusions
       state.persistedKey = state.cacheKey
       if (typeof cached.clientVersion === 'string' && /^\d+\.\d+\.\d+$/.test(cached.clientVersion)) {
         state.clientVersion = cached.clientVersion
@@ -342,6 +351,7 @@ export class LiveCatalog {
       const cacheKey = this.identity(state, apiKey, credential, auth)
       if (state.cacheKey !== cacheKey) {
         delete state.metadata
+        delete state.excludedIds
         delete state.clientVersion
         this.snapshot = undefined
       }
@@ -351,18 +361,24 @@ export class LiveCatalog {
       this.profiles()
       if (!this.valid(provider, state)) throw new Error('model metadata request superseded')
       const merged = new Map(state.metadata?.map(model => [model.id, model]))
-      for (const model of result.models) merged.set(model.id, model)
+      const excludedIds = new Set(state.excludedIds)
+      for (const model of result.models) {
+        merged.set(model.id, model)
+        excludedIds.delete(model.id)
+      }
+      for (const id of result.excludedIds) excludedIds.add(id)
       const metadata = [...merged.values()]
-      if (metadata.length > 2000) throw new Error('retained model metadata exceeds the entry limit')
-      resolveProfiles(this.raw?.providers, new Map([[provider, metadata]]))
+      if (new Set([...merged.keys(), ...excludedIds]).size > 2000) throw new Error('retained model metadata exceeds the entry limit')
+      resolveProfiles(this.raw?.providers, new Map([[provider, metadata]]), new Map([[provider, [...excludedIds]]]))
       const serialized = JSON.stringify({
-        version: 1, models: metadata, clientVersion: result.clientVersion,
+        version: 2, models: metadata, excludedIds: [...excludedIds], clientVersion: result.clientVersion,
       })
       if (Buffer.byteLength(serialized) > 4 * 1024 * 1024) throw new Error('retained model metadata exceeds the byte limit')
       const sequence = await this.persist(state, serialized, signal)
       signal.throwIfAborted()
       if (!this.valid(provider, state) || state.writeSequence !== sequence) throw new Error('model metadata request superseded')
       state.metadata = metadata
+      state.excludedIds = [...excludedIds]
       state.persistedKey = state.cacheKey
       state.clientVersion = result.clientVersion
       this.snapshot = undefined

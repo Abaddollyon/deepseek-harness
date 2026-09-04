@@ -597,6 +597,8 @@ export type PiAiModelOverride = Omit<PiAiModelProfile, 'id'>
 export interface RouteCatalogRequest {
   /** Live metadata beneath explicit configuration and above installed capabilities. */
   discovered?: readonly PiAiModelProfile[]
+  /** Authoritatively excluded discovery IDs; explicit entries and overrides remain selectable. */
+  excludedIds?: readonly string[]
   /** Provider route key, stamped onto every materialized model. */
   provider: string
   /** Wire protocol override; absent defers to each catalog model's own API. */
@@ -775,6 +777,8 @@ function resolveModelCompat(
 export interface RouteCatalog {
   /** The materialized models in configuration order. */
   models: readonly Model<Api>[]
+  /** New picker choices, excluding ineligible implicit fallback entries. */
+  selectableModels: readonly Model<Api>[]
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    *
@@ -920,5 +924,8 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models, configuredMaxTokens }
+  const excluded = new Set(request.excludedIds)
+  const authoritative = new Set([...configured.map(model => model.id), ...Object.keys(overrides)])
+  const selectableModels = models.filter(model => !excluded.has(model.id) || authoritative.has(model.id))
+  return { models, selectableModels, configuredMaxTokens }
 }

@@ -108,7 +108,9 @@ profile 通过可选 settings seam 每次操作重新读取：base 与用户的 
 
 ### 从端点发现模型
 
-在路由上设置 `modelDiscovery: { enabled: true }`，即可在激活时、凭据变更后和每六小时通过经过认证的元数据扩展目录。Kimi Code 与 OpenAI 兼容路由使用 `/models`；Anthropic 使用分页 Models API，`openai-codex` 则通过 pi-ai 的串行 OAuth 刷新获取订阅元数据。显式 `models` 条目与 `modelOverrides` 保留自身字段；发现操作不会写入设置或选择替代模型。新元数据使用既有不可变适配器快照，因此列举、解析和请求发送保持一致，进行中的调用保留其捕获的模型。成功发布会发出 `llm/adapters-updated`。
+在路由上设置 `modelDiscovery: { enabled: true }`，即可在激活时、凭据变更后和每六小时通过经过认证的元数据扩展目录。Kimi Code 与 OpenAI 兼容路由使用 `/models`；Anthropic 使用分页 Models API，`openai-codex` 则通过 pi-ai 的串行 OAuth 刷新获取订阅元数据。显式 `models` 条目与 `modelOverrides` 保留自身字段；发现操作不会写入设置或选择替代模型。可选模型通过同一不可变适配器快照解析和发送请求；进行中的调用保留其捕获的模型。成功发布会发出 `llm/adapters-updated`。
+
+经过验证的隐藏／内部或显式不受支持的 Codex ID 会被排除在新的选择器选项之外，包括已安装回退项和此前发现的条目。显式 `models` 条目和 `modelOverrides` 仍可选择。已安装和上次有效的已发现描述符仍可为已保存选择解析和发送请求；提供方执行仍可能拒绝它们。后续回复省略某行不会改变其元数据或可选资格；有效的正向行可恢复可选资格。排除项与元数据缓存共享账户／配置范围、离线恢复、已验证 OAuth 续期迁移、四 MiB 限制，以及合计 2,000 个不同 ID 的限制。非空且仅含排除项的回复具有权威性；失败、格式错误或空回复会保留上次有效的元数据和排除项。缓存版本 2 包含排除项；更旧的可选缓存格式会被忽略。
 
 `ctx.llm.discoverModels('llm-pi-ai', { provider })` 会显式刷新已启用的配置路由。携带替换密钥或不同端点／协议的请求仍作为草稿探测，不会发布目录。失败或空结果以 `DISCOVERY_FAILED` 拒绝请求，但保留最后有效目录；并发刷新共享同一请求。未显式启用时，已安装路由返回静态目录，自定义 OpenAI 兼容路由返回草稿候选项。
 
