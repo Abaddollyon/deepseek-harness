@@ -23,10 +23,18 @@ interface RouteState {
   identified: boolean
   metadata?: readonly PiAiModelProfile[]
   cacheKey?: string
+  persistedKey?: string
+  writeSequence: number
   clientVersion?: string | undefined
   flight?: Promise<void> | undefined
   initialization?: Promise<void>
   timer?: ReturnType<typeof setTimeout>
+}
+
+interface Renewal {
+  state: RouteState
+  from?: string
+  to?: string
 }
 
 /** Dependencies already owned by the adapter plugin. */
@@ -75,7 +83,7 @@ export class LiveCatalog {
   private raw: Config | undefined
   private snapshot: ReadonlyMap<string, ResolvedPiAiProviderProfile> | undefined
   private closed = false
-  private authRefresh = new AsyncLocalStorage<RouteState>()
+  private authRefresh = new AsyncLocalStorage<Renewal>()
 
   constructor(private readonly options: LiveCatalogOptions) {}
 
@@ -99,6 +107,7 @@ export class LiveCatalog {
         if (profile.modelDiscovery?.enabled !== true || this.states.has(provider)) continue
         const state: RouteState = {
           configKey: digest(raw.providers?.[provider]), profile, controller: new AbortController(), restored: false,
+          writeSequence: 0,
           references: new Set(profile.apiKeyEnv === undefined ? [] : [profile.apiKeyEnv]), identified: false,
         }
         this.states.set(provider, state)
@@ -138,6 +147,66 @@ export class LiveCatalog {
     return digest(['effective-auth-v2', state.profile.provider, state.configKey, identity])
   }
 
+  /** Observe only trusted renewal consumers: Models.getAuth and adapter auth recovery, never login.
+   * @returns Auth injection preserving verified serialized OAuth predecessor/successor continuity.
+   */
+  renewalAuth(): PiAiAuthInjection {
+    const source = this.options.auth.credentials
+    return { ...this.options.auth, credentials: {
+      read: (id, options) => source.read(id, options),
+      list: options => source.list(options),
+      delete: (id, options) => source.delete(id, options),
+      modify: async (provider, mutate, options) => {
+        this.profiles()
+        const state = this.states.get(provider)
+        if (state === undefined) return source.modify(provider, mutate, options)
+        const signal = options?.signal ?? state.controller.signal
+        // A generation can renew before the background cache read has finished.
+        // Wait only for restore, not network discovery, so the predecessor is identified.
+        const initialization = state.initialization
+        if (!state.restored && initialization !== undefined) {
+          await within(signal, () => initialization)
+        }
+        const renewal: Renewal = { state }
+        return this.authRefresh.run(renewal, async () => {
+          const committed = await source.modify(provider, async (current) => {
+            const updated = await mutate(current)
+            if (current?.type === 'oauth' && updated?.type === 'oauth') {
+              renewal.from = this.identity(state, undefined, current)
+              renewal.to = this.identity(state, undefined, updated)
+            }
+            return updated
+          }, options)
+          if (this.valid(provider, state) && renewal.from === state.cacheKey && renewal.to !== undefined
+            && committed?.type === 'oauth' && this.identity(state, undefined, committed) === renewal.to) {
+            state.cacheKey = renewal.to
+            try { await this.preserveCache(provider, state, signal) } catch {
+              // Auth was committed by its owner. Cache I/O must not turn a valid renewal into auth failure.
+              if (this.valid(provider, state)) this.options.warn(provider)
+            }
+          }
+          return committed
+        })
+      },
+    } }
+  }
+
+  private async preserveCache(provider: string, state: RouteState, caller: AbortSignal): Promise<void> {
+    const key = state.cacheKey
+    if (!this.valid(provider, state) || state.metadata === undefined || key === undefined || state.persistedKey === key) return
+    const timeout = new AbortController()
+    const timer = setTimeout(() => { timeout.abort() }, state.profile.modelDiscovery?.timeoutMs ?? 15_000)
+    const signal = AbortSignal.any([caller, state.controller.signal, timeout.signal])
+    try {
+      const sequence = await this.persist(state, JSON.stringify({
+        version: 1, models: state.metadata, clientVersion: state.clientVersion,
+      }), signal)
+      if (this.valid(provider, state) && state.writeSequence === sequence && state.cacheKey === key) state.persistedKey = key
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   private async restore(provider: string, state: RouteState, signal: AbortSignal): Promise<void> {
     try {
       const [key, credential] = await Promise.all([
@@ -169,6 +238,7 @@ export class LiveCatalog {
       signal.throwIfAborted()
       if (!this.valid(provider, state)) return
       state.metadata = models
+      state.persistedKey = state.cacheKey
       if (typeof cached.clientVersion === 'string' && /^\d+\.\d+\.\d+$/.test(cached.clientVersion)) {
         state.clientVersion = cached.clientVersion
       }
@@ -261,11 +331,11 @@ export class LiveCatalog {
       signal.throwIfAborted()
       const apiKey = await within(signal, () => this.options.resolveApiKey(provider, state.profile))
       signal.throwIfAborted()
-      const models = createModels({ ...this.options.auth, authContext: this.authContext(state, signal) })
+      const models = createModels({ ...this.renewalAuth(), authContext: this.authContext(state, signal) })
       models.setProvider(state.profile.piProvider)
-      const auth = await within(signal, () => this.authRefresh.run(state, () => models.getAuth(provider, {
+      const auth = await within(signal, () => models.getAuth(provider, {
         signal, ...apiKey === undefined ? {} : { apiKey },
-      })))
+      }))
       signal.throwIfAborted()
       if (auth === undefined) throw new Error('missing model metadata credential')
       const credential = await within(signal, () => this.options.auth.credentials.read(provider, { signal }))
@@ -276,6 +346,7 @@ export class LiveCatalog {
         this.snapshot = undefined
       }
       state.cacheKey = cacheKey
+      await this.preserveCache(provider, state, signal)
       const result = await within(signal, () => fetchLiveMetadata(state.profile, auth.auth, signal, state.clientVersion))
       this.profiles()
       if (!this.valid(provider, state)) throw new Error('model metadata request superseded')
@@ -288,10 +359,11 @@ export class LiveCatalog {
         version: 1, models: metadata, clientVersion: result.clientVersion,
       })
       if (Buffer.byteLength(serialized) > 4 * 1024 * 1024) throw new Error('retained model metadata exceeds the byte limit')
-      await this.persist(state, serialized, signal)
+      const sequence = await this.persist(state, serialized, signal)
       signal.throwIfAborted()
-      if (!this.valid(provider, state)) throw new Error('model metadata request superseded')
+      if (!this.valid(provider, state) || state.writeSequence !== sequence) throw new Error('model metadata request superseded')
       state.metadata = metadata
+      state.persistedKey = state.cacheKey
       state.clientVersion = result.clientVersion
       this.snapshot = undefined
       this.options.changed()
@@ -303,8 +375,13 @@ export class LiveCatalog {
     }
   }
 
-  private async persist(state: RouteState, serialized: string, signal: AbortSignal): Promise<void> {
+  private async persist(state: RouteState, serialized: string, signal: AbortSignal): Promise<number> {
     signal.throwIfAborted()
+    const sequence = ++state.writeSequence
+    const check = (): void => {
+      signal.throwIfAborted()
+      if (sequence !== state.writeSequence) throw new Error('model metadata write superseded')
+    }
     const filename = this.filename(state)
     const staging = `${filename}.${randomUUID()}.pending`
     // A write still staging at timeout cannot be promoted. Commit queues
@@ -312,12 +389,12 @@ export class LiveCatalog {
     const writing = (async () => {
       try {
         await writeFileAtomic(staging, serialized, { mode: 0o600, dirMode: 0o700 })
-        signal.throwIfAborted()
+        check()
         const previous = this.cacheCommits.get(filename) ?? Promise.resolve()
         const commit = previous.catch(() => { /* An earlier failed commit cannot prevent this one. */ }).then(async () => {
-          signal.throwIfAborted()
+          check()
           await rename(staging, filename)
-          signal.throwIfAborted()
+          check()
         })
         this.cacheCommits.set(filename, commit)
         try { await commit } finally {
@@ -330,6 +407,7 @@ export class LiveCatalog {
     this.diskWrites.add(writing)
     void writing.then(() => this.diskWrites.delete(writing), () => this.diskWrites.delete(writing))
     await within(signal, () => writing)
+    return sequence
   }
 
   /** Fence old account metadata and start discovery with the current credential.
@@ -338,9 +416,10 @@ export class LiveCatalog {
   invalidate(provider: string): void {
     const state = this.states.get(provider)
     if (state === undefined) return
-    // A committed rotation in this exact getAuth operation already precedes its metadata fetch.
-    // Login/logout and another request's rotation run outside this async context and still fence it.
-    if (this.authRefresh.getStore() === state) return
+    // Only a trusted serialized renewal whose predecessor owns this catalog can retain it.
+    // Login/logout and unobserved external replacements still fence the state.
+    const renewal = this.authRefresh.getStore()
+    if (renewal?.state === state && renewal.from === state.cacheKey && renewal.to !== undefined) return
     this.stop(state)
     this.states.delete(provider)
     this.raw = undefined

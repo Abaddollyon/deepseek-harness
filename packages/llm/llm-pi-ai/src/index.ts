@@ -213,7 +213,7 @@ export function apply(ctx: Context, config: Config): void {
     profiles,
     ensureModel: (provider, model, signal) => catalog.ensureModel(provider, model, signal),
     resolveApiKey,
-    auth,
+    auth: catalog.renewalAuth(),
     resolveAttachments: () => ctx.get('attachments'),
     resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
       attachments,

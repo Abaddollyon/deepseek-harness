@@ -20,6 +20,8 @@ Codex metadata negotiates with the current stable version advertised by the publ
 
 ## Alternatives considered
 
+The shared renewal-only auth injection observes predecessor and successor grants inside serialized provider refresh transactions, then verifies the committed successor. It serves discovery, request-time generation auth, and forced recovery, but not login. Only a predecessor matching the current cache identity preserves metadata and the Codex version. Migration writes normalized data under the successor fingerprint; per-route write sequences fence delayed migrations against newer catalog commits. Unobserved external replacements remain invalidations rather than inferred same-account renewals. Cache migration errors leave generation auth valid and remain retryable by discovery.
+
 **Rewrite model configuration on refresh.** Rejected because discovery would overwrite explicit choices and turn transient provider replies into user settings.
 
 **Maintain picker-specific catalogs.** Rejected because chat, delegation, automation, and remote configuration must resolve through the same dispatch service.

@@ -6,17 +6,22 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type { Credential } from '@earendil-works/pi-ai'
 import { LiveCatalog } from '../src/live-catalog.ts'
 import { PiAiAdapter } from '../src/adapter.ts'
 import * as LlmPiAi from '../src/index.ts'
 import type { LiveCatalogOptions } from '../src/live-catalog.ts'
+import { assemble } from './assemble.ts'
+import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
-const disk = vi.hoisted(() => ({ hold: undefined as { entered: () => void; release: Promise<undefined> } | undefined }))
+const disk = vi.hoisted(() => ({
+  hold: undefined as { entered: () => void; release: Promise<undefined>; stagingOnly?: boolean } | undefined,
+}))
 vi.mock('@deepseek-ai/dsh-atomic-write', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@deepseek-ai/dsh-atomic-write')>()
   return { ...actual, writeFileAtomic: async (...args: Parameters<typeof actual.writeFileAtomic>) => {
     const hold = disk.hold
-    if (hold !== undefined) {
+    if (hold !== undefined && (!hold.stagingOnly || args[0].endsWith('.pending'))) {
       disk.hold = undefined
       hold.entered()
       await hold.release
@@ -34,6 +39,8 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
   vi.useRealTimers()
+  vi.restoreAllMocks()
+  await closeMockServers()
 })
 
 async function home(): Promise<string> {
@@ -64,6 +71,130 @@ function catalog(config: LiveCatalogOptions): LiveCatalog {
 }
 
 describe('catalog review regressions', () => {
+  it.each(['anthropic', 'openai-codex'])('R4 retains %s metadata across verified OAuth renewal and offline restart', async (provider) => {
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const token = (suffix: string): string => provider === 'anthropic' ? `sk-ant-oat-${suffix}`
+      : `head.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'same-account' }, suffix })).toString('base64url')}.sig`
+    let credential: Credential = { type: 'oauth', access: token('old'), refresh: 'old-refresh', expires: now + 600_000 }
+    const config = options(await home(), () => 'unused')
+    const raw = { providers: { [provider]: { models: [{ id: 'configured' }], modelDiscovery: { enabled: true, timeoutMs: 1000 } } } }
+    config.current = () => raw
+    config.auth.credentials.read = async () => credential
+    config.auth.credentials.modify = async (_id, mutate) => { credential = await mutate(credential) ?? credential; return credential }
+    let offline = false
+    let rotations = 0
+    const versions: Array<string | null> = []
+    vi.stubGlobal('fetch', async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      if (url.pathname.endsWith('/token')) {
+        rotations++
+        return Response.json({ access_token: token('new'), refresh_token: 'new-refresh', expires_in: 3600 })
+      }
+      if (url.hostname === 'registry.npmjs.org') {
+        if (offline) throw new Error('public metadata offline')
+        return Response.json({ version: '0.153.2' })
+      }
+      if (provider === 'openai-codex') versions.push(url.searchParams.get('client_version'))
+      if (offline) throw new Error('provider metadata offline')
+      return Response.json(provider === 'openai-codex'
+        ? { models: [{ slug: 'last-good-discovered', visibility: 'list' }] }
+        : { data: [{ id: 'last-good-discovered' }] })
+    })
+    const first = catalog(config)
+    await first.refresh(provider)
+    now += 1_200_000
+    offline = true
+    await expect(first.refresh(provider)).rejects.toThrow(/discovery/)
+    expect(rotations).toBe(1)
+    expect(first.profiles().get(provider)?.piProvider.getModels().map(model => model.id)).toContain('last-good-discovered')
+    await first.dispose()
+    const restarted = catalog(config)
+    await expect(restarted.refresh(provider)).rejects.toThrow(/discovery/)
+    expect(restarted.profiles().get(provider)?.piProvider.getModels().map(model => model.id)).toContain('last-good-discovered')
+    if (provider === 'openai-codex') expect(versions).toEqual(['0.153.2', '0.153.2', '0.153.2'])
+    // An unrelated replacement, even for the same provider, has no trusted lineage.
+    credential = { type: 'oauth', access: token('unrelated'), refresh: 'unrelated-refresh', expires: now + 3_600_000 }
+    await expect(restarted.refresh(provider)).rejects.toThrow(/discovery/)
+    expect(restarted.profiles().get(provider)?.piProvider.getModels().map(model => model.id)).not.toContain('last-good-discovered')
+    const otherAccount = catalog(config)
+    await expect(otherAccount.refresh(provider)).rejects.toThrow(/discovery/)
+    expect(otherAccount.profiles().get(provider)?.piProvider.getModels().map(model => model.id)).not.toContain('last-good-discovered')
+  })
+
+  it.each(['request-time', 'auth-recovery', 'concurrent-catalog'])('R4 preserves the catalog across real adapter %s renewal and metadata failure', async (mode) => {
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const root = await home()
+    vi.stubEnv('DSH_HOME', root)
+    const server = await mockServer([
+      ...mode === 'auth-recovery' ? [{ status: 401, body: JSON.stringify({ error: { message: 'token rejected' } }) }] : [],
+      { events: textEvents },
+    ])
+    const raw = { providers: { anthropic: {
+      api: 'openai-completions', baseURL: server.url, models: [{ id: 'configured' }], modelDiscovery: { enabled: true },
+    } } }
+    const boot = async (): Promise<Context> => {
+      const ctx = new Context()
+      cleanups.push(async () => { await ctx.fiber.dispose() })
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(LocalCredentialProvider, { path: join(root, 'credentials.yaml'), watch: false })
+      return ctx
+    }
+    const first = await boot()
+    await first.credentials.modifyRecord(LlmPiAi.recordKeyFor('anthropic'), async () => ({ kind: 'grant', payload: {
+      type: 'oauth', access: 'sk-ant-oat-old', refresh: 'old-refresh', expires: now + 600_000,
+    } }))
+    const nativeFetch = globalThis.fetch
+    let offline = false
+    let rotations = 0
+    let discovered = 'generation-discovered'
+    vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      if (url.pathname.endsWith('/token')) {
+        rotations++
+        return Promise.resolve(Response.json({ access_token: 'sk-ant-oat-new', refresh_token: 'new-refresh', expires_in: 3600 }))
+      }
+      if (url.pathname.endsWith('/models')) {
+        return offline ? Promise.reject(new Error('metadata offline')) : Promise.resolve(Response.json({ data: [{ id: discovered }] }))
+      }
+      return nativeFetch(input, init)
+    })
+    await first.plugin(LlmPiAi, raw)
+    await first.llm.discoverModels('llm-pi-ai', { provider: 'anthropic' })
+    if (mode !== 'auth-recovery') now += 1_200_000
+    offline = true
+    const entered = Promise.withResolvers<undefined>()
+    const gate = Promise.withResolvers<undefined>()
+    cleanups.push(async () => { gate.resolve(undefined) })
+    if (mode === 'concurrent-catalog') disk.hold = { entered: () => { entered.resolve(undefined) }, release: gate.promise, stagingOnly: true }
+    const generation = assemble(first, { provider: 'anthropic', model: 'generation-discovered', messages: [] })
+    if (mode === 'concurrent-catalog') {
+      await entered.promise
+      offline = false
+      discovered = 'newer-catalog-model'
+      await first.llm.discoverModels('llm-pi-ai', { provider: 'anthropic' })
+      offline = true
+      gate.resolve(undefined)
+    }
+    const generated = await generation
+    expect(generated.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(rotations).toBe(1)
+    await expect(first.llm.discoverModels('llm-pi-ai', { provider: 'anthropic' })).rejects.toThrow(/discovery/)
+    expect((await first.llm.listModels('anthropic')).map(model => model.id)).toContain('generation-discovered')
+    if (mode === 'concurrent-catalog') expect((await first.llm.listModels('anthropic')).map(model => model.id)).toContain('newer-catalog-model')
+    await first.fiber.dispose()
+    const restarted = await boot()
+    await restarted.plugin(LlmPiAi, raw)
+    expect((await restarted.llm.resolveModelInfo('anthropic', 'generation-discovered')).id).toBe('generation-discovered')
+    if (mode === 'concurrent-catalog') expect((await restarted.llm.resolveModelInfo('anthropic', 'newer-catalog-model')).id).toBe('newer-catalog-model')
+    await restarted.credentials.modifyRecord(LlmPiAi.recordKeyFor('anthropic'), async () => ({ kind: 'grant', payload: {
+      type: 'oauth', access: 'sk-ant-oat-other-account', refresh: 'other-refresh', expires: now + 3_600_000,
+    } }))
+    await expect(restarted.llm.discoverModels('llm-pi-ai', { provider: 'anthropic' })).rejects.toThrow(/discovery/)
+    expect((await restarted.llm.listModels('anthropic')).map(model => model.id)).not.toContain('generation-discovered')
+  })
+
   it.each(['deadline', 'caller abort'])('R3 bounds cold unknown lookup by %s while known selection stays immediate', async (cause) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const entered = Promise.withResolvers<undefined>()
