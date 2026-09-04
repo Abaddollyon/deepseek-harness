@@ -11,6 +11,8 @@ import { ZH_BROWSER_LOCALE, connectFreshWorkspaceZh, saveFailureShot } from './s
 const OVERLAY = fileURLToPath(new URL('./default-model.overlay.yml', import.meta.url))
 const DESKTOP_SHOT = '/tmp/dsh-model-picker-desktop.png'
 const NARROW_SHOT = '/tmp/dsh-model-picker-narrow.png'
+const DESKTOP_FULL_SHOT = '/tmp/dsh-model-picker-desktop-full.png'
+const NARROW_FULL_SHOT = '/tmp/dsh-model-picker-narrow-full.png'
 const ARIA_RECEIPT = '/tmp/dsh-model-picker-aria.md'
 
 describe('web e2e: model picker search and refresh', () => {
@@ -71,6 +73,7 @@ describe('web e2e: model picker search and refresh', () => {
 
     await search.press('ArrowDown')
     await expect.poll(() => acme.evaluate(node => node === document.activeElement)).toBe(true)
+    await page.screenshot({ path: DESKTOP_FULL_SHOT })
     await menu.screenshot({ path: DESKTOP_SHOT })
 
     await acme.press('Escape')
@@ -98,6 +101,7 @@ describe('web e2e: model picker search and refresh', () => {
     expect(box!.x).toBeGreaterThanOrEqual(0)
     expect(box!.x + box!.width).toBeLessThanOrEqual(390)
     expect(box!.y + box!.height).toBeLessThanOrEqual(844)
+    await page.screenshot({ path: NARROW_FULL_SHOT })
     await menu.screenshot({ path: NARROW_SHOT })
     await writeFile(ARIA_RECEIPT, `${await menu.ariaSnapshot()}\n`)
 
