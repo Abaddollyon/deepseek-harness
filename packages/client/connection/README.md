@@ -27,6 +27,8 @@ The package carries browser-to-Host Remote calls, exact Fetch responses, and con
 
 The browser uses HTTP POST for Remote unary calls. API Gateway owns the `/api/remote.mux` WebSocket and its logical streams; in-process compositions provide equivalent Remote streams through `connection.rpc.open` without opening a WebSocket. The Host half owns the sole `/api` route, Fetch bridge, browser authentication, Host/Origin checks, and exact `GET`/`HEAD` route registry. Typert Gateway claims generated Remote endpoints, feature packages register non-JSON responses such as Session-log downloads, and unclaimed requests return 404. Loopback hostname classification remains package-internal to the browser-facing Client state.
 
+A dedicated JSON channel may register with `ctx.connection.rpc.handle(channel, handler, { maxBodyBytes })`. The positive safe-integer cap applies only to that route and is enforced as request chunks arrive, before JSON parsing or handler dispatch. Omitting the options argument preserves the carrier-wide default.
+
 -----
 
 <a id="browser-authentication-and-request-trust"></a>
@@ -58,7 +60,7 @@ None; this package neither assembles nor sends a provider request.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **The `/api` bridge buffers each request body in memory** — `maxRequestBodyBytes` (default 300 MiB, sized for the default 200 MiB aggregate image limit after base64 expansion plus envelope headroom) is therefore also the per-request resident bound; a streaming body path would be needed to lower it without shrinking the image limits.
+- **The HTTP bridge buffers each accepted request body in memory** — `maxRequestBodyBytes` sets the shared `/api` cap (default 300 MiB, sized for the default 200 MiB aggregate image limit after base64 expansion plus envelope headroom), while a dedicated JSON channel can select a smaller `maxBodyBytes`; a streaming dispatch path would be needed to avoid buffering accepted bodies.
 - **The browser cookie is not marked `Secure`** — loopback HTTP is the shipped transport, so exposing the same authority over plaintext networking can expose the bearer cookie in transit.
 - **There is no logout operation** — clearing the browser cookie ends one browser session; deleting the owner credential record and restarting `dsh` revokes every session.
 

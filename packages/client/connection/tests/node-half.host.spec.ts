@@ -55,6 +55,15 @@ function fakeRawPost(headers: Record<string, string>, url: string, body: string)
   return request
 }
 
+/** Chunked JSON POST without Content-Length, so the stream limit owns rejection. */
+function fakeChunkedPost(headers: Record<string, string>, url: string, body: unknown): IncomingMessage {
+  const encoded = Buffer.from(JSON.stringify(body))
+  const split = Math.max(1, Math.floor(encoded.byteLength / 2))
+  const request = Readable.from([encoded.subarray(0, split), encoded.subarray(split)]) as unknown as IncomingMessage
+  Object.assign(request, { url, method: 'POST', headers: { 'content-type': 'application/json', ...headers } })
+  return request
+}
+
 /** Response recorder compatible with both the fence's short-circuit and the bridge. */
 function fakeResponse(): {
   response: ServerResponse
@@ -322,6 +331,63 @@ describe('connection node half', () => {
     expect(routes.map(candidate => candidate.path)).toEqual([API_PATH])
     await fiber.dispose()
     expect(routes).toHaveLength(0)
+  })
+
+  it('bounds each dedicated RPC body while preserving the default registration form', async () => {
+    const { routes, connection, dispose } = await mounted()
+    const cookie = browserCookie(connection, '127.0.0.1:3080')
+    const headers = { host: '127.0.0.1:3080', cookie }
+    const accepted: ClientRequest = {
+      type: 'client-request',
+      rpcId: RpcId('rpc-bounded'),
+      method: 'read',
+      payload: null,
+    }
+    const maxBodyBytes = Buffer.byteLength(JSON.stringify(accepted))
+    const calls: unknown[] = []
+    const remove = connection.rpc.handle('/bounded', async (endpoint, payload) => {
+      calls.push({ endpoint, payload })
+      return { ok: true, value: null }
+    }, { maxBodyBytes })
+    const route = routes.find(candidate => candidate.path === '/bounded')!
+
+    const exact = fakeResponse()
+    await route.handler(fakeChunkedPost(headers, '/bounded/read', accepted), exact.response)
+    expect(exact.state.status).toBe(200)
+    expect(calls).toEqual([{ endpoint: 'read', payload: null }])
+
+    const oversized = fakeResponse()
+    await route.handler(fakeChunkedPost(headers, '/bounded/read', {
+      ...accepted,
+      payload: { value: 'cross the channel limit before JSON parsing' },
+    }), oversized.response)
+    expect(oversized.state).toMatchObject({ status: 413, headers: { connection: 'close' } })
+    expect(calls).toHaveLength(1)
+
+    await remove()
+    await dispose()
+  })
+
+  it('rejects malformed dedicated RPC body limits before route registration', async () => {
+    const { routes, connection, dispose } = await mounted()
+    const handler = async () => ({ ok: true as const, value: null })
+    const invalid = [
+      null,
+      {},
+      { maxBodyBytes: 0 },
+      { maxBodyBytes: -1 },
+      { maxBodyBytes: 1.5 },
+      { maxBodyBytes: Number.NaN },
+      { maxBodyBytes: Number.POSITIVE_INFINITY },
+      { maxBodyBytes: Number.MAX_SAFE_INTEGER + 1 },
+      { maxBodyBytes: '8192' },
+      { maxBodyBytes: 1, extra: true },
+    ]
+    for (const options of invalid) {
+      expect(() => connection.rpc.handle('/bounded', handler, options as never)).toThrow(/RPC channel body limit/)
+    }
+    expect(routes.map(route => route.path)).toEqual([API_PATH])
+    await dispose()
   })
 
   it('dispatches claimed /api endpoints and withdraws the claim', async () => {

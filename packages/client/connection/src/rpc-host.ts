@@ -19,6 +19,7 @@ import type {
   ConnectionFetchRoute,
   ConnectionFetchHandler,
   HostConnectionFetch,
+  ConnectionRpcChannelOptions,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcFailure,
   ConnectionRpcHandler,
@@ -79,7 +80,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
   get rpc(): HostConnectionRpc {
     const owner = this.ctx
     return {
-      handle: (channel, handler) => this.register(owner, channel, handler),
+      handle: (channel, handler, options) => this.register(owner, channel, handler, options),
       intercept: (channel, matches, handler) =>
         this.registerInterceptor(owner, channel, matches, handler),
     }
@@ -163,8 +164,10 @@ export class HostConnectionService extends Service implements HostConnectionHand
     owner: Context,
     channel: string,
     handler: ConnectionRpcHandler,
+    options?: ConnectionRpcChannelOptions,
   ): () => Promise<void> {
     assertChannel(channel)
+    const maxBodyBytes = rpcChannelBodyLimit(options)
     const fetchHandler = rpcFetchHandler(channel, handler)
     const route: WebRoute = {
       kind: 'prefix',
@@ -176,7 +179,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
           res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
           return
         }
-        await bridge(req, res, fetchHandler)
+        await bridge(req, res, fetchHandler, maxBodyBytes)
       },
     }
     return owner.effect(
@@ -290,6 +293,18 @@ function assertChannel(channel: string): void {
   if (!CHANNEL_PATTERN.test(channel) || channel === '/api') {
     throw new Error(`connection: invalid or reserved RPC channel ${JSON.stringify(channel)}`)
   }
+}
+
+function rpcChannelBodyLimit(options: ConnectionRpcChannelOptions | undefined): number | undefined {
+  if (options === undefined) return undefined
+  if (typeof options !== 'object' || options === null || Array.isArray(options)
+    || Object.keys(options).length !== 1 || !Object.hasOwn(options, 'maxBodyBytes')) {
+    throw new Error('connection: RPC channel body limit options must contain only maxBodyBytes')
+  }
+  if (!Number.isSafeInteger(options.maxBodyBytes) || options.maxBodyBytes <= 0) {
+    throw new Error('connection: RPC channel body limit maxBodyBytes must be a positive safe integer')
+  }
+  return options.maxBodyBytes
 }
 
 function assertFetchRoute(route: ConnectionFetchRoute): void {
