@@ -234,3 +234,49 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+@media (max-width: 640px) {
+  .panel {
+    flex-direction: column;
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    max-width: none;
+  }
+
+  .nav {
+    width: 100%;
+    padding: 16px 12px 8px;
+    gap: 10px;
+  }
+
+  .navTitle {
+    padding: 0 4px;
+  }
+
+  .navList {
+    flex-direction: row;
+    gap: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .navCell {
+    flex: none;
+    gap: 4px;
+    padding: 9px 6px;
+  }
+
+  .content {
+    min-height: 0;
+  }
+
+  .header {
+    height: 46px;
+    padding: 8px 12px;
+  }
+
+  .options {
+    padding: 0 12px 16px;
+  }
+}
