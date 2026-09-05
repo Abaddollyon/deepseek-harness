@@ -511,6 +511,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'One-shot permission decisions dispatched over the `approval/request` waterfall; answerers are listeners (the ACP bridge for its own agents), absence fails closed to `unavailable`.',
   },
   {
+    key: 'pendingInteractions',
+    pkg: 'pending-interactions',
+    title: 'Passive pending-interaction lifecycle',
+    mode: 'core',
+    consumers: ['user-approval', 'user-questions'],
+    note: 'Publishes content-free snapshots and queued lifecycle edges around existing answerer waterfalls; observers receive no answer authority and cannot delay settlement.',
+  },
+  {
     key: 'permissionPresets',
     pkg: 'permission-presets',
     title: 'Permission presets',
@@ -630,6 +638,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['client-hmr'],
     note: 'Composes the __DSH_BOOT__ entry graph from an incremental dsh.client scan, serves plugin bundles, and notifies rebuilt/graph-changed subscribers.',
+  },
+  {
+    key: 'clientSurfaces',
+    pkg: 'client-modules',
+    title: 'Named client surface registry',
+    mode: 'core',
+    consumers: ['client-connection', 'host-frontend-static'],
+    note: 'Registers exact authenticated index paths and composes dependency-closed boot graphs while keeping opt-out packages off the ordinary root graph.',
   },
   {
     key: 'workflowEngine',

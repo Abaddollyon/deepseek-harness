@@ -365,7 +365,7 @@ describe('ApprovalService.request', () => {
     const answerer = vi.fn(() => answer.promise)
     ctx.on('approval/request', answerer)
     const firstClient: string[] = []
-    const closeFirst = ctx.pendingInteractions.onChange(change => firstClient.push(change.type))
+    const closeFirst = ctx.pendingInteractions.onChange((change) => { firstClient.push(change.type) })
 
     const pending = ctx.approval.request(requestOf(agent))
     await Promise.resolve()
@@ -374,7 +374,7 @@ describe('ApprovalService.request', () => {
     }])
     closeFirst()
     const secondClient: string[] = []
-    ctx.pendingInteractions.onChange(change => secondClient.push(change.type))
+    ctx.pendingInteractions.onChange((change) => { secondClient.push(change.type) })
     answer.resolve('allowed-once')
 
     await expect(pending).resolves.toBe('allowed-once')

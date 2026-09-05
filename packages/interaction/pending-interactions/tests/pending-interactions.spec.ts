@@ -104,7 +104,7 @@ describe('PendingInteractionRegistry', () => {
     const ctx = new Context()
     await ctx.plugin(PendingInteractionRegistry)
     const seen: string[] = []
-    const unsubscribe = ctx.pendingInteractions.onChange(change => seen.push(change.type))
+    const unsubscribe = ctx.pendingInteractions.onChange((change) => { seen.push(change.type) })
     ctx.pendingInteractions.begin({ kind: 'question' })
     unsubscribe()
     await Promise.resolve()

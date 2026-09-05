@@ -116,6 +116,43 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
 }
 
 describe('connection node half', () => {
+  it('resolves registered client surfaces to exact token launch paths', async () => {
+    const mountedConnection = await mounted()
+    try {
+      expect(() => mountedConnection.connection.authenticatedUrl('http://127.0.0.1:3080', 'missing'))
+        .toThrow('unknown client surface')
+    } finally {
+      await mountedConnection.dispose()
+    }
+
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    provideBrowserCredentials(ctx)
+    ctx.provide('webServer', fakeHttpServer(routes, []) as WebServer)
+    ctx.provide('clientSurfaces', {
+      get: (id: string) => id === 'companion'
+        ? { id, path: '/companion', roots: [], rootPlugin: '@fixture/companion' }
+        : undefined,
+    } as never)
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    try {
+      const connection = ctx.connection
+      const launch = new URL(connection.authenticatedUrl('http://127.0.0.1:3080/ignored?return=/wrong', 'companion'))
+      expect(launch.pathname).toBe('/companion')
+      expect([...launch.searchParams.keys()]).toEqual(['token'])
+      const exchanged = fakeResponse()
+      connection.authorizeIndex(
+        fakeRequest({ host: '127.0.0.1:3080' }, `${launch.pathname}${launch.search}`),
+        exchanged.response,
+        'companion',
+      )
+      expect(exchanged.state).toMatchObject({ status: 303, headers: { location: '/companion' } })
+    } finally {
+      await fiber.dispose()
+    }
+  })
+
   it('reserves enough default carrier capacity for the 200 MiB image batch', () => {
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBe(300 * 1024 * 1024)
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBeGreaterThan(Math.ceil(200 * 1024 * 1024 * 4 / 3) + 1024 * 1024)

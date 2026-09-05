@@ -17,6 +17,7 @@
     "src/rpc.ts"
   ],
   "references": [
+    { "path": "../modules" },
     {
       "path": "../../../vendor/cordis"
     },

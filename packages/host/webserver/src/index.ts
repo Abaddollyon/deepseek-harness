@@ -18,6 +18,12 @@ import { renderIndexInjections, type IndexInjection } from './injections.ts'
 export { renderIndexInjections } from './injections.ts'
 export type { IndexInjection, IndexInjectionPlacement } from './injections.ts'
 
+/** Optional rendering variant selected by an index owner. */
+export interface IndexRenderContext {
+  /** Stable variant name understood by index-injection contributors. */
+  readonly variant?: string
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     webServer: WebServer
@@ -28,9 +34,10 @@ declare module '@deepseek-ai/cordis' {
      * render and every worker boot-payload request; listeners push their
      * current rows, so a row's data is read fresh at emit time.
      * @param table - Mutable row table; listeners append in activation order.
+     * @param context - Optional index-render variant selected by the index owner.
      * @mode emit
      */
-    'webserver/index-inject'(table: IndexInjection[]): void
+    'webserver/index-inject'(table: IndexInjection[], context?: IndexRenderContext): void
   }
 }
 
@@ -318,11 +325,12 @@ export class WebServer extends Service {
    * Gather the structured injection table: one `webserver/index-inject` emit,
    * every subscriber pushes its current rows. Fresh per call, so subscribers
    * read live state (module graph, theme preference) at emit time.
+   * @param context - optional variant supplied to injection contributors.
    * @returns rows in subscriber activation order.
    */
-  collectIndexInjections(): IndexInjection[] {
+  collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[] {
     const table: IndexInjection[] = []
-    this.ctx.emit('webserver/index-inject', table)
+    this.ctx.emit('webserver/index-inject', table, context)
     return table
   }
 
@@ -330,10 +338,11 @@ export class WebServer extends Service {
    * Render one index.html body: the structured injection table first, then
    * the raw `tapIndex` transforms over the result.
    * @param html - the raw index.html body.
+   * @param context - optional variant supplied to injection contributors.
    * @returns the transformed body.
    */
-  renderIndex(html: string): string {
-    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections()))
+  renderIndex(html: string, context: IndexRenderContext = {}): string {
+    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections(context)))
   }
 }
 

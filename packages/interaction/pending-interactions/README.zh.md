@@ -17,6 +17,7 @@ kind: "package-reference"
 - [生命周期](#lifecycle)
 - [模型体验](#model-experience)
 - [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
 
 -----
 
@@ -36,6 +37,7 @@ kind: "package-reference"
 
 审批与用户提问服务只在实际派发给 answerer 时调用 `begin()`。它们在回答、拒绝、提供方不可用、错误或取消时结束记录。注册表还会在 `agent/disposed` 时清除该 agent 的记录，并在自身 dispose（资源释放）时清除所有记录。观察者交付通过队列执行且隔离失败，因此观察者无法回答、延迟或替换交互结果。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 无，因为注册表只向被动 Host 消费方暴露进程内生命周期元数据。
@@ -50,3 +52,13 @@ kind: "package-reference"
 
 - **仅限进程内生命周期**：重连的消费方从当前快照开始；已结束记录不是持久历史。
 - **无 agent 的提问没有会话身份**：它们仍可通过不透明 id 与 kind 被观察，但不存在可用于推导 agent 或会话身份的存活 Agent。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作上下文——点击展开</summary>
+
+无。
+
+</details>

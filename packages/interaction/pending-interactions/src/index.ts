@@ -89,7 +89,11 @@ export class PendingInteractionRegistry extends Service implements PendingIntera
     }, 'pending-interactions: Host lifetime')
   }
 
-  /** Begin one content-free lifecycle and return its idempotent end capability. */
+  /**
+   * Begin one content-free lifecycle.
+   * @param input - interaction kind and optional owning agent.
+   * @returns the idempotent end capability.
+   */
   begin(input: PendingInteractionBegin): () => void {
     if (!this.active) return () => {}
     const id = randomUUID() as PendingInteractionId
@@ -119,7 +123,10 @@ export class PendingInteractionRegistry extends Service implements PendingIntera
     }
   }
 
-  /** Current immutable baseline. Historical ended interactions are absent. */
+  /**
+   * Read the current immutable baseline; historical ended interactions are absent.
+   * @returns epoch, revision, and current pending records.
+   */
   snapshot(): PendingInteractionSnapshot {
     return Object.freeze({
       epoch: this.epoch,
@@ -128,7 +135,11 @@ export class PendingInteractionRegistry extends Service implements PendingIntera
     })
   }
 
-  /** Subscribe to future deltas; callers obtain history through snapshot(). */
+  /**
+   * Subscribe to future deltas; callers obtain history through snapshot().
+   * @param listener - failure-contained consumer of future lifecycle changes.
+   * @returns synchronous unsubscribe capability.
+   */
   onChange(listener: (change: PendingInteractionChange) => void | Promise<void>): () => void {
     if (!this.active) return () => {}
     this.listeners.add(listener)

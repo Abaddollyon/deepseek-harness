@@ -39,6 +39,10 @@ The application combo scripts register plugin factories once during boot; module
 
 The shell seeds a frozen module table (`PLATFORM_MODULES`: React, Cordis, and static UI libraries); every dynamic bundle resolves its externals against exactly that baseline. `dsh.client.external` adds only exact non-baseline requests, each answered by the dynamic package row it names or an exact static-table key. Type-only imports are erased and create no request. Composition rejects malformed requests, missing suppliers, self-requests, and synchronous request cycles.
 
+### Named client surfaces
+
+`ctx.clientSurfaces.register({ id, path, roots, rootPlugin })` publishes an exact authenticated index entry for the caller's fiber lifetime. Its boot graph contains the modules bootstrap package, the declared roots, the single root plugin, and their transitive `dsh.client.inject` plus dynamic `external` dependencies. Registration rejects missing requirements and duplicate ids or paths. Packages declaring `dsh.client.defaultRoot: false` stay out of the ordinary root graph unless an ordinary package depends on them; metadata omission preserves the existing default-root behavior.
+
 ### Build requirements
 
 The host serves built client bundles, so `pnpm run build` must have produced each `lib/client.js` before launch; a missing bundle fails activation loudly with one build instruction and a package/path list. Source launch maps host imports to TypeScript source but still consumes the built client export. The package accepts no plugin config of its own.

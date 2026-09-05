@@ -91,6 +91,29 @@ afterEach(() => {
 })
 
 describe('BrowserAuth', () => {
+  it('exchanges only on the selected surface path and redirects to its clean URL', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const launch = new URL(auth.authenticatedUrl('http://127.0.0.1:3080/root?return=/evil#hash', '/companion'))
+    expect(launch.pathname).toBe('/companion')
+    expect([...launch.searchParams.keys()]).toEqual(['token'])
+    expect(launch.hash).toBe('')
+
+    const denied = response()
+    expect(auth.authorizeIndex(request(`/${launch.search}`), denied.value, '/companion')).toBe(false)
+    expect(denied.state.status).toBe(401)
+
+    const exchanged = response()
+    expect(auth.authorizeIndex(
+      request(`${launch.pathname}${launch.search}`),
+      exchanged.value,
+      '/companion',
+    )).toBe(false)
+    expect(exchanged.state).toMatchObject({
+      status: 303,
+      headers: { location: '/companion', 'referrer-policy': 'no-referrer' },
+    })
+  })
+
   it('mints one process token and a persistent authority-bound cookie', async () => {
     const store = new RecordCredentials()
     const processOwner = {}

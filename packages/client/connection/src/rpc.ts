@@ -184,14 +184,14 @@ export interface HostConnectionHandle {
    * @param response - response owned when the result is false.
    * @returns true only when the frontend may serve index.html.
    */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, surfaceId?: string): boolean
 
   /**
    * Add the fresh process token to an ordinary Web application URL.
    * @param baseUrl - clean canonical browser origin.
    * @returns root URL accepted by {@link authorizeIndex} for initial login.
    */
-  authenticatedUrl(baseUrl: string): string
+  authenticatedUrl(baseUrl: string, surfaceId?: string): string
 }
 
 /** Transport-independent Fetch handler used by HTTP and worker carriers. */

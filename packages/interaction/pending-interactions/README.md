@@ -17,6 +17,7 @@ English | [中文](README.zh.md)
 - [Lifecycle](#lifecycle)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
 
 -----
 
@@ -50,3 +51,13 @@ None; this package neither assembles nor sends a provider request.
 
 - **Process-local lifecycle only** — reconnecting consumers start from the current snapshot; ended records are not durable history.
 - **Agentless questions lack session identity** — they remain observable by opaque id and kind, but no live Agent exists from which to derive agent or session identity.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+None.
+
+</details>

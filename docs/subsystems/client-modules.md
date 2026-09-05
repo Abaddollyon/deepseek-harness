@@ -165,4 +165,42 @@ onGraphChanged(listener: () => void): () => void
 ```
 
 Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)
+
+<a id="ctxclientsurfaces--clientsurfaceregistry"></a>
+
+### `ctx.clientSurfaces` — `ClientSurfaceRegistry`
+
+Registration and graph lookup for named browser entry surfaces.
+
+```ts cordis-catalog
+/**
+ * Register one surface for the lifetime of the calling plugin fiber.
+ * @param definition - stable id, exact path, graph roots, and root plugin.
+ * @returns effect-owned disposer for the registration.
+ */
+register(definition: ClientSurfaceDefinition): () => Promise<void>
+
+/**
+ * Return a registered immutable definition by id.
+ * @param id - stable surface identifier.
+ * @returns the definition, or undefined when it is not registered.
+ */
+get(id: string): ClientSurfaceDefinition | undefined
+
+/**
+ * Return the viable registered surface matching an exact pathname.
+ * @param path - decoded exact browser pathname.
+ * @returns the definition, or undefined when absent or currently incomplete.
+ */
+findByPath(path: string): ClientSurfaceDefinition | undefined
+
+/**
+ * Compose the current dependency-closed graph for one registered surface.
+ * @param id - stable registered surface identifier.
+ * @returns the current surface boot graph.
+ */
+graph(id: string): WebBootGraph
+```
+
+Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)
 <!-- END GENERATED cordis-surface -->

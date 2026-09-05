@@ -2,6 +2,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-modules'
 import {
   RpcId,
   type ClientRequest,
@@ -99,13 +100,22 @@ export class HostConnectionService extends Service implements HostConnectionHand
   }
 
   /** Authenticate an index request through the process-token exchange or cookie. */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
-    return this.browserAuth.authorizeIndex(request, response)
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, surfaceId?: string): boolean {
+    return this.browserAuth.authorizeIndex(request, response, this.surfacePath(surfaceId))
   }
 
   /** Add this process's launch token to the clean application URL. */
-  authenticatedUrl(baseUrl: string): string {
-    return this.browserAuth.authenticatedUrl(baseUrl)
+  authenticatedUrl(baseUrl: string, surfaceId?: string): string {
+    return this.browserAuth.authenticatedUrl(baseUrl, this.surfacePath(surfaceId))
+  }
+
+  private surfacePath(surfaceId: string | undefined): string {
+    if (surfaceId === undefined) return '/'
+    const definition = this.ctx.get('clientSurfaces')?.get(surfaceId)
+    if (definition === undefined) {
+      throw new Error(`connection: unknown client surface ${JSON.stringify(surfaceId)}`)
+    }
+    return definition.path
   }
 
   /**
