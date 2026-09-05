@@ -58,6 +58,9 @@ function classifyPiAiError(message: string): string {
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
+  // Codex can report an overload as an SSE error without an HTTP status.
+  // Classify the known provider fault, not every unknown PI_AI_ERROR.
+  if (/\b(?:servers? (?:are|is) (?:currently )?overloaded|overloaded_error)\b/i.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -95,7 +98,8 @@ function classifyPiAiError(message: string): string {
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures.
+ *   to non-retryable `PI_AI_ERROR` failures. Known status-less provider overloads
+ *   map to `SERVER`; unclassified errors remain `PI_AI_ERROR`.
  */
 export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)

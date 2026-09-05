@@ -813,6 +813,31 @@ describe('mapStopReason / mapUsage', () => {
       .toEqual({ kind: 'error', failure: { message: 'pi-ai stream error', code: 'PI_AI_ERROR' } })
   })
 
+  it.each([
+    'Codex error: Our servers are currently overloaded. Please try again later.',
+    'The server is overloaded. Please try again later.',
+    '{"type":"overloaded_error","message":"Overloaded"}',
+  ])('routes status-less provider overload to bounded server recovery: %s', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER', message: errorMessage } })
+    const policy = resolveRetryPolicy(undefined, 'test retryPolicy')
+    if (policy.mode !== 'normal') throw new Error('default retry policy must be normal mode')
+    expect(policy.retryableCodes).toContain('SERVER')
+  })
+
+  it('does not broaden overload recovery to generic, permanent or cancelled failures', () => {
+    for (const errorMessage of ['Tool schema has overloaded signatures', 'Please try again later', 'unrecognized failure', 'not_overloaded_error', 'overloaded_error_suffix']) {
+      expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+        .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+    }
+    for (const [prefix, code] of [['HTTP 401', 'AUTH'], ['HTTP 400', 'INVALID_REQUEST'], ['HTTP 429 insufficient_quota', 'QUOTA']] as const) {
+      expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: prefix + ': Our servers are currently overloaded.' })))
+        .toMatchObject({ kind: 'error', failure: { code } })
+    }
+    expect(mapStopReason(assistant({ stopReason: 'aborted', errorMessage: 'Our servers are currently overloaded.' })))
+      .toMatchObject({ kind: 'aborted', failure: { code: 'ABORTED' } })
+  })
+
   it('maps routable HTTP-ish error messages to stable codes', () => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 401: bad key' })))
       .toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
