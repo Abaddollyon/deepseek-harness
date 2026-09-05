@@ -69,6 +69,7 @@ export function SubagentModelSelectionCard(props: SubagentModelSelectionCardProp
       state={state}
       onSave={props.save}
       onDiscard={props.discard}
+      onOpen={props.openCatalog}
     >
       <div className={css.permission}>
         <div className={css.toggleRow}>

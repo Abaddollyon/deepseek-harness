@@ -595,6 +595,10 @@ export type PiAiModelOverride = Omit<PiAiModelProfile, 'id'>
 
 /** The route-level facts model materialization reads. */
 export interface RouteCatalogRequest {
+  /** Live metadata beneath explicit configuration and above installed capabilities. */
+  discovered?: readonly PiAiModelProfile[]
+  /** Authoritatively excluded discovery IDs; explicit entries and overrides remain selectable. */
+  excludedIds?: readonly string[]
   /** Provider route key, stamped onto every materialized model. */
   provider: string
   /** Wire protocol override; absent defers to each catalog model's own API. */
@@ -773,6 +777,8 @@ function resolveModelCompat(
 export interface RouteCatalog {
   /** The materialized models in configuration order. */
   models: readonly Model<Api>[]
+  /** New picker choices, excluding ineligible implicit fallback entries. */
+  selectableModels: readonly Model<Api>[]
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    *
@@ -802,6 +808,9 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
   // schema materializes `[]` for the absent case, and an empty catalog could
   // serve no request anyway, so both mean "serve the installed catalog".
   const configured = request.models ?? []
+  if (new Set(configured.map(model => model.id)).size !== configured.length) {
+    invalid(provider, 'lists a model more than once')
+  }
   const overrides = request.modelOverrides ?? {}
   // Every miss is refused, never skipped: an override that lands nowhere is a
   // typo someone would otherwise hunt for in a silently unchanged model.
@@ -828,9 +837,19 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
   // An override becomes the catalog entry's configuration, so everything a
   // models entry may declare — capacities, efforts, compat — resolves through
   // the same path with the same diagnostics and request-default semantics.
-  const entries: readonly PiAiModelProfile[] = configured.length > 0
+  const explicit: readonly PiAiModelProfile[] = configured.length > 0
     ? configured
     : [...defaults.values()].map(model => ({ id: model.id, ...overrides[model.id] }))
+  const effective = new Map((request.discovered ?? []).map(model => [model.id, model]))
+  for (const entry of explicit) {
+    const metadata = effective.get(entry.id)
+    effective.set(entry.id, {
+      ...metadata,
+      ...entry,
+      ...declaredInput(entry.input) === undefined && metadata?.input !== undefined ? { input: metadata.input } : {},
+    })
+  }
+  const entries = [...effective.values()]
   if (entries.length === 0) {
     invalid(provider, 'resolves no models; the installed catalog does not describe this route, so its models'
       + ' must be listed in configuration')
@@ -873,7 +892,8 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
     }
     // Only a value the profile named is a deployment choice; the catalog's is
     // the model's capability and stays out of request defaults.
-    if (entry.maxTokens !== undefined) configuredMaxTokens.set(entry.id, entry.maxTokens)
+    const explicitMaxTokens = explicit.find(model => model.id === entry.id)?.maxTokens
+    if (explicitMaxTokens !== undefined) configuredMaxTokens.set(entry.id, explicitMaxTokens)
     return {
       // The installed entry lays the floor, and the fields below override it.
       // Enumerating instead would silently drop every `Model` field this
@@ -904,5 +924,8 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models, configuredMaxTokens }
+  const excluded = new Set(request.excludedIds)
+  const authoritative = new Set([...configured.map(model => model.id), ...Object.keys(overrides)])
+  const selectableModels = models.filter(model => !excluded.has(model.id) || authoritative.has(model.id))
+  return { models, selectableModels, configuredMaxTokens }
 }

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-05-pwsh-initialization-accepts-owned-idle-prompt.md
+2026-09-05-pwsh-initialization-accepts-owned-idle-prompt.md: d65b56a3e8cf789587d22105eef4cbf266d3f1b4
+2026-09-05-pwsh-initialization-accepts-owned-idle-prompt.zh.md: 5eac4664e9083b4883e3ca2e1b0e852e0ad9e07a

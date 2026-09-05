@@ -103,10 +103,12 @@ interface PiAiSnapshot {
   models: Models
 }
 
-/** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
+/** Constructor options for {@link PiAiAdapter}: resolution and readiness hooks owned by the plugin. */
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedPiAiProviderProfile>
+  /** Bounded readiness for unknown IDs only; known models keep their immediate snapshot. */
+  ensureModel?: (provider: string, model: string, signal?: AbortSignal) => Promise<void>
   /**
    * Resolve the credential for one already-resolved profile; called once per
    * stream call and frozen for that call. `undefined` defers to the route's own
@@ -330,8 +332,7 @@ export class PiAiAdapter extends LlmAdapter {
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     return Promise.resolve().then(() => {
       const snapshot = this.current()
-      this.profileOf(snapshot, provider)
-      return snapshot.models.getModels(provider).map(model => ({
+      return this.profileOf(snapshot, provider).selectableModels.map(model => ({
         provider,
         id: model.id,
         name: model.name,
@@ -343,12 +344,16 @@ export class PiAiAdapter extends LlmAdapter {
   override resolveModel(
     provider: string,
     model: string,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve().then(() => {
-      const snapshot = this.current()
-      return this.modelInfo(snapshot, provider, model)
-    })
+    return Promise.resolve(this.snapshotForModel(provider, model, signal))
+      .then(snapshot => this.modelInfo(snapshot, provider, model))
+  }
+
+  private snapshotForModel(provider: string, model: string, signal?: AbortSignal): PiAiSnapshot | Promise<PiAiSnapshot> {
+    const snapshot = this.current()
+    if (snapshot.models.getModel(provider, model) !== undefined || this.config.ensureModel === undefined) return snapshot
+    return this.config.ensureModel(provider, model, signal).then(() => this.current())
   }
 
   private modelInfo(snapshot: PiAiSnapshot, provider: string, model: string): LlmResolvedModelInfo {
@@ -369,16 +374,24 @@ export class PiAiAdapter extends LlmAdapter {
     }
   }
 
-  override prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
-    const snapshot = this.current()
-    return Promise.resolve({
+  override prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const captured = this.snapshotForModel(provider, model, signal)
+    return Promise.resolve(captured).then(snapshot => ({
       model: this.modelInfo(snapshot, provider, model),
       stream: options => this.streamWithSnapshot(options, snapshot),
-    })
+    }))
   }
 
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    return this.streamWithSnapshot(options, this.current())
+    const snapshot = this.snapshotForModel(options.provider, options.model, options.signal)
+    if (!(snapshot instanceof Promise)) return this.streamWithSnapshot(options, snapshot)
+    // Direct consumers may abandon an iterable without ever entering its generator.
+    void snapshot.catch(() => {})
+    return this.streamWhenReady(options, snapshot)
+  }
+
+  private async * streamWhenReady(options: GenerateOptions, snapshot: Promise<PiAiSnapshot>): AsyncIterable<StreamChunk> {
+    yield * this.streamWithSnapshot(options, await snapshot)
   }
 
   private async * streamWithSnapshot(

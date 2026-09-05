@@ -336,7 +336,7 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
           if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
             throw new Error('persistent pwsh shell did not accept initialization')
           }
-          if (result.waitReason === 'stdin_read') break
+          if (result.waitReason === 'stdin_read' || (result.waitReason === 'inferred_idle' && promptCompleted(result))) break
           await pause()
         }
         return spawned.sessionId

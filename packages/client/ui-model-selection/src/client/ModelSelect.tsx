@@ -42,7 +42,7 @@ interface EffortChoice {
  * @returns the trigger and, while open, the two-level menu.
  */
 export function ModelSelect(
-  { locked, available, directory, load, select, t }:
+  { locked, available, directory, load, refresh, select, t }:
   ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
 ) {
   const state = useSyncExternalStore(
@@ -51,6 +51,7 @@ export function ModelSelect(
   )
   const [open, setOpen] = useState(false)
   const [pane, setPane] = useState<Pane>('root')
+  const [search, setSearch] = useState('')
   // The in-menu error strip serves catalog loads (its Retry re-runs the
   // load); a rejected SELECTION announces through the transient toast
   // instead, so the strip renders only while the latest failure-capable
@@ -60,6 +61,7 @@ export function ModelSelect(
   const toastSeq = useRef(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const id = useId()
 
@@ -99,6 +101,15 @@ export function ModelSelect(
       })),
     ], [reasoning, t])
   const busy = state.status === 'selecting'
+  const query = search.trim().toLocaleLowerCase()
+  const filteredGroups = useMemo(() => state.groups.flatMap((group) => {
+    const providerMatches = `${group.name}\n${group.id}`.toLocaleLowerCase().includes(query)
+    const models = query.length === 0 || providerMatches
+      ? group.models
+      : group.models.filter(model => `${model.name}\n${model.id}`.toLocaleLowerCase().includes(query))
+    return models.length === 0 ? [] : [{ ...group, models }]
+  }), [state.groups, query])
+  const filteredCount = filteredGroups.reduce((total, group) => total + group.models.length, 0)
 
   const reload = (): void => {
     lastActionRef.current = 'load'
@@ -114,10 +125,18 @@ export function ModelSelect(
     return () => { document.removeEventListener('mousedown', closeOutside) }
   }, [open])
 
+  useEffect(() => {
+    if (!open) return
+    if (pane === 'root') itemRefs.current[0]?.focus()
+    else if (pane === 'model') searchRef.current?.focus()
+    else itemRefs.current[0]?.focus()
+  }, [open, pane])
+
   if (!available) return null
 
   const show = (): void => {
     setPane('root')
+    setSearch('')
     setOpen(true)
     reload()
   }
@@ -125,6 +144,7 @@ export function ModelSelect(
   const close = (restoreFocus = false): void => {
     setOpen(false)
     setPane('root')
+    setSearch('')
     if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
   }
 
@@ -140,7 +160,9 @@ export function ModelSelect(
     if (event.key === 'Escape' && open) {
       event.preventDefault()
       // Escape backs out of a drilled pane first, then closes.
-      if (pane !== 'root') setPane('root')
+      if (pane !== 'root') {
+        setPane('root')
+      }
       else close(true)
       return
     }
@@ -243,11 +265,11 @@ export function ModelSelect(
           className={css.menu}
           role="menu"
           aria-label={t('menu.aria')}
-          aria-busy={state.status === 'loading' || busy}
+          aria-busy={state.status === 'loading' || state.refreshing || busy}
         >
           {pane === 'root' && (
             <>
-              <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setPane('model') }}>
+              <button ref={itemRef()} type="button" role="menuitem" className={css.cell} onClick={() => { setSearch(''); setPane('model') }}>
                 <span className={css.cellLabel}>{t('menu.model')}</span>
                 <span className={css.cellValue}>{modelLabel}</span>
                 <IconChevronRightOutline14 className={css.cellChevron} />
@@ -264,7 +286,27 @@ export function ModelSelect(
 
           {pane === 'model' && (
             <>
-              {state.status === 'loading' && (
+              <div className={css.catalogTools}>
+                <input
+                  ref={searchRef}
+                  type="search"
+                  className={css.search}
+                  value={search}
+                  placeholder={t('search.placeholder')}
+                  aria-label={t('search.aria')}
+                  onChange={(event) => { setSearch(event.currentTarget.value) }}
+                />
+                <button
+                  ref={itemRef()}
+                  type="button"
+                  className={css.refresh}
+                  disabled={state.status === 'loading' || state.refreshing || busy}
+                  onClick={() => { lastActionRef.current = 'load'; refresh() }}
+                >
+                  {t('action.refresh')}
+                </button>
+              </div>
+              {(state.status === 'loading' || state.refreshing) && (
                 <div className={css.status}>{t('status.loading')}</div>
               )}
               {state.error !== null && lastActionRef.current === 'load' && (
@@ -280,7 +322,7 @@ export function ModelSelect(
                 </div>
               ))}
               <div className={clsx(css.groups, 'scrollable')}>
-                {state.groups.map((group) => {
+                {filteredGroups.map((group) => {
                   const headingId = `${id}-${group.id}`
                   return (
                     <section role="group" aria-labelledby={headingId} className={css.group} key={group.id}>
@@ -312,8 +354,8 @@ export function ModelSelect(
                   )
                 })}
               </div>
-              {state.status === 'ready' && choices.length === 0 && (
-                <div className={css.empty}>{t('empty.models')}</div>
+              {state.status === 'ready' && filteredCount === 0 && (
+                <div className={css.empty}>{query.length === 0 ? t('empty.models') : t('empty.search')}</div>
               )}
             </>
           )}

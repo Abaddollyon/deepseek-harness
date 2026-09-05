@@ -11,7 +11,7 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { ModelCatalogDirectory } from './catalog.ts'
+import type { ModelCatalogDirectory, ModelCatalogLoadOptions } from './catalog.ts'
 
 /** Directory snapshot both entries render from. */
 export interface ModelDirectoryState {
@@ -31,6 +31,8 @@ export interface ModelDirectoryState {
   failures: readonly ModelCatalogFailure[]
   /** Lifecycle of the in-flight operation. */
   status: 'idle' | 'loading' | 'ready' | 'selecting' | 'error'
+  /** A background catalog read is running while last-good rows remain usable. */
+  refreshing: boolean
   /** Whole-request or selection failure text; null when none. */
   error: string | null
 }
@@ -39,7 +41,7 @@ export interface ModelDirectoryState {
 export class ModelDirectory {
   /** The shared snapshot both entries render from (uSES-safe store). */
   readonly store: SnapshotStore<ModelDirectoryState> = createSnapshotStore<ModelDirectoryState>({
-    current: null, routable: null, groups: [], failures: [], status: 'idle', error: null,
+    current: null, routable: null, groups: [], failures: [], status: 'idle', refreshing: false, error: null,
   })
 
   /** Latest selection operation wins; an older response never overwrites a newer one. */
@@ -70,11 +72,12 @@ export class ModelDirectory {
 
   /**
    * Ensure the Host generation's shared advisory catalog is loaded.
+   * @param options - whether opening this directory should revalidate a stale shared catalog.
    * @returns the fresh directory value.
    */
-  async load(): Promise<ModelDirectoryState> {
+  async load(options: ModelCatalogLoadOptions = {}): Promise<ModelDirectoryState> {
     this.assertAvailable()
-    await this.catalog.load()
+    await this.catalog.load(options)
     this.syncInputs()
     return this.store.getSnapshot()
   }
@@ -144,7 +147,13 @@ export class ModelDirectory {
         if (catalog.status === 'error') {
           this.store.update((state) => {
             state.status = 'error'
+            state.refreshing = false
             state.error = catalog.error
+          })
+        } else if (catalog.status === 'loading') {
+          this.store.update((state) => {
+            state.refreshing = true
+            state.error = null
           })
         }
         return
@@ -155,6 +164,7 @@ export class ModelDirectory {
         groups: [],
         failures: [],
         status: catalog.status === 'error' ? 'error' : 'loading',
+        refreshing: false,
         error: catalog.error,
       })
       return
@@ -169,6 +179,7 @@ export class ModelDirectory {
       status: this.store.getSnapshot().status === 'selecting'
         ? 'selecting'
         : 'ready',
+      refreshing: false,
       error: null,
     })
   }

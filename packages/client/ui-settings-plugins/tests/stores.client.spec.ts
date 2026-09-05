@@ -763,6 +763,51 @@ describe('SubagentModelSelectionCardController', () => {
     expect(models).toHaveBeenCalledTimes(2)
   })
 
+  it('revalidates a stale enabled card on open and coalesces repeated opens', async () => {
+    let now = 0
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    host.publish({
+      status: 'ready', writable: true, revision: 1,
+      value: { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] }, user: {},
+    })
+    const next = deferred<never>()
+    const models = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true, value: {
+          groups: [{ id: 'alpha', name: 'Alpha', models: [{ id: 'fast', name: 'Fast' }] }],
+          failures: [],
+        },
+      })
+      .mockReturnValueOnce(next.promise)
+    const controller = new SubagentModelSelectionCardController(
+      host.scope,
+      ctxWith({ session: { modelCatalog: models } }),
+      { staleAfterMs: 1_000, now: () => now },
+    )
+    const face = controller.inject()
+    await vi.waitFor(() => { expect(face.hooks.subagentModelSelectionCard.getSnapshot().catalogStatus).toBe('ready') })
+
+    now = 1_001
+    face.openCatalog()
+    face.openCatalog()
+    expect(models).toHaveBeenCalledTimes(2)
+    expect(face.hooks.subagentModelSelectionCard.getSnapshot().candidates).toEqual([
+      expect.objectContaining({ key: 'alpha\0fast', selected: true }),
+    ])
+    next.resolve({
+      ok: true, value: {
+        groups: [{ id: 'beta', name: 'Beta', models: [{ id: 'new', name: 'New' }] }],
+        failures: [],
+      },
+    } as never)
+    await vi.waitFor(() => {
+      expect(face.hooks.subagentModelSelectionCard.getSnapshot().candidates).toEqual([
+        expect.objectContaining({ key: 'beta\0new', available: true }),
+        expect.objectContaining({ key: 'alpha\0fast', available: false, selected: true }),
+      ])
+    })
+  })
+
   it('suppresses duplicate actions and late save settlements', async () => {
     const host = stubSettingsScope<SubagentModelSelectionSettings>()
     const catalog = modelsApi({

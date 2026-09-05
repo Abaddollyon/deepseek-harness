@@ -1109,6 +1109,8 @@ export interface Config {
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
+  /** Opt-in live model metadata; explicit models and overrides remain authoritative. */
+  modelDiscovery?: PiAiModelDiscovery
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
   /** Name shown by configuration surfaces; defaults to the route key. */
@@ -1125,6 +1127,7 @@ export interface PiAiProviderProfile {
    * This route's model catalog. Omission serves the installed catalog for the
    * route unchanged; an explicit list replaces it, each entry defaulting its
    * unset fields from the installed model of the same id.
+   * With modelDiscovery enabled, live entries extend this list underneath its explicit fields.
    */
   models?: PiAiModelProfile[]
   /**
@@ -1208,6 +1211,16 @@ export interface PiAiProviderProfile {
    * disables it.
    */
   authRecovery?: PiAiAuthRecovery
+}
+
+/** Background discovery cadence and total operation timeout for one route. */
+export interface PiAiModelDiscovery {
+  /** Enable startup, credential-change, periodic, and explicit catalog refresh. */
+  enabled?: boolean
+  /** Milliseconds between refreshes; defaults to six hours. */
+  refreshIntervalMs?: number
+  /** Total auth, public version lookup, and metadata request budget; defaults to fifteen seconds. */
+  timeoutMs?: number
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1371,7 +1384,7 @@ export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFo
 
 Depends on: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`)
 
-Source: [`packages/llm/llm-pi-ai/src/config.ts:252`](../packages/llm/llm-pi-ai/src/config.ts)
+Source: [`packages/llm/llm-pi-ai/src/config.ts:267`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 

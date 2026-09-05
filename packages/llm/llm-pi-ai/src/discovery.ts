@@ -8,7 +8,8 @@
  * not disclose. Only a route the catalog does not describe — a gateway, a
  * self-hosted server — is interrogated over the wire.
  *
- * Neither path is a catalog refresh. Nothing here is stored: the request
+ * Enabled configured routes refresh through live-catalog before reaching this
+ * draft-only helper. Neither path here publishes a catalog. Nothing here is stored: the request
  * carries a draft the user is still editing, and the reply is candidate
  * metadata the surface offers for adoption. `settings.yaml` remains the only
  * thing that decides what a route serves.

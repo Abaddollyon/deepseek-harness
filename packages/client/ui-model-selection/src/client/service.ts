@@ -33,10 +33,11 @@ interface LiveState {
 
 /** The `ctx.modelDirectories` session model-selection service. */
 export class ModelDirectoryResolver extends Service {
-  static inject = ['sessions', 'remote', 'remote.session']
+  static inject = ['sessions', 'remote', 'remote.llm', 'remote.session', 'remote.settings']
 
   private readonly live: LiveState = { directories: new Map() }
   private readonly catalog: ModelCatalogDirectory
+  private discoveryInflight: Promise<void> | undefined
 
   /** Localized composer-block copy; this plugin owns the string it raises. */
   private readonly blockReason: () => string
@@ -109,4 +110,78 @@ export class ModelDirectoryResolver extends Service {
     }, 'ui-model-selection: session directory')
     return directory
   }
+
+  /**
+   * Refresh every configured pi-ai route whose automatic discovery is enabled.
+   * Disabled, unconfigured, and other adapter families are deliberately absent.
+   * @param directory - the caller's resident directory, reset onto its durable projection before renewal.
+   */
+  refreshDiscoveredModels(directory: ModelDirectory): void {
+    if (this.discoveryInflight !== undefined) return
+    this.catalog.beginRefresh()
+    directory.resetConnected()
+    const operation = this.runDiscoveryRefresh().catch((error: unknown) => {
+      this.catalog.reportRefreshFailure(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      if (this.discoveryInflight === operation) this.discoveryInflight = undefined
+    })
+    this.discoveryInflight = operation
+  }
+
+  private async runDiscoveryRefresh(): Promise<void> {
+    const enumerationFailures: string[] = []
+    const [settings, configurable] = await Promise.all([
+      this.ctx.remote.settings.describe().catch((error: unknown) => {
+        enumerationFailures.push(`settings: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }),
+      this.ctx.remote.llm.listConfigurableProviders().catch((error: unknown) => {
+        enumerationFailures.push(`providers: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }),
+    ])
+    if (settings !== undefined && !settings.ok) enumerationFailures.push(`settings: ${settings.error.message}`)
+    if (configurable !== undefined && !configurable.ok) enumerationFailures.push(`providers: ${configurable.error.message}`)
+    const routes: string[] = []
+    if (settings?.ok === true && configurable?.ok === true) {
+      const namespace = settings.value.namespaces.find(row => row.ns === 'llm-pi-ai')
+      if (namespace !== undefined) {
+        for (const entry of configurable.value) {
+          if (entry.settingsNs !== 'llm-pi-ai') continue
+          const profile = valueAt(namespace.value, entry.settingsPath)
+          if (automaticDiscoveryEnabled(profile)) routes.push(entry.provider)
+        }
+      }
+    }
+    const outcomes = await Promise.all([...new Set(routes)].map(async (provider) => {
+      try {
+        const response = await this.ctx.remote.llm.discoverModels('llm-pi-ai', { provider })
+        return response.ok ? undefined : `${provider}: ${response.error.message}`
+      } catch (error) {
+        return `${provider}: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }))
+    await this.catalog.reload().catch(() => { /* the directory already retains and exposes the last good catalog */ })
+    const failures = [
+      ...enumerationFailures,
+      ...outcomes.filter((failure): failure is string => failure !== undefined),
+    ]
+    if (failures.length > 0) this.catalog.reportRefreshFailure(failures.join('; '))
+  }
+}
+
+function valueAt(root: unknown, path: readonly string[]): unknown {
+  let value = root
+  for (const key of path) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+    value = (value as Record<string, unknown>)[key]
+  }
+  return value
+}
+
+function automaticDiscoveryEnabled(profile: unknown): boolean {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) return false
+  const discovery = (profile as Record<string, unknown>).modelDiscovery
+  return typeof discovery === 'object' && discovery !== null && !Array.isArray(discovery)
+    && (discovery as Record<string, unknown>).enabled === true
 }

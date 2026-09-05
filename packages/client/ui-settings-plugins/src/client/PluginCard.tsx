@@ -35,6 +35,8 @@ export interface PluginCardProps {
   onSave: () => void
   /** Drop every staged edit. */
   onDiscard: () => void
+  /** Refresh live card inputs when the disclosure transitions open. */
+  onOpen?: () => void
   /** The plugin's controls. */
   children: ReactNode
 }
@@ -69,7 +71,10 @@ export function PluginCard(props: PluginCardProps) {
         className={css.header}
         aria-expanded={open}
         aria-label={`${props.t(open ? 'collapse' : 'expand')}: ${title}`}
-        onClick={() => { setOpen(!open) }}
+        onClick={() => {
+          if (!open) props.onOpen?.()
+          setOpen(!open)
+        }}
       >
         <span className={css.headText}>
           <span className={css.name}>{title}</span>

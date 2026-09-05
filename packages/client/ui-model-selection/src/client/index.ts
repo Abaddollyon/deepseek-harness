@@ -101,7 +101,9 @@ function selectionOf(state: ModelDirectoryState, id: string): ModelSelection | u
 const NS = 'model'
 
 /** Required services: the contribution registry, the seat's slot registry, locale, and the service's own faces. */
-export const inject = ['commandUi', 'locale', 'sessions', 'slots', 'remote', 'remote.session']
+export const inject = [
+  'commandUi', 'locale', 'sessions', 'slots', 'remote', 'remote.llm', 'remote.session', 'remote.settings',
+]
 
 /**
  * Client plugin body: mount ModelDirectoryResolver, register the `model` dictionaries,
@@ -137,7 +139,7 @@ export function apply(ctx: ClientContext): void {
           if (sessions.subagentAddress(session.sessionId) !== undefined) {
             throw new Error('model selection is unavailable for addressed subagent sessions')
           }
-          return optionsOf(await models.directoryFor(session.sessionId).load(), t)
+          return optionsOf(await models.directoryFor(session.sessionId).load({ freshIfStale: true }), t)
         },
         onSelect: async (option, session) => {
           if (sessions.subagentAddress(session.sessionId) !== undefined) {
@@ -168,7 +170,10 @@ export function apply(ctx: ClientContext): void {
           available,
           directory: directory.store,
           load: () => {
-            if (available) directory.load().catch(() => { /* surfaced on the store */ })
+            if (available) directory.load({ freshIfStale: true }).catch(() => { /* surfaced on the store */ })
+          },
+          refresh: () => {
+            if (available) models.refreshDiscoveredModels(directory)
           },
           select: (selection: ModelSelection) => available
             ? directory.select(selection).then(() => true, () => false)

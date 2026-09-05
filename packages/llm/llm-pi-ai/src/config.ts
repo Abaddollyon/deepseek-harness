@@ -14,7 +14,7 @@
  * @module dsh-llm-pi-ai/config
  */
 
-import type { CacheRetention, ChatTemplateKwargValue, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
+import type { Api, CacheRetention, ChatTemplateKwargValue, Model, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
@@ -95,6 +95,8 @@ export type {
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
+  /** Opt-in live model metadata; explicit models and overrides remain authoritative. */
+  modelDiscovery?: PiAiModelDiscovery
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
   /** Name shown by configuration surfaces; defaults to the route key. */
@@ -111,6 +113,7 @@ export interface PiAiProviderProfile {
    * This route's model catalog. Omission serves the installed catalog for the
    * route unchanged; an explicit list replaces it, each entry defaulting its
    * unset fields from the installed model of the same id.
+   * With modelDiscovery enabled, live entries extend this list underneath its explicit fields.
    */
   models?: PiAiModelProfile[]
   /**
@@ -196,6 +199,16 @@ export interface PiAiProviderProfile {
   authRecovery?: PiAiAuthRecovery
 }
 
+/** Background discovery cadence and total operation timeout for one route. */
+export interface PiAiModelDiscovery {
+  /** Enable startup, credential-change, periodic, and explicit catalog refresh. */
+  enabled?: boolean
+  /** Milliseconds between refreshes; defaults to six hours. */
+  refreshIntervalMs?: number
+  /** Total auth, public version lookup, and metadata request budget; defaults to fifteen seconds. */
+  timeoutMs?: number
+}
+
 /** Adapter-level recovery from a pre-content provider auth rejection. */
 export interface PiAiAuthRecovery {
   /** Additional attempts after an auth-classified failure (default 1). */
@@ -240,6 +253,8 @@ export interface ResolvedPiAiProviderProfile
    * serving requests.
    */
   piProvider: Provider
+  /** Selectable catalog projection; piProvider retains descriptors for existing selections. */
+  selectableModels: readonly Model<Api>[]
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    * The seam materializes one only into a request that names no cap of its
@@ -353,6 +368,11 @@ const modelProfile: z<PiAiModelProfile> = z.object({
 const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
+  modelDiscovery: z.object({
+    enabled: z.boolean().default(false),
+    refreshIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(21_600_000),
+    timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
+  }),
   apiKeyEnv: z.string().role('credential-ref'),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
@@ -437,10 +457,14 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
  * resolves to the empty (dormant) route set here rather than through a hidden
  * fallback, and each route's models and pi-ai provider are materialized once.
  * @param providers - configured provider profiles keyed by route.
+ * @param discovered - normalized metadata, applied beneath explicit configuration.
+ * @param excludedIds - normalized discovery exclusions, scoped to each route's configuration and credential.
  * @returns validated profiles in configuration order.
  */
 export function resolveProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>> | undefined,
+  discovered: ReadonlyMap<string, readonly PiAiModelProfile[]> = new Map(),
+  excludedIds: ReadonlyMap<string, readonly string[]> = new Map(),
 ): Map<string, ResolvedPiAiProviderProfile> {
   if (Array.isArray(providers)) {
     throw new Error('llm-pi-ai: providers is now a dict keyed by provider route, not an array of profiles')
@@ -449,6 +473,11 @@ export function resolveProfiles(
   const resolved = new Map<string, ResolvedPiAiProviderProfile>()
   for (const [provider, source] of entries) {
     rejectRemovedFields(provider, source)
+    for (const [key, value] of Object.entries(source.modelDiscovery ?? {})) {
+      if (key !== 'enabled' && (!Number.isSafeInteger(value) || Number(value) <= 0 || Number(value) > MAX_TIMER_DELAY_MS)) {
+        throw new Error(`llm-pi-ai: provider "${provider}" modelDiscovery.${key} must be a positive timer interval`)
+      }
+    }
     if (provider.length === 0) throw new Error('llm-pi-ai: provider names must be non-empty')
     if (source.baseURL !== undefined && source.baseURL.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty baseURL`)
@@ -504,6 +533,8 @@ export function resolveProfiles(
     const displayName = source.displayName ?? provider
     const catalog = resolveRouteModels({
       provider,
+      ...source.modelDiscovery?.enabled !== true ? {} : { discovered: discovered.get(provider) ?? [] },
+      ...source.modelDiscovery?.enabled !== true ? {} : { excludedIds: excludedIds.get(provider) ?? [] },
       ...source.api === undefined ? {} : { api: source.api },
       ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
       ...source.models === undefined ? {} : { models: source.models },
@@ -528,6 +559,7 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog.configuredMaxTokens,
+      selectableModels: catalog.selectableModels,
       piProvider: buildProvider({
         provider,
         displayName,

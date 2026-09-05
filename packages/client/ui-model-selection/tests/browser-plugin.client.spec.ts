@@ -59,7 +59,12 @@ async function bench() {
   const ctx = new Context()
   let defaultSelection: ModelSelection = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
   let selected = defaultSelection
-  const calls = { models: 0, select: 0 }
+  const calls = { models: 0, select: 0, discover: 0 }
+  let groups = GROUPS
+  let discoveryFailure: string | undefined
+  let automaticDiscovery = true
+  let settingsFailure: 'throw' | 'result' | undefined
+  let providerEnumerationFailure: 'throw' | 'result' | undefined
   const projections = new Map<SessionId, SnapshotStore<ModelSelectionProjection | undefined>>()
   // Whether the Host reports an adapter for the current route; the composer
   // block follows this, never catalog membership.
@@ -72,7 +77,7 @@ async function bench() {
         value: {
           default: defaultSelection,
           routableProviders: routable ? ['deepseek-official'] : [],
-          groups: GROUPS,
+          groups,
           failures: [],
         },
       })
@@ -90,8 +95,46 @@ async function bench() {
       return Promise.resolve({ ok: true as const, value: { selected } })
     },
   }
-  const remote = Object.assign(new TestRemote(ctx), { session: sessionRemote })
+  const llmRemote = {
+    listConfigurableProviders: () => providerEnumerationFailure === 'throw'
+      ? Promise.reject(new Error('provider enumeration offline'))
+      : Promise.resolve(providerEnumerationFailure === 'result'
+        ? { ok: false as const, error: { message: 'provider enumeration refused' } }
+        : {
+          ok: true as const,
+          value: [{
+            provider: 'openai', displayName: 'OpenAI', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'],
+          }],
+        }),
+    discoverModels: () => {
+      calls.discover += 1
+      return Promise.resolve(discoveryFailure === undefined
+        ? { ok: true as const, value: [] }
+        : { ok: false as const, error: { message: discoveryFailure } })
+    },
+  }
+  const settingsRemote = {
+    describe: () => settingsFailure === 'throw'
+      ? Promise.reject(new Error('settings enumeration offline'))
+      : Promise.resolve(settingsFailure === 'result'
+        ? { ok: false as const, error: { message: 'settings enumeration refused' } }
+        : {
+          ok: true as const,
+          value: {
+            writable: true,
+            namespaces: [{
+              ns: 'llm-pi-ai', schema: {}, base: {}, user: {}, applies: 'live' as const, secrets: [], revision: 0,
+              value: { providers: { openai: { modelDiscovery: { enabled: automaticDiscovery } } } },
+            }],
+          },
+        }),
+  }
+  const remote = Object.assign(new TestRemote(ctx), {
+    llm: llmRemote, session: sessionRemote, settings: settingsRemote,
+  })
+  ctx.reflect.provide('remote.llm', llmRemote)
   ctx.reflect.provide('remote.session', sessionRemote)
+  ctx.reflect.provide('remote.settings', settingsRemote)
   const blocks = new Map<SessionId, { reason: string } | undefined>()
   ctx.provide('conversation', {
     blocks: {
@@ -163,6 +206,11 @@ async function bench() {
     setProjected: (id: SessionId, value: ModelSelectionProjection) => { projections.get(id)?.set(value) },
     address: (id: SessionId) => { addressed.add(id) },
     setRoutable: (next: boolean) => { routable = next },
+    setGroups: (next: typeof GROUPS) => { groups = next },
+    setDiscoveryFailure: (next: string | undefined) => { discoveryFailure = next },
+    setAutomaticDiscovery: (next: boolean) => { automaticDiscovery = next },
+    setSettingsFailure: (next: typeof settingsFailure) => { settingsFailure = next },
+    setProviderEnumerationFailure: (next: typeof providerEnumerationFailure) => { providerEnumerationFailure = next },
     blockOf: (key: string) => blocks.get(sid(key)),
   }
 }
@@ -245,6 +293,101 @@ describe('ui-model-selection dual entry', () => {
     expect(b.calls.models).toBe(1)
   })
 
+  it('coalesces explicit discovery refreshes and preserves the selected route as new rows arrive', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    const nextGroups = [{
+      ...GROUPS[0]!,
+      models: [...GROUPS[0]!.models, { id: 'deepseek-v5', name: 'DeepSeek-V5' }],
+    }]
+    b.setGroups(nextGroups as typeof GROUPS)
+
+    face.refresh()
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot().groups[0]?.models.map(model => model.id)).toContain('deepseek-v5')
+    })
+    expect(b.calls.discover).toBe(1)
+    expect(face.directory.getSnapshot().current).toEqual({
+      provider: 'deepseek-official', model: 'deepseek-v4-flash',
+    })
+  })
+
+  it('keeps last-good rows and reports one enabled-route discovery failure', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setDiscoveryFailure('provider offline')
+
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot()).toMatchObject({
+        status: 'error', error: 'openai: provider offline', current: {
+          provider: 'deepseek-official', model: 'deepseek-v4-flash',
+        },
+      })
+    })
+    expect(face.directory.getSnapshot().groups).toEqual(GROUPS)
+  })
+
+  it('treats a disabled automatic-discovery route as a normal catalog refresh', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setAutomaticDiscovery(false)
+
+    face.refresh()
+
+    await vi.waitFor(() => { expect(b.calls.models).toBe(2) })
+    expect(b.calls.discover).toBe(0)
+    expect(face.directory.getSnapshot()).toMatchObject({ status: 'ready', error: null })
+  })
+
+  it('reports thrown settings enumeration failures while retaining last-good rows', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setSettingsFailure('throw')
+
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot()).toMatchObject({
+        status: 'error', error: 'settings: settings enumeration offline', groups: GROUPS,
+      })
+    })
+    expect(b.calls.discover).toBe(0)
+  })
+
+  it('reports non-OK provider enumeration failures while retaining last-good rows', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    face.load()
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    b.setProviderEnumerationFailure('result')
+
+    face.refresh()
+
+    await vi.waitFor(() => {
+      expect(face.directory.getSnapshot()).toMatchObject({
+        status: 'error', error: 'providers: provider enumeration refused', groups: GROUPS,
+      })
+    })
+    expect(b.calls.discover).toBe(0)
+  })
+
   it('keeps the durable projected selection while the eager catalog reconnects', async () => {
     const b = await bench()
     b.mint('s1')
@@ -323,9 +466,7 @@ describe('ui-model-selection dual entry', () => {
     // Recovering clears it without a reload of the surface.
     b.setRoutable(true)
     b.remote.emit('llm/adapters-updated', [])
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(b.blockOf('s1')).toBeUndefined()
+    await vi.waitFor(() => { expect(b.blockOf('s1')).toBeUndefined() })
     expect(b.calls.models).toBe(3)
   })
 
@@ -386,6 +527,6 @@ describe('ui-model-selection dual entry', () => {
     })).rejects.toThrow(/unavailable for addressed subagent/)
     b.ctx.emit('connection/reset')
     await Promise.resolve()
-    expect(b.calls).toEqual({ models: 2, select: 0 })
+    expect(b.calls).toEqual({ models: 2, select: 0, discover: 0 })
   })
 })

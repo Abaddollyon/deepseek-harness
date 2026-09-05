@@ -26,6 +26,11 @@ const PROTOCOLS = ['openai-completions', 'openai-responses', 'anthropic-messages
 /** The pi-ai profile shape as the host serializes it, including the layer-1 fields. */
 const PiAiConfig = Schema.object({
   providers: Schema.dict(Schema.object({
+    modelDiscovery: Schema.object({
+      enabled: Schema.boolean().default(false),
+      refreshIntervalMs: Schema.number(),
+      timeoutMs: Schema.number(),
+    }),
     apiKey: Schema.string().role('secret'),
     apiKeyEnv: Schema.string().role('credential-ref'),
     displayName: Schema.string(),
@@ -256,6 +261,31 @@ describe('protocolChoices', () => {
 })
 
 describe('model list editing', () => {
+  it('stages automatic discovery without changing explicit models or unknown profile fields', async () => {
+    const { mutate } = await mountSection({
+      providers: {
+        openai: {
+          models: [{ id: 'pinned-model', name: 'Pinned' }],
+          modelDiscovery: { enabled: false, refreshIntervalMs: 7_200_000, futureOption: 'keep' },
+          compatibilityFlag: 'keep-too',
+        },
+      },
+    })
+    openEditor('openai')
+
+    const control = screen.getByRole<HTMLInputElement>('checkbox', { name: en.automaticDiscovery })
+    expect(control.checked).toBe(false)
+    fireEvent.click(control)
+    fireEvent.click(screen.getByText(en.apply))
+
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(firstMutate(mutate).ops).toEqual([{
+      op: 'set',
+      path: ['providers', 'openai', 'modelDiscovery'],
+      value: { enabled: true, refreshIntervalMs: 7_200_000, futureOption: 'keep' },
+    }])
+  })
+
   it('adds, edits, and removes rows without storing emptied optional fields', async () => {
     const { mutate } = await mountSection()
     openEditor('openai')
@@ -538,9 +568,9 @@ describe('endpoint interrogation', () => {
     openEditor('openai')
 
     fireEvent.click(screen.getByText(en.fetchModels))
-    await screen.findByText(en.fetchTitle)
+    const dialog = await screen.findByRole('dialog')
     // The already-configured row starts unchecked; the new one starts checked.
-    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    const boxes = [...dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
     expect(boxes.map(box => box.checked)).toEqual([false, true])
     fireEvent.click(screen.getByText(en.fetchAdopt))
 
@@ -648,8 +678,8 @@ describe('endpoint interrogation', () => {
     openEditor('openai')
 
     fireEvent.click(screen.getByText(en.fetchModels))
-    await screen.findByText(en.fetchTitle)
-    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    const dialog = await screen.findByRole('dialog')
+    const boxes = [...dialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
     const first = boxes[0] as HTMLInputElement
     fireEvent.click(first)
     fireEvent.click(first)
@@ -824,7 +854,7 @@ describe('hand-declared providers', () => {
     await mountSection({ providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' } } })
     openEditor('openai')
     fireEvent.click(screen.getByText(en.customized))
-    expect(fields()).toEqual([en.keyInput, en.baseUrl])
+    expect(fields()).toEqual([en.keyInput, en.automaticDiscovery, en.baseUrl])
     cleanup()
 
     // A hand-declared route named its own protocol at creation, so editing it
@@ -834,7 +864,9 @@ describe('hand-declared providers', () => {
       declaredRoutes: ['acme-gateway'],
     })
     openEditor('acme-gateway')
-    expect(fields()).toEqual([en.keyInput, en.customDisplayName, en.baseUrl, en.customApi])
+    expect(fields()).toEqual([
+      en.keyInput, en.automaticDiscovery, en.customDisplayName, en.baseUrl, en.customApi,
+    ])
   })
 
   it('renames a declared route and falls back to its id when the name is cleared', async () => {
