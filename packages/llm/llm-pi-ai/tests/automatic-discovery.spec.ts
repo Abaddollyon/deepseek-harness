@@ -2,19 +2,21 @@ import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { BlockAssembler, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as LlmPiAi from '../src/index.ts'
 import { resolveProfiles } from '../src/config.ts'
+import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 const contexts: Context[] = []
 const homes: string[] = []
 afterEach(async () => {
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
   for (const path of homes.splice(0)) await rm(path, { recursive: true, force: true })
+  await closeMockServers()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
   vi.useRealTimers()
@@ -60,6 +62,40 @@ describe('automatic model discovery', () => {
     expect(resolved.context?.contextWindow).toBe(131072)
     expect(resolved.reasoning?.efforts.map(effort => effort.id)).toEqual(['low', 'high'])
     expect((await ctx.llm.resolveModelInfo('kimi-coding', 'kimi-for-coding')).context?.contextWindow).toBe(77777)
+  })
+
+  it('dispatches a conservatively discovered model without an incompatible provider default', async () => {
+    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const hostFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: URL | string | Request, options?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input)
+      if (url.pathname.endsWith('/models')) {
+        return Response.json({ data: [{ id: 'k3-256k', supports_reasoning: false }] })
+      }
+      return hostFetch(input, options)
+    })
+    const ctx = await boot(undefined, {
+      api: 'openai-completions',
+      baseURL: server.url,
+      reasoning: 'high',
+      models: [{ id: 'kimi-for-coding', reasoningEfforts: { high: 'high' } }],
+    })
+    await ctx.llm.discoverModels('llm-pi-ai', { provider: 'kimi-coding' })
+
+    const configured = await ctx.llm.prepareCall({ provider: 'kimi-coding', model: 'kimi-for-coding' })
+    const configuredResult = new BlockAssembler()
+    for await (const chunk of configured.stream({ ...configured.config, messages: [] })) configuredResult.push(chunk)
+
+    const discovered = await ctx.llm.prepareCall({ provider: 'kimi-coding', model: 'k3-256k' })
+    const discoveredResult = new BlockAssembler()
+    for await (const chunk of discovered.stream({ ...discovered.config, messages: [] })) discoveredResult.push(chunk)
+
+    expect(configured.config.reasoningEffort).toBe(ReasoningEffortId('high'))
+    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'high' })
+    expect(discovered.config.reasoningEffort).toBeUndefined()
+    expect(discoveredResult.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
+    expect(server.requests[1]).not.toHaveProperty('thinking')
   })
 
   it('keeps the good catalog on an empty refresh and reports failure to the caller', async () => {

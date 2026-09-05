@@ -193,19 +193,15 @@ function profileOptions(
 }
 
 /**
- * The profile default this exact model can actually take, for DESCRIBING it.
+ * The profile default this exact model can actually take.
  * A configured level the model does not support yields none rather than
- * throwing: `resolveModel` builds the model catalog, and a catalog that fails
- * takes its whole provider out of every picker — so one mis-set profile field
- * would hide every model on the route, including the ones that support the
- * level. The request path still refuses, which is where a bad configuration
- * belongs: describing what a model can do must not fail because a deployment
- * asked it for something it cannot.
+ * throwing: the caller did not select an effort, so the exact model's own
+ * default applies instead. Explicit request efforts stay strict.
  * @param model - the resolved model descriptor.
  * @param effort - the profile's configured level, if any.
  * @returns the level when this model supports it, otherwise undefined.
  */
-function describableReasoningLevel(
+function supportedReasoningDefault(
   model: Model<Api>,
   effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
 ): ModelThinkingLevel | undefined {
@@ -215,12 +211,11 @@ function describableReasoningLevel(
     : undefined
 }
 
-/** Validate an explicit Harness/profile effort without invoking pi-ai's clamp. */
+/** Validate an explicit Harness request effort without invoking pi-ai's clamp. */
 function resolveReasoningLevel(
   model: Model<Api>,
-  effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
-): ModelThinkingLevel | undefined {
-  if (effort === undefined) return undefined
+  effort: ReasoningEffortIdType | ModelThinkingLevel,
+): ModelThinkingLevel {
   const supported = getSupportedThinkingLevels(model)
   if (supported.some(level => level === effort)) return effort as ModelThinkingLevel
   throw new LlmError(
@@ -359,7 +354,7 @@ export class PiAiAdapter extends LlmAdapter {
   private modelInfo(snapshot: PiAiSnapshot, provider: string, model: string): LlmResolvedModelInfo {
     const profile = this.profileOf(snapshot, provider)
     const resolvedModel = this.modelOf(snapshot, provider, model)
-    const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
+    const defaultLevel = supportedReasoningDefault(resolvedModel, profile.reasoning)
     // Only a cap the deployment configured is a request default; the
     // catalog's `maxTokens` sizes the model and stops there.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
@@ -408,10 +403,9 @@ export class PiAiAdapter extends LlmAdapter {
     // the one it started with and the next call picks up the new one.
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
-    const reasoning = resolveReasoningLevel(
-      model,
-      options.reasoningEffort ?? profile.reasoning,
-    )
+    const reasoning = options.reasoningEffort === undefined
+      ? supportedReasoningDefault(model, profile.reasoning)
+      : resolveReasoningLevel(model, options.reasoningEffort)
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
 
     // Auth recovery replays the whole attempt. A provider credential

@@ -141,6 +141,73 @@ describe('web e2e: settings modal and General preferences', () => {
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
 
+  it('keeps every settings section keyboard-reachable in a narrow viewport', async () => {
+    const narrowPage = await browser.newPage({ viewport: { width: 390, height: 700 }, locale: ZH_BROWSER_LOCALE })
+    const narrowTripwire = watchConsole(narrowPage)
+    try {
+      await narrowPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+      await narrowPage.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+      // The collapsed sidebar renders this control as its icon-only dialog trigger.
+      const trigger = narrowPage.locator('button[aria-haspopup="dialog"]')
+      await trigger.click()
+      const dialog = narrowPage.getByRole('dialog', { name: '设置' })
+      await dialog.waitFor({ timeout: 10_000 })
+
+      const panelBox = await dialog.boundingBox()
+      expect(panelBox).not.toBeNull()
+      expect(panelBox!.x).toBeGreaterThanOrEqual(12)
+      expect(panelBox!.y).toBeGreaterThanOrEqual(12)
+      expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(378)
+      expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(688)
+
+      const nav = dialog.getByRole('navigation')
+      const navList = dialog.getByRole('button', { name: '通用设置' }).locator('..')
+      const content = dialog.locator(':scope > div').first()
+      const options = content.locator(':scope > div').nth(1)
+      const [navBox, contentBox] = await Promise.all([nav.boundingBox(), content.boundingBox()])
+      expect(navBox).not.toBeNull()
+      expect(contentBox).not.toBeNull()
+      expect(contentBox!.y).toBeGreaterThanOrEqual(navBox!.y + navBox!.height - 1)
+      expect(await navList.evaluate(element => getComputedStyle(element).overflowX)).toBe('auto')
+      expect(await options.evaluate(element => getComputedStyle(element).overflowY)).toBe('auto')
+      expect(await options.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
+
+      const close = dialog.getByRole('button', { name: '关闭' })
+      const openDocument = dialog.getByRole('button', { name: '打开配置文件' })
+      expect(await close.evaluate(element => document.activeElement === element)).toBe(true)
+      for (const control of [openDocument, close]) {
+        const box = await control.boundingBox()
+        expect(box).not.toBeNull()
+        expect(box!.x).toBeGreaterThanOrEqual(panelBox!.x)
+        expect(box!.x + box!.width).toBeLessThanOrEqual(panelBox!.x + panelBox!.width)
+      }
+
+      const sectionNames = ['通用设置', '模型', '插件', 'Agent 预设'] as const
+      await dialog.getByRole('button', { name: sectionNames[0] }).click()
+      for (const name of sectionNames.slice(1)) {
+        await narrowPage.keyboard.press('Tab')
+        const section = dialog.getByRole('button', { name })
+        expect(await section.evaluate(element => document.activeElement === element)).toBe(true)
+        await narrowPage.keyboard.press('Enter')
+        expect(await section.getAttribute('aria-current')).toBe('true')
+      }
+      const [navListBox, lastSectionBox] = await Promise.all([
+        navList.boundingBox(), dialog.getByRole('button', { name: sectionNames.at(-1)! }).boundingBox(),
+      ])
+      expect(navListBox).not.toBeNull()
+      expect(lastSectionBox).not.toBeNull()
+      expect(lastSectionBox!.x + lastSectionBox!.width)
+        .toBeLessThanOrEqual(navListBox!.x + navListBox!.width)
+      await narrowPage.keyboard.press('Escape')
+      await expect.poll(() => dialog.count(), { timeout: 5_000 }).toBe(0)
+      expect(await trigger.evaluate(element => document.activeElement === element)).toBe(true)
+      expect(narrowTripwire.pageErrors).toEqual([])
+      expect(narrowTripwire.warnings).toEqual([])
+    } finally {
+      await narrowPage.close()
+    }
+  }, 60_000)
+
   it('stores Permission as the default for future sessions without changing an existing session', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-settings-permission'))
     const existing = scaffold.ctx.sessions.create(SessionId('settings-permission-before'))

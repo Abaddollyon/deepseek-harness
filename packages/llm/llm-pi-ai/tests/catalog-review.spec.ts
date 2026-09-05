@@ -3,15 +3,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Credential } from '@earendil-works/pi-ai'
 import { LiveCatalog } from '../src/live-catalog.ts'
 import { PiAiAdapter } from '../src/adapter.ts'
+import { resolveProfiles } from '../src/config.ts'
 import * as LlmPiAi from '../src/index.ts'
 import type { LiveCatalogOptions } from '../src/live-catalog.ts'
 import { assemble } from './assemble.ts'
+import { memoryAuth } from './auth-double.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 const disk = vi.hoisted(() => ({
@@ -224,6 +227,90 @@ describe('catalog review regressions', () => {
       gate.resolve(undefined)
       await missing
     }
+  })
+
+  it('rejects an explicitly unsupported effort before auth or provider I/O', async () => {
+    const server = await mockServer([])
+    const resolveApiKey = vi.fn(() => Promise.resolve('unused'))
+    const adapter = new PiAiAdapter({
+      profiles: () => resolveProfiles({
+        'acme-gateway': {
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          reasoning: 'high',
+          models: [{ id: 'acme-think', reasoningEfforts: { high: 'high' } }],
+        },
+      }),
+      resolveApiKey,
+      auth: memoryAuth(),
+    })
+
+    const drain = async (): Promise<void> => {
+      for await (const _chunk of adapter.stream({
+        provider: 'acme-gateway',
+        model: 'acme-think',
+        reasoningEffort: ReasoningEffortId('low'),
+        messages: [],
+      })) { /* drain */ }
+    }
+
+    await expect(drain()).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
+    expect(resolveApiKey).not.toHaveBeenCalled()
+    expect(server.requests).toEqual([])
+  })
+
+  it('streams a cold unknown model from the immutable profile replacement published by readiness', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const route = 'acme-gateway'
+    const requested = 'discovered-later'
+    const profile = (models: Array<{ id: string }>) => ({
+      [route]: {
+        api: 'openai-completions' as const,
+        baseURL: `${server.url}/v1`,
+        models,
+        modelDiscovery: { enabled: true },
+      },
+    })
+    let current = resolveProfiles(profile([{ id: 'known' }]))
+    const ensureModel = vi.fn(async (provider: string, model: string): Promise<void> => {
+      expect([provider, model]).toEqual([route, requested])
+      current = resolveProfiles(profile([{ id: 'known' }, { id: requested }]))
+    })
+    const adapter = new PiAiAdapter({
+      profiles: () => current,
+      ensureModel,
+      resolveApiKey: () => Promise.resolve('k'),
+      auth: memoryAuth(),
+    })
+
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({ provider: route, model: requested, messages: [] })) chunks.push(chunk)
+
+    expect(ensureModel).toHaveBeenCalledTimes(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(server.paths).toEqual(['/v1/chat/completions'])
+    expect(server.requests).toEqual([expect.objectContaining({ model: requested })])
+  })
+
+  it('consumes rejected cold readiness when the returned stream is abandoned', async () => {
+    const readiness = Promise.withResolvers<undefined>()
+    const adapter = new PiAiAdapter({
+      profiles: () => resolveProfiles({ openai: {
+        api: 'openai-completions',
+        baseURL: 'https://unused.invalid/v1',
+        models: [{ id: 'known' }],
+        modelDiscovery: { enabled: true },
+      } }),
+      ensureModel: () => readiness.promise,
+      resolveApiKey: () => Promise.resolve('unused'),
+      auth: memoryAuth(),
+    })
+
+    const abandoned = adapter.stream({ provider: 'openai', model: 'unknown', messages: [] })
+    expect(abandoned[Symbol.asyncIterator]).toBeTypeOf('function')
+    readiness.reject(new Error('readiness failed'))
+    await Promise.resolve()
+    await Promise.resolve()
   })
 
   it('R1 isolates offline restored catalogs by the actual ambient account', async () => {
