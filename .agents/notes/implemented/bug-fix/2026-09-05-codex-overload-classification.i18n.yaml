@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-05-codex-overload-classification.md
+2026-09-05-codex-overload-classification.md: 24599b1dfcf01f3ccc946b1259c6f82e2692ee75
+2026-09-05-codex-overload-classification.zh.md: af06f96356c9c644154cf3ed886b943e91793fa6

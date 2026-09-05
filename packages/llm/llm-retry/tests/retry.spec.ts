@@ -60,7 +60,7 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
-async function* partialToolFailure(error: Error): AsyncGenerator<StreamChunk> {
+async function* partialToolFailure(error: LlmError, terminalFinish = false): AsyncGenerator<StreamChunk> {
   const id = ToolCallId('discarded-call')
   yield { type: 'block-start', index: 0, blockType: 'text' }
   yield { type: 'text-delta', index: 0, text: 'discarded partial output' }
@@ -68,7 +68,8 @@ async function* partialToolFailure(error: Error): AsyncGenerator<StreamChunk> {
   yield { type: 'block-start', index: 1, blockType: 'tool-call' }
   yield { type: 'tool-call-delta', index: 1, id, name: 'danger', argumentsDelta: '{}' }
   yield { type: 'block-end', index: 1, block: { type: 'tool-call', id, name: 'danger', arguments: '{}' } }
-  throw error
+  if (terminalFinish) yield { type: 'finish', reason: { kind: 'error', failure: error.failure } }
+  else throw error
 }
 
 function textResponse(text: string): StreamChunk[] {
@@ -260,10 +261,13 @@ describe('provider-routed retry policy', () => {
     })
   })
 
-  it('leaves partial failed chunks on their step without committing a message or tool side effect', async () => {
+  it.each([
+    { code: 'TRANSPORT', message: 'stream interrupted', terminal: false },
+    { code: 'SERVER', message: 'Codex error: Our servers are currently overloaded. Please try again later.', terminal: true },
+  ])('leaves partial failed chunks without tool side effects ($code)', async ({ code, message, terminal }) => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
-      partialToolFailure(new LlmError('stream interrupted', 'TRANSPORT')),
+      partialToolFailure(new LlmError(message, code), terminal),
       textResponse('recovered'),
     ])
     ;({ ctx: context } = await harness(adapter))
@@ -308,6 +312,48 @@ describe('provider-routed retry policy', () => {
       content: [{ type: 'text', text: 'recovered' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     })
+  })
+
+  it('does not repeat a completed tool step when the following inference overloads', async () => {
+    vi.useFakeTimers()
+    const id = ToolCallId('completed-once')
+    const adapter = new ScriptedAdapter([
+      [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'once', arguments: '{}' } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+      [{ type: 'finish', reason: { kind: 'error', failure: {
+        message: 'Codex error: Our servers are currently overloaded. Please try again later.',
+        code: 'SERVER',
+      } } }],
+      textResponse('recovered after completed tool'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    let executions = 0
+    context.tools.register(defineContentToolFixture({
+      name: 'once',
+      description: 'records a completed effect',
+      parameters: {},
+      async execute() {
+        executions += 1
+        return [{ type: 'text', text: 'committed effect' }]
+      },
+    }))
+    const agent = context.agentLoop.create(SessionId('retry-after-tool'), { provider: 'mock', model: 'mock' })
+    const scheduled = waitForRetry(context, agent, 1)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await scheduled).data.step).toBe(2)
+    expect(executions).toBe(1)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(500)
+    await idle
+    expect(executions).toBe(1)
+    expect(adapter.requests).toHaveLength(3)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/start')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start').map(event => event.data.step))
+      .toEqual([1, 2])
   })
 
   it('applies bounded exponential jitter and stops after the configured budget', async () => {
