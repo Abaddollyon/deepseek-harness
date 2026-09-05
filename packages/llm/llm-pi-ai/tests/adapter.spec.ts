@@ -66,6 +66,29 @@ function adapterOf(
   })
 }
 
+async function discoveredReasoningHarness(
+  baseURL: string,
+  models: LlmPiAi.PiAiModelProfile[],
+): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  const profiles = resolveProfiles({
+    'kimi-coding': {
+      apiKeyEnv: 'PI_TEST_KEY',
+      api: 'openai-completions',
+      baseURL,
+      reasoning: 'high',
+      modelDiscovery: { enabled: true },
+    },
+  }, new Map([['kimi-coding', models]]))
+  ctx.llm.registerAdapter(['kimi-coding'], new PiAiAdapter({
+    profiles: () => profiles,
+    resolveApiKey: () => Promise.resolve('test-key'),
+    auth: memoryAuth(),
+  }))
+  return ctx
+}
+
 beforeEach(() => {
   // Configuration carries only the reference; these mounts resolve it from
   // the environment, which is the whole credential plane without a seam.
@@ -182,6 +205,80 @@ describe('PiAiAdapter provider routing', () => {
       failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
     })
     expect(server.requests).toHaveLength(2)
+  })
+
+  it('omits an inherited provider effort for a conservatively non-reasoning discovered model', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await discoveredReasoningHarness(server.url, [{
+      id: 'k3-256k',
+      reasoningEfforts: false,
+    }])
+
+    const result = await assemble(ctx, {
+      provider: 'kimi-coding',
+      model: 'k3-256k',
+      messages: [],
+    })
+
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+    expect(server.requests[0]).not.toHaveProperty('thinking')
+  })
+
+  it('omits an inherited provider effort when a discovered model offers only another level', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await discoveredReasoningHarness(server.url, [{
+      id: 'k3-low-only',
+      reasoningEfforts: { low: 'low' },
+    }])
+
+    const result = await assemble(ctx, {
+      provider: 'kimi-coding',
+      model: 'k3-low-only',
+      messages: [],
+    })
+
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+    expect(server.requests[0]).not.toHaveProperty('thinking')
+  })
+
+  it('preserves an inherited provider effort supported by the discovered model', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await discoveredReasoningHarness(server.url, [{
+      id: 'k3-high',
+      reasoningEfforts: { high: 'high' },
+    }])
+
+    const result = await assemble(ctx, {
+      provider: 'kimi-coding',
+      model: 'k3-high',
+      messages: [],
+    })
+
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'high' })
+  })
+
+  it('rejects an explicit unsupported effort even when the discovered model supports the provider default', async () => {
+    const server = await mockServer([])
+    const ctx = await discoveredReasoningHarness(server.url, [{
+      id: 'k3-high',
+      reasoningEfforts: { high: 'high' },
+    }])
+
+    const result = await assemble(ctx, {
+      provider: 'kimi-coding',
+      model: 'k3-high',
+      reasoningEffort: ReasoningEffortId('low'),
+      messages: [],
+    })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
+    })
+    expect(server.requests).toHaveLength(0)
   })
 
   it('preserves omitted profile options when constructing the adapter directly', async () => {
@@ -534,7 +631,7 @@ describe('provider profile lifecycle', () => {
     expect((await ctx.llm.resolveModelInfo('openai', 'gpt-4.1')).reasoning).toBeUndefined()
   })
 
-  it('uses a supported profile reasoning value as the model default and rejects an unsupported one', async () => {
+  it('uses a supported profile reasoning value as the model default and omits an unsupported one', async () => {
     const supported = new Context()
     await supported.plugin(LlmRuntime)
     await supported.plugin(LlmPiAi, {
@@ -543,24 +640,18 @@ describe('provider profile lifecycle', () => {
     await expect(supported.llm.resolveModelInfo('deepseek', 'deepseek-v4-flash'))
       .resolves.toMatchObject({ reasoning: { defaultEffort: ReasoningEffortId('max') } })
 
-    // A profile level this model cannot take DESCRIBES as no default rather
-    // than failing: resolveModelInfo builds the model catalog, and a catalog
-    // that throws takes its whole provider out of every picker — one mis-set
-    // field would hide every model on the route, including the ones that do
-    // support the level. The request path below is where it is refused.
-    const unsupported = new Context()
-    await unsupported.plugin(LlmRuntime)
-    await unsupported.plugin(LlmPiAi, {
-      providers: { deepseek: { reasoning: 'medium' } },
-    })
+    // A provider-wide default is not an explicit request. The exact model may
+    // decline it without hiding the route or blocking a request that can use
+    // the provider/model's own default.
+    const server = await mockServer([{ events: textEvents }])
+    const unsupported = await harness(server.url, { reasoning: 'medium' })
     const described = await unsupported.llm.resolveModelInfo('deepseek', 'deepseek-v4-flash')
     expect(described.reasoning?.defaultEffort).toBeUndefined()
     expect(described.reasoning?.efforts.length).toBeGreaterThan(0)
     await expect(assemble(unsupported, {
       provider: 'deepseek', model: 'deepseek-v4-flash', messages: [],
-    })).resolves.toMatchObject({
-      finish: { kind: 'error', failure: { code: 'UNSUPPORTED_REASONING_EFFORT' } },
-    })
+    })).resolves.toMatchObject({ finish: { kind: 'stop' } })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
 
     const disabled = new Context()
     await disabled.plugin(LlmRuntime)
