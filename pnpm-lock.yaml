@@ -5885,6 +5885,15 @@ importers:
         specifier: workspace:^
         version: link:../../typert/protocol
 
+  packages/interaction/pending-interactions:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+
   packages/interaction/permission-presets:
     dependencies:
       '@deepseek-ai/schemastery':
@@ -5967,6 +5976,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-pending-interactions':
+        specifier: workspace:^
+        version: link:../pending-interactions
       '@deepseek-ai/dsh-scope':
         specifier: workspace:^
         version: link:../../core/scope
@@ -5988,6 +6000,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-pending-interactions':
+        specifier: workspace:^
+        version: link:../pending-interactions
       '@deepseek-ai/dsh-scope':
         specifier: workspace:^
         version: link:../../core/scope

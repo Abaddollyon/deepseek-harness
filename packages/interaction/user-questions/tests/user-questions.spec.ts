@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import PendingInteractionRegistry from '@deepseek-ai/dsh-pending-interactions'
 import UserQuestionService, {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -350,5 +351,45 @@ describe('UserQuestionService', () => {
       { id: 'plan-review', selected: ['Approve'] },
     ])
     expect(p.seen[0]?.questions[1]?.intent).toEqual(intent)
+  })
+
+  it('reports a plan-review lifecycle without exposing its questions', async () => {
+    const ctx = new Context()
+    await ctx.plugin(PendingInteractionRegistry)
+    await ctx.plugin(UserQuestionService)
+    const answer = Promise.withResolvers<AskUserQuestionAnswer>()
+    registerAnswerer(ctx, { ask: () => answer.promise })
+    const pending = ctx.userQuestions.ask({
+      questions: [{
+        id: 'review', question: 'Approve?', detail: 'secret plan',
+        options: [{ label: 'Approve' }], intent: { kind: 'plan-review', approve: 'Approve' },
+      }],
+    })
+    await Promise.resolve()
+
+    const [record] = ctx.pendingInteractions.snapshot().pending
+    expect(record).toMatchObject({ kind: 'plan-review' })
+    expect(Object.keys(record!)).toEqual(['id', 'kind', 'startedAtMs'])
+    answer.resolve({ answers: [{ id: 'review', selected: ['Approve'] }] })
+    await expect(pending).resolves.toEqual({ answers: [{ id: 'review', selected: ['Approve'] }] })
+    expect(ctx.pendingInteractions.snapshot().pending).toEqual([])
+  })
+
+  it('aborts and clears when an answerer never settles', async () => {
+    const ctx = new Context()
+    await ctx.plugin(PendingInteractionRegistry)
+    await ctx.plugin(UserQuestionService)
+    const controller = new AbortController()
+    registerAnswerer(ctx, { ask: () => new Promise<AskUserQuestionAnswer>(() => {}) })
+    const pending = ctx.userQuestions.ask({
+      questions: [{ id: 'confirm', question: 'Proceed?' }],
+      signal: controller.signal,
+    })
+    await Promise.resolve()
+    expect(ctx.pendingInteractions.snapshot().pending).toHaveLength(1)
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ code: 'ASK_ABORTED' })
+    expect(ctx.pendingInteractions.snapshot().pending).toEqual([])
   })
 })

@@ -12,6 +12,7 @@ import { createUserMessage, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-pending-interactions'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
 declare module '@deepseek-ai/cordis' {
@@ -264,6 +265,10 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
+    const endPending = this.ctx.get('pendingInteractions')?.begin({
+      kind: 'approval',
+      agent: req.agent,
+    })
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
     // path as an async one — `Promise.resolve(call())` would let it escape
@@ -281,20 +286,24 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    if (signal === undefined) return answer
-    return await new Promise<ApprovalOutcome>((resolve) => {
-      const onAbort = () => {
-        signal.removeEventListener('abort', onAbort)
-        resolve('cancelled')
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      void answer.then((outcome) => {
-        signal.removeEventListener('abort', onAbort)
-        // After an abort won the race this resolve is a settled-promise no-op:
-        // the late answer is discarded by construction.
-        resolve(outcome)
+    try {
+      if (signal === undefined) return await answer
+      return await new Promise<ApprovalOutcome>((resolve) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          resolve('cancelled')
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        void answer.then((outcome) => {
+          signal.removeEventListener('abort', onAbort)
+          // After an abort won the race this resolve is a settled-promise no-op:
+          // the late answer is discarded by construction.
+          resolve(outcome)
+        })
       })
-    })
+    } finally {
+      endPending?.()
+    }
   }
 }
 
