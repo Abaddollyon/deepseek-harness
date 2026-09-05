@@ -214,9 +214,8 @@ function supportedReasoningDefault(
 /** Validate an explicit Harness request effort without invoking pi-ai's clamp. */
 function resolveReasoningLevel(
   model: Model<Api>,
-  effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
-): ModelThinkingLevel | undefined {
-  if (effort === undefined) return undefined
+  effort: ReasoningEffortIdType | ModelThinkingLevel,
+): ModelThinkingLevel {
   const supported = getSupportedThinkingLevels(model)
   if (supported.some(level => level === effort)) return effort as ModelThinkingLevel
   throw new LlmError(
