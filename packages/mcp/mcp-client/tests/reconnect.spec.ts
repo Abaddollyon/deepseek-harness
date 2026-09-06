@@ -609,7 +609,7 @@ describe('connection source (host-connection)', () => {
     // The bounce holds while the authority is down; reauthorization connects anew.
     // Restore connect success first: the gate rejection owned only the fenced attempt.
     mockConnect.mockResolvedValue(undefined)
-    source.connect.mockResolvedValue({} as Transport)
+    source.connect.mockResolvedValue({})
     fire('reauthorized')
     await vi.waitFor(() => { expect(instances).toHaveLength(2) })
     await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
@@ -627,10 +627,15 @@ describe('connection source (host-connection)', () => {
       // The generation ignores close(): the bounce barrier must fail closed.
       mockClose.mockResolvedValue(undefined)
       fire('revoked')
+      // A second bounce is already queued when the first close barrier expires.
+      fire('authorized')
       await vi.advanceTimersByTimeAsync(5_000)
 
       expect(errors.some(line => line.includes('during a host bounce'))).toBe(true)
       expect(instances).toHaveLength(1)
+      // Further authority changes must not erase the unresolved close barrier.
+      fire('config-changed')
+      fire('authorized')
       await vi.advanceTimersByTimeAsync(30_000)
       expect(instances).toHaveLength(1)
       await handle.dispose()
@@ -677,7 +682,7 @@ describe('connection source (host-connection)', () => {
     // Only an authority signal re-establishes; the hold itself never retries.
     // (The crashed generation's tools stay registered through the outage, so
     // the new generation itself is the signal to await.)
-    source.connect.mockResolvedValue({} as Transport)
+    source.connect.mockResolvedValue({})
     fire('reauthorized')
     await vi.waitFor(() => { expect(instances).toHaveLength(2) })
     await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })

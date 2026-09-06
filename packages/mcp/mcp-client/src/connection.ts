@@ -173,6 +173,8 @@ export function startConnection(
     : opts
 
   let disposed = false
+  /** A close timeout permanently fences re-establishment for this handle, including queued authority bounces. */
+  let closeBarrierFailed = false
   /** Current generation: the connecting or connected client; undefined during backoff waits and after final failure. */
   let client: Client | undefined
   /** Close signal paired with {@link client}; captured by dispose before current ownership is cleared. */
@@ -239,7 +241,10 @@ export function startConnection(
   /** Wait for the transport-owned close signal without letting a broken transport wedge teardown forever. */
   function waitForClose(closed: Promise<void>): Promise<boolean> {
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => { resolve(false) }, GENERATION_CLOSE_TIMEOUT_MS)
+      const timeout = setTimeout(() => {
+        closeBarrierFailed = true
+        resolve(false)
+      }, GENERATION_CLOSE_TIMEOUT_MS)
       timeout.unref()
       void closed.then(() => {
         clearTimeout(timeout)
@@ -261,7 +266,7 @@ export function startConnection(
    * give-up terminal state.
    */
   function onSourceInvalidate(reason: ConnectionInvalidation): void {
-    if (disposed) return
+    if (disposed || closeBarrierFailed) return
     failedAttempts = 0
     holdLogged = false
     if (reconnectTimer !== undefined) {
@@ -292,7 +297,7 @@ export function startConnection(
           return
         }
       }
-      if (disposed) return
+      if (disposed || closeBarrierFailed) return
       // Awaited, not just assigned: the next queued bounce starts only after
       // this attempt settled, so two attempts never overlap.
       settling = connectGeneration(false)
