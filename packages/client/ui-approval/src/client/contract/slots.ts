@@ -69,6 +69,8 @@ let nextApprovalKey = 0
 export class PendingApproval {
   /** Domain discriminator used by Session pending-interaction consumers. */
   readonly kind = 'approval' as const
+  /** Agent/Session identity owning the scoped request. */
+  readonly sessionId: SessionId
   /** Opaque render identity and one-shot remount axis. */
   readonly key: string
   /** Tool requesting the decision. */
@@ -91,8 +93,9 @@ export class PendingApproval {
    * @param sessionId - Agent/Session identity owning the scoped request.
    * @param request - Host approval request projected through the Remote Event.
    */
-  constructor(readonly sessionId: SessionId, request: ApprovalPresentationRequest) {
+  constructor(sessionId: SessionId, request: ApprovalPresentationRequest) {
     nextApprovalKey += 1
+    this.sessionId = sessionId
     this.key = `approval:${String(nextApprovalKey)}`
     this.toolName = request.toolName
     this.callId = request.callId

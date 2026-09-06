@@ -11,6 +11,14 @@ kind: "package-reference"
 
 `dsh-host-directory-picker-browse` 把独立的 `ctx.directoryBrowser` 服务适配为旧的 `ctx.directoryPicker` browse 能力。它保持现有应用内选择器界面兼容，同时把文件系统所有权放在始终可用的浏览提供方中。
 
+## 目录
+
+- [模型体验](#model-experience)
+- [已知限制与延期工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
 ## 使用此包
 
 先组合一个 `directoryBrowser` 提供方，再组合此适配器。适配器注入该服务并返回稳定的 `{ kind: 'browse', list, createDirectory }` 能力。它没有配置，也不自行执行文件系统操作。
@@ -24,9 +32,10 @@ kind: "package-reference"
 - [原生 picker](../directory-picker-native/README.zh.md)
 - [自适应 picker](../directory-picker-auto/README.zh.md)
 
+<a id="model-experience"></a>
 ## 模型体验
 
-无。此包只适配 GUI 主机能力。
+无，因为这个 GUI 主机 picking 后端不注册任何面向模型的内容。
 
 #### KV 缓存影响
 
@@ -34,8 +43,12 @@ kind: "package-reference"
 
 ## 已知限制与延期工作
 
-适配器要求恰好一个 `ctx.directoryBrowser` 提供方。其 browse 合同为兼容性保留 directory-picker 错误词汇。
+<a id="known-limitations-and-deferred-work"></a>
 
-### 开发说明
+- **要求恰好一个 browser provider**——没有 `ctx.directoryBrowser` 时适配器无法组合。
+- **错误保留旧词汇**——browse 合同为兼容性保留 directory-picker 错误码。
+
+<a id="dev-note"></a>
+### 开发备注
 
 不要把文件系统代码移回此适配器。独立浏览器使远程客户端可在本地原生选择器保持组合时继续浏览。

@@ -17,6 +17,15 @@ The application shell owns `ctx.environmentNavigation` for its full lifetime. Se
 
 See [Web Client architecture](../../../docs/subsystems/web-client.md) for runtime projection and package ownership.
 
+## Table of Contents
+
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="model-experience"></a>
 ## Model Experience
 
 None, as this package routes browser state and Host requests without assembling model input.
@@ -27,8 +36,20 @@ None; environment selection, presentation state, and transport generations do no
 
 ## Known Limitations and Deferred Work
 
+<a id="known-limitations-and-deferred-work"></a>
+
 - **One carrier factory owns the shell lifetime** — a product composition cannot replace transport authority while an environment composition is active.
 - **Feature routes require explicit registration** — runtime plugins cannot issue arbitrary absolute or unregistered network requests through the environment request service.
 - **Presentation memory is bounded to 200 Sessions** — the oldest inactive compound Session state is evicted when the limit is exceeded; the smaller serialized storage cap may retain fewer entries across reload.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+Keep runtime-owned services below each environment root and keep shell-owned renderer, layout, locale, and navigation services above those roots. A Host switch must retire the old presentation before exposing services from its replacement.
+
+</details>
 
 **Runtime invariant:** No companion is published. Runtime identity, route authorization, generation fencing, lease disposal, and Loader-owned projection are verified directly by driven lifecycle specs.

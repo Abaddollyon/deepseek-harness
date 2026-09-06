@@ -86,6 +86,7 @@ describe.skipIf(!process.env.E2B_API_KEY)('E2B live Loader composition', () => {
       const owner: Agent = {
         id: ownerId,
         options: {},
+        hasExecutionBudget: false,
         session: ownerSession,
         inbox: new Inbox(ownerSession, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
         status: 'idle',

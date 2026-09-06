@@ -145,7 +145,11 @@ export interface ConnectionHandle {
 
 /** Factory for independent Connection handles over caller-owned transports. */
 export interface ConnectionFactory {
-  /** Create one Connection handle without consulting the page-global transport. */
+  /**
+   * Create one Connection handle without consulting the page-global transport.
+   * @param transport - carrier hooks owned by the environment runtime.
+   * @returns an independent Connection handle over that transport.
+   */
   create(transport: ClientTransportHooks): ConnectionHandle
 }
 

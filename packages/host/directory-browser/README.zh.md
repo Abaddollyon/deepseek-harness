@@ -11,6 +11,14 @@ kind: "package-reference"
 
 `dsh-host-directory-browser` 定义始终可寻址的主机能力 `ctx.directoryBrowser`，用于有界目录列表和创建子目录。它独立于 `ctx.directoryPicker`：主机可为本地窗口保留原生系统选择器，同时让远程客户端浏览同一主机文件系统，且不打开主机界面。
 
+## 目录
+
+- [模型体验](#model-experience)
+- [已知限制与延期工作](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
 ## 使用此包
 
 提供方继承 `DirectoryBrowser` 并实现 `list(path?, signal?)` 与 `createDirectory(path, name)`。消费方注入 `directoryBrowser`；工作区控制器通过 `directoryBrowser/list` 和 `directoryBrowser/createDirectory` Remote 方法公开它。
@@ -23,9 +31,10 @@ kind: "package-reference"
 - [目录选择器接缝](../directory-picker/README.zh.md)
 - [工作区控制器](../../api/workspace-controller/README.zh.md)
 
+<a id="model-experience"></a>
 ## 模型体验
 
-无。该服务是 GUI 主机能力，不公开模型工具或提示内容。
+无，因为这个无显示界面的 GUI 主机浏览 seam 不注册任何面向模型的内容。
 
 #### KV 缓存影响
 
@@ -33,8 +42,11 @@ kind: "package-reference"
 
 ## 已知限制与延期工作
 
-此包只定义能力。文件系统策略、边界和平台行为属于所选提供方。
+<a id="known-limitations-and-deferred-work"></a>
 
-### 开发说明
+- **Seam 不定义文件系统策略**——边界、根目录、符号链接处理和平台行为属于所选提供方。
+
+<a id="dev-note"></a>
+### 开发备注
 
 保持该服务与交互式选择器独立。即使 `ctx.directoryPicker` 提供原生选择器，远程浏览也必须可用。

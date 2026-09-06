@@ -23,6 +23,7 @@ function stubAgent(rawId: string, overrides: Partial<Agent> = {}): Agent {
   const agent: Agent = {
     id,
     options: {},
+    hasExecutionBudget: false,
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',

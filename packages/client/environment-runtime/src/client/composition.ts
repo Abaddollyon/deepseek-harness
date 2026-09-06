@@ -77,9 +77,17 @@ export interface EnvironmentComposition {
 
 /** Shell-owned coordinator configured by the product's trusted Host adapter. */
 export interface EnvironmentCompositionService {
-  /** Install the sole trusted carrier factory for this shell lifetime. */
+  /**
+   * Install the sole trusted carrier factory for this shell lifetime.
+   * @param factory - product-owned factory for environment client carriers.
+   * @returns disposer that withdraws this factory while it remains current.
+   */
   registerFactory(factory: EnvironmentClientCarrierFactory): () => void
-  /** Start navigation-driven runtime/presentation composition. */
+  /**
+   * Start navigation-driven runtime/presentation composition.
+   * @param options - trusted runtime roster and shell presentation services.
+   * @returns the active environment composition lifecycle.
+   */
   start(options: EnvironmentCompositionOptions): Promise<EnvironmentComposition>
 }
 

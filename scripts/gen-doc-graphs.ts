@@ -199,6 +199,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Carries the picking seam onto the wire: capability gating, cancellation, and the seam-coded failures a browser directory flow discriminates on.',
   },
   {
+    key: 'directoryBrowserController',
+    pkg: 'api-workspace-controller',
+    title: 'Host directory-browsing Remote controller',
+    mode: 'core',
+    note: 'Carries display-free listing and child-directory creation onto a dedicated Remote namespace without invoking the Host interactive picker.',
+  },
+  {
     key: 'invariants',
     pkg: 'invariants',
     title: 'Package-owned invariant registry',
@@ -605,6 +612,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     implementations: ['spill-local'],
     consumers: ['spill-policy'],
     note: 'The backend saves oversized tool text and returns a model-facing locator plus retrieval hint; spill-policy is the tools/post-execute consumer that decides when to spill.',
+  },
+  {
+    key: 'directoryBrowser',
+    pkg: 'host-directory-browser',
+    title: 'Display-free directory browsing seam',
+    mode: 'seam',
+    implementations: ['host-directory-browser-filesystem'],
+    consumers: ['host-directory-picker-browse', 'api-workspace-controller'],
+    note: 'Keeps bounded filesystem listing and child creation available to remote clients independently from the Host interactive picker.',
   },
   {
     key: 'directoryPicker',

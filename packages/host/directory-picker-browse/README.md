@@ -11,6 +11,14 @@ English | [中文](README.zh.md)
 
 `dsh-host-directory-picker-browse` adapts the independent `ctx.directoryBrowser` service to the legacy `ctx.directoryPicker` browse capability. It keeps existing in-app picker surfaces compatible while filesystem ownership lives in the always-available browser provider.
 
+## Table of Contents
+
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
 ## Use this package
 
 Compose a `directoryBrowser` provider before this adapter. The adapter injects that service and returns a stable `{ kind: 'browse', list, createDirectory }` capability. It has no configuration and performs no filesystem work itself.
@@ -24,9 +32,10 @@ Hosts that choose the native picker do not need this adapter for remote browsing
 - [Native picker](../directory-picker-native/README.md)
 - [Adaptive picker](../directory-picker-auto/README.md)
 
+<a id="model-experience"></a>
 ## Model Experience
 
-None. This package only adapts GUI Host capabilities.
+None, as the GUI-host picking backend registers nothing model-facing.
 
 #### KV Cache effect
 
@@ -34,8 +43,12 @@ None; this package does not assemble provider requests.
 
 ## Known Limitations and Deferred Work
 
-The adapter requires exactly one `ctx.directoryBrowser` provider. Its browse contract retains the directory-picker error vocabulary for compatibility.
+<a id="known-limitations-and-deferred-work"></a>
 
+- **Exactly one browser provider is required** — the adapter cannot compose without `ctx.directoryBrowser`.
+- **Errors retain the legacy vocabulary** — the browse contract keeps directory-picker error codes for compatibility.
+
+<a id="dev-note"></a>
 ### Dev Note
 
 Do not move filesystem code back into this adapter. The independent browser is what lets remote clients browse while a local native chooser remains composed.
