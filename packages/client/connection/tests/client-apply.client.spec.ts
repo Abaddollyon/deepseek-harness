@@ -127,6 +127,7 @@ describe('connection client apply', () => {
   })
 
   it('provides an explicit transport factory for independent runtimes', async () => {
+    ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
     const ctx = new Context()
     await ctx.plugin({ apply, inject: [] })
     const transport: ClientTransportHooks = { fetch: vi.fn() }
@@ -134,7 +135,15 @@ describe('connection client apply', () => {
     const handle = ctx.connectionFactory.create(transport)
 
     expect(handle).not.toBe(ctx.get('connection'))
+    expect(handle.isLoopback).toBe(false)
     await ctx.fiber.dispose()
+  })
+
+  it('grants local authority only when an explicit transport owns its Host', () => {
+    ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
+
+    expect(createConnectionHandle({ fetch: vi.fn(), ownsHost: false }).isLoopback).toBe(false)
+    expect(createConnectionHandle({ fetch: vi.fn(), ownsHost: true }).isLoopback).toBe(true)
   })
 
   it('selects the fixture RPC transport under ?fixture', async () => {

@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-`@deepseek-ai/dsh-client-environment-runtime` 为每个已获取 Host 创建新的 Cordis root。Host carrier 提供 unary 与 stream transport；shell 注入的 Connection factory 在可信且 dependency-closed 的 domain roster 激活前创建独立 Connection。Runtime 发布不可变的环境与 activation identity，公开只允许已注册相对 `/api/` 路由的功能请求 service，并以 Connection generation 的丢失或替换限制请求完成。
+`@deepseek-ai/dsh-client-environment-runtime` 为每个已获取 Host 创建新的 Cordis root。Host carrier 提供 unary 与 stream transport；shell 注入的 Connection factory 在可信且 dependency-closed 的 domain roster 激活前创建独立 Connection。显式 transport 只有在声明 `ownsHost: true` 时才获得本地权限，绝不继承 shell 页面的 loopback 权限；未使用显式 override 的 page-root Connection 则保留页面 authority 与继承 transport 的所有权声明。Runtime 发布不可变的环境与 activation identity，公开只允许已注册相对 `/api/` 路由的功能请求 service，并以 Connection generation 的丢失或替换限制请求完成。
 
 Web boot kernel 公开一个由可信 boot manifest 与 memoized module system 支撑的 activator。产品用 `available()` 校验必需 root，推导 domain、presentation 与 suspension closure，并声明已提供的 package face。选中远端环境时会撤下不安全的本地 presentation entry，把选中 runtime 所需的 Cordis service 投影到短生命周期 presentation context，再让这些 entry 使用 shell 中唯一的 renderer、layout、locale、theme 与 Slot registry。返回本地或切换 Host 时，先处置 presentation，再释放 runtime lease；最后一个 lease 会处置 runtime 与 carrier。
 
@@ -26,4 +26,4 @@ Web boot kernel 公开一个由可信 boot manifest 与 memoized module system �
 
 ## 后果
 
-不同 Host 可以使用相同 Session id，而不共享 runtime 或 presentation state；迟到请求也无法跨越 generation 边界。产品 composition 必须维护显式可信 roster，并区分 domain provider、远端 presentation entry、持久 shell service 与不安全本地 registration。Host 切换会 remount presentation plugin，因此需要跨切换保留的状态必须进入 shell-owned 复合 presentation store，而不是 apply-owned module cache。Loader lifecycle test 覆盖 withdrawal、restoration、service ownership 与 single-renderer 行为；runtime test 覆盖 context isolation、lease disposal、route authorization 与 generation fencing。
+不同 Host 可以使用相同 Session id，而不共享 runtime、presentation state 或 shell 页面的本地信任；迟到请求也无法跨越 generation 边界。产品 composition 必须维护显式可信 roster，并区分 domain provider、远端 presentation entry、持久 shell service 与不安全本地 registration。Host 切换会 remount presentation plugin，因此需要跨切换保留的状态必须进入 shell-owned 复合 presentation store，而不是 apply-owned module cache。Loader lifecycle test 覆盖 withdrawal、restoration、service ownership 与 single-renderer 行为；runtime test 覆盖 context isolation、lease disposal、route authorization、generation fencing 与显式 transport 所有权。

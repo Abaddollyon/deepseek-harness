@@ -113,9 +113,10 @@ interface ClientTransportGlobal {
  */
 export interface ConnectionHandle {
   /**
-   * Whether the privileged surface is reachable: the page authority is
-   * loopback, the transport declares the page owns the Host
-   * ({@link ClientTransportHooks.ownsHost}), or the context is not a browser.
+   * Whether the privileged surface is reachable. Page-root handles trust a
+   * loopback authority, an inherited transport that owns its Host, or a
+   * non-browser context. Handles over an explicit transport trust only that
+   * transport's {@link ClientTransportHooks.ownsHost} declaration.
    */
   readonly isLoopback: boolean
   /** Current Remote event generation and the Host facts carried by its opening frame. */
@@ -203,7 +204,8 @@ export function createConnectionHandle(transportOverride?: ClientTransportHooks)
   const pageLocation = typeof location === 'undefined' ? undefined : location
   const fixture = pageLocation !== undefined && new URLSearchParams(pageLocation.search).has('fixture')
   const fixtureRpc = transportOverride === undefined && fixture ? createFixtureConnectionRpc() : undefined
-  const transport = transportOverride ?? (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
+  const inheritedTransport = (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
+  const transport = transportOverride ?? inheritedTransport
   const rpc = fixtureRpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
@@ -243,7 +245,11 @@ export function createConnectionHandle(transportOverride?: ClientTransportHooks)
     publishState(undefined)
   }
   const handle: ConnectionHandle = {
-    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
+    isLoopback: transportOverride === undefined
+      ? inheritedTransport?.ownsHost === true
+        || pageLocation === undefined
+        || isLoopbackHostname(pageLocation.hostname)
+      : transportOverride.ownsHost === true,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
