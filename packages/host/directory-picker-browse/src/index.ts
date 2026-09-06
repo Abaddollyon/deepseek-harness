@@ -1,7 +1,7 @@
-/** Browse picker interaction backed by the independent directory browser. */
 import { DirectoryPicker, type DirectoryPickerCapability } from '@deepseek-ai/dsh-host-directory-picker'
 import type {} from '@deepseek-ai/dsh-host-directory-browser'
 
+/** Browse picker interaction backed by the independent directory browser. */
 export default class BrowseDirectoryPicker extends DirectoryPicker {
   static inject = ['directoryBrowser']
 

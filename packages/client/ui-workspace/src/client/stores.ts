@@ -55,6 +55,7 @@ type WorkspaceViewActions = {
 
 /**
  * Create the workspace browser viewing store handle.
+ * @param environmentId - optional owning Host id used to isolate persisted browser state.
  * @returns the store handle (spec + type + identity + factory in one).
  */
 export function createWorkspaceViewStore(

@@ -3,7 +3,9 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client
 import { createEnvironmentCompositionService } from './composition.ts'
 import type { HostGeneration } from './identity.ts'
 import { createEnvironmentNavigation } from './navigation.ts'
-import { createEnvironmentPresentationStore } from './presentation-state.ts'
+import {
+  createEnvironmentPresentationStore, MAX_PRESENTATION_STORAGE_UNITS,
+} from './presentation-state.ts'
 import type { HostGenerationSource } from './registry.ts'
 import { createEnvironmentRequest } from './request.ts'
 import type { RuntimeEnvironment } from './runtime.ts'
@@ -49,6 +51,26 @@ export { createEnvironmentPresentationStore } from './presentation-state.ts'
 export const inject = ['connection', 'connectionFactory']
 
 let localRuntimeSequence = 0
+const PRESENTATION_STORAGE_KEY = 'dsh.environment-navigation.presentation.v1'
+const PRESENTATION_WRITE_DELAY_MS = 250
+
+function readPersistedPresentation(): string | undefined {
+  if (typeof localStorage === 'undefined') return undefined
+  try {
+    return localStorage.getItem(PRESENTATION_STORAGE_KEY) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function persistPresentation(value: string): void {
+  if (value.length > MAX_PRESENTATION_STORAGE_UNITS) return
+  try {
+    localStorage.setItem(PRESENTATION_STORAGE_KEY, value)
+  } catch {
+    // Persistence is best-effort; storage denial or quota must not block presentation updates.
+  }
+}
 
 /**
  * Install the local Host's runtime identity and feature-request seat.
@@ -79,9 +101,7 @@ export function apply(ctx: Context): void {
     request: request.request.bind(request),
     registerFeatureRoute: request.registerRoute.bind(request),
   }
-  const stored = typeof localStorage === 'undefined'
-    ? undefined
-    : localStorage.getItem('dsh.environment-navigation.presentation.v1') ?? undefined
+  const stored = readPersistedPresentation()
   const presentation = createEnvironmentPresentationStore(stored)
   const navigation = {
     ...createEnvironmentNavigation({ kind: 'environments' }),
@@ -98,8 +118,34 @@ export function apply(ctx: Context): void {
   ctx.effect(() => navigation.subscribe(syncLocationPresentation), 'environment-runtime: location presentation state')
   syncLocationPresentation()
   if (typeof localStorage !== 'undefined') {
-    ctx.effect(() => presentation.subscribe(() => {
-      localStorage.setItem('dsh.environment-navigation.presentation.v1', presentation.serialize())
-    }), 'environment-runtime: environment presentation persistence')
+    ctx.effect(() => {
+      let dirty = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const flush = (): void => {
+        if (!dirty) return
+        dirty = false
+        if (timer !== undefined) clearTimeout(timer)
+        timer = undefined
+        persistPresentation(presentation.serialize())
+      }
+      const schedule = (): void => {
+        dirty = true
+        if (timer !== undefined) clearTimeout(timer)
+        timer = setTimeout(flush, PRESENTATION_WRITE_DELAY_MS)
+      }
+      const removeSubscription = presentation.subscribe(schedule)
+      const pagehide = (): void => { flush() }
+      const pageLifecycle = globalThis as unknown as {
+        addEventListener?: (type: string, listener: () => void) => void
+        removeEventListener?: (type: string, listener: () => void) => void
+      }
+      pageLifecycle.addEventListener?.('pagehide', pagehide)
+      return () => {
+        removeSubscription()
+        pageLifecycle.removeEventListener?.('pagehide', pagehide)
+        flush()
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    }, 'environment-runtime: environment presentation persistence')
   }
 }

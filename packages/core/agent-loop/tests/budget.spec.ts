@@ -83,6 +83,26 @@ function finalReason(agent: Agent) {
 }
 
 describe('native agent budgets', () => {
+  it('snapshots execution limits while preserving the public options identity', async () => {
+    const adapter = new BudgetAdapter([tool('one'), text('unused')])
+    const ctx = await harness(adapter)
+    const configuredBudget = budget({ maxTurns: 1 })
+    const agent = ctx.agentLoop.create(SessionId('immutable-budget'), {
+      provider: 'budget', model: 'model', budget: configuredBudget,
+    })
+    expect(agent.options.budget).toBe(configuredBudget)
+
+    configuredBudget.maxTurns = 2
+    configuredBudget.maxInputTokens = 200
+    configuredBudget.maxOutputTokens = 80
+    configuredBudget.maxRetries = 20
+    send(agent)
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(finalReason(agent)).toMatchObject({ kind: 'error', error: { code: 'BUDGET_EXCEEDED' } })
+  })
+
   it.each([
     { maxTurns: 0 }, { maxInputTokens: 0 }, { maxOutputTokens: 0 }, { maxRetries: -1 },
     { maxTurns: 1.5 }, { maxInputTokens: Number.POSITIVE_INFINITY }, { maxOutputTokens: Number.MAX_SAFE_INTEGER + 1 },

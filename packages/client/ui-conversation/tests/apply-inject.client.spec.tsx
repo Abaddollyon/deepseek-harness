@@ -31,8 +31,11 @@ function sessionFakeFor() {
   } satisfies SessionBehaviorOverrides
 }
 
-async function bench() {
+async function bench(options: { environmentId?: string } = {}) {
   const runtime = await SlotTestRuntime.create()
+  if (options.environmentId !== undefined) {
+    runtime.ctx.provide('environmentRuntime', { environmentId: options.environmentId } as never)
+  }
   runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   const connectWorkspace = vi.fn(async () => ROOT)
   runtime.ctx.provide('uiWorkspace', { connectWorkspace } as never)
@@ -164,6 +167,39 @@ describe('Conversation inject API', () => {
       expect(activate).toHaveBeenLastCalledWith('custom')
     } finally {
       removeCustom?.()
+      removeChat()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('migrates and activates a legacy local View before the scoped store is created', async () => {
+    const b = await bench({ environmentId: 'local' })
+    const binding = b.runtime.ctx.uiConversation.binding(ROOT)
+    const activate = vi.spyOn(binding, 'activate')
+    const removeChat = b.slots.register(
+      { name: 'conversation.view', id: 'chat', order: 0 },
+      (() => null) as never,
+    )
+    const removeCustom = b.slots.register(
+      { name: 'conversation.view', id: 'custom', order: 10 },
+      (() => null) as never,
+    )
+    const legacyKey = `dsh.conversation.${ROOT}`
+    const compoundKey = `dsh.conversation.${JSON.stringify(['local', ROOT])}`
+    try {
+      await b.runtime.flush()
+      localStorage.setItem(legacyKey, JSON.stringify({
+        draft: 'kept', view: 'custom', viewRequest: null,
+      }))
+      activate.mockClear()
+
+      b.runtime.ctx.uiSession.adapter.resolve(ROOT)
+
+      expect(activate).toHaveBeenLastCalledWith('custom')
+      expect(localStorage.getItem(compoundKey)).toContain('"view":"custom"')
+      expect(localStorage.getItem(legacyKey)).toBeNull()
+    } finally {
+      removeCustom()
       removeChat()
       await b.runtime.dispose()
     }

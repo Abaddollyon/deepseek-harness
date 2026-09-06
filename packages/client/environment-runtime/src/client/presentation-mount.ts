@@ -36,6 +36,8 @@ export interface EnvironmentPresentationMountOptions {
  * and renderer-facing services only from `shell`. It never owns either
  * source context, so switching Hosts withdraws UI registrations without
  * disposing the renderer or a separately retained Host runtime.
+ * @param options - runtime and shell services plus the activation callback and cancellation signal.
+ * @returns the mounted presentation and its exact asynchronous disposer.
  */
 export async function createEnvironmentPresentationMount(
   options: EnvironmentPresentationMountOptions,

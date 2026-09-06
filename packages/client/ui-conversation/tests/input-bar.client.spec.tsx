@@ -69,6 +69,7 @@ interface BenchOptions {
   subagent?: Exclude<SessionSnapshot['subagent'], null>
   disabled?: boolean
   connectionReady?: boolean
+  connectionReadySource?: InputBarProps['connectionReady']
   inert?: boolean
   blocked?: { readonly reason: string }
   workspacePickerOpen?: boolean
@@ -175,7 +176,7 @@ function bench(over?: BenchOptions) {
     useInput: bindSnapshotSelector(shell.state),
     inputActions: shell.actions,
     keyboard: shell,
-    connectionReady: createSnapshotStore(over?.connectionReady ?? true),
+    connectionReady: over?.connectionReadySource ?? createSnapshotStore(over?.connectionReady ?? true),
     addImages: over?.addImages ?? (() => null),
     removeImage,
     draftImages: ids => ids.flatMap((id) => {
@@ -870,6 +871,30 @@ describe('running and lock semantics', () => {
     const { textarea, button } = bench({ draft: 'retain me', connectionReady: false })
     expect(editableOf(textarea)).toBe(true)
     expect(button.disabled).toBe(true)
+  })
+
+  it('keeps permission mutation offline until the same runtime reconnects', async () => {
+    const connectionReady = createSnapshotStore(false)
+    const command = vi.fn(() => Promise.resolve(true))
+    const permissions = {
+      options: [
+        { value: 'read-only', name: 'read-only' },
+        { value: 'workspace-write', name: 'workspace-write' },
+      ],
+      currentValue: 'read-only',
+    }
+    const { view } = bench({ permissions, command, connectionReadySource: connectionReady })
+    const trigger = view.getByLabelText(/^访问模式/) as HTMLButtonElement
+    expect(trigger.disabled).toBe(true)
+    fireEvent.click(trigger)
+    expect(command).not.toHaveBeenCalled()
+
+    act(() => { connectionReady.set(true) })
+    expect(trigger.disabled).toBe(false)
+    fireEvent.click(trigger)
+    fireEvent.click(view.getByRole('menuitem', { name: '工作区内修改' }))
+    expect(command).toHaveBeenCalledExactlyOnceWith('/permission workspace-write')
+    await act(async () => {})
   })
 
   it('idle primary sends and disables on empty draft', () => {

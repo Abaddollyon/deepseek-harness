@@ -37,4 +37,32 @@ describe('environment presentation state', () => {
     })
     expect(store.getSidebarMode('local')).toBe('workspaces')
   })
+
+  test('bounds persistence to newest sessions without evicting in-memory state', () => {
+    const store = createEnvironmentPresentationStore()
+    const refs = Array.from({ length: 12 }, (_, index) => ({
+      environmentId: 'sigil', sessionId: `session-${String(index).padStart(2, '0')}`,
+    }))
+    for (const [index, ref] of refs.entries()) {
+      store.update(ref, { draft: String(index).repeat(100_000), viewId: `view-${index}` })
+    }
+
+    const serialized = store.serialize()
+    const restored = createEnvironmentPresentationStore(serialized)
+    expect(serialized.length).toBeLessThanOrEqual(1_000_000)
+    expect(restored.get(refs.at(-1)!)).toEqual(store.get(refs.at(-1)!))
+    expect(restored.get(refs[0]!)).toMatchObject({ draft: '', viewId: 'chat' })
+    expect(store.get(refs[0]!)).toMatchObject({ viewId: 'view-0' })
+  })
+
+  test('keeps a normalized non-BMP draft within the aggregate persistence cap', () => {
+    const store = createEnvironmentPresentationStore()
+    const ref = { environmentId: 'local', sessionId: 'emoji' }
+    store.update(ref, { draft: '😀'.repeat(100_000), viewId: 'chat' })
+
+    const serialized = store.serialize()
+    expect(serialized.length).toBeLessThanOrEqual(1_000_000)
+    expect(createEnvironmentPresentationStore(serialized).get(ref).draft)
+      .toBe(store.get(ref).draft)
+  })
 })

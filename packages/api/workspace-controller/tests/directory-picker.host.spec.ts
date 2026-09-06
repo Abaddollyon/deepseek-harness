@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { DirectoryPicker, DirectoryPickerError } from '@deepseek-ai/dsh-host-directory-picker'
-import type { DirectoryPickerCapability } from '@deepseek-ai/dsh-host-directory-picker'
+import type {
+  DirectoryPickerBrowseCapability, DirectoryPickerCapability,
+} from '@deepseek-ai/dsh-host-directory-picker'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { DirectoryPickerController } from '../src/directory-picker.ts'
 import { DirectoryBrowserController } from '../src/directory-browser.ts'
@@ -23,7 +25,7 @@ class StubPicker extends DirectoryPicker {
 
 const NATIVE_STUB: DirectoryPickerCapability = { kind: 'native', pick: async () => null }
 
-const BROWSE_STUB: DirectoryPickerCapability = {
+const BROWSE_STUB: DirectoryPickerBrowseCapability = {
   kind: 'browse',
   list: async (path) => {
     if (path === '/denied') {

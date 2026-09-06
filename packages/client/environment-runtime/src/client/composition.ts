@@ -90,7 +90,11 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Create the shell-owned environment composition service. */
+/**
+ * Create the shell-owned environment composition service.
+ * @param shell - persistent shell context whose renderer services presentations share.
+ * @returns the single-carrier composition service.
+ */
 export function createEnvironmentCompositionService(shell: Context): EnvironmentCompositionService {
   let factory: EnvironmentClientCarrierFactory | undefined
   let running = false

@@ -43,6 +43,8 @@ interface PersistedState {
 const EMPTY_SESSION: SessionPresentationState = Object.freeze({ draft: '', viewId: 'chat' })
 const MAX_SESSIONS = 200
 const MAX_TEXT = 100_000
+/** Maximum UTF-16 code units written for one presentation snapshot. */
+export const MAX_PRESENTATION_STORAGE_UNITS = 1_000_000
 
 /**
  * Create compound-key presentation state from optional persisted JSON.
@@ -68,7 +70,7 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
       sessions.delete(key)
       sessions.set(key, next)
       while (sessions.size > MAX_SESSIONS) {
-        const oldest = sessions.keys().next().value as string | undefined
+        const oldest = sessions.keys().next().value
         if (oldest === undefined) break
         sessions.delete(oldest)
       }
@@ -83,11 +85,20 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
       publish()
     },
     serialize() {
-      const value: PersistedState = {
-        sessions: Object.fromEntries(sessions),
-        sidebar: Object.fromEntries(sidebar),
+      const sidebarJson = JSON.stringify(Object.fromEntries(sidebar))
+      const prefix = '{"sessions":{'
+      const suffix = `},"sidebar":${sidebarJson}}`
+      let used = prefix.length + suffix.length
+      const entries: string[] = []
+      // Map insertion order is recency order because update() reinserts touched sessions.
+      for (const [key, value] of [...sessions].reverse()) {
+        const entry = `${JSON.stringify(key)}:${JSON.stringify(value)}`
+        const separator = entries.length === 0 ? 0 : 1
+        if (used + separator + entry.length > MAX_PRESENTATION_STORAGE_UNITS) continue
+        entries.push(entry)
+        used += separator + entry.length
       }
-      return JSON.stringify(value)
+      return `${prefix}${entries.join(',')}${suffix}`
     },
     subscribe(listener) {
       listeners.add(listener)

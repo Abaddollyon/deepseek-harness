@@ -366,6 +366,7 @@ export class SlotRegistry extends Service {
    * swaps its owning plugin graph. Replacements may install after the previous
    * owner retires; subscribers see the final authoritative sources when the
    * outermost hold releases.
+   * @returns an idempotent release callback for this transition hold.
    */
   holdStandardSourceTransitions(): () => void {
     if (this._standardSourceTransitionHolds === 0) this.publishPresentationTransition(true)
@@ -419,6 +420,7 @@ export class SlotRegistry extends Service {
    * Forget persisted stores for a Session the owning Host authoritatively removed.
    * Ordinary binding and runtime disposal use {@link releaseStoreScope} so a
    * Host switch keeps drafts available for the next presentation mount.
+   * @param key - compound renderer store scope key to clear.
    */
   clearStoreScope(key: string): void {
     for (const [handle, record] of this._stores) {

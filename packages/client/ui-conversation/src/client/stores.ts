@@ -36,6 +36,7 @@ export function createConversationStore(): EngineStoreHandle<ConversationStoreSt
 /**
  * Read the persisted View preference before the Slot store is materialized.
  * @param sessionId - Session-scoped persistence suffix.
+ * @param environmentId - owning Host id; local compound scopes migrate the legacy Session-only key.
  * @returns the preferred View id, or null when storage has no usable value.
  */
 export function readConversationViewPreference(sessionId: SessionId, environmentId?: string): string | null {
@@ -44,7 +45,20 @@ export function readConversationViewPreference(sessionId: SessionId, environment
     const scopeKey = environmentId === undefined
       ? sessionId
       : JSON.stringify([environmentId, sessionId])
-    const raw = localStorage.getItem(`${CONVERSATION_STORE_KEY}.${scopeKey}`)
+    const key = `${CONVERSATION_STORE_KEY}.${scopeKey}`
+    let raw = localStorage.getItem(key)
+    if (raw === null && environmentId === 'local') {
+      const legacyKey = `${CONVERSATION_STORE_KEY}.${sessionId}`
+      raw = localStorage.getItem(legacyKey)
+      if (raw !== null) {
+        try {
+          localStorage.setItem(key, raw)
+          localStorage.removeItem(legacyKey)
+        } catch {
+          // Reading the legacy preference remains useful when best-effort migration cannot persist.
+        }
+      }
+    }
     if (raw === null) return null
     const stored: unknown = JSON.parse(raw)
     if (typeof stored !== 'object' || stored === null || !('view' in stored)) return null

@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState, useSyncExternalStore } from 'react'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
@@ -14,6 +15,8 @@ import css from './QueueDock.module.css'
 
 /** Queue operations injected by the session-scoped registration. */
 export interface QueueDockInjected {
+  /** Owning runtime mutation readiness; queued rows remain readable while false. */
+  connectionReady?: ObservableSnapshot<boolean>
   updateQueue: (itemId: QueueItemId, action: QueueAction) => Promise<void>
   notify: (level: 'info' | 'error', text: string) => void
   /** Resolve one durable queued image into a session-scoped browser URL. */
@@ -58,11 +61,19 @@ function QueueThumb({ attachment, loadImage, label }: {
 /** Full props of a dock entry: InputZone owner share + session standard kit + global seat + the locale seat. */
 export type QueueDockProps = PropsRuntime<'conversation.input.dock'> & QueueDockInjected & PropsLocale<'conversation'>
 
+const READY_SOURCE: ObservableSnapshot<boolean> = { getSnapshot: () => true, subscribe: () => () => {} }
+
 /**
  * Queue strip: one item renders directly; multiple items default to a
  * collapsible count header; an empty queue renders nothing.
  */
-export function QueueDock({ useSession, updateQueue, notify, loadImage, t }: QueueDockProps) {
+export function QueueDock({ useSession, updateQueue, notify, loadImage, connectionReady, t }: QueueDockProps) {
+  const readySource = connectionReady ?? READY_SOURCE
+  const mutationsReady = useSyncExternalStore(
+    listener => readySource.subscribe(listener),
+    () => readySource.getSnapshot(),
+    () => readySource.getSnapshot(),
+  )
   const inbox = useSession(s => s.queue)
   const queue = useMemo(() => inbox.filter(row => row.placement === 'queued'), [inbox])
   const pendingSubmissions = useSession(s => s.pendingSubmissions)
@@ -96,6 +107,7 @@ export function QueueDock({ useSession, updateQueue, notify, loadImage, t }: Que
     action: QueueAction,
     failure: string,
   ): Promise<boolean> => {
+    if (!mutationsReady) return false
     setBusy(itemId)
     try {
       await updateQueue(itemId, action)
@@ -189,7 +201,7 @@ export function QueueDock({ useSession, updateQueue, notify, loadImage, t }: Que
                             type="button"
                             className={css.action}
                             aria-label={t('queue.save')}
-                            disabled={busy !== null || editing.text.trim() === ''}
+                            disabled={busy !== null || editing.text.trim() === '' || !mutationsReady}
                             onClick={() => { void saveEdit() }}
                           >
                             <IconCheckOutline16 size={14} />
@@ -231,7 +243,7 @@ export function QueueDock({ useSession, updateQueue, notify, loadImage, t }: Que
                             type="button"
                             className={css.action}
                             aria-label={t('queue.remove')}
-                            disabled={busy !== null}
+                            disabled={busy !== null || !mutationsReady}
                             onClick={() => {
                               void applyAction(
                                 row.id,
@@ -249,7 +261,7 @@ export function QueueDock({ useSession, updateQueue, notify, loadImage, t }: Que
                             className={css.action}
                             aria-label={t('queue.steer')}
                             title={running ? undefined : t('queue.steer.unavailable')}
-                            disabled={busy !== null || !running}
+                            disabled={busy !== null || !running || !mutationsReady}
                             onClick={() => {
                               void applyAction(
                                 row.id,
@@ -296,6 +308,15 @@ export const queueDockEntry = {
   name: 'conversation-queue-dock',
   inject: ['slots', 'conversation', 'sessions', 'uiConversation'],
   apply(ctx: Context): void {
+    const runtimeGeneration = (ctx.get('environmentRuntime') as {
+      generation?: ObservableSnapshot<unknown>
+    } | undefined)?.generation
+    const connectionReady: ObservableSnapshot<boolean> = runtimeGeneration === undefined
+      ? READY_SOURCE
+      : {
+        getSnapshot: () => runtimeGeneration.getSnapshot() !== undefined,
+        subscribe: listener => runtimeGeneration.subscribe(listener),
+      }
     ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
       name: 'conversation.input.dock',
       id: 'queue',
@@ -307,6 +328,7 @@ export const queueDockEntry = {
         const conversation = ctx.get('conversation') as ConversationController | undefined
         if (conversation === undefined) throw new Error('queue dock: conversation service unavailable')
         return {
+          connectionReady,
           updateQueue: (itemId, action) => conversation.updateQueueSession(binding.session, itemId, action),
           notify: (level, text) => { conversation.input.for(binding.ctx).notify(level, text) },
           loadImage: attachment => ctx.uiConversation.imageUrl(sessionId, attachment),

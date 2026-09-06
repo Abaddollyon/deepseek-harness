@@ -4,13 +4,21 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 
 /** Stateful execution-limit owner for one live React loop instance. */
 export class AgentBudgetTracker {
+  private readonly limit: Readonly<AgentBudget>
   private steps = 0
   private inputTokens = 0
   private outputTokens = 0
   private retries = 0
   private inputAccountingAvailable = true
 
-  constructor(private readonly limit: Readonly<AgentBudget>) {}
+  constructor(limit: Readonly<AgentBudget>) {
+    this.limit = {
+      maxTurns: limit.maxTurns,
+      maxInputTokens: limit.maxInputTokens,
+      maxOutputTokens: limit.maxOutputTokens,
+      maxRetries: limit.maxRetries,
+    }
+  }
 
   /** Admit one model step before its durable step boundary opens. */
   admitStep(): void {

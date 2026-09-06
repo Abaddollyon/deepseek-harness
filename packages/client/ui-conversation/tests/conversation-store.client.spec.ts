@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createConversationStore, readConversationViewPreference } from '../src/client/stores.ts'
 
@@ -66,5 +66,18 @@ describe('createConversationStore', () => {
 
     localStorage.setItem(`${KEY}.${scopeKey}`, '{invalid')
     expect(readConversationViewPreference(sessionId, 'sigil')).toBeNull()
+  })
+
+  it('uses a legacy local View even when best-effort migration cannot write', () => {
+    const sessionId = 'sess-legacy' as SessionId
+    localStorage.setItem(`${KEY}.${sessionId}`, JSON.stringify({ view: 'trajectory' }))
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError')
+    })
+    try {
+      expect(readConversationViewPreference(sessionId, 'local')).toBe('trajectory')
+    } finally {
+      write.mockRestore()
+    }
   })
 })
