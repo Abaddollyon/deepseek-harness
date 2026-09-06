@@ -129,7 +129,7 @@ Lead 可以停止 teammate 的当前轮次，而不会删除其排队的消息�
 
 ### 持久 mailbox
 
-`sendMessage()` 校验 peer 成员关系，追加 `team/message/queued` 并在尝试投递前 flush。目标消息以 `Team message <id> from <name>:` 开头，并在 `TeamMessageSource` 中保留同一 id 与发送者。只有目标 Session 在 pending inbox 或已记录历史中持久持有消息身份后，才会以 `team/message/delivered` 确认投递。即时准入按目标与持久队列顺序串行化；恢复按同一顺序重新投递 queued-minus-delivered 记录。重试前会同时折叠 live 与持久目标 inbox／历史状态，因此 inbox 已接受但模型尚未 claim 时发生崩溃不会复制消息。该保证是进程内重试加 target Session 去重，而不是跨进程 exactly-once 投递。
+`sendMessage()` 校验 peer 成员关系，追加 `team/message/queued` 并在尝试投递前 flush。目标消息以 `Team message <id> from <name>:` 开头，并在 `TeamMessageSource` 中保留同一 id 与发送者。只有目标 Session 在 pending inbox 或已记录历史中持久持有消息身份后，才会以 `team/message/delivered` 确认投递。即时准入按目标与持久队列顺序串行化；恢复按同一顺序重新投递 queued-minus-delivered 记录。存在候选记录的恢复会先在 Lead 事务内部 flush Lead Session，再捕获并认领这些记录，因此 queued flush 仍在进行或已被拒绝的记录绝不会被恢复投递；没有候选记录的启动不付出 flush。只有当持久化后端参与 `session/flush` 时，该 flush 才是持久性闸门；没有后端时它与其他 Team flush 一样是同一份内存契约。被拒绝的发送是未知结果，而非不投递的保证：持久化会保留并重试被拒绝的写入，一旦之后某次 flush 成功，之后的恢复就会投递该记录。发送方在自己的事务内、在任何恢复能观察到该记录之前注册自己的即时投递，因此只有恢复才可能发现记录已在进行中，`accepted` 与 `queued` 报告的是发送方自己的尝试。重试前会同时折叠 live 与持久目标 inbox／历史状态，因此 inbox 已接受但模型尚未 claim 时发生崩溃不会复制消息。该保证是进程内重试加 target Session 去重，而不是跨进程 exactly-once 投递。
 
 ### 共享任务板
 
