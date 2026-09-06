@@ -131,13 +131,10 @@ function raceCredentialAbort<T>(operation: Promise<T>, signal: AbortSignal | und
   if (signal === undefined) return operation
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
-      operation.catch(() => {
-        // The durable operation may still acquire its lock; its mutator checks
-        // the same signal before committing, and this handler owns settlement.
-      })
       reject(credentialOperationError(signal.reason))
     }
     signal.addEventListener('abort', onAbort, { once: true })
+    // Both handlers remain attached after cancellation and own the durable operation's late settlement.
     operation.then(
       (value) => {
         signal.removeEventListener('abort', onAbort)

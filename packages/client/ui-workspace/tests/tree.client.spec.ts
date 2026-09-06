@@ -3,8 +3,9 @@ import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-sess
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { ScheduleId } from '@deepseek-ai/dsh-schedule'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import { relativeTime } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel, relativeTime,
+  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel,
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'

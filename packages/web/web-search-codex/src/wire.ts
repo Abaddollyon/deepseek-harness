@@ -91,10 +91,10 @@ export class CodexSearchWire {
    * @param signal - Cancellation for the protocol phase.
    */
   async initialize(signal: AbortSignal): Promise<void> {
-    object(await this.guarded(this.transport.request('initialize', {
+    await this.requestObject('initialize', {
       clientInfo: { name: 'deepseek-harness', title: 'DeepSeek Harness', version: '0.0.1' },
       capabilities: { experimentalApi: false, requestAttestation: false },
-    }, signal), signal), 'initialize response')
+    }, signal, 'initialize response')
     this.transport.notify('initialized')
     await this.guarded(this.transport.flush(), signal)
   }
@@ -105,13 +105,13 @@ export class CodexSearchWire {
    * @param signal - Cancellation for the protocol phase.
    */
   async startThread(cwd: string, signal: AbortSignal): Promise<void> {
-    const response = object(await this.guarded(this.transport.request('thread/start', {
+    const response = await this.requestObject('thread/start', {
       cwd,
       ephemeral: true,
       approvalPolicy: 'never',
       sandbox: 'read-only',
       config: { web_search: 'live', tools: { web_search: true } },
-    }, signal), signal), 'thread/start response')
+    }, signal, 'thread/start response')
     const thread = object(response.thread, 'thread/start thread')
     if (thread.ephemeral !== true) {
       throw new CodexProtocolError('Codex app-server did not create an ephemeral thread')
@@ -136,10 +136,10 @@ export class CodexSearchWire {
     }
     const completion = Promise.withResolvers<JsonObject>()
     this.turnCompleted = completion
-    const response = object(await this.guarded(this.transport.request('turn/start', {
+    const response = await this.requestObject('turn/start', {
       threadId,
       input: [{ type: 'text', text: prompt(query), text_elements: [] }],
-    }, signal), signal), 'turn/start response')
+    }, signal, 'turn/start response')
     const turn = object(response.turn, 'turn/start turn')
     const turnId = identifier(turn.id, 'turn/start turn id')
     for (const observedTurn of this.threadByTurn.keys()) {
@@ -176,6 +176,15 @@ export class CodexSearchWire {
 
   private rejectFatal(error: Error): void {
     this.fatal.reject(error)
+  }
+
+  private async requestObject(
+    method: string,
+    params: JsonObject,
+    signal: AbortSignal,
+    label: string,
+  ): Promise<JsonObject> {
+    return object(await this.guarded(this.transport.request(method, params, signal), signal), label)
   }
 
   private async guarded<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
