@@ -98,7 +98,7 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  width: 336px;
+  width: 400px;
   max-width: min(400px, calc(100vw - 32px));
   max-height: min(560px, calc(100vh - 140px));
   padding: 4px;
@@ -323,5 +323,47 @@
 }
 
 .refresh:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.compact {
+  min-height: 32px;
+  align-items: center;
+}
+
+.compact .clickarea {
+  align-items: center;
+}
+
+.compact .metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compact .metricDuration {
+  line-height: 18px;
+}
+
+.compact .clickarea > :global([data-state]) {
+  margin-top: 0;
+}
+
+.openSession {
+  flex: none;
+  align-self: center;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.openSession:hover,
+.openSession:focus-visible {
+  color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }

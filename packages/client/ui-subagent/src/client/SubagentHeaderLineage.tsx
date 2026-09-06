@@ -16,7 +16,7 @@ import { NS } from './locales.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-token-meter/client'
 import css from './SubagentHeaderLineage.module.css'
-import { indexSubagentDescendants } from './subagent-lineage.ts'
+import { indexSubagentDescendants, type SubagentDescendantSummary } from './subagent-lineage.ts'
 
 type CatalogEntry = SubagentCatalogSnapshot['entries'][number]
 type Catalogs = SessionListState['subagentsByParent']
@@ -37,6 +37,7 @@ interface CatalogRowsProps {
   currentSessionId: SessionId | undefined
   catalog: SubagentCatalogSnapshot
   catalogs: Catalogs
+  descendants: ReadonlyMap<SessionId, SubagentDescendantSummary>
   summaries: Readonly<Record<SessionId, SessionSummary>>
   expanded: ReadonlySet<SessionId>
   level: number
@@ -237,9 +238,12 @@ function CatalogLoadingRows({
 
 /** Render one catalog level and recurse only through explicitly expanded rows. */
 function CatalogRows({
-  parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level, now,
+  parentSessionId, currentSessionId, catalog, catalogs, descendants, summaries, expanded, level, now,
   openChild, refresh, toggleBranch, closeCatalog, t,
 }: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
+  const active = (entry: CatalogEntry): boolean => entry.kind === 'child'
+    && (entry.activity === 'running' || (descendants.get(entry.id)?.runningCount ?? 0) > 0)
+  const entries = [...catalog.entries].sort((a, b) => Number(active(b)) - Number(active(a)))
   const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
   const reserveDisclosure = catalog.entries.some(
     entry => entry.kind === 'child' && entry.hasChildren,
@@ -267,7 +271,7 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {catalog.entries.map((entry) => {
+      {entries.map((entry) => {
         if (entry.kind === 'diagnostic') {
           const reason = diagnosticReason(entry, t)
           return (
@@ -295,13 +299,18 @@ function CatalogRows({
         const isCurrent = entry.id === currentSessionId
         const isExpanded = expanded.has(entry.id)
         const knownLeaf = !entry.hasChildren
+        const compact = !active(entry)
+        const runningDescendants = descendants.get(entry.id)?.runningCount ?? 0
         const childLoading = childCatalog === undefined
           || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
         const summary = summaries[entry.id]
         const label = entry.label ?? entry.id
         const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
         const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-        const secondary = [summary?.title, mode, activity]
+        const descendantActivity = runningDescendants > 0
+          ? t('activity.descendants', { count: runningDescendants })
+          : undefined
+        const secondary = [summary?.title, mode, activity, descendantActivity]
           .filter(value => value !== undefined)
           .join(' · ')
         const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
@@ -327,11 +336,16 @@ function CatalogRows({
           openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
           closeCatalog()
         }
+        const activate = (): void => {
+          if (knownLeaf) open()
+          else toggleBranch(entry.id)
+        }
         const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
+          if (event.target !== event.currentTarget) return
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
             event.stopPropagation()
-            open()
+            activate()
           } else if (
             (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
             || (event.key === 'ArrowLeft' && isExpanded)
@@ -356,8 +370,9 @@ function CatalogRows({
               aria-current={isCurrent || undefined}
               aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
               {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
-              className={css.row}
-              onClick={open}
+              title={[label, secondary, metrics].filter(value => value !== '').join(' · ')}
+              className={`${css.row} ${compact ? css.compact : ''}`}
+              onClick={activate}
               onKeyDown={handleKey}
             >
               {knownLeaf
@@ -374,10 +389,10 @@ function CatalogRows({
                   </button>
                 )}
               <div className={css.clickarea}>
-                <StateDot state={entry.activity === 'running' ? 'ongoing' : 'done'} />
+                <StateDot state={compact ? 'done' : 'ongoing'} />
                 <span className={css.content}>
                   <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
-                  <span className={css.summary}>{secondary}</span>
+                  {!compact && <span className={css.summary}>{secondary}</span>}
                 </span>
                 {metrics !== '' && (
                   <span className={css.metrics}>
@@ -393,6 +408,19 @@ function CatalogRows({
                   </span>
                 )}
               </div>
+              {!knownLeaf && (
+                <button
+                  type="button"
+                  className={css.openSession}
+                  aria-label={t('session.openLabel', { label })}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    open()
+                  }}
+                >
+                  {t('session.open')}
+                </button>
+              )}
             </div>
             {isExpanded && !knownLeaf && (
               <div
@@ -415,6 +443,7 @@ function CatalogRows({
                       currentSessionId={currentSessionId}
                       catalog={childCatalog}
                       catalogs={catalogs}
+                      descendants={descendants}
                       summaries={summaries}
                       expanded={expanded}
                       level={level + 1}
@@ -469,7 +498,7 @@ const MENU_VIEWPORT_MARGIN = 16
 /** Place a portaled catalog below its trigger without crossing the viewport edge. */
 function catalogMenuPosition(trigger: HTMLButtonElement): CSSProperties {
   const rect = trigger.getBoundingClientRect()
-  const width = Math.min(336, window.innerWidth - MENU_VIEWPORT_MARGIN * 2)
+  const width = Math.min(400, window.innerWidth - MENU_VIEWPORT_MARGIN * 2)
   return {
     top: rect.bottom + 5,
     left: Math.min(
@@ -508,10 +537,8 @@ function CatalogDropdown({
     ? currentEntry.label ?? currentEntry.id
     : displayTitle
   const healthy = catalog?.entries.filter(entry => entry.kind === 'child') ?? []
-  const descendants = useMemo(
-    () => indexSubagentDescendants(summaries).get(rootSessionId) ?? NO_DESCENDANTS,
-    [rootSessionId, summaries],
-  )
+  const descendantIndex = useMemo(() => indexSubagentDescendants(summaries), [summaries])
+  const descendants = descendantIndex.get(rootSessionId) ?? NO_DESCENDANTS
   // The catalog can arrive before the session-list baseline; never undercount
   // the already-visible direct rows during that short bootstrap window.
   const descendantCount = Math.max(healthy.length, descendants.count)
@@ -696,7 +723,7 @@ function CatalogDropdown({
 
   const navigate = (event: KeyboardEvent<HTMLDivElement>): void => {
     const items = treeItems(menuRef.current)
-    const index = items.indexOf(document.activeElement as HTMLElement)
+    const index = items.findIndex(item => item.contains(document.activeElement))
     if (event.key === 'Escape') {
       event.preventDefault()
       changeOpen(false, true)
@@ -789,6 +816,7 @@ function CatalogDropdown({
             currentSessionId={currentSessionId}
             catalog={presentedCatalog}
             catalogs={catalogs}
+            descendants={descendantIndex}
             summaries={summaries}
             expanded={expanded}
             level={1}
