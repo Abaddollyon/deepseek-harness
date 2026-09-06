@@ -339,7 +339,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
-    if (agent.options.budget !== undefined) {
+    if (agent.hasExecutionBudget) {
       throw new LlmError(
         'budgeted agent cannot run model-backed compaction because auxiliary model usage is not tracked',
         'BUDGET_ACCOUNTING_UNAVAILABLE',

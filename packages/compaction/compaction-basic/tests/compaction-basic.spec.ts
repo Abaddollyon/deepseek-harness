@@ -27,7 +27,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionSeq, type EpochHeader } from '@deepseek-ai/dsh-session'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import AgentRegistry, { agentEvents, Inbox, type Agent, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents, Inbox, type Agent, type AgentOptions, type RequestErrorAction, type RequestPreflightAction } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -129,6 +129,7 @@ function createContext(contextWindow = 1_000, adapter: LlmAdapter = new ContextA
 function agent(session: Session, model?: string, budget = false): Agent {
   return {
     id: session.id,
+    hasExecutionBudget: budget,
     options: {
       ...model === undefined ? {} : { provider: model, model },
       ...budget ? {
@@ -1699,6 +1700,48 @@ describe('automatic listener and loader composition', () => {
     expect((failure as Error & { code?: unknown }).code).toBe('BUDGET_ACCOUNTING_UNAVAILABLE')
     expect(failure.message).toContain('auxiliary model usage is not tracked')
     expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('retains compaction denial after the caller deletes the original budget option', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(TokenMeter)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const adapter = new ObservableCompactionAdapter(() => 20_000, 20_000)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    await ctx.plugin(BasicCompactionEngine, { thresholdRatio: 0.1, retainTokens: 10 })
+    const options: AgentOptions = {
+      provider: MODEL,
+      model: MODEL,
+      budget: { maxTurns: 4, maxInputTokens: 100, maxOutputTokens: 3, maxRetries: 0 },
+    }
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('immutable-compaction-budget-presence'),
+      seed: conversation(4).snapshotEvents(),
+      agentOptions: options,
+    })
+
+    try {
+      expect(handle.agent.options).toBe(options)
+      expect(handle.agent.hasExecutionBudget).toBe(true)
+      delete options.budget
+
+      const failure: unknown = await preflight(ctx, handle.agent).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(failure).toBeInstanceOf(Error)
+      if (!(failure instanceof Error)) throw new TypeError('expected compaction admission failure')
+      expect((failure as Error & { code?: unknown }).code).toBe('BUDGET_ACCOUNTING_UNAVAILABLE')
+      expect(adapter.requests).toHaveLength(0)
+    } finally {
+      await handle.dispose()
+    }
   })
 
   it('preserves overflow failure without dispatching untracked compaction for a budgeted agent', async () => {

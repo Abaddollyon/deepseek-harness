@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-`AgentOptions.budget` 为一个实时 agent-loop 实例携带完整的 `{ maxTurns, maxInputTokens, maxOutputTokens, maxRetries }` 策略。循环在下一次提供方分发前准入模型步骤与请求错误重试。它把每次请求的输出上限限制到剩余总量，并在每次尝试后计入提供方报告的输出。
+`AgentOptions.budget` 为一个实时 agent-loop 实例携带完整的 `{ maxTurns, maxInputTokens, maxOutputTokens, maxRetries }` 策略。构造过程会捕获策略与 `Agent.hasExecutionBudget`，同时保留调用方的 `AgentOptions` identity；之后修改 options 不能扩大限制，也不能向辅助调用所有者隐藏预算存在性。循环在下一次提供方分发前准入模型步骤与请求错误重试。它把每次请求的输出上限限制到剩余总量，并在每次尝试后计入提供方报告的输出。
 
 输入 token 是按响应计量的续跑阈值。由于权威 usage 随响应到达，一个提供方请求可能跨过阈值；循环随后拒绝下一次请求。响应 usage 缺失时，必需的续跑以 `BUDGET_ACCOUNTING_UNAVAILABLE` 被拒绝。prepared adapter 可以提供精确输入 token 计数，在分发前拒绝当前过大请求。
 

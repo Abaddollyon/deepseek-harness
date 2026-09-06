@@ -10,7 +10,7 @@ External schedulers stored model-step, input-token, output-token, and retry limi
 
 ## Decision
 
-`AgentOptions.budget` carries one complete `{ maxTurns, maxInputTokens, maxOutputTokens, maxRetries }` policy for a live agent-loop instance. The loop admits model steps and request-error retries before the next provider dispatch. It clamps each request's output cap to the remaining total and accounts provider-reported output after every attempt.
+`AgentOptions.budget` carries one complete `{ maxTurns, maxInputTokens, maxOutputTokens, maxRetries }` policy for a live agent-loop instance. Construction captures both the policy and `Agent.hasExecutionBudget`, while retaining the caller's `AgentOptions` identity; later option mutation cannot expand the limits or hide budget presence from auxiliary-call owners. The loop admits model steps and request-error retries before the next provider dispatch. It clamps each request's output cap to the remaining total and accounts provider-reported output after every attempt.
 
 Input tokens are a response-accounted continuation threshold. A provider request can cross the threshold because authoritative usage arrives with its response; the loop then refuses the next request. Missing response usage refuses a required continuation with `BUDGET_ACCOUNTING_UNAVAILABLE`. A prepared adapter may supply an exact input-token count to reject an oversized current request before dispatch.
 

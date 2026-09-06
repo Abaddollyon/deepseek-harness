@@ -74,7 +74,7 @@ const handle = await ctx.agents.create({
 
 ### 限制一次 agent 运行
 
-编程调用方可以传入 `AgentOptions.budget`，其中包含正数 `maxTurns`、`maxInputTokens` 和 `maxOutputTokens`，以及非负 `maxRetries`。循环在创建 tracker 时会复制这四项限制，同时保留调用方可见的 `AgentOptions` identity，因此之后修改配置对象不会扩大正在运行的 agent 额度。`maxTurns` 计算模型步骤，包括工具后续步骤，而重试仍是同一步骤内的尝试。循环把每次请求的 `maxTokens` 限制为剩余总输出额度，并在超额步骤或重试之前停止。输入 token 使用提供方响应中的权威 usage；由于 usage 在响应后到达，一个在途请求可能跨过阈值，但不会再分发后续请求。响应没有 usage 时，后续请求以 `BUDGET_ACCOUNTING_UNAVAILABLE` 停止；提供精确 prepared-call 计数的适配器可以在分发前拒绝过大的请求。
+编程调用方可以传入 `AgentOptions.budget`，其中包含正数 `maxTurns`、`maxInputTokens` 和 `maxOutputTokens`，以及非负 `maxRetries`。循环在构造时会复制这四项限制与公开的 `Agent.hasExecutionBudget` 存在性信号，同时保留调用方可见的 `AgentOptions` identity，因此之后修改配置对象既不能扩大额度，也不能隐藏正在运行的 agent 带有预算。`maxTurns` 计算模型步骤，包括工具后续步骤，而重试仍是同一步骤内的尝试。循环把每次请求的 `maxTokens` 限制为剩余总输出额度，并在超额步骤或重试之前停止。输入 token 使用提供方响应中的权威 usage；由于 usage 在响应后到达，一个在途请求可能跨过阈值，但不会再分发后续请求。响应没有 usage 时，后续请求以 `BUDGET_ACCOUNTING_UNAVAILABLE` 停止；提供精确 prepared-call 计数的适配器可以在分发前拒绝过大的请求。
 
 -----
 

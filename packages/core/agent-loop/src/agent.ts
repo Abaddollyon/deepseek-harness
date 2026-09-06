@@ -106,6 +106,10 @@ export class ReactLoopAgent implements Agent {
     this.budget = options.budget === undefined ? undefined : new AgentBudgetTracker(options.budget)
   }
 
+  get hasExecutionBudget(): boolean {
+    return this.budget !== undefined
+  }
+
   get status(): AgentStatus {
     return this.phase.kind === 'idle' || this.phase.kind === 'maintenance' ? 'idle' : 'running'
   }
