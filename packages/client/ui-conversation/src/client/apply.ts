@@ -133,6 +133,17 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-conversation: dictionaries')
   const t = ctx.locale.bind(NS)
   const conversationStore = createConversationStore()
+  const mountedConversationActions = new Map<SessionId, {
+    readonly binding: unknown
+    readonly actions: BoundActions<typeof conversationStore>
+  }>()
+  const rememberMountedConversation = (
+    sessionId: SessionId,
+    actions: BoundActions<typeof conversationStore>,
+  ): void => {
+    const binding = sessions.binding(sessionId)
+    if (binding !== undefined) mountedConversationActions.set(sessionId, { binding, actions })
+  }
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
@@ -178,10 +189,11 @@ export function apply(ctx: Context): void {
     const location = environmentNavigation?.getSnapshot?.()
     if (location?.kind !== 'session' || location.ref.environmentId !== owningEnvironmentId) return
     const sessionId = sessions.list.getSnapshot().current
-    if (sessionId === undefined
-      || location.ref.sessionId !== sessionId
-      || sessions.binding(sessionId) === undefined) return
+    if (sessionId === undefined || location.ref.sessionId !== sessionId) return
+    const mounted = mountedConversationActions.get(sessionId)
+    if (mounted === undefined || mounted.binding !== sessions.binding(sessionId)) return
     activateView(sessionId, location.viewId)
+    mounted.actions.setView(location.viewId)
   }
   const conversationViews = createSnapshotStore<readonly ViewTab[]>(viewTabs())
   const refreshViews = (): void => {
@@ -281,18 +293,21 @@ export function apply(ctx: Context): void {
       'conversation.view': { kind: 'list', scope: 'session' },
     },
     store: conversationStore,
-    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionInjected => ({
-      hooks: { conversationViews },
-      bindDraftMirror: write => inputHub.shell(sessionId).bindMirror((draft) => {
-        write(draft)
-        presentation?.update(presentationRef(sessionId), { draft })
-      }),
-      openView: (view, focus) => {
-        activateView(sessionId, view)
-        actions.openView(view, focus)
-        presentation?.update(presentationRef(sessionId), { viewId: view })
-      },
-    }),
+    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionInjected => {
+      rememberMountedConversation(sessionId, actions)
+      return {
+        hooks: { conversationViews },
+        bindDraftMirror: write => inputHub.shell(sessionId).bindMirror((draft) => {
+          write(draft)
+          presentation?.update(presentationRef(sessionId), { draft })
+        }),
+        openView: (view, focus) => {
+          activateView(sessionId, view)
+          actions.openView(view, focus)
+          presentation?.update(presentationRef(sessionId), { viewId: view })
+        },
+      }
+    },
   }, ConversationSession)
 
   const registerConversationHeader = () => slots.register({
@@ -304,15 +319,18 @@ export function apply(ctx: Context): void {
       'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
     },
     store: conversationStore,
-    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionHeaderInjected => ({
-      hooks: { conversationViews },
-      open: (id) => { sessions.open(id) },
-      selectView: (view) => {
-        activateView(sessionId, view)
-        actions.setView(view)
-        presentation?.update(presentationRef(sessionId), { viewId: view })
-      },
-    }),
+    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionHeaderInjected => {
+      rememberMountedConversation(sessionId, actions)
+      return {
+        hooks: { conversationViews },
+        open: (id) => { sessions.open(id) },
+        selectView: (view) => {
+          activateView(sessionId, view)
+          actions.setView(view)
+          presentation?.update(presentationRef(sessionId), { viewId: view })
+        },
+      }
+    },
   }, ConversationSessionHeader)
 
   const registerComposerBar = () => slots.register({

@@ -211,6 +211,7 @@ describe('Conversation inject API', () => {
     const b = await bench({ environmentId: 'sigil', navigation })
     const binding = b.runtime.ctx.uiConversation.binding(ROOT)
     const activate = vi.spyOn(binding, 'activate')
+    const mounted = b.conversationApi(ROOT)
     const removeChat = b.slots.register(
       { name: 'conversation.view', id: 'chat', order: 0 },
       (() => null) as never,
@@ -232,11 +233,13 @@ describe('Conversation inject API', () => {
       })
 
       expect(activate).toHaveBeenLastCalledWith('tasks')
+      expect(mounted.instance.store.getSnapshot().view).toBe('tasks')
       activate.mockClear()
       navigation.open({
         kind: 'session', ref: { environmentId: 'other', sessionId: ROOT }, viewId: 'chat',
       })
       expect(activate).not.toHaveBeenCalled()
+      expect(mounted.instance.store.getSnapshot().view).toBe('tasks')
     } finally {
       removeTasks()
       removeChat()
