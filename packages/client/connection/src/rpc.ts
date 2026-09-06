@@ -103,6 +103,12 @@ export type ConnectionRpcHandler = (
   signal: AbortSignal,
 ) => Promise<ConnectionRpcResult<unknown>>
 
+/** Buffering policy for one dedicated Host RPC channel. */
+export interface ConnectionRpcChannelOptions {
+  /** Positive safe-integer body cap enforced while the HTTP request streams in. */
+  readonly maxBodyBytes: number
+}
+
 /** Synchronous ownership test for one endpoint on a shared RPC channel. */
 export type ConnectionRpcEndpointMatcher = (endpoint: string) => boolean
 
@@ -135,11 +141,13 @@ export interface HostConnectionRpc {
    * Register one authenticated absolute channel prefix.
    * @param channel - absolute logical channel such as `/rpc`.
    * @param handler - decoded endpoint handler returning the existing RPC result shape.
+   * @param options - optional per-channel request body cap; omission uses the carrier default.
    * @returns asynchronous disposer removing the channel and its physical route.
    */
   handle(
     channel: string,
     handler: ConnectionRpcHandler,
+    options?: ConnectionRpcChannelOptions,
   ): () => Promise<void>
 
   /**
@@ -184,14 +192,14 @@ export interface HostConnectionHandle {
    * @param response - response owned when the result is false.
    * @returns true only when the frontend may serve index.html.
    */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, surfaceId?: string): boolean
 
   /**
    * Add the fresh process token to an ordinary Web application URL.
    * @param baseUrl - clean canonical browser origin.
    * @returns root URL accepted by {@link authorizeIndex} for initial login.
    */
-  authenticatedUrl(baseUrl: string): string
+  authenticatedUrl(baseUrl: string, surfaceId?: string): string
 }
 
 /** Transport-independent Fetch handler used by HTTP and worker carriers. */

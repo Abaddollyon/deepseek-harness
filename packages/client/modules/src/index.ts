@@ -45,6 +45,8 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The web plugin table (provided by the client-modules node half). */
     clientModules: ClientModuleRegistry
+    /** Registered dependency-closed browser entry surfaces. */
+    clientSurfaces: ClientSurfaceRegistry
   }
 }
 
@@ -62,6 +64,8 @@ interface DshClientDeclaration {
    * Absent means the package uses only the baseline externals.
    */
   external?: string[]
+  /** Whether the package participates in the ordinary root graph. */
+  defaultRoot?: boolean
 }
 
 /** The declared fields a graph row carries, normalized (absent array declarations become empty). */
@@ -70,6 +74,8 @@ interface WebBootRowFields {
   /** Module specifiers the package requests from the module table. */
   external: string[]
   immediately: boolean
+  /** Whether this row is a root of the ordinary application graph. */
+  defaultRoot: boolean
 }
 
 /** Filesystem baseline captured before a client artifact snapshot is read. */
@@ -212,11 +218,15 @@ function parseDshClient(pkgName: string, value: unknown): DshClientDeclaration |
   if (decl.immediately !== undefined && typeof decl.immediately !== 'boolean') {
     throw new Error(`client-modules: ${pkgName} dsh.client.immediately must be a boolean`)
   }
+  if (decl.defaultRoot !== undefined && typeof decl.defaultRoot !== 'boolean') {
+    throw new Error(`client-modules: ${pkgName} dsh.client.defaultRoot must be a boolean`)
+  }
   return {
     platform: decl.platform,
     ...(inject !== undefined ? { inject } : {}),
     ...(external !== undefined ? { external } : {}),
     ...(decl.immediately !== undefined ? { immediately: decl.immediately } : {}),
+    ...(decl.defaultRoot !== undefined ? { defaultRoot: decl.defaultRoot } : {}),
   }
 }
 
@@ -523,6 +533,127 @@ window.__ModuleLoader__={
   return rows
 }
 
+/** One named browser entry surface and the roots of its private boot graph. */
+export interface ClientSurfaceDefinition {
+  /** Stable programmatic surface identifier. */
+  readonly id: string
+  /** Exact clean browser pathname, such as `/companion`. */
+  readonly path: string
+  /** Additional client packages treated as graph roots. */
+  readonly roots: readonly string[]
+  /** The one package that mounts this surface's root UI. */
+  readonly rootPlugin: string
+}
+
+/** Registration and graph lookup for named browser entry surfaces. */
+export class ClientSurfaceRegistry extends Service {
+  private readonly definitions = new Map<string, ClientSurfaceDefinition>()
+  private readonly paths = new Map<string, string>()
+
+  constructor(
+    ctx: Context,
+    private readonly composeGraph: (definition: ClientSurfaceDefinition) => WebBootGraph,
+  ) {
+    super(ctx, 'clientSurfaces')
+  }
+
+  /**
+   * Register one surface for the lifetime of the calling plugin fiber.
+   * @param definition - stable id, exact path, graph roots, and root plugin.
+   * @returns effect-owned disposer for the registration.
+   */
+  register(definition: ClientSurfaceDefinition): () => Promise<void> {
+    const normalized = validateSurfaceDefinition(definition)
+    const owner = this.ctx
+    return owner.effect(() => {
+      if (this.definitions.has(normalized.id)) {
+        throw new Error(`client-surfaces: duplicate id ${JSON.stringify(normalized.id)}`)
+      }
+      if (this.paths.has(normalized.path)) {
+        throw new Error(`client-surfaces: duplicate path ${JSON.stringify(normalized.path)}`)
+      }
+      const graph = this.composeGraph(normalized)
+      for (const existing of this.definitions.values()) {
+        const includesExistingOwner = graph.entries.some(row => row.id === existing.rootPlugin)
+        const existingIncludesOwner = this.composeGraph(existing).entries
+          .some(row => row.id === normalized.rootPlugin)
+        if (includesExistingOwner || existingIncludesOwner) {
+          throw new Error(
+            `client-surfaces: ${normalized.id} and ${existing.id} share more than one root plugin`,
+          )
+        }
+      }
+      this.definitions.set(normalized.id, normalized)
+      this.paths.set(normalized.path, normalized.id)
+      return () => {
+        this.definitions.delete(normalized.id)
+        this.paths.delete(normalized.path)
+      }
+    }, `client-surfaces: ${normalized.id}`)
+  }
+
+  /**
+   * Return a registered immutable definition by id.
+   * @param id - stable surface identifier.
+   * @returns the definition, or undefined when it is not registered.
+   */
+  get(id: string): ClientSurfaceDefinition | undefined {
+    return this.definitions.get(id)
+  }
+
+  /**
+   * Return the viable registered surface matching an exact pathname.
+   * @param path - decoded exact browser pathname.
+   * @returns the definition, or undefined when absent or currently incomplete.
+   */
+  findByPath(path: string): ClientSurfaceDefinition | undefined {
+    const id = this.paths.get(path)
+    if (id === undefined) return undefined
+    const definition = this.definitions.get(id)
+    if (definition === undefined) return undefined
+    try {
+      this.composeGraph(definition)
+      return definition
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Compose the current dependency-closed graph for one registered surface.
+   * @param id - stable registered surface identifier.
+   * @returns the current surface boot graph.
+   */
+  graph(id: string): WebBootGraph {
+    const definition = this.definitions.get(id)
+    if (definition === undefined) throw new Error(`client-surfaces: unknown surface ${JSON.stringify(id)}`)
+    return this.composeGraph(definition)
+  }
+}
+
+function validateSurfaceDefinition(definition: ClientSurfaceDefinition): ClientSurfaceDefinition {
+  if (!/^[a-z][a-z0-9-]*$/u.test(definition.id)) {
+    throw new Error(`client-surfaces: invalid id ${JSON.stringify(definition.id)}`)
+  }
+  if (!/^\/[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*$/u.test(definition.path)) {
+    throw new Error(`client-surfaces: invalid path ${JSON.stringify(definition.path)}`)
+  }
+  const roots: unknown = definition.roots
+  if (!Array.isArray(roots)
+    || roots.some(root => typeof root !== 'string' || exactPackageSpecifier(root) === undefined)) {
+    throw new Error('client-surfaces: roots must be package-root specifiers')
+  }
+  if (exactPackageSpecifier(definition.rootPlugin) === undefined) {
+    throw new Error('client-surfaces: rootPlugin must be a package-root specifier')
+  }
+  return Object.freeze({
+    id: definition.id,
+    path: definition.path,
+    roots: Object.freeze([...new Set(roots as string[])]),
+    rootPlugin: definition.rootPlugin,
+  })
+}
+
 /**
  * The web plugin table service: incremental `dsh.client` scan + wire composition
  * + bundle route + index injection rows. Construction runs the activation scan
@@ -549,6 +680,7 @@ export class ClientModuleRegistry extends Service {
   private previousBatchResponses = new Map<string, { body: Buffer; contentType: string }>()
   private flushQueued = false
   private composed: WebBootGraph
+  private readonly surfaceRegistry: ClientSurfaceRegistry
 
   /**
    * Build the service: subscribe, seed, and run the activation flush.
@@ -556,6 +688,7 @@ export class ClientModuleRegistry extends Service {
    */
   constructor(ctx: Context) {
     super(ctx, 'clientModules')
+    this.surfaceRegistry = new ClientSurfaceRegistry(ctx, definition => this.surfaceGraph(definition))
     // Subscribe before seeding so a fiber arriving mid-activation lands in the
     // same dirty set (Set idempotence makes the overlap harmless). An entry-less
     // fiber is a child plugin or a manual mount — never a loader row; O(1) drop.
@@ -586,8 +719,9 @@ export class ClientModuleRegistry extends Service {
       () => ctx.webServer.register({ kind: 'prefix', path: '/plugins', handler: this.serveBundle }),
       'client-modules: bundle route',
     )
-    ctx.on('webserver/index-inject', (table) => {
-      table.push(...bootInjections(this.composed))
+    ctx.on('webserver/index-inject', (table, context) => {
+      const graph = context?.variant === undefined ? this.composed : this.surfaceRegistry.graph(context.variant)
+      table.push(...bootInjections(graph))
     })
   }
 
@@ -675,8 +809,8 @@ export class ClientModuleRegistry extends Service {
     return () => { this.graphListeners.delete(listener) }
   }
 
-  private compose(): WebBootGraph {
-    const entries = orderByModuleGraph([...this.table.values()].map(record => record.entry))
+  private compose(records: readonly WebPluginRecord[] = this.defaultRecords(), replace = true): WebBootGraph {
+    const entries = orderByModuleGraph(records.map(record => record.entry))
     const bootstrap = PARSER_PRELOAD_IDS
       .map(id => this.table.get(id))
       .filter((record): record is WebPluginRecord => record !== undefined)
@@ -704,7 +838,10 @@ export class ClientModuleRegistry extends Service {
         contentType: 'application/json; charset=utf-8',
       })
     }
-    const responses = new Map(batchResponses)
+    const responses = replace ? new Map(batchResponses) : new Map(this.responses)
+    if (!replace) {
+      for (const [url, response] of batchResponses) responses.set(url, response)
+    }
     for (const record of this.table.values()) {
       const artifact = buildCombo([record], record.entry.rev)
       responses.set(artifact.url, {
@@ -716,11 +853,63 @@ export class ClientModuleRegistry extends Service {
         contentType: 'application/json; charset=utf-8',
       })
     }
-    this.previousBatchResponses = this.batchResponses
-    this.batchResponses = batchResponses
+    if (replace) {
+      this.previousBatchResponses = this.batchResponses
+      this.batchResponses = batchResponses
+    } else {
+      for (const [url, response] of batchResponses) this.batchResponses.set(url, response)
+    }
     this.responses = responses
     const batches = artifacts.map(artifact => artifact.descriptor)
     return { rev: shortHash(JSON.stringify({ entries, batches })), entries, batches }
+  }
+
+  /**
+   * Build a named surface graph from its exact dependency closure.
+   * @param definition - validated surface roots and root plugin.
+   * @returns the boot graph and published combo responses.
+   */
+  private surfaceGraph(definition: ClientSurfaceDefinition): WebBootGraph {
+    const rootPlugin = this.table.get(definition.rootPlugin)
+    if (rootPlugin !== undefined && rootPlugin.meta.defaultRoot) {
+      throw new Error(
+        `client-surfaces: root plugin ${definition.rootPlugin} must declare dsh.client.defaultRoot false`,
+      )
+    }
+    const selected = this.dependencyClosure([CLIENT_MODULES_ID, ...definition.roots, definition.rootPlugin], true)
+    return this.compose([...this.table.values()].filter(record => selected.has(record.entry.id)), false)
+  }
+
+  private defaultRecords(): WebPluginRecord[] {
+    const roots = [...this.table.values()]
+      .filter(record => record.meta.defaultRoot)
+      .map(record => record.entry.id)
+    const selected = this.dependencyClosure(roots, false)
+    return [...this.table.values()].filter(record => selected.has(record.entry.id))
+  }
+
+  private dependencyClosure(roots: readonly string[], strict: boolean): Set<string> {
+    const selected = new Set<string>()
+    const visit = (id: string, requestedBy?: string): void => {
+      const record = this.table.get(id)
+      if (record === undefined) {
+        if (strict) {
+          const suffix = requestedBy === undefined ? '' : ` requested by ${requestedBy}`
+          throw new Error(`client-surfaces: missing client module ${id}${suffix}`)
+        }
+        return
+      }
+      if (selected.has(id)) return
+      selected.add(id)
+      for (const dependency of [...record.meta.inject ?? [], ...record.meta.external]) {
+        const packageId = exactPackageSpecifier(stripClientSuffix(dependency))
+        if (packageId === undefined) continue
+        const requiredInjection = record.meta.inject?.includes(dependency) === true
+        if (this.table.has(packageId) || (strict && requiredInjection)) visit(packageId, id)
+      }
+    }
+    for (const root of roots) visit(root)
+    return selected
   }
 
   private notifyGraphChanged(): void {
@@ -766,6 +955,7 @@ export class ClientModuleRegistry extends Service {
       ...(decl.inject !== undefined ? { inject: decl.inject } : {}),
       external: decl.external ?? [],
       immediately: decl.immediately === true,
+      defaultRoot: decl.defaultRoot !== false,
     }
     const resolved = { packageName, meta }
     this.pkgMeta.set(sourceKey, resolved)

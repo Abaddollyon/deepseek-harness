@@ -76,4 +76,4 @@ None.
 
 </details>
 
-**Runtime invariant:** No companion is published. The single provider slot is validated at registration and asks return directly to their caller; the seam publishes no independent request/answer audit stream.
+**Runtime invariant:** The single provider slot is validated at registration and answers return directly to their caller. When `ctx.pendingInteractions` is composed, `ask()` reports only a content-free begin/end lifecycle around answerer dispatch; that observer has no answer authority.

@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-client-ui-subagent` is the web client's subagent conversation feature: users browse and open subagent conversations from the parent session's header, continue them through reason-specific read-only composer states, and reference running children with the `@` source. From the parent session's header, users browse the complete subagent-origin descendant lineage — active branches sort first; inactive agents use one-line rows with token usage and active-turn duration — and open any depth with the child's exact address. Clicking a branch expands its children on demand; its separate Open action navigates to the conversation. Mode and activity remain available in row tooltips and accessible names. A one-shot child always opens a read-only composer identifying the transcript as a completed execution record; a continuable child routes follow-up prompts through its FIFO inbox while it runs. Subagent-origin Session rows are omitted from the ordinary sidebar, so the parent header catalog is their navigation entry point.
+`dsh-client-ui-subagent` is the web client's subagent conversation feature: users browse and open subagent conversations from the parent session's header, continue them through reason-specific read-only composer states, and reference running children with the `@` source. From the parent session's header, users browse the complete subagent-origin descendant lineage — active branches sort first; inactive agents fold into a collapsed count and reveal one-line rows with token usage and active-turn duration — and open any depth with the child's exact address. Clicking a branch expands its children on demand; its separate Open action navigates to the conversation. Mode and activity remain available in row tooltips and accessible names. A one-shot child always opens a read-only composer identifying the transcript as a completed execution record; a continuable child routes follow-up prompts through its FIFO inbox while it runs. Subagent-origin Session rows are omitted from the ordinary sidebar, so the parent header catalog is their navigation entry point.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ The session header keeps the current session title as the lineage breadcrumb and
 
 ### Browsing the tree
 
-Rows display mode plus `running`/`inactive` activity and an optional log-backed title; the trailing column stacks total durable provider usage above active-turn duration. Keyboard navigation works with ArrowRight/ArrowLeft to expand and collapse branches and ArrowUp/ArrowDown, Home, End, and Escape to navigate or close the tree. An unlabeled one-shot row falls back to its session id; corrupt, unsupported, or unavailable rows remain readable but disabled.
+Each catalog level keeps running agents, branches with running descendants, and the current conversation visible. The Inactive agents disclosure reveals other records; inactive means not running, including completed, failed, or cancelled work. Reopening the menu collapses history again. Rows display mode plus `running`/`inactive` activity and an optional log-backed title; the trailing column stacks total durable provider usage above active-turn duration. Keyboard navigation works with ArrowRight/ArrowLeft to expand and collapse branches and ArrowUp/ArrowDown, Home, End, and Escape to navigate or close the tree. An unlabeled one-shot row falls back to its session id; corrupt, unsupported, or unavailable rows remain readable but disabled.
 
 ### Continuing a conversation
 

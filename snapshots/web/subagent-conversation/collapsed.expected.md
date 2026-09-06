@@ -1,0 +1,2 @@
+- tree "Subagent sessions":
+  - treeitem "Inactive agents (2)" [level=1]

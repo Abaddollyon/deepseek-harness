@@ -773,6 +773,144 @@ describe('shared module declarations', () => {
     expect(() => construct([packageName]))
       .toThrow(`client-modules: ${packageName} dsh.client.external must be a string array`)
   })
+
+  it('rejects malformed defaultRoot metadata', () => {
+    const packageName = '@fixture/default-root-invalid'
+    writeBuiltPackage(packageName, { defaultRoot: 'no' })
+    expect(() => construct([packageName]))
+      .toThrow(`client-modules: ${packageName} dsh.client.defaultRoot must be a boolean`)
+  })
+})
+
+describe('named client surfaces', () => {
+  function surfaceFixture(): { context: Context; service: ClientModuleRegistry } {
+    writeBuiltPackage(MODULES_ID, { immediately: true })
+    writeBuiltPackage('@fixture/shared-renderer', {})
+    writeBuiltPackage('@fixture/companion-root', {
+      defaultRoot: false,
+      inject: ['@fixture/shared-renderer'],
+    })
+    writeBuiltPackage('@fixture/neutral-root', {
+      defaultRoot: false,
+      inject: ['@fixture/shared-renderer'],
+    })
+    writeBuiltPackage('@fixture/full-app-only', {})
+    return constructWithRoute([
+      '@fixture/companion-root',
+      '@fixture/neutral-root',
+      '@fixture/full-app-only',
+      '@fixture/shared-renderer',
+      MODULES_ID,
+    ])
+  }
+
+  it('keeps opt-out packages off the ordinary root while retaining required opt-out dependencies', () => {
+    writeBuiltPackage('@fixture/ordinary-root', { inject: ['@fixture/hidden-dependency'] })
+    writeBuiltPackage('@fixture/hidden-dependency', { defaultRoot: false })
+    writeBuiltPackage('@fixture/unrelated-hidden', { defaultRoot: false })
+    const service = construct([
+      '@fixture/ordinary-root',
+      '@fixture/hidden-dependency',
+      '@fixture/unrelated-hidden',
+    ])
+    expect(service.graph().entries.map(row => row.id)).toEqual([
+      '@fixture/ordinary-root',
+      '@fixture/hidden-dependency',
+    ])
+  })
+
+  it('composes isolated companion and neutral closures and disposes their registrations', async () => {
+    const { context, service } = surfaceFixture()
+    const surfaces = context.clientSurfaces
+    const disposeCompanion = surfaces.register({
+      id: 'companion',
+      path: '/companion',
+      roots: ['@fixture/shared-renderer'],
+      rootPlugin: '@fixture/companion-root',
+    })
+    surfaces.register({
+      id: 'neutral',
+      path: '/neutral',
+      roots: ['@fixture/shared-renderer'],
+      rootPlugin: '@fixture/neutral-root',
+    })
+
+    expect(service.graph().entries.map(row => row.id)).toEqual([
+      '@fixture/full-app-only',
+      '@fixture/shared-renderer',
+      MODULES_ID,
+    ])
+    expect(surfaces.graph('companion').entries.map(row => row.id)).toEqual([
+      '@fixture/companion-root',
+      '@fixture/shared-renderer',
+      MODULES_ID,
+    ])
+    expect(surfaces.graph('neutral').entries.map(row => row.id)).toEqual([
+      '@fixture/neutral-root',
+      '@fixture/shared-renderer',
+      MODULES_ID,
+    ])
+    expect(surfaces.graph('companion').entries.map(row => row.id)).not.toContain('@fixture/full-app-only')
+    expect(surfaces.findByPath('/companion')?.id).toBe('companion')
+
+    await disposeCompanion()
+    expect(surfaces.findByPath('/companion')).toBeUndefined()
+    expect(() => surfaces.graph('companion')).toThrow('unknown surface')
+  })
+
+  it('fails closed for missing dependencies and duplicate identifiers or paths', () => {
+    const { context } = surfaceFixture()
+    const surfaces = context.clientSurfaces
+    expect(() => surfaces.register({
+      id: 'missing',
+      path: '/missing',
+      roots: ['@fixture/not-installed'],
+      rootPlugin: '@fixture/companion-root',
+    })).toThrow('missing client module @fixture/not-installed')
+
+    surfaces.register({
+      id: 'companion',
+      path: '/companion',
+      roots: [],
+      rootPlugin: '@fixture/companion-root',
+    })
+    expect(() => surfaces.register({
+      id: 'companion',
+      path: '/second',
+      roots: [],
+      rootPlugin: '@fixture/neutral-root',
+    })).toThrow('duplicate id')
+    expect(() => surfaces.register({
+      id: 'neutral',
+      path: '/companion',
+      roots: [],
+      rootPlugin: '@fixture/neutral-root',
+    })).toThrow('duplicate path')
+  })
+
+  it('requires an opt-out root and rejects closures containing another registered root owner', () => {
+    const { context } = surfaceFixture()
+    const surfaces = context.clientSurfaces
+    expect(() => surfaces.register({
+      id: 'ordinary',
+      path: '/ordinary',
+      roots: [],
+      rootPlugin: '@fixture/full-app-only',
+    })).toThrow('must declare dsh.client.defaultRoot false')
+
+    surfaces.register({
+      id: 'companion',
+      path: '/companion',
+      roots: [],
+      rootPlugin: '@fixture/companion-root',
+    })
+    expect(() => surfaces.register({
+      id: 'neutral',
+      path: '/neutral',
+      roots: ['@fixture/companion-root'],
+      rootPlugin: '@fixture/neutral-root',
+    })).toThrow('share more than one root plugin')
+  })
 })
 
 describe('module graph order', () => {

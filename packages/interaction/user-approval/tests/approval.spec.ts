@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
+import PendingInteractionRegistry from '@deepseek-ai/dsh-pending-interactions'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -15,11 +16,13 @@ import ApprovalService, { ApprovalOutcome, ApprovalRequest, setApprovalPolicy } 
  * turn-enclosure precondition); pass `seed` to stage idle/closed logs.
  * Returns the recorded audit appends alongside the fake.
  */
-function fakeAgent(seed: Array<{ type: string }> = [{ type: 'turn/start' }, { type: 'user/message' }]): { agent: Agent; appended: Array<{ type: string; data: Record<string, unknown> }> } {
+function fakeAgent(seed: Array<{ type: string }> = [{ type: 'turn/start' }, { type: 'user/message' }], id = 'fake-agent'): { agent: Agent; appended: Array<{ type: string; data: Record<string, unknown> }> } {
   const appended: Array<{ type: string; data: Record<string, unknown> }> = []
   const events: Array<{ type: string; data?: Record<string, unknown> }> = [...seed]
   const agent = {
+    id,
     session: {
+      id,
       get seq() { return events.length },
       eventAt: (seq: number) => events[seq],
       append: (type: string, data: Record<string, unknown>) => {
@@ -351,6 +354,52 @@ describe('ApprovalService.request', () => {
 
     await fiber.dispose()
     await expect(ctx.approval.request(requestOf(agent))).resolves.toBe('unavailable')
+  })
+
+  it('reports only passive approval lifecycle while the answerer retains the decision', async () => {
+    const ctx = new Context()
+    await ctx.plugin(PendingInteractionRegistry)
+    await ctx.plugin(ApprovalService)
+    const { agent } = fakeAgent(undefined, 'approval-owner')
+    const answer = Promise.withResolvers<ApprovalOutcome>()
+    const answerer = vi.fn(() => answer.promise)
+    ctx.on('approval/request', answerer)
+    const firstClient: string[] = []
+    const closeFirst = ctx.pendingInteractions.onChange((change) => { firstClient.push(change.type) })
+
+    const pending = ctx.approval.request(requestOf(agent))
+    await Promise.resolve()
+    expect(ctx.pendingInteractions.snapshot().pending).toMatchObject([{
+      kind: 'approval', agentId: 'approval-owner', sessionId: 'approval-owner',
+    }])
+    closeFirst()
+    const secondClient: string[] = []
+    ctx.pendingInteractions.onChange((change) => { secondClient.push(change.type) })
+    answer.resolve('allowed-once')
+
+    await expect(pending).resolves.toBe('allowed-once')
+    await Promise.resolve()
+    expect(answerer).toHaveBeenCalledOnce()
+    expect(firstClient).toEqual(['began'])
+    expect(secondClient).toEqual(['ended'])
+    expect(ctx.pendingInteractions.snapshot().pending).toEqual([])
+  })
+
+  it('clears a pending approval when cancellation beats an answerer that never settles', async () => {
+    const ctx = new Context()
+    await ctx.plugin(PendingInteractionRegistry)
+    await ctx.plugin(ApprovalService)
+    const controller = new AbortController()
+    const { agent } = fakeAgent(undefined, 'cancelled-approval')
+    ctx.on('approval/request', () => new Promise<ApprovalOutcome>(() => {}))
+
+    const pending = ctx.approval.request(requestOf(agent, { signal: controller.signal }))
+    await Promise.resolve()
+    expect(ctx.pendingInteractions.snapshot().pending).toHaveLength(1)
+    controller.abort()
+
+    await expect(pending).resolves.toBe('cancelled')
+    expect(ctx.pendingInteractions.snapshot().pending).toEqual([])
   })
 })
 

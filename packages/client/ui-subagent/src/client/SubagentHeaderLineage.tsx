@@ -236,7 +236,7 @@ function CatalogLoadingRows({
   ))
 }
 
-/** Render one catalog level and recurse only through explicitly expanded rows. */
+/** Keep running branches and the current conversation visible; fold inactive history per level. */
 function CatalogRows({
   parentSessionId, currentSessionId, catalog, catalogs, descendants, summaries, expanded, level, now,
   openChild, refresh, toggleBranch, closeCatalog, t,
@@ -248,6 +248,200 @@ function CatalogRows({
   const reserveDisclosure = catalog.entries.some(
     entry => entry.kind === 'child' && entry.hasChildren,
   )
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const inHistory = (entry: CatalogEntry): boolean => entry.kind === 'child'
+    && !active(entry) && entry.id !== currentSessionId
+  const history = entries.filter(inHistory)
+  const visible = entries.filter(entry => !inHistory(entry))
+  const renderEntry = (entry: CatalogEntry, entryLevel: number) => {
+    if (entry.kind === 'diagnostic') {
+      const reason = diagnosticReason(entry, t)
+      return (
+        <div key={entry.id} className={css.node}>
+          <div
+            role="treeitem"
+            aria-disabled="true"
+            aria-level={entryLevel}
+            aria-label={`${entry.id} ${reason}`}
+            className={`${css.row} ${css.disabled}`}
+            title={reason}
+          >
+            {reserveDisclosure && <span className={css.disclosureSpace} />}
+            <StateDot state="error" />
+            <span className={css.content}>
+              <span className={css.label}>{entry.id}</span>
+              <span className={css.summary}>{reason}</span>
+            </span>
+          </div>
+        </div>
+      )
+    }
+
+    const childCatalog = catalogs[entry.id]
+    const isCurrent = entry.id === currentSessionId
+    const isExpanded = expanded.has(entry.id)
+    const knownLeaf = !entry.hasChildren
+    const compact = !active(entry)
+    const runningDescendants = descendants.get(entry.id)?.runningCount ?? 0
+    const childLoading = childCatalog === undefined
+      || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
+    const summary = summaries[entry.id]
+    const label = entry.label ?? entry.id
+    const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
+    const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
+    const descendantActivity = runningDescendants > 0
+      ? t('activity.descendants', { count: runningDescendants })
+      : undefined
+    const secondary = [summary?.title, mode, activity, descendantActivity]
+      .filter(value => value !== undefined)
+      .join(' · ')
+    const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
+    const durationMs = activityDuration(
+      summary,
+      entry.activity,
+      now,
+    )
+    const tokenMetric = totalTokens === undefined
+      ? undefined
+      : t('tokens.total', { value: formatTokens(totalTokens, t) })
+    const durationMetric = durationMs === undefined
+      ? undefined
+      : {
+        compact: formatDuration(durationMs, t),
+        exact: formatExactDuration(durationMs, t),
+      }
+    const metrics = [tokenMetric, durationMetric?.exact]
+      .filter(value => value !== undefined)
+      .join(' · ')
+
+    const open = (): void => {
+      openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
+      closeCatalog()
+    }
+    const activate = (): void => {
+      if (knownLeaf) open()
+      else toggleBranch(entry.id)
+    }
+    const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
+      if (event.target !== event.currentTarget) return
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        event.stopPropagation()
+        activate()
+      } else if (
+        (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
+        || (event.key === 'ArrowLeft' && isExpanded)
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
+        toggleBranch(entry.id)
+      }
+    }
+    const toggle = (event: MouseEvent<HTMLButtonElement>): void => {
+      event.preventDefault()
+      event.stopPropagation()
+      toggleBranch(entry.id)
+    }
+
+    return (
+      <div key={entry.id} className={css.node}>
+        <div
+          role="treeitem"
+          tabIndex={0}
+          aria-level={entryLevel}
+          aria-current={isCurrent || undefined}
+          aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
+          {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
+          title={[label, secondary, metrics].filter(value => value !== '').join(' · ')}
+          className={`${css.row} ${compact ? css.compact : ''}`}
+          onClick={activate}
+          onKeyDown={handleKey}
+        >
+          {knownLeaf
+            ? reserveDisclosure && <span className={css.disclosureSpace} />
+            : (
+              <button
+                type="button"
+                tabIndex={-1}
+                className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
+                aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
+                onClick={toggle}
+              >
+                <IconChevronRightOutline14 />
+              </button>
+            )}
+          <div className={css.clickarea}>
+            <StateDot state={compact ? 'done' : 'ongoing'} />
+            <span className={css.content}>
+              <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
+              {!compact && <span className={css.summary}>{secondary}</span>}
+            </span>
+            {metrics !== '' && (
+              <span className={css.metrics}>
+                {tokenMetric !== undefined && <span className={css.metricToken}>{tokenMetric}</span>}
+                {durationMetric !== undefined && (
+                  <span
+                    className={css.metricDuration}
+                    title={t('duration.exactTitle', { duration: durationMetric.exact })}
+                  >
+                    {durationMetric.compact}
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+          {!knownLeaf && (
+            <button
+              type="button"
+              className={css.openSession}
+              aria-label={t('session.openLabel', { label })}
+              onClick={(event) => {
+                event.stopPropagation()
+                open()
+              }}
+            >
+              {t('session.open')}
+            </button>
+          )}
+        </div>
+        {isExpanded && !knownLeaf && (
+          <div
+            role="group"
+            className={css.children}
+            aria-busy={childLoading || undefined}
+          >
+            {childCatalog === undefined
+              ? (
+                <CatalogLoadingRows
+                  parentSessionId={entry.id}
+                  summaries={summaries}
+                  level={entryLevel + 1}
+                  t={t}
+                />
+              )
+              : (
+                <CatalogRows
+                  parentSessionId={entry.id}
+                  currentSessionId={currentSessionId}
+                  catalog={childCatalog}
+                  catalogs={catalogs}
+                  descendants={descendants}
+                  summaries={summaries}
+                  expanded={expanded}
+                  level={entryLevel + 1}
+                  now={now}
+                  openChild={openChild}
+                  refresh={refresh}
+                  toggleBranch={toggleBranch}
+                  closeCatalog={closeCatalog}
+                  t={t}
+                />
+              )}
+          </div>
+        )}
+      </div>
+    )
+  }
   return (
     <>
       {emptyLoading && (
@@ -271,195 +465,40 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {entries.map((entry) => {
-        if (entry.kind === 'diagnostic') {
-          const reason = diagnosticReason(entry, t)
-          return (
-            <div key={entry.id} className={css.node}>
-              <div
-                role="treeitem"
-                aria-disabled="true"
-                aria-level={level}
-                aria-label={`${entry.id} ${reason}`}
-                className={`${css.row} ${css.disabled}`}
-                title={reason}
-              >
-                {reserveDisclosure && <span className={css.disclosureSpace} />}
-                <StateDot state="error" />
-                <span className={css.content}>
-                  <span className={css.label}>{entry.id}</span>
-                  <span className={css.summary}>{reason}</span>
-                </span>
-              </div>
-            </div>
-          )
-        }
-
-        const childCatalog = catalogs[entry.id]
-        const isCurrent = entry.id === currentSessionId
-        const isExpanded = expanded.has(entry.id)
-        const knownLeaf = !entry.hasChildren
-        const compact = !active(entry)
-        const runningDescendants = descendants.get(entry.id)?.runningCount ?? 0
-        const childLoading = childCatalog === undefined
-          || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
-        const summary = summaries[entry.id]
-        const label = entry.label ?? entry.id
-        const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-        const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-        const descendantActivity = runningDescendants > 0
-          ? t('activity.descendants', { count: runningDescendants })
-          : undefined
-        const secondary = [summary?.title, mode, activity, descendantActivity]
-          .filter(value => value !== undefined)
-          .join(' · ')
-        const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
-        const durationMs = activityDuration(
-          summary,
-          entry.activity,
-          now,
-        )
-        const tokenMetric = totalTokens === undefined
-          ? undefined
-          : t('tokens.total', { value: formatTokens(totalTokens, t) })
-        const durationMetric = durationMs === undefined
-          ? undefined
-          : {
-            compact: formatDuration(durationMs, t),
-            exact: formatExactDuration(durationMs, t),
-          }
-        const metrics = [tokenMetric, durationMetric?.exact]
-          .filter(value => value !== undefined)
-          .join(' · ')
-
-        const open = (): void => {
-          openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
-          closeCatalog()
-        }
-        const activate = (): void => {
-          if (knownLeaf) open()
-          else toggleBranch(entry.id)
-        }
-        const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
-          if (event.target !== event.currentTarget) return
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            event.stopPropagation()
-            activate()
-          } else if (
-            (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
-            || (event.key === 'ArrowLeft' && isExpanded)
-          ) {
-            event.preventDefault()
-            event.stopPropagation()
-            toggleBranch(entry.id)
-          }
-        }
-        const toggle = (event: MouseEvent<HTMLButtonElement>): void => {
-          event.preventDefault()
-          event.stopPropagation()
-          toggleBranch(entry.id)
-        }
-
-        return (
-          <div key={entry.id} className={css.node}>
-            <div
-              role="treeitem"
-              tabIndex={0}
-              aria-level={level}
-              aria-current={isCurrent || undefined}
-              aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
-              {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
-              title={[label, secondary, metrics].filter(value => value !== '').join(' · ')}
-              className={`${css.row} ${compact ? css.compact : ''}`}
-              onClick={activate}
-              onKeyDown={handleKey}
-            >
-              {knownLeaf
-                ? reserveDisclosure && <span className={css.disclosureSpace} />
-                : (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
-                    aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
-                    onClick={toggle}
-                  >
-                    <IconChevronRightOutline14 />
-                  </button>
-                )}
-              <div className={css.clickarea}>
-                <StateDot state={compact ? 'done' : 'ongoing'} />
-                <span className={css.content}>
-                  <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
-                  {!compact && <span className={css.summary}>{secondary}</span>}
-                </span>
-                {metrics !== '' && (
-                  <span className={css.metrics}>
-                    {tokenMetric !== undefined && <span className={css.metricToken}>{tokenMetric}</span>}
-                    {durationMetric !== undefined && (
-                      <span
-                        className={css.metricDuration}
-                        title={t('duration.exactTitle', { duration: durationMetric.exact })}
-                      >
-                        {durationMetric.compact}
-                      </span>
-                    )}
-                  </span>
-                )}
-              </div>
-              {!knownLeaf && (
-                <button
-                  type="button"
-                  className={css.openSession}
-                  aria-label={t('session.openLabel', { label })}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    open()
-                  }}
-                >
-                  {t('session.open')}
-                </button>
-              )}
-            </div>
-            {isExpanded && !knownLeaf && (
-              <div
-                role="group"
-                className={css.children}
-                aria-busy={childLoading || undefined}
-              >
-                {childCatalog === undefined
-                  ? (
-                    <CatalogLoadingRows
-                      parentSessionId={entry.id}
-                      summaries={summaries}
-                      level={level + 1}
-                      t={t}
-                    />
-                  )
-                  : (
-                    <CatalogRows
-                      parentSessionId={entry.id}
-                      currentSessionId={currentSessionId}
-                      catalog={childCatalog}
-                      catalogs={catalogs}
-                      descendants={descendants}
-                      summaries={summaries}
-                      expanded={expanded}
-                      level={level + 1}
-                      now={now}
-                      openChild={openChild}
-                      refresh={refresh}
-                      toggleBranch={toggleBranch}
-                      closeCatalog={closeCatalog}
-                      t={t}
-                    />
-                  )}
-              </div>
-            )}
+      {visible.map(entry => renderEntry(entry, level))}
+      {history.length > 0 && (
+        <div className={css.node}>
+          <div
+            role="treeitem"
+            tabIndex={0}
+            aria-level={level}
+            aria-expanded={historyOpen}
+            aria-label={t('history.label', { count: history.length })}
+            className={`${css.row} ${css.compact} ${css.history}`}
+            onClick={() => { setHistoryOpen(open => !open) }}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return
+              if (event.key === 'Enter' || event.key === ' '
+                || (event.key === 'ArrowRight' && !historyOpen)
+                || (event.key === 'ArrowLeft' && historyOpen)) {
+                event.preventDefault()
+                event.stopPropagation()
+                setHistoryOpen(open => !open)
+              }
+            }}
+          >
+            <span className={`${css.disclosure} ${historyOpen ? css.disclosureOpen : ''}`} aria-hidden="true">
+              <IconChevronRightOutline14 />
+            </span>
+            <span>{t('history.label', { count: history.length })}</span>
           </div>
-        )
-      })}
+          {historyOpen && (
+            <div role="group" className={css.children}>
+              {history.map(entry => renderEntry(entry, level + 1))}
+            </div>
+          )}
+        </div>
+      )}
     </>
   )
 }

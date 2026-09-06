@@ -202,6 +202,7 @@
     { "path": "./packages/context/tmux-context" },
     { "path": "./packages/context/session-reference" },
     { "path": "./packages/interaction/user-questions" },
+    { "path": "./packages/interaction/pending-interactions" },
     { "path": "./packages/interaction/user-approval" },
     { "path": "./packages/interaction/permission-presets" },
     { "path": "./packages/core/tools" },

@@ -367,3 +367,13 @@
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+.history {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.history:hover,
+.history:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}

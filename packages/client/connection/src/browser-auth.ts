@@ -216,13 +216,14 @@ export class BrowserAuth {
   }
 
   /**
-   * Add this process's launch token to the ordinary application root URL.
+   * Add this process's launch token to one trusted application index path.
    * @param baseUrl - canonical browser origin without credentials.
-   * @returns root URL carrying the process token as its sole authentication input.
+   * @param pathname - exact trusted index pathname selected by the caller.
+   * @returns URL carrying the process token as its sole authentication input.
    */
-  authenticatedUrl(baseUrl: string): string {
+  authenticatedUrl(baseUrl: string, pathname = '/'): string {
     const url = new URL(baseUrl)
-    url.pathname = '/'
+    url.pathname = pathname
     url.search = ''
     url.hash = ''
     url.searchParams.set(TOKEN_QUERY, this.launchToken)
@@ -230,20 +231,21 @@ export class BrowserAuth {
   }
 
   /**
-   * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to clean `/`; a valid cookie lets the caller serve the
+   * Authenticate an index request. A valid query token on the caller-selected
+   * path mints the cookie and redirects to that clean path; a valid cookie lets the caller serve the
    * index; every other request receives the same minimal 401 response.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
+   * @param pathname - exact trusted index pathname selected by the caller.
    * @returns true only when the caller may serve index.html.
    */
-  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse): boolean {
+  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, pathname = '/'): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
     if (tokens.length > 0) {
       const authority = requestAuthority(req.headers)
-      if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
+      if (req.method === 'GET' && url.pathname === pathname && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
         const issuedAt = Date.now()
         const expiresAt = issuedAt + this.maxAgeMilliseconds
@@ -255,7 +257,7 @@ export class BrowserAuth {
         }, this.secret)
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': '/',
+          'location': pathname,
           'referrer-policy': 'no-referrer',
           'set-cookie': sessionCookie(
             cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
@@ -264,10 +266,10 @@ export class BrowserAuth {
         res.end()
         return false
       }
-      if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req)) {
+      if (req.method === 'GET' && url.pathname === pathname && this.isAuthenticated(req)) {
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': '/',
+          'location': pathname,
           'referrer-policy': 'no-referrer',
         })
         res.end()

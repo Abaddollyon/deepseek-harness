@@ -1730,6 +1730,9 @@ importers:
       '@deepseek-ai/dsh-brand':
         specifier: workspace:^
         version: link:../../util/brand
+      '@deepseek-ai/dsh-client-modules':
+        specifier: workspace:^
+        version: link:../modules
       '@deepseek-ai/dsh-commands':
         specifier: workspace:^
         version: link:../../interaction/commands
@@ -5885,6 +5888,9 @@ importers:
 
   packages/host/frontend-static:
     dependencies:
+      '@deepseek-ai/dsh-client-modules':
+        specifier: workspace:^
+        version: link:../../client/modules
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
@@ -5986,6 +5992,15 @@ importers:
         specifier: workspace:^
         version: link:../../typert/protocol
 
+  packages/interaction/pending-interactions:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+
   packages/interaction/permission-presets:
     dependencies:
       '@deepseek-ai/schemastery':
@@ -6068,6 +6083,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-pending-interactions':
+        specifier: workspace:^
+        version: link:../pending-interactions
       '@deepseek-ai/dsh-scope':
         specifier: workspace:^
         version: link:../../core/scope
@@ -6089,6 +6107,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-pending-interactions':
+        specifier: workspace:^
+        version: link:../pending-interactions
       '@deepseek-ai/dsh-scope':
         specifier: workspace:^
         version: link:../../core/scope

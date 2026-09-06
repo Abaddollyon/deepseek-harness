@@ -280,7 +280,9 @@ describe('real Loader composition', () => {
     const loaded = await loadComposition()
     const server = loaded.webServer
     let flag = 'dark'
-    loaded.on('webserver/index-inject', (table) => {
+    let seenVariant: string | undefined
+    loaded.on('webserver/index-inject', (table, context) => {
+      seenVariant = context?.variant
       table.push(
         { kind: 'script', placement: 'head', text: 'window.__Q__=1' },
         { kind: 'script-src', placement: 'head', src: '/plugins/a.js?rev="1"&x=<y>' },
@@ -309,6 +311,9 @@ describe('real Loader composition', () => {
     ].map(part => html.indexOf(part))
     expect(order).toEqual([...order].sort((a, b) => a - b))
     expect(order.every(at => at !== -1)).toBe(true)
+
+    server.renderIndex('<head></head><body></body>', { variant: 'neutral' })
+    expect(seenVariant).toBe('neutral')
 
     // Fresh collection per render: the listener reads live state at emit time.
     flag = 'light'

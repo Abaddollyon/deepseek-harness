@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-client-ui-subagent` 是 Web 客户端的 subagent 对话功能：用户从父会话的页头浏览并打开 subagent 对话，通过按原因区分的只读编辑器状态续接对话，并用 `@` source 引用运行中的 child。用户从父会话的页头浏览完整的 subagent 来源后代谱系——活跃分支排在前面，未运行的代理使用显示 token 用量与活跃轮次耗时的单行布局——并能以子会话的确切地址打开任意深度。点击分支会按需展开其子项；独立的“打开”操作进入会话。行提示和无障碍名称保留 mode 与活动状态。one-shot child 始终打开一个把 transcript 说明为已完成执行记录的只读编辑器；可继续 child 在运行期间把后续提示词经其 FIFO inbox 路由。普通侧边栏会省略带 subagent origin 的会话行，因此父级页头目录是它们的导航入口。
+`dsh-client-ui-subagent` 是 Web 客户端的 subagent 对话功能：用户从父会话的页头浏览并打开 subagent 对话，通过按原因区分的只读编辑器状态续接对话，并用 `@` source 引用运行中的 child。用户从父会话的页头浏览完整的 subagent 来源后代谱系——活跃分支排在前面，未运行的代理收进带计数的折叠项，展开后使用显示 token 用量与活跃轮次耗时的单行布局——并能以子会话的确切地址打开任意深度。点击分支会按需展开其子项；独立的“打开”操作进入会话。行提示和无障碍名称保留 mode 与活动状态。one-shot child 始终打开一个把 transcript 说明为已完成执行记录的只读编辑器；可继续 child 在运行期间把后续提示词经其 FIFO inbox 路由。普通侧边栏会省略带 subagent origin 的会话行，因此父级页头目录是它们的导航入口。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 浏览目录
 
-行显示 mode、`running`/`inactive` 活动状态与由日志支撑的可选 title；尾随列在上行显示提供方的持久化 token 用量总计，在下行显示活跃轮次耗时。键盘导航：ArrowRight/ArrowLeft 展开和折叠分支；ArrowUp/ArrowDown、Home、End 与 Escape 用于导航或关闭树。没有 label 的 one-shot 行回退到其会话 id；损坏、不受支持或不可用的行仍保持可读但禁用。
+每层目录保留运行中的代理、包含运行中后代的分支及当前会话。“未运行的子代理”折叠项展开其余记录；未运行包括已完成、失败或取消的工作。重新打开菜单时历史记录再次折叠。行显示 mode、`running`/`inactive` 活动状态与由日志支撑的可选 title；尾随列在上行显示提供方的持久化 token 用量总计，在下行显示活跃轮次耗时。键盘导航：ArrowRight/ArrowLeft 展开和折叠分支；ArrowUp/ArrowDown、Home、End 与 Escape 用于导航或关闭树。没有 label 的 one-shot 行回退到其会话 id；损坏、不受支持或不可用的行仍保持可读但禁用。
 
 ### 续接对话
 

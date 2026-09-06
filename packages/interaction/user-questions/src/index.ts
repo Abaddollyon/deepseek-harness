@@ -10,6 +10,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-pending-interactions'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 
 declare module '@deepseek-ai/cordis' {
@@ -131,15 +132,40 @@ export class UserQuestionService extends Service {
       'no user-questions answerer accepted the request',
       'NO_PROVIDER',
     ))
+    const endPending = this.ctx.get('pendingInteractions')?.begin({
+      kind: request.questions.some(question => question.intent?.kind === 'plan-review')
+        ? 'plan-review'
+        : 'question',
+      ...(agent === undefined ? {} : { agent }),
+    })
     try {
-      return await (agent === undefined
-        ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
-        : this.ctx.waterfall(
-          scopeTarget(agent, agent),
-          'user-questions/request',
-          { ...request, agent },
-          noAnswerer,
-        ))
+      let answer: Promise<AskUserQuestionAnswer>
+      try {
+        answer = Promise.resolve(agent === undefined
+          ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
+          : this.ctx.waterfall(
+            scopeTarget(agent, agent),
+            'user-questions/request',
+            { ...request, agent },
+            noAnswerer,
+          ))
+      } catch (error) {
+        answer = Promise.resolve().then(() => { throw error })
+      }
+      const signal = request.signal
+      if (signal === undefined) return await answer
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          reject(abortedQuestion(signal.reason))
+        }
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+        void answer.finally(() => {
+          signal.removeEventListener('abort', onAbort)
+        }).catch(() => {})
+      })
+      return await Promise.race([answer, aborted])
     } catch (error) {
       const restored = restoreUserQuestionError(error)
       if (restored instanceof UserQuestionError) throw restored
@@ -147,6 +173,8 @@ export class UserQuestionService extends Service {
         throw abortedQuestion(error)
       }
       throw restored
+    } finally {
+      endPending?.()
     }
   }
 }
