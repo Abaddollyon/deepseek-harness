@@ -446,7 +446,8 @@ describe('managed fetch and refresh through the SDK', () => {
     expect(h.connection.ownsRecord({ kind: 'grant', payload: 'corrupt' })).toBe(false)
     await h.connection.revoke()
     expect(h.connection.ownsRecord(store.current())).toBe(true)
-    expect(h.events.at(-1)).toEqual({ kind: 'revoked', epoch: 2, grantedScope: undefined })
+    expect(h.events.at(-1)).toEqual({ kind: 'revoked', epoch: undefined, grantedScope: undefined })
+    expect(grantPayload(store)).toMatchObject({ status: 'revoked', epoch: 2 })
     const other = harness({}, {}, store.current())
     expect(other.connection.ownsRecord(store.current())).toBe(false)
   })
@@ -617,6 +618,53 @@ describe('revocation, disposal, and stale commits', () => {
     await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
     expect(h.fixture.calledPaths().filter(path => path === 'POST /token')).toHaveLength(2)
     expect(h.changes).toEqual(['authorized', 'revoked'])
+  })
+
+  it('refuses every new request from the first synchronous step of revocation, even while the tombstone write is held', async () => {
+    const h = await authorized()
+    const gate = Promise.withResolvers<undefined>()
+    const working = h.store.modifyRecord.bind(h.store)
+    h.store.modifyRecord = async (key, mutate) => { await gate.promise; return working(key, mutate) }
+    const revocation = h.connection.revoke()
+    expect(h.events.at(-1)).toEqual({ kind: 'revoked', epoch: undefined, grantedScope: undefined })
+    const requests = h.fixture.calls.length
+    h.clock.now += 3_600_000
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    h.clock.now -= 3_600_000
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    expect(h.fixture.calls.length).toBe(requests)
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked' })
+    gate.resolve(undefined)
+    await expect(revocation).resolves.toEqual({ local: 'revoked', remote: 'succeeded' })
+    expect(grantPayload(h.store)).toMatchObject({ status: 'revoked' })
+    // Revoking again re-tombstones without telling consumers twice.
+    await expect(h.connection.revoke()).resolves.toEqual({ local: 'revoked', remote: 'no-grant' })
+    expect(h.events.filter(event => event.kind === 'revoked')).toHaveLength(1)
+    // A fresh engine over the stored tombstone (a Host restart) reads the durable revocation itself.
+    const restarted = harness({}, {}, h.store.current())
+    await expect(restarted.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: 3 })
+    const refused = await rejects(restarted.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    expect(refused.message).toContain('revoked')
+  })
+
+  it('stays locally revoked when the tombstone write fails, reports that truthfully, and recovers only through an explicit re-authorization', async () => {
+    const h = await authorized()
+    const working = h.store.modifyRecord.bind(h.store)
+    h.store.modifyRecord = () => Promise.reject(new Error('store offline leaked access-secret'))
+    const error = await rejects(h.connection.revoke(), 'STORE')
+    expect(inspect(error, { depth: 8 })).not.toMatch(SECRET)
+    h.store.modifyRecord = () => Promise.resolve(undefined)
+    await rejects(h.connection.revoke(), 'PROTOCOL')
+    expect(h.fixture.calledPaths().filter(path => path === 'POST /revoke')).toEqual([])
+    expect(grantPayload(h.store)).toMatchObject({ status: 'authorized' })
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: 1 })
+    const requests = h.fixture.calls.length
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    expect(h.fixture.calls.length).toBe(requests)
+    h.store.modifyRecord = working
+    await h.connection.authorize(surface(h.fixture).session)
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'authorized', epoch: 2 })
+    expect(await (await h.connection.authenticatedFetch(new AbortController().signal)(SERVER)).json()).toMatchObject({ ok: true })
   })
 
   it('reports remote revocation truthfully: unsupported, failed, and no grant', async () => {
@@ -949,6 +997,22 @@ describe('queue ordering around an explicit attempt', () => {
     await rejects(request, 'AUTH_REQUIRED')
     expect(h.fixture.calledPaths().filter(path => path === 'POST /token')).toHaveLength(1)
     expect(grantPayload(h.store)).toMatchObject({ status: 'revoked' })
+  })
+
+  it('refuses a refresh queued behind an authorization once the record was corrupted in between', async () => {
+    const h = await authorized()
+    h.clock.now += 3_600_000
+    const s = surface(h.fixture, () => new Promise<string>(() => {}))
+    const attempt = h.connection.authorize(s.session)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const request = h.connection.authenticatedFetch(new AbortController().signal)(SERVER)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await h.store.modifyRecord(KEY, () => Promise.resolve({ kind: 'grant', payload: 'corrupt' }))
+    s.controller.abort()
+    await rejects(attempt, 'CANCELLED')
+    const error = await rejects(request, 'AUTH_REQUIRED')
+    expect(error.message).toContain('invalid')
+    expect(h.fixture.calledPaths().filter(path => path === 'POST /token')).toHaveLength(1)
   })
 
   it('honors a withdrawal that lands while the attempt waits its turn in the queue', async () => {

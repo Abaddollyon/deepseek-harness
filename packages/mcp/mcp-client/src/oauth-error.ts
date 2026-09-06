@@ -39,6 +39,8 @@ export type McpOAuthErrorCode =
   | 'MANAGED_HEADER'
   /** The authorization server or the OAuth client library rejected a protocol step; the cause carries the detail. */
   | 'PROTOCOL'
+  /** The credential store rejected a durable write; what it holds now is not what the engine intended. */
+  | 'STORE'
 
 /** OAuth error codes (RFC 6749 §5.2 style) and Node/harness error codes are short fixed identifiers; anything else is not echoed. */
 const OAUTH_CODE_PATTERN = /^[a-z_]{1,40}$/

@@ -1020,6 +1020,44 @@ describe('nativeMcpConnections with the real OAuth engine', () => {
     await ping(h)
   })
 
+  it('withdraws consumers at the first synchronous step of revocation, before the tombstone is stored, and bounces once', async () => {
+    h = await mountRealHarness()
+    await apply(h.ctx, hostConfig())
+    await signIn(h)
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    const settled = await epochOf(h)
+
+    const gate = Promise.withResolvers<undefined>()
+    const working = h.credentials.modifyRecord.bind(h.credentials)
+    h.credentials.modifyRecord = async (key, mutate) => { await gate.promise; return working(key, mutate) }
+    const revocation = h.service.revoke('github')
+    // Withdrawn synchronously: no await has passed, nothing durable has changed.
+    expect(await epochOf(h)).toBe(settled + 1)
+    expect((h.credentials.records.get(h.service.recordKeyFor('github')) as { payload: { status: string } }).payload.status).toBe('authorized')
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeUndefined() })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const mcpRequests = h.mcp.authorization.length
+    const tokenRequests = h.authorizationServer.calls.filter(call => call.url.pathname === '/token').length
+    // A consumer re-evaluating now is held: no bearer, no refresh, no MCP request.
+    const binding = h.service.acquire('github', { serverName: 'late' })
+    await expect(binding.connect(new AbortController().signal)).resolves.toBeUndefined()
+    binding.release()
+    expect(h.mcp.authorization.length).toBe(mcpRequests)
+    expect(h.authorizationServer.calls.filter(call => call.url.pathname === '/token')).toHaveLength(tokenRequests)
+
+    gate.resolve(undefined)
+    await expect(revocation).resolves.toEqual({ local: 'revoked', remote: 'succeeded' })
+    h.credentials.modifyRecord = working
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // The stored tombstone is the engine's own write: no second withdrawal.
+    expect(await epochOf(h)).toBe(settled + 1)
+    expect((await h.service.describe('github'))?.state).toBe('revoked')
+
+    await signIn(h)
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    await ping(h)
+  })
+
   it('withdraws on an external write even when the engine commits atop it before the judgement read returns', async () => {
     h = await mountRealHarness()
     await apply(h.ctx, hostConfig())
