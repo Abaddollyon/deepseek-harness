@@ -130,8 +130,9 @@ interface McpConnectionEngine {
    */
   captureOwnership(): (record: CredentialRecord | undefined) => boolean
   /**
-   * Local-first revocation: the local tombstone is committed before any bounded remote attempt.
-   * @returns the local outcome and the bounded remote outcome.
+   * Refuse locally and notify consumers before awaiting storage. Commit the
+   * tombstone before any bounded remote attempt. A failed write leaves this engine refused.
+   * @returns the committed local outcome and the bounded remote outcome.
    */
   revoke(): Promise<McpOAuthRevocation>
   /** Abort owned work and await quiescence. */
@@ -149,10 +150,10 @@ interface McpConnectionEngineInit {
   /** Frozen connection identity and network bounds from settings. */
   spec: ResolvedMcpConnectionSpec
   /**
-   * Observer of the durable transitions the engine commits, each carrying the
-   * epoch and effective scope of that commit; the service maps them to
-   * consumer invalidations. The engine contains observer failures.
-   * @param event - the committed transition and its facts.
+   * Observer of engine authority transitions. Committed changes carry their
+   * epoch and effective scope; local revocation arrives before persistence,
+   * without an epoch. The service invalidates consumers; the engine contains observer failures.
+   * @param event - the authority transition and its committed or local facts.
    */
   onChange: (event: McpOAuthChangeEvent) => void
 }
@@ -166,7 +167,7 @@ interface McpConnectionEngineInit {
 type McpConnectionEngineFactory = (init: McpConnectionEngineInit) => McpConnectionEngine
 ```
 
-已提交的变迁是携带本次提交自身事实的事件——记录 epoch 与生效的授予 scope——因此服务根据操作自身的数据判断一次刷新的 scope 变化，绝不依赖可能已被另一次提交超越的事后状态读取。连接键上的 `credentials/record-updated` 通过在事件发生时同步捕获的 `captureOwnership` 分类器判定，并应用于异步读取所返回的记录：它为引擎当时最后存储的内容以及正在进行的写入作证；引擎自己的提交已经经由 `onChange` 上报，只有不是它写入的记录——外部编辑、删除、另一个进程的写入——才会作为权威变化使消费方失效，而引擎在事件之后做出的写入无法掩盖这一点。
+已提交的变迁是携带本次提交自身事实的事件——记录 epoch 与生效的授予 scope——因此服务根据操作自身的数据判断一次刷新的 scope 变化，绝不依赖可能已被另一次提交超越的事后状态读取。本地撤销是唯一在持久化之前报告的变迁：它不携带 epoch，因为消费方必须立即停止。连接键上的 `credentials/record-updated` 通过在事件发生时同步捕获的 `captureOwnership` 分类器判定，并应用于异步读取所返回的记录：它为引擎当时最后存储的内容以及正在进行的写入作证；引擎自己的提交已经经由 `onChange` 上报，只有不是它写入的记录——外部编辑、删除、另一个进程的写入——才会作为权威变化使消费方失效，而引擎在事件之后做出的写入无法掩盖这一点。
 
 引擎的生命周期状态就是 OAuth 引擎的无令牌状态视图：授权当前能否服务请求、不能服务时的原因、进行中的操作，以及可安全呈现在状态界面上的授权事实。
 
@@ -190,28 +191,36 @@ interface McpOAuthStatus {
   accessTokenExpiresAt: number | undefined
   /** Effective granted scope: the server's `scope` response, else the scope the grant already had (RFC 6749 §5.1, §6). */
   grantedScope: string | undefined
-  /** Record epoch, absent while nothing valid is stored. */
+  /** Record epoch; absent while nothing valid is stored, and while locally revoked, when the store is not consulted. */
   epoch: number | undefined
 }
 ```
 
-刷新通常对消费方不可见，除非它提交的 scope 集合与消费方连接时的 scope 不同；授权、失效与撤销各自都会立即使消费方失效；来自连接已不再运行的引擎的变迁会被忽略——使其退役的路径已经用它自己的原因完成过失效。
+刷新通常对消费方不可见，除非它提交的 scope 集合与消费方连接时的 scope 不同；授权与失效在提交后使消费方失效，撤销在第一个同步步骤——墓碑记录写入存储之前——使消费方失效；来自连接已不再运行的引擎的变迁会被忽略：使其退役的路径已经用它自己的原因完成过失效。
 
 ```ts type-equiv
-/** Durable transitions the engine committed; the bridge resyncs or drops tools on them. */
+/**
+ * Transitions the engine reports; the bridge resyncs or drops tools on them.
+ * All but `revoked` and `disposed` are reported once committed; `revoked` is
+ * reported at the first synchronous step of revocation, before its tombstone
+ * is stored, because consumers must stop at once.
+ */
 type McpOAuthChange = 'authorized' | 'refreshed' | 'invalidated' | 'revoked' | 'disposed'
 ```
 
 ```ts type-equiv
 /**
- * One committed transition with the facts of that commit, so an observer
- * judges scope and identity from the operation's own data rather than from a
- * later status read that another commit may already have overtaken.
+ * One authority transition. Committed changes carry their own epoch and
+ * effective scope, not a later status read another commit may have overtaken.
+ * A `revoked` event reports immediate local refusal, not a durable-write acknowledgement.
  */
 interface McpOAuthChangeEvent {
   /** The transition. */
   kind: McpOAuthChange
-  /** Record epoch the commit wrote; absent for `disposed`, which writes nothing. */
+  /**
+   * Record epoch the commit wrote; absent for `disposed`, which writes
+   * nothing, and for `revoked`, which is reported before its tombstone is stored.
+   */
   epoch: number | undefined
   /** Effective granted scope of the committed grant; absent unless `authorized` or `refreshed`. */
   grantedScope: string | undefined
@@ -220,7 +229,7 @@ interface McpOAuthChangeEvent {
 
 ## 状态视图
 
-`describe()` 与 `list()` 以无令牌的事实回答配置界面：已配置的连接，以及被移除但仍有消费方绑定的连接——移除会让引擎与授权流程退役，但在没有任何绑定之前保持连接可达，因此之后的重新添加能到达同一批消费方，而不是把它们遗弃。`state` 是引擎的授权生命周期——引擎无法构造或连接不再被配置时为 `unavailable`——它不说明工具可发现性，后者只有消费方 agent 的监督器知道。
+`describe()` 与 `list()` 以无令牌的事实回答配置界面：已配置的连接，以及被移除但仍有消费方绑定的连接——移除会让引擎与授权流程退役，但在没有任何绑定之前保持连接可达，因此之后的重新添加能到达同一批消费方，而不是把它们遗弃。`state` 是引擎的授权生命周期——引擎无法构造或连接不再被配置时为 `unavailable`——它不说明工具可发现性，后者只有消费方 agent 的监督器知道。Host 已闩锁的拒绝由 Host 自己的围栏直接报告为 `revoked`，不查询存储——挂起或失败的存储绝不能拖延或掩盖它——每次引擎读取也都会对照读取期间到达的拒绝重新判定。
 
 ```ts type-equiv
 /**
@@ -305,7 +314,7 @@ interface McpConnectionBinding extends ConnectionSource {
 
 ## 撤销
 
-撤销是本地优先的：引擎先提交本地墓碑记录，再尝试有界的远程撤销，其 `revoked` 变迁会使每个消费方失效，因此撤回立即生效。`removeGrant()` 直接删除授权记录——即“遗忘”操作——由于没有任何引擎写入过这次删除，记录更新判定会自行使消费方失效。
+撤销先在本地拒绝，再做持久化：引擎闩锁本地撤销、中止进行中的托管请求与正在运行的操作，并在第一次存储 await 之前报告 `revoked`，因此在墓碑写入待定期间——或写入失败之后——到达的请求都会被拒绝，而不是从存储仍持有的记录继续服务；只有显式的重新授权才能解除该闩锁。`revoked` 事件因此报告的是立即的本地拒绝，而不是持久写入确认。墓碑记录必须先提交，然后才有任何有界的远程撤销尝试；写入未获确认会抛出 `STORE`——此时存储状态未知，不进行任何远程尝试，授权服务器侧的令牌可能仍然有效；远程结果如实报告，绝不臆断。Host 把被拒绝的凭据键围栏在任何连接状态之外，因此该拒绝比闩锁它的引擎更长寿——配置替换会在同一存储之上构造新引擎——也比连接的移除与重新添加更长寿，即使重新添加的是指向不同端点的同名连接（围栏以凭据记录为键，而非配置），同样比消费方剪枝更长寿；只有在最近一次闩锁的撤销之后进入并成功提交的新显式授权才能解除围栏，仅仅更早进入的尝试会在其开始处与发布处被拒绝。围栏仅存于内存：Host 重启会遗忘它；当墓碑写入失败时，之后只有持久记录起决定作用——而它可能仍持有授权。`removeGrant()` 直接删除授权记录——即“遗忘”操作——由于没有任何引擎写入过这次删除，记录更新判定会自行使消费方失效。
 
 ```ts type-equiv
 /** Outcome of {@link McpOAuthConnection.revoke}; the local tombstone is committed before any remote attempt. */
@@ -366,9 +375,9 @@ async list(): Promise<McpConnectionStatusView[]>
 recordKeyFor(id: string): CredentialKey
 
 /**
- * Revoke one connection's grant: the engine commits the local tombstone
- * first and its `revoked` transition invalidates every consumer, so the
- * withdrawal takes effect immediately.
+ * Revoke one connection's grant: the engine refuses locally and its
+ * synchronous `revoked` transition invalidates consumers before storage is
+ * awaited. The tombstone must commit before any remote revocation attempt.
  * @param id - the connection to revoke.
  * @returns the local outcome and the bounded remote outcome.
  */

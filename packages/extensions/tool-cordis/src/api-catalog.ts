@@ -1316,7 +1316,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async revoke(id: string): Promise<McpOAuthRevocation>',
-        description: 'Revoke one connection\'s grant: the engine commits the local tombstone first and its `revoked` transition invalidates every consumer, so the withdrawal takes effect immediately.',
+        description: 'Revoke one connection\'s grant: the engine refuses locally and its synchronous `revoked` transition invalidates consumers before storage is awaited. The tombstone must commit before any remote revocation attempt.',
         parameters: [{ name: 'id', description: 'the connection to revoke.' }],
         returns: 'the local outcome and the bounded remote outcome.',
       },

@@ -130,8 +130,9 @@ interface McpConnectionEngine {
    */
   captureOwnership(): (record: CredentialRecord | undefined) => boolean
   /**
-   * Local-first revocation: the local tombstone is committed before any bounded remote attempt.
-   * @returns the local outcome and the bounded remote outcome.
+   * Refuse locally and notify consumers before awaiting storage. Commit the
+   * tombstone before any bounded remote attempt. A failed write leaves this engine refused.
+   * @returns the committed local outcome and the bounded remote outcome.
    */
   revoke(): Promise<McpOAuthRevocation>
   /** Abort owned work and await quiescence. */
@@ -149,10 +150,10 @@ interface McpConnectionEngineInit {
   /** Frozen connection identity and network bounds from settings. */
   spec: ResolvedMcpConnectionSpec
   /**
-   * Observer of the durable transitions the engine commits, each carrying the
-   * epoch and effective scope of that commit; the service maps them to
-   * consumer invalidations. The engine contains observer failures.
-   * @param event - the committed transition and its facts.
+   * Observer of engine authority transitions. Committed changes carry their
+   * epoch and effective scope; local revocation arrives before persistence,
+   * without an epoch. The service invalidates consumers; the engine contains observer failures.
+   * @param event - the authority transition and its committed or local facts.
    */
   onChange: (event: McpOAuthChangeEvent) => void
 }
@@ -166,7 +167,7 @@ interface McpConnectionEngineInit {
 type McpConnectionEngineFactory = (init: McpConnectionEngineInit) => McpConnectionEngine
 ```
 
-Committed transitions are events carrying the commit's own facts — the record epoch and the effective granted scope — so the service judges a refresh's scope change from the operation's data, never from a later status read another commit may have overtaken. A `credentials/record-updated` for a connection's key is judged through a `captureOwnership` classifier captured synchronously at the event and applied to the record the asynchronous read returns: it vouches for what the engine last stored plus writes in flight at that instant, the engine's own commits already arrived through `onChange`, and only a record it did not write — an external edit, a deletion, another process's write — withdraws consumers as a change of authority, while a write the engine makes after the event cannot hide it.
+Committed transitions are events carrying the commit's own facts — the record epoch and the effective granted scope — so the service judges a refresh's scope change from the operation's data, never from a later status read another commit may have overtaken. Local revocation is the one transition reported before persistence: it arrives without an epoch, because consumers must stop at once. A `credentials/record-updated` for a connection's key is judged through a `captureOwnership` classifier captured synchronously at the event and applied to the record the asynchronous read returns: it vouches for what the engine last stored plus writes in flight at that instant, the engine's own commits already arrived through `onChange`, and only a record it did not write — an external edit, a deletion, another process's write — withdraws consumers as a change of authority, while a write the engine makes after the event cannot hide it.
 
 The engine's lifecycle status is the OAuth engine's token-free status view: whether a grant can serve requests, why not while it cannot, the in-flight operation, and grant facts safe for status surfaces.
 
@@ -190,28 +191,36 @@ interface McpOAuthStatus {
   accessTokenExpiresAt: number | undefined
   /** Effective granted scope: the server's `scope` response, else the scope the grant already had (RFC 6749 §5.1, §6). */
   grantedScope: string | undefined
-  /** Record epoch, absent while nothing valid is stored. */
+  /** Record epoch; absent while nothing valid is stored, and while locally revoked, when the store is not consulted. */
   epoch: number | undefined
 }
 ```
 
-A refresh is invisible to consumers unless the scope set it committed differs from the scope they connected with; authorization, invalidation, and revocation each invalidate immediately, and transitions from an engine the connection no longer runs are ignored — the path that retired it already invalidated with its own reason.
+A refresh is invisible to consumers unless the scope set it committed differs from the scope they connected with; authorization and invalidation invalidate once committed, revocation invalidates at the first synchronous step — before its tombstone is stored — and transitions from an engine the connection no longer runs are ignored: the path that retired it already invalidated with its own reason.
 
 ```ts type-equiv
-/** Durable transitions the engine committed; the bridge resyncs or drops tools on them. */
+/**
+ * Transitions the engine reports; the bridge resyncs or drops tools on them.
+ * All but `revoked` and `disposed` are reported once committed; `revoked` is
+ * reported at the first synchronous step of revocation, before its tombstone
+ * is stored, because consumers must stop at once.
+ */
 type McpOAuthChange = 'authorized' | 'refreshed' | 'invalidated' | 'revoked' | 'disposed'
 ```
 
 ```ts type-equiv
 /**
- * One committed transition with the facts of that commit, so an observer
- * judges scope and identity from the operation's own data rather than from a
- * later status read that another commit may already have overtaken.
+ * One authority transition. Committed changes carry their own epoch and
+ * effective scope, not a later status read another commit may have overtaken.
+ * A `revoked` event reports immediate local refusal, not a durable-write acknowledgement.
  */
 interface McpOAuthChangeEvent {
   /** The transition. */
   kind: McpOAuthChange
-  /** Record epoch the commit wrote; absent for `disposed`, which writes nothing. */
+  /**
+   * Record epoch the commit wrote; absent for `disposed`, which writes
+   * nothing, and for `revoked`, which is reported before its tombstone is stored.
+   */
   epoch: number | undefined
   /** Effective granted scope of the committed grant; absent unless `authorized` or `refreshed`. */
   grantedScope: string | undefined
@@ -220,7 +229,7 @@ interface McpOAuthChangeEvent {
 
 ## Status views
 
-`describe()` and `list()` answer configuration surfaces with token-free facts: configured connections, plus removed ones consumers still bind — removal retires the engine and flow but keeps the connection reachable until nothing binds it, so a later re-add reaches the same consumers instead of orphaning them. `state` is the engine's authorization lifecycle — `unavailable` while no engine could be constructed or the connection is no longer configured — and says nothing about tool discoverability, which only the consuming agent's supervisor knows.
+`describe()` and `list()` answer configuration surfaces with token-free facts: configured connections, plus removed ones consumers still bind — removal retires the engine and flow but keeps the connection reachable until nothing binds it, so a later re-add reaches the same consumers instead of orphaning them. `state` is the engine's authorization lifecycle — `unavailable` while no engine could be constructed or the connection is no longer configured — and says nothing about tool discoverability, which only the consuming agent's supervisor knows. A Host-latched refusal is reported as `revoked` from the Host's own fence without consulting the store — a store that hangs or fails must not delay or hide it — and every engine read is re-judged against a refusal that arrived during it.
 
 ```ts type-equiv
 /**
@@ -305,7 +314,7 @@ interface McpConnectionBinding extends ConnectionSource {
 
 ## Revocation
 
-Revocation is local-first: the engine commits the local tombstone before any bounded remote attempt, and its `revoked` transition invalidates every consumer, so the withdrawal takes effect immediately. `removeGrant()` deletes the grant record outright — the forget operation — and since no engine wrote that deletion, the record-updated judgement withdraws consumers on its own.
+Revocation refuses locally before it persists: the engine latches the local revocation, aborts in-flight managed requests and the running operation, and reports `revoked` before the first storage await, so a request arriving while the tombstone write is pending — or after it failed — is refused rather than served from the record the store still holds, and only an explicit re-authorization lifts the latch. The `revoked` event therefore reports immediate local refusal, not a durable-write acknowledgement. The tombstone must commit before any bounded remote revocation attempt; an unconfirmed write throws `STORE` — the stored state is then unknown, no remote attempt runs, and the authorization-server token may still live — and the remote outcome is reported truthfully, never assumed. The Host fences the refused credential key outside any connection state, so the refusal outlives the engine that latched it — a config swap builds a new engine over the same store — the connection's removal and re-add, even one naming a different endpoint (the fence keys the credential record, not the config), and consumer pruning; only a new explicit authorization entered after the latest latched revocation and committed lifts the fence, while an attempt that merely entered earlier is refused at its start and at publication. The fence is memory-only: a Host restart forgets it, and when the tombstone write failed, only the durable record governs afterwards — and it may still hold the grant. `removeGrant()` deletes the grant record outright — the forget operation — and since no engine wrote that deletion, the record-updated judgement withdraws consumers on its own.
 
 ```ts type-equiv
 /** Outcome of {@link McpOAuthConnection.revoke}; the local tombstone is committed before any remote attempt. */
@@ -366,9 +375,9 @@ async list(): Promise<McpConnectionStatusView[]>
 recordKeyFor(id: string): CredentialKey
 
 /**
- * Revoke one connection's grant: the engine commits the local tombstone
- * first and its `revoked` transition invalidates every consumer, so the
- * withdrawal takes effect immediately.
+ * Revoke one connection's grant: the engine refuses locally and its
+ * synchronous `revoked` transition invalidates consumers before storage is
+ * awaited. The tombstone must commit before any remote revocation attempt.
  * @param id - the connection to revoke.
  * @returns the local outcome and the bounded remote outcome.
  */

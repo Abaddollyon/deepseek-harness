@@ -6,7 +6,7 @@
  */
 
 import { inspect } from 'node:util'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
@@ -657,7 +657,7 @@ describe('revocation, disposal, and stale commits', () => {
     await rejects(h.connection.revoke(), 'PROTOCOL')
     expect(h.fixture.calledPaths().filter(path => path === 'POST /revoke')).toEqual([])
     expect(grantPayload(h.store)).toMatchObject({ status: 'authorized' })
-    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: 1 })
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: undefined })
     const requests = h.fixture.calls.length
     await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
     expect(h.fixture.calls.length).toBe(requests)
@@ -665,6 +665,130 @@ describe('revocation, disposal, and stale commits', () => {
     await h.connection.authorize(surface(h.fixture).session)
     await expect(h.connection.status()).resolves.toMatchObject({ state: 'authorized', epoch: 2 })
     expect(await (await h.connection.authenticatedFetch(new AbortController().signal)(SERVER)).json()).toMatchObject({ ok: true })
+  })
+
+  it('does not let an authorization aborted between mutation and acknowledgement clear the latch or report a grant', async () => {
+    const h = await authorized()
+    const working = h.store.modifyRecord.bind(h.store)
+    const acknowledge = Promise.withResolvers<undefined>()
+    let calls = 0
+    h.store.modifyRecord = async (key, mutate) => {
+      calls += 1
+      // First write (the authorization commit): mutated and stored, acknowledgement withheld.
+      if (calls === 1) {
+        const result = await working(key, mutate)
+        await acknowledge.promise
+        return result
+      }
+      // Second write (the revocation tombstone): the store fails.
+      return Promise.reject(new Error('store offline'))
+    }
+    const events = h.events.length
+    const attempt = h.connection.authorize(surface(h.fixture).session)
+    await vi.waitFor(() => { expect(calls).toBe(1) })
+    await rejects(h.connection.revoke(), 'STORE')
+    acknowledge.resolve(undefined)
+    await rejects(attempt, 'AUTH_REQUIRED')
+    expect(h.events.slice(events).map(event => event.kind)).toEqual(['revoked'])
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked' })
+    h.store.modifyRecord = working
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+  })
+
+  it('refuses an authorization that entered before the revocation but had not started when it was latched', async () => {
+    const h = await authorized()
+    const reading = Promise.withResolvers<undefined>()
+    const read = h.store.readRecord.bind(h.store)
+    h.store.readRecord = async (key) => { await reading.promise; return read(key) }
+    const working = h.store.modifyRecord.bind(h.store)
+    const s = surface(h.fixture)
+    const attempt = h.connection.authorize(s.session)
+    h.store.modifyRecord = () => Promise.reject(new Error('store offline'))
+    await rejects(h.connection.revoke(), 'STORE')
+    h.store.readRecord = read
+    h.store.modifyRecord = working
+    reading.resolve(undefined)
+    await rejects(attempt, 'AUTH_REQUIRED')
+    expect(s.notices).toEqual([])
+    expect(s.prompts).toEqual([])
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked' })
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    // Control: an authorization entered after the revocation is the explicit recovery and lifts the latch.
+    await h.connection.authorize(surface(h.fixture).session)
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'authorized' })
+    expect(await (await h.connection.authenticatedFetch(new AbortController().signal)(SERVER)).json()).toMatchObject({ ok: true })
+  })
+
+  it('reports STORE without claiming the record unchanged when the store commits and then rejects, and never reaches the remote endpoint', async () => {
+    const h = await authorized()
+    const working = h.store.modifyRecord.bind(h.store)
+    h.store.modifyRecord = async (key, mutate) => {
+      await working(key, mutate)
+      throw new Error('lock release failed')
+    }
+    const error = await rejects(h.connection.revoke(), 'STORE')
+    expect(error.message).not.toMatch(/still stored|unchanged/)
+    expect(grantPayload(h.store)).toMatchObject({ status: 'revoked' })
+    expect(h.fixture.calledPaths().filter(path => path === 'POST /revoke')).toEqual([])
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked' })
+  })
+
+  it('does not publish a grant when the revocation lands in any microtask between the store acknowledgement and publication', async () => {
+    // The acknowledgement travels through several awaits before the grant is published; the revocation is
+    // latched after each possible number of hops, so every gap in that chain is exercised.
+    for (let hops = 0; hops < 8; hops += 1) {
+      const h = await authorized()
+      const working = h.store.modifyRecord.bind(h.store)
+      let writes = 0
+      h.store.modifyRecord = async (key, mutate) => {
+        writes += 1
+        if (writes !== 1) return working(key, mutate)
+        const result = await working(key, mutate)
+        const latch = (): void => {
+          h.store.modifyRecord = () => Promise.reject(new Error('store offline'))
+          void h.connection.revoke().catch(() => {})
+        }
+        let schedule = latch
+        for (let depth = 0; depth < hops; depth += 1) {
+          const inner = schedule
+          schedule = () => { queueMicrotask(inner) }
+        }
+        schedule()
+        return result
+      }
+      const events = h.events.length
+      const attempt = h.connection.authorize(surface(h.fixture).session)
+      const outcome = await attempt.then(() => 'published', (error: unknown) => (isMcpOAuthError(error, 'AUTH_REQUIRED') ? 'refused' : 'other'))
+      const kinds = h.events.slice(events).map(event => event.kind)
+      // Landing before publication: nothing published. Landing after: the grant was published first, then
+      // revoked — never a grant published on top of a latched revocation.
+      if (outcome === 'refused') expect(kinds, `hops=${hops}`).toEqual(['revoked'])
+      else expect([outcome, kinds], `hops=${hops}`).toEqual(['published', ['authorized', 'revoked']])
+      await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked' })
+      await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+      if (outcome === 'published') break
+      expect(hops, 'the acknowledgement-to-publication chain is shorter than the scan').toBeLessThan(7)
+    }
+  })
+
+  it('reports the local refusal immediately without touching a store whose read never settles', async () => {
+    const h = await authorized()
+    h.store.modifyRecord = () => Promise.reject(new Error('store offline'))
+    await rejects(h.connection.revoke(), 'STORE')
+    let reads = 0
+    h.store.readRecord = () => { reads += 1; return new Promise(() => {}) }
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: undefined })
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
+    expect(reads).toBe(0)
+  })
+
+  it('reports the local refusal even when the store cannot be read', async () => {
+    const h = await authorized()
+    h.store.modifyRecord = () => Promise.reject(new Error('store offline'))
+    await rejects(h.connection.revoke(), 'STORE')
+    h.store.readRecord = () => Promise.reject(new Error('store offline'))
+    await expect(h.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: undefined })
+    await rejects(h.connection.authenticatedFetch(new AbortController().signal)(SERVER), 'AUTH_REQUIRED')
   })
 
   it('reports remote revocation truthfully: unsupported, failed, and no grant', async () => {
@@ -1103,7 +1227,7 @@ describe('validation helpers', () => {
     await empty.connection.revoke()
     const tombstone = viewGrantRecord(empty.store.current(), resolved)
     expect(tombstone).toMatchObject({ kind: 'grant', epoch: 1, discovery: undefined })
-    await expect(empty.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: 1 })
+    await expect(empty.connection.status()).resolves.toMatchObject({ state: 'revoked', epoch: undefined })
     const foreign = resolveMcpOAuthSpec(spec({ scopes: [] }))
     expect(viewGrantRecord(empty.store.current(), foreign)).toEqual({ kind: 'foreign', epoch: 1 })
   })

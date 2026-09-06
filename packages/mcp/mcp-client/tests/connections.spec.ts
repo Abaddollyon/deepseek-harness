@@ -702,6 +702,48 @@ describe('nativeMcpConnections host service', () => {
     expect(await harness.service.list()).toHaveLength(1)
   })
 
+  it('reports and enforces a refusal without waiting on an engine whose status never settles, and re-judges after the wait', async () => {
+    harness = await mountHarness()
+    await apply(harness.ctx, hostConfig())
+    await vi.waitFor(() => { expect(harness!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    const engine = harness.engines[0]!
+    const authorizedStatus: McpConnectionEngineStatus = {
+      state: 'authorized', inFlight: undefined, hasRefreshToken: true, accessTokenExpiresAt: undefined, grantedScope: 'mcp', epoch: 1,
+    }
+    const status = engine.status.bind(engine)
+
+    // A refusal that arrives while a status view is awaiting the engine: the view reports it.
+    const describing = Promise.withResolvers<McpConnectionEngineStatus>()
+    engine.status = () => describing.promise
+    const view = harness.service.describe('github')
+    engine.init.onChange({ kind: 'revoked', epoch: undefined, grantedScope: undefined })
+    describing.resolve(authorizedStatus)
+    expect((await view)?.state).toBe('revoked')
+    engine.init.onChange({ kind: 'authorized', epoch: 2, grantedScope: 'mcp' })
+    expect((await harness.service.describe('github'))?.state).toBe('authorized')
+
+    // A refusal that arrives while a direct binding caller is awaiting the engine's status: no transport,
+    // even though that caller never aborted its signal.
+    const pending = Promise.withResolvers<McpConnectionEngineStatus>()
+    engine.status = () => pending.promise
+    const binding = harness.service.acquire('github', { serverName: 'direct' })
+    const connecting = binding.connect(new AbortController().signal)
+    engine.state = 'revoked'
+    engine.init.onChange({ kind: 'revoked', epoch: undefined, grantedScope: undefined })
+    pending.resolve(authorizedStatus)
+    await expect(connecting).resolves.toBeUndefined()
+
+    // While refused, status views never consult the engine — a hanging store cannot delay or hide the refusal.
+    let asked = 0
+    engine.status = () => { asked += 1; return new Promise(() => {}) }
+    expect((await harness.service.describe('github'))?.state).toBe('revoked')
+    expect((await harness.service.list())[0]?.state).toBe('revoked')
+    await expect(binding.connect(new AbortController().signal)).resolves.toBeUndefined()
+    expect(asked).toBe(0)
+    engine.status = status
+    binding.release()
+  })
+
   it('service disposal quiesces engines and withdraws flows and consumers', async () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
@@ -756,6 +798,7 @@ async function mountRealHarness(options: {
   serverOptions?: FixtureOptions
   records?: Map<CredentialKey, CredentialRecord>
   authorizationServer?: AuthorizationServerFixture
+  /** An MCP fixture inherited from an earlier Host mount; this harness takes over closing it. */
   mcp?: HttpMcpFixture
 } = {}): Promise<RealHarness> {
   const ctx = new Context()
@@ -793,7 +836,7 @@ async function mountRealHarness(options: {
     events,
     dispose: async () => {
       await ctx.fiber.dispose()
-      if (options.mcp === undefined) await mcp.close()
+      await mcp.close()
     },
   }
 }
@@ -1053,6 +1096,59 @@ describe('nativeMcpConnections with the real OAuth engine', () => {
     expect(await epochOf(h)).toBe(settled + 1)
     expect((await h.service.describe('github'))?.state).toBe('revoked')
 
+    await signIn(h)
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    await ping(h)
+  })
+
+  it('keeps refusing a locally revoked grant across a config swap, a removal and re-add, and consumer pruning until a new sign-in', async () => {
+    h = await mountRealHarness()
+    await apply(h.ctx, hostConfig())
+    await signIn(h)
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    const key = h.service.recordKeyFor('github')
+
+    // The tombstone write fails: the grant is revoked in this Host, the store still holds it.
+    const working = h.credentials.modifyRecord.bind(h.credentials)
+    h.credentials.modifyRecord = () => Promise.reject(new Error('store offline'))
+    await expect(h.service.revoke('github')).rejects.toMatchObject({ code: 'STORE' })
+    h.credentials.modifyRecord = working
+    expect((h.credentials.records.get(key) as { payload: { status: string } }).payload.status).toBe('authorized')
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeUndefined() })
+    expect((await h.service.describe('github'))?.state).toBe('revoked')
+
+    // An innocuous edit swaps the engine: the fresh engine must not serve the stored grant.
+    await h.ctx.settings.update(SETTINGS_NS, { github: { requestTimeoutMs: 20_000 } })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(h.ctx.tools.get('mcp__srv__ping')).toBeUndefined()
+    expect((await h.service.describe('github'))?.state).toBe('revoked')
+    const probe = h.service.acquire('github', { serverName: 'probe' })
+    await expect(probe.connect(new AbortController().signal)).resolves.toBeUndefined()
+    probe.release()
+
+    // A fresh Host over the same store, inheriting the fixtures (the first Host is disposed, not its servers).
+    const first = h
+    await first.ctx.fiber.dispose()
+    h = await mountRealHarness({ records: first.credentials.records, authorizationServer: first.authorizationServer, mcp: first.mcp })
+    // A fresh Host has no memory of the failed tombstone: only durable state governs after a restart.
+    expect((await h.service.describe('github'))?.state).toBe('authorized')
+    await apply(h.ctx, hostConfig())
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
+    const restartedStore = h.credentials.modifyRecord.bind(h.credentials)
+    h.credentials.modifyRecord = () => Promise.reject(new Error('store offline'))
+    await expect(h.service.revoke('github')).rejects.toMatchObject({ code: 'STORE' })
+    h.credentials.modifyRecord = restartedStore
+    await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeUndefined() })
+    const settled = await epochOf(h)
+    await h.ctx.settings.replace(SETTINGS_NS, {})
+    await vi.waitFor(async () => { expect((await h!.service.describe('github'))?.configured).toBe(false) })
+    await h.ctx.settings.replace(SETTINGS_NS, { github: connectionEntry() })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(h.ctx.tools.get('mcp__srv__ping')).toBeUndefined()
+    expect((await h.service.describe('github'))?.state).toBe('revoked')
+    expect(await epochOf(h)).toBeGreaterThan(settled)
+
+    // Only a new, successful explicit sign-in lifts the refusal.
     await signIn(h)
     await vi.waitFor(() => { expect(h!.ctx.tools.get('mcp__srv__ping')).toBeDefined() })
     await ping(h)

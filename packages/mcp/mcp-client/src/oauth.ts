@@ -59,7 +59,7 @@ export interface McpOAuthStatus {
   accessTokenExpiresAt: number | undefined
   /** Effective granted scope: the server's `scope` response, else the scope the grant already had (RFC 6749 §5.1, §6). */
   grantedScope: string | undefined
-  /** Record epoch, absent while nothing valid is stored. */
+  /** Record epoch; absent while nothing valid is stored, and while locally revoked, when the store is not consulted. */
   epoch: number | undefined
 }
 
@@ -72,9 +72,9 @@ export interface McpOAuthStatus {
 export type McpOAuthChange = 'authorized' | 'refreshed' | 'invalidated' | 'revoked' | 'disposed'
 
 /**
- * One committed transition with the facts of that commit, so an observer
- * judges scope and identity from the operation's own data rather than from a
- * later status read that another commit may already have overtaken.
+ * One authority transition. Committed changes carry their own epoch and
+ * effective scope, not a later status read another commit may have overtaken.
+ * A `revoked` event reports immediate local refusal, not a durable-write acknowledgement.
  */
 export interface McpOAuthChangeEvent {
   /** The transition. */
@@ -131,7 +131,13 @@ class Operation {
   /** Record epoch every commit of this operation must find; advanced by its own commits. */
   expectedEpoch: number | undefined
 
-  constructor(readonly kind: 'authorize' | 'refresh', expectedEpoch: number | undefined, seed: Partial<Pick<Staged, 'discovery' | 'clientInformation' | 'tokens'>>) {
+  constructor(
+    readonly kind: 'authorize' | 'refresh',
+    expectedEpoch: number | undefined,
+    seed: Partial<Pick<Staged, 'discovery' | 'clientInformation' | 'tokens'>>,
+    /** Revocation count when the operation's caller entered; a commit is refused once it moved. */
+    readonly entered: number,
+  ) {
     this.expectedEpoch = expectedEpoch
     this.staged = {
       discovery: seed.discovery,
@@ -251,6 +257,13 @@ export class McpOAuthConnection {
    * because the tombstone write may be pending or may have failed.
    */
   private locallyRevoked = false
+  /**
+   * Count of revocations latched so far. An authorization captures it on
+   * entry — before its first await — and is refused at its start and at its
+   * commit if a revocation was latched since: an attempt that only entered
+   * before the revocation is not the explicit recovery from it.
+   */
+  private revocations = 0
   /** Serializes authorize and refresh operations; its tail never rejects. */
   private queue: Promise<unknown> = Promise.resolve()
   private current: Operation | undefined
@@ -285,15 +298,19 @@ export class McpOAuthConnection {
   }
 
   /**
-   * Token-free lifecycle facts read from the durable record.
+   * Token-free lifecycle facts read from the durable record — except while
+   * disposed or locally revoked, which are facts of this engine reported
+   * without a store read.
    * @returns the current status.
    */
   async status(): Promise<McpOAuthStatus> {
     const inFlight: McpOAuthStatus['inFlight'] = this.authorizing ? 'authorize' : this.refreshing === undefined ? undefined : 'refresh'
     const base = { inFlight, hasRefreshToken: false, accessTokenExpiresAt: undefined, grantedScope: undefined, epoch: undefined }
     if (this.disposed) return { state: 'disposed', ...base }
+    // The local refusal is a fact of this engine, reported without touching the store: a store that hangs or
+    // fails must not delay or hide it, and the durable epoch is truthfully unknown here.
+    if (this.locallyRevoked) return { state: 'revoked', ...base }
     const view = await this.readView()
-    if (this.locallyRevoked) return { state: 'revoked', ...base, epoch: view.epoch }
     switch (view.kind) {
       case 'none': return { state: 'auth-required', reason: 'no-grant', ...base }
       case 'invalid': return { state: 'auth-required', reason: 'record-invalid', ...base }
@@ -329,14 +346,17 @@ export class McpOAuthConnection {
     this.assertLive()
     if (this.authorizing) throw new McpOAuthError('an authorization attempt is already running for this MCP server', 'ALREADY_IN_FLIGHT')
     if (session.signal.aborted) throw new McpOAuthError('the authorization attempt was cancelled', 'CANCELLED', { cause: session.signal.reason })
+    const entered = this.revocations
     this.authorizing = true
     try {
       await this.enqueue(async () => {
         this.assertLive()
+        this.assertNotRevokedSince(entered)
         const view = await this.readView()
+        this.assertNotRevokedSince(entered)
         const op = new Operation('authorize', view.epoch, view.kind === 'grant'
           ? { discovery: view.discovery, clientInformation: view.doc.clientInformation }
-          : {})
+          : {}, entered)
         const withdraw = (): void => {
           op.controller.abort(new McpOAuthError('the authorization attempt was cancelled', 'CANCELLED', { cause: session.signal.reason }))
         }
@@ -423,13 +443,14 @@ export class McpOAuthConnection {
    * failed — is refused rather than served from the record the store still
    * holds. Only an explicit re-authorization lifts the latch.
    * @returns local and remote outcomes; the remote one is reported truthfully, never assumed.
-   * @throws {McpOAuthError} `DISPOSED`; `STORE` when the tombstone could not be written — the engine stays
-   *   locally revoked, but the durable record was not changed.
+   * @throws {McpOAuthError} `DISPOSED`; `STORE` when the tombstone write is not confirmed — the engine
+   *   stays locally revoked; the durable outcome requires reconciliation.
    */
   async revoke(): Promise<McpOAuthRevocation> {
     this.assertLive()
     const alreadyLatched = this.locallyRevoked
     this.locallyRevoked = true
+    this.revocations += 1
     this.rotateGrant(new McpOAuthError('the grant was revoked', 'AUTH_REQUIRED'))
     this.current?.controller.abort(new McpOAuthError('the grant was revoked while this operation ran', 'AUTH_REQUIRED'))
     this.rejectedEpoch = undefined
@@ -452,7 +473,7 @@ export class McpOAuthConnection {
     } catch (error) {
       throw error instanceof McpOAuthError
         ? error
-        : new McpOAuthError('the credential store did not accept the revocation tombstone; the grant is revoked here but still stored', 'STORE', { cause: error })
+        : new McpOAuthError('the credential store did not confirm the revocation tombstone; the grant is revoked here and its stored state is unknown', 'STORE', { cause: error })
     }
     const revoked: GrantDocument | undefined = previous
     if (revoked?.tokens === undefined) return { local: 'revoked', remote: 'no-grant' }
@@ -688,9 +709,13 @@ export class McpOAuthConnection {
       clientInformation: this.clientInformationOf(op.staged),
       discovery: op.staged.discovery,
     }))
+    // Publication is a further hop after the commit resolved; a revocation or abort that landed in that hop
+    // means the stored document stands but nothing is published from it and the latch stays.
+    op.throwIfAborted()
+    this.assertNotRevokedSince(op.entered)
     op.staged.tokens = effective
     this.rejectedEpoch = undefined
-    // A newly committed grant is the explicit recovery from a local revocation.
+    // A newly committed grant from an attempt entered after every latched revocation is the explicit recovery.
     if (op.kind === 'authorize') this.locallyRevoked = false
     this.emit({ kind: op.kind === 'authorize' ? 'authorized' : 'refreshed', epoch: committed.epoch, grantedScope: scope })
   }
@@ -730,6 +755,7 @@ export class McpOAuthConnection {
       committed = await this.write((current) => {
         op.throwIfAborted()
         this.assertLive()
+        this.assertNotRevokedSince(op.entered)
         const view = viewGrantRecord(current, this.spec)
         if (view.epoch !== op.expectedEpoch) {
           throw new McpOAuthError('the grant changed while this operation ran; its result was discarded', 'STALE')
@@ -743,6 +769,10 @@ export class McpOAuthConnection {
       if (error instanceof McpOAuthError) op.staged.failure = error
       throw error
     }
+    // The store may have acknowledged a document it stored while this operation was being aborted or a
+    // revocation latched; what it stored stands, but this operation reports nothing from it.
+    op.throwIfAborted()
+    this.assertNotRevokedSince(op.entered)
     op.expectedEpoch = committed.epoch
     return committed
   }
@@ -786,7 +816,11 @@ export class McpOAuthConnection {
     const view = await this.readView()
     if (view.kind !== 'grant' || view.doc.status !== 'authorized' || view.doc.tokens === undefined) throw this.authRequired(view)
     if (this.usable(view) !== undefined) return
-    const op = new Operation('refresh', view.epoch, { discovery: view.discovery, clientInformation: view.doc.clientInformation, tokens: view.doc.tokens })
+    const op = new Operation('refresh', view.epoch, {
+      discovery: view.discovery,
+      clientInformation: view.doc.clientInformation,
+      tokens: view.doc.tokens,
+    }, this.revocations)
     this.current = op
     try {
       if (view.doc.tokens.refresh_token === undefined) {
@@ -807,7 +841,7 @@ export class McpOAuthConnection {
       this.assertLive()
       const view = await this.readView()
       if (view.kind !== 'grant' || view.epoch !== epoch || view.doc.status !== 'authorized') return
-      const op = new Operation('refresh', epoch, { discovery: view.discovery, clientInformation: view.doc.clientInformation })
+      const op = new Operation('refresh', epoch, { discovery: view.discovery, clientInformation: view.doc.clientInformation }, this.revocations)
       await this.commitInvalidation(op, 'tokens')
     })
   }
@@ -879,6 +913,11 @@ export class McpOAuthConnection {
 
   private assertNotRevoked(): void {
     if (this.locallyRevoked) throw new McpOAuthError('the grant was revoked', 'AUTH_REQUIRED')
+  }
+
+  /** Refuse an authorization that entered before a revocation was latched: only one entered afterwards recovers from it. */
+  private assertNotRevokedSince(entered: number): void {
+    if (this.revocations !== entered) throw new McpOAuthError('the grant was revoked after this authorization attempt began', 'AUTH_REQUIRED')
   }
 
   private emit(event: McpOAuthChangeEvent): void {

@@ -196,8 +196,9 @@ export interface McpConnectionEngine {
    */
   captureOwnership(): (record: CredentialRecord | undefined) => boolean
   /**
-   * Local-first revocation: the local tombstone is committed before any bounded remote attempt.
-   * @returns the local outcome and the bounded remote outcome.
+   * Refuse locally and notify consumers before awaiting storage. Commit the
+   * tombstone before any bounded remote attempt. A failed write leaves this engine refused.
+   * @returns the committed local outcome and the bounded remote outcome.
    */
   revoke(): Promise<McpOAuthRevocation>
   /** Abort owned work and await quiescence. */
@@ -213,10 +214,10 @@ export interface McpConnectionEngineInit {
   /** Frozen connection identity and network bounds from settings. */
   spec: ResolvedMcpConnectionSpec
   /**
-   * Observer of the durable transitions the engine commits, each carrying the
-   * epoch and effective scope of that commit; the service maps them to
-   * consumer invalidations. The engine contains observer failures.
-   * @param event - the committed transition and its facts.
+   * Observer of engine authority transitions. Committed changes carry their
+   * epoch and effective scope; local revocation arrives before persistence,
+   * without an epoch. The service invalidates consumers; the engine contains observer failures.
+   * @param event - the authority transition and its committed or local facts.
    */
   onChange: (event: McpOAuthChangeEvent) => void
 }
@@ -422,6 +423,16 @@ export class NativeMcpConnectionsService extends Service {
 
   private readonly engineFactory: McpConnectionEngineFactory
   private readonly connections = new Map<string, ConnectionState>()
+  /**
+   * Grant records this Host refuses because an engine revoked them locally.
+   * Kept by credential key, outside any ConnectionState, so the refusal
+   * outlives the engine that latched it (a config swap builds a new engine
+   * over the same store), the state's removal and re-add, and consumer
+   * pruning. Cleared only by a new successful explicit authorization for the
+   * key. A Host restart forgets it: when the tombstone write failed, only the
+   * durable record governs afterwards, and that record may still hold the grant.
+   */
+  private readonly refused = new Set<CredentialKey>()
 
   /**
    * Register the settings namespace, reconcile the stored document, and wire
@@ -519,9 +530,9 @@ export class NativeMcpConnectionsService extends Service {
   }
 
   /**
-   * Revoke one connection's grant: the engine commits the local tombstone
-   * first and its `revoked` transition invalidates every consumer, so the
-   * withdrawal takes effect immediately.
+   * Revoke one connection's grant: the engine refuses locally and its
+   * synchronous `revoked` transition invalidates consumers before storage is
+   * awaited. The tombstone must commit before any remote revocation attempt.
    * @param id - the connection to revoke.
    * @returns the local outcome and the bounded remote outcome.
    */
@@ -561,9 +572,12 @@ export class NativeMcpConnectionsService extends Service {
    */
   private async connectTransport(connection: ConnectionState, signal: AbortSignal): Promise<Transport | undefined> {
     const engine = connection.engine
-    if (engine === undefined || signal.aborted) return undefined
+    if (engine === undefined || signal.aborted || this.refused.has(connection.credentialKey)) return undefined
     const status = await engine.status()
-    if (status.state !== 'authorized' || abortedNow(signal) || !this.stillRuns(connection, engine)) return undefined
+    // Re-judged after the await: a refusal that arrived meanwhile must hold even for a caller that did not abort.
+    if (status.state !== 'authorized' || abortedNow(signal) || !this.stillRuns(connection, engine) || this.refused.has(connection.credentialKey)) {
+      return undefined
+    }
     // The MCP SDK's StreamableHTTPClientTransport has optional properties typed
     // without `| undefined` (exactOptionalPropertyTypes mismatch with the
     // Transport interface); the SDK constructed the object, so the cast
@@ -581,6 +595,25 @@ export class NativeMcpConnectionsService extends Service {
 
   /** Token-free view of one connection; every field is a fact the Host owns. */
   private async view(connection: ConnectionState): Promise<McpConnectionStatusView> {
+    return {
+      id: connection.id,
+      label: connection.entry.label ?? connection.id,
+      url: connection.spec.url,
+      configured: connection.configured,
+      state: await this.stateOf(connection),
+      inFlightAuth: this.ctx.authorization.describe(connection.credentialKey)?.inFlight ?? false,
+      consumers: [...connection.consumers.values()],
+      epoch: connection.epoch,
+    }
+  }
+
+  /**
+   * The authorization state to report: the Host's own refusal without asking
+   * the engine (whose store may hang), else the engine's status, re-judged
+   * against a refusal that arrived during the read.
+   */
+  private async stateOf(connection: ConnectionState): Promise<McpConnectionStatusView['state']> {
+    if (this.refused.has(connection.credentialKey)) return 'revoked'
     let status: McpConnectionEngineStatus | undefined
     try {
       status = await connection.engine?.status()
@@ -588,16 +621,8 @@ export class NativeMcpConnectionsService extends Service {
       // An engine that cannot read its grant is reported unavailable, never guessed at.
       this.ctx.logger.warn('mcp-connections: connection "%s" could not report its status (%s)', connection.id, errorToken(error))
     }
-    return {
-      id: connection.id,
-      label: connection.entry.label ?? connection.id,
-      url: connection.spec.url,
-      configured: connection.configured,
-      state: status?.state ?? 'unavailable',
-      inFlightAuth: this.ctx.authorization.describe(connection.credentialKey)?.inFlight ?? false,
-      consumers: [...connection.consumers.values()],
-      epoch: connection.epoch,
-    }
+    if (this.refused.has(connection.credentialKey)) return 'revoked'
+    return status?.state ?? 'unavailable'
   }
 
   /**
@@ -643,6 +668,8 @@ export class NativeMcpConnectionsService extends Service {
     if (connection.engine !== engine) return
     switch (event.kind) {
       case 'authorized':
+        // A new grant committed by an explicit attempt is the one thing that lifts a local refusal.
+        this.refused.delete(connection.credentialKey)
         this.rememberScope(connection, event.epoch, event.grantedScope)
         this.invalidate(connection, 'reauthorized')
         return
@@ -656,6 +683,8 @@ export class NativeMcpConnectionsService extends Service {
         this.invalidate(connection, 'invalid-grant')
         return
       case 'revoked':
+        // Reported at the engine's first synchronous step; the fence holds whether or not the tombstone lands.
+        this.refused.add(connection.credentialKey)
         this.invalidate(connection, 'revoked')
         return
       case 'disposed':
