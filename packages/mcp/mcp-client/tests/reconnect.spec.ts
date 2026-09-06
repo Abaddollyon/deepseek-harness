@@ -628,18 +628,44 @@ describe('connection source (host-connection)', () => {
       mockClose.mockResolvedValue(undefined)
       fire('revoked')
       // A second bounce is already queued when the first close barrier expires.
-      fire('authorized')
+      fire('reauthorized')
       await vi.advanceTimersByTimeAsync(5_000)
 
       expect(errors.some(line => line.includes('during a host bounce'))).toBe(true)
       expect(instances).toHaveLength(1)
       // Further authority changes must not erase the unresolved close barrier.
       fire('config-changed')
-      fire('authorized')
+      fire('reauthorized')
       await vi.advanceTimersByTimeAsync(30_000)
       expect(instances).toHaveLength(1)
       await handle.dispose()
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still withdraws cached tools after an outage close timeout permanently stops reconnecting', async () => {
+    vi.useFakeTimers()
+    const { errors } = captureLogs(ctx)
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 1, maxDelayMs: 1, maxAttempts: 1 })
+    try {
+      await handle.ready
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      mockConnect.mockRejectedValue(new Error('fixture connect failed'))
+      mockClose.mockResolvedValue(undefined)
+      instances[0]!.onclose?.()
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(errors.some(line => line.includes('failed generation did not close'))).toBe(true)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      fire('revoked')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+      fire('reauthorized')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(instances).toHaveLength(2)
+    } finally {
+      await handle.dispose()
       vi.useRealTimers()
     }
   })

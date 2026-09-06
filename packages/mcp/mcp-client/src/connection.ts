@@ -263,10 +263,11 @@ export function startConnection(
    * then re-evaluates the authority fresh, so a new transport never overlaps
    * the old one. Not an outage: the attempt budget is reset, because the
    * authority (like HMR for legacy configs) is the recovery path from the
-   * give-up terminal state.
+   * attempt-budget give-up state. A close-barrier timeout remains terminal
+   * for this handle, but authority withdrawal still fences work and drops tools.
    */
   function onSourceInvalidate(reason: ConnectionInvalidation): void {
-    if (disposed || closeBarrierFailed) return
+    if (disposed) return
     failedAttempts = 0
     holdLogged = false
     if (reconnectTimer !== undefined) {
@@ -280,6 +281,7 @@ export function startConnection(
     attemptController?.abort()
     connectedAt = undefined
     enqueueToolDrop()
+    if (closeBarrierFailed) return
     ctx.logger.info(`${label}: host connection invalidated (${reason}); re-establishing`)
     const bounced = bounceChain.then(async () => {
       // A previous bounce's attempt may still be connecting: fence and close
