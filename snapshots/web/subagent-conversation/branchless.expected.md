@@ -1,2 +1,4 @@
 - tree "Subagent sessions":
-  - treeitem "example editor continuable · not running 0 tok · {{duration}}" [level=1]: example editor 0 tok {{duration}}
+  - treeitem "Inactive agents (1)" [expanded] [level=1]
+  - group:
+    - treeitem "example editor continuable · not running 0 tok · {{duration}}" [level=2]: example editor 0 tok {{duration}}
