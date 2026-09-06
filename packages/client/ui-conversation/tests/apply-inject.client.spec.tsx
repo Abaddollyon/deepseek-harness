@@ -19,6 +19,7 @@ import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 usePinnedBrowserLanguages('zh-CN')
 
 const ROOT = 'root-1' as SessionId
+const OTHER = 'session-2' as SessionId
 
 type TestLocation =
   | { readonly kind: 'environments'; readonly selectedId?: string }
@@ -240,6 +241,79 @@ describe('Conversation inject API', () => {
       })
       expect(activate).not.toHaveBeenCalled()
       expect(mounted.instance.store.getSnapshot().view).toBe('tasks')
+    } finally {
+      removeTasks()
+      removeChat()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('initializes a cold mounted store from the exact navigation View over stale persistence', async () => {
+    const persistedKey = `dsh.conversation.${JSON.stringify(['sigil', ROOT])}`
+    localStorage.setItem(persistedKey, JSON.stringify({
+      draft: '', view: 'chat', viewRequest: null,
+    }))
+    const navigation = environmentNavigation({
+      kind: 'session', ref: { environmentId: 'sigil', sessionId: ROOT }, viewId: 'tasks',
+    })
+    const b = await bench({ environmentId: 'sigil', navigation })
+    const removeChat = b.slots.register(
+      { name: 'conversation.view', id: 'chat', order: 0 },
+      (() => null) as never,
+    )
+    const removeTasks = b.slots.register(
+      { name: 'conversation.view', id: 'tasks', order: 10 },
+      (() => null) as never,
+    )
+    try {
+      await b.runtime.sessions.setCurrent(ROOT)
+      const activate = vi.spyOn(b.runtime.ctx.uiConversation.binding(ROOT), 'activate')
+      const mounted = b.conversationApi(ROOT)
+
+      expect(mounted.instance.store.getSnapshot().view).toBe('tasks')
+      b.headerApi(ROOT).injected.selectView('chat')
+      b.conversationApi(ROOT)
+      expect(mounted.instance.store.getSnapshot().view).toBe('chat')
+      activate.mockClear()
+      b.runtime.ctx.locale.setLocale('en')
+      expect(activate).toHaveBeenLastCalledWith('chat')
+      expect(mounted.instance.store.getSnapshot().view).toBe('chat')
+    } finally {
+      removeTasks()
+      removeChat()
+      await b.runtime.dispose()
+      localStorage.removeItem(persistedKey)
+    }
+  })
+
+  it('initializes different and replacement Session stores from their exact navigation View', async () => {
+    const navigation = environmentNavigation({
+      kind: 'session', ref: { environmentId: 'sigil', sessionId: ROOT }, viewId: 'chat',
+    })
+    const b = await bench({ environmentId: 'sigil', navigation })
+    const removeChat = b.slots.register(
+      { name: 'conversation.view', id: 'chat', order: 0 },
+      (() => null) as never,
+    )
+    const removeTasks = b.slots.register(
+      { name: 'conversation.view', id: 'tasks', order: 10 },
+      (() => null) as never,
+    )
+    try {
+      await b.runtime.sessions.add({ id: OTHER, session: sessionFakeFor() }, { current: false })
+      navigation.open({
+        kind: 'session', ref: { environmentId: 'sigil', sessionId: OTHER }, viewId: 'tasks',
+      })
+      await b.runtime.sessions.setCurrent(OTHER)
+      expect(b.conversationApi(OTHER).instance.store.getSnapshot().view).toBe('tasks')
+
+      await b.runtime.sessions.remove(ROOT)
+      await b.runtime.sessions.add({ id: ROOT, session: sessionFakeFor() }, { current: false })
+      navigation.open({
+        kind: 'session', ref: { environmentId: 'sigil', sessionId: ROOT }, viewId: 'tasks',
+      })
+      await b.runtime.sessions.setCurrent(ROOT)
+      expect(b.conversationApi(ROOT).instance.store.getSnapshot().view).toBe('tasks')
     } finally {
       removeTasks()
       removeChat()

@@ -137,13 +137,6 @@ export function apply(ctx: Context): void {
     readonly binding: unknown
     readonly actions: BoundActions<typeof conversationStore>
   }>()
-  const rememberMountedConversation = (
-    sessionId: SessionId,
-    actions: BoundActions<typeof conversationStore>,
-  ): void => {
-    const binding = sessions.binding(sessionId)
-    if (binding !== undefined) mountedConversationActions.set(sessionId, { binding, actions })
-  }
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
@@ -175,9 +168,32 @@ export function apply(ctx: Context): void {
     const active = resolveActiveView(viewTabs(), preferred)
     if (active !== undefined) uiConversation.binding(sessionId).activate(active.id)
   }
+  const restoredView = (sessionId: SessionId): string | null =>
+    readConversationViewPreference(sessionId, environmentId)
+      ?? presentation?.get(presentationRef(sessionId)).viewId
+      ?? null
+  const initialView = (sessionId: SessionId): string | null => {
+    const location = environmentNavigation?.getSnapshot?.()
+    if (location?.kind === 'session'
+      && location.ref.environmentId === owningEnvironmentId
+      && location.ref.sessionId === sessionId) return location.viewId
+    return restoredView(sessionId)
+  }
+  const rememberMountedConversation = (
+    sessionId: SessionId,
+    actions: BoundActions<typeof conversationStore>,
+  ): void => {
+    const binding = sessions.binding(sessionId)
+    if (binding === undefined) return
+    const previous = mountedConversationActions.get(sessionId)
+    if (previous?.binding === binding && previous.actions === actions) return
+    mountedConversationActions.set(sessionId, { binding, actions })
+    const preferred = initialView(sessionId)
+    activateView(sessionId, preferred)
+    if (preferred !== null) actions.setView(preferred)
+  }
   const restoreView = (sessionId: SessionId): void => {
-    const stored = readConversationViewPreference(sessionId, environmentId)
-    activateView(sessionId, stored ?? presentation?.get(presentationRef(sessionId)).viewId ?? null)
+    activateView(sessionId, restoredView(sessionId))
   }
   const restoreCurrentView = (): void => {
     const sessionId = sessions.list.getSnapshot().current
