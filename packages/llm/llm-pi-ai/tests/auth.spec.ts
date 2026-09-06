@@ -163,7 +163,7 @@ describe('pi-ai credential store over harness records', () => {
     await expect(store.delete('openai-codex')).rejects.toThrow(/mounts no credentials service/)
   })
 
-  it('abandons an in-flight durable mutation on cancellation without committing it', async () => {
+  it.each(['resolve', 'reject'])('abandons an in-flight durable mutation that later %ss without committing it', async (settlement) => {
     const ctx = await stored()
     const store = credentialStoreFrom(ctx)
     const entered = Promise.withResolvers<undefined>()
@@ -174,6 +174,7 @@ describe('pi-ai credential store over harness records', () => {
       entered.resolve(undefined)
       await release.promise
       mutationReturned.resolve(undefined)
+      if (settlement === 'reject') throw new Error('late credential failure')
       return { type: 'api_key', key: 'too-late' }
     }, { signal: controller.signal })
     await entered.promise
