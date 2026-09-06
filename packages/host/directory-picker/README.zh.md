@@ -29,7 +29,7 @@ web GUI 宿主通过一份约定让操作者选择工作区目录：一个只提
 
 ### 选择后端
 
-当操作者坐在宿主屏幕前时，[原生后端](../directory-picker-native/README.zh.md)是正确选择：`directoryPicker/pick` 打开一个 OS 选择器，返回所选绝对路径，取消时返回 `null`。[浏览后端](../directory-picker-browse/README.zh.md)处处可用——它在浏览器中列举一个目录层级并创建子目录，因此无法触达 OS 对话框的远程客户端依然能选择工作区。当宿主处境在两次启动之间变化时，组合[自适应选择器](../directory-picker-auto/README.zh.md)，它在启动时判定一次处境并挂载匹配的后端。
+当操作者坐在宿主屏幕前时，[原生后端](../directory-picker-native/README.zh.md)是正确选择：`directoryPicker/pick` 打开一个 OS 选择器，返回所选绝对路径，取消时返回 `null`。[browse 适配器](../directory-picker-browse/README.zh.md)把独立的 `ctx.directoryBrowser` 服务投影为旧 browse 能力。远程所有方应调用独立的 `directoryBrowser/*` namespace；即使此 picker 为原生，它仍保持可用。当宿主处境在两次启动之间变化时，组合[自适应选择器](../directory-picker-auto/README.zh.md)，它在启动时只解析交互式 picker。
 
 ### 能力约定
 

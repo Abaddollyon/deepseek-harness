@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { DirectoryPicker, DirectoryPickerError } from '@deepseek-ai/dsh-host-directory-picker'
 import type { DirectoryPickerCapability } from '@deepseek-ai/dsh-host-directory-picker'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { DirectoryPickerController } from '../src/directory-picker.ts'
+import { DirectoryBrowserController } from '../src/directory-browser.ts'
 
 const roots: Context[] = []
 
@@ -47,11 +48,29 @@ const BROWSE_STUB: DirectoryPickerCapability = {
   },
 }
 
+class StubDirectoryBrowser extends Service {
+  static capabilityStub: Extract<DirectoryPickerCapability, { kind: 'browse' }> = BROWSE_STUB
+
+  constructor(ctx: Context) {
+    super(ctx, 'directoryBrowser')
+  }
+
+  list(path?: string, signal?: AbortSignal) {
+    return StubDirectoryBrowser.capabilityStub.list(path, signal)
+  }
+
+  createDirectory(path: string, name: string) {
+    return StubDirectoryBrowser.capabilityStub.createDirectory(path, name)
+  }
+}
+
 async function harness(capability: DirectoryPickerCapability = NATIVE_STUB) {
   StubPicker.capabilityStub = capability
+  StubDirectoryBrowser.capabilityStub = capability.kind === 'browse' ? capability : BROWSE_STUB
   const ctx = new Context()
   roots.push(ctx)
   await ctx.plugin(StubPicker).await()
+  await ctx.plugin(StubDirectoryBrowser).await()
   return new DirectoryPickerController(ctx)
 }
 
@@ -157,11 +176,27 @@ describe('directoryPicker browse Remotes', () => {
     expect((await pending).code).toBe('gateway/cancelled')
   })
 
-  it('refuses the browse verbs under a native composition', async () => {
+  it('serves browse verbs from an independent browser under a native picker composition', async () => {
     const picker = await harness()
-    expect(await refused(picker.list(undefined, new AbortController().signal)))
-      .toMatchObject({ code: 'directory-picker/unavailable', details: { capability: 'native' } })
-    expect(await refused(picker.createDirectory('/x', 'y')))
-      .toMatchObject({ code: 'directory-picker/unavailable', details: { capability: 'native' } })
+    expect(await picker.list(undefined, new AbortController().signal))
+      .toMatchObject({ path: '/home/user' })
+    expect(await picker.createDirectory('/x', 'y')).toBe('/x/y')
+  })
+})
+
+describe('directoryBrowser Remotes', () => {
+  it('serves bounded browsing independently while the interactive picker stays native', async () => {
+    StubPicker.capabilityStub = NATIVE_STUB
+    const ctx = new Context()
+    roots.push(ctx)
+    await ctx.plugin(StubPicker).await()
+    await ctx.plugin(StubDirectoryBrowser).await()
+    const browser = new DirectoryBrowserController(ctx)
+    const picker = new DirectoryPickerController(ctx)
+
+    expect(await picker.pick(new AbortController().signal)).toBeNull()
+    expect(await browser.list('/home/user', new AbortController().signal))
+      .toMatchObject({ path: '/home/user' })
+    expect(await browser.createDirectory('/home/user', 'fresh')).toBe('/home/user/fresh')
   })
 })
