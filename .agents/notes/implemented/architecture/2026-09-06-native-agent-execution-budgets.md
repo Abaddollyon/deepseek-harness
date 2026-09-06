@@ -27,3 +27,5 @@ The headless application accepts all four limits together through runner config 
 ## Consequences
 
 Model-step, retry, and requested-output limits stop work before excess dispatch. Input limits can overshoot by one in-flight response and documentation must call them thresholds. Focused fake-adapter tests cover request admission, usage reconciliation, unknown usage, retry denial, CLI validation, and headless Agent forwarding without provider credentials.
+
+The shipped basic compaction backend makes a separate model request outside the conversation loop. Until auxiliary calls share budget accounting, its default model-backed summarizer fails with `BUDGET_ACCOUNTING_UNAVAILABLE` for a budgeted Agent before dispatch. Model-free pruning and subclassed model-independent summarizers remain available; unbudgeted Agents retain normal compaction.

@@ -10,7 +10,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { EpochHeader, Session, SessionSeq } from '@deepseek-ai/dsh-session'
-import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { Agent, RequestPreflightAction } from '@deepseek-ai/dsh-agent'
@@ -339,6 +339,12 @@ export class BasicCompactionEngine extends CompactionEngine {
     agent: Agent,
     signal?: AbortSignal,
   ): Promise<SummaryResult> {
+    if (agent.options.budget !== undefined) {
+      throw new LlmError(
+        'budgeted agent cannot run model-backed compaction because auxiliary model usage is not tracked',
+        'BUDGET_ACCOUNTING_UNAVAILABLE',
+      )
+    }
     const target = conversationTarget(agent)
     const config = target === undefined
       ? this.config

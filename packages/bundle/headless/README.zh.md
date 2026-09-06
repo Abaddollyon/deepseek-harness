@@ -47,7 +47,7 @@ agent（智能体）会完成该任务，把提供方的每个非空推理增量
 | `budget` | — | 完整的 `maxTurns`、`maxInputTokens`、`maxOutputTokens` 与 `maxRetries` 对象；部分对象在 Agent 创建前失败 |
 | `selection` | — | 完整的逐运行 provider/model 选择，以及可选的显式推理强度 |
 
-`--provider` 与 `--model` 必须同时出现，并且只选择本次运行；它们不会修改已保存设置。`--reasoning-effort` 需要这对参数。显式的适配器强度 id 会应用到实际请求，而 `provider-default` 会省略强度，并从这个隔离选择中清除已保存强度。四个命令行预算选项也必须同时出现。`maxTurns` 限制模型步骤，`maxRetries` 限制模型请求错误后的额外尝试，`maxOutputTokens` 则通过把每次请求限制到剩余总量来跨请求分配。对于报告权威 usage 的适配器，`maxInputTokens` 是按响应计量的阈值：一个在途响应可能跨过该阈值，随后循环会在下一次请求前停止。若响应不报告 usage 且还需要另一步，运行以 `BUDGET_ACCOUNTING_UNAVAILABLE` 失败。这些限制属于这一个 Agent；启动多个 headless 子进程的调用方必须自行分配共享父预算。
+`--provider` 与 `--model` 必须同时出现，并且只选择本次运行；它们不会修改已保存设置。`--reasoning-effort` 需要这对参数。显式的适配器强度 id 会应用到实际请求，而 `provider-default` 会省略强度，并从这个隔离选择中清除已保存强度。四个命令行预算选项也必须同时出现。`maxTurns` 限制模型步骤，`maxRetries` 限制模型请求错误后的额外尝试，`maxOutputTokens` 则通过把每次请求限制到剩余总量来跨请求分配。对于报告权威 usage 的适配器，`maxInputTokens` 是按响应计量的阈值：一个在途响应可能跨过该阈值，随后循环会在下一次请求前停止。若响应不报告 usage 且还需要另一步，运行以 `BUDGET_ACCOUNTING_UNAVAILABLE` 失败。同一错误也会停止模型支持的自动压缩，因为该辅助请求尚未计入 Agent token 计量；该请求绝不会被分发。这些限制属于这一个 Agent；启动多个 headless 子进程的调用方必须自行分配共享父预算。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-headless)是每个受支持字段及其 JSDoc 的穷尽式真源。
 

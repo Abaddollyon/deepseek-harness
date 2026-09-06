@@ -58,7 +58,7 @@ class ContextAdapter extends LlmAdapter {
 class ImagePricedContextAdapter extends ContextAdapter {
   override imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing {
     return {
-      priceImages: images => images.map(() => ({ visualTokens: 100, text: "image handle" })),
+      priceImages: images => images.map(() => ({ visualTokens: 100, text: 'image handle' })),
     }
   }
 }
@@ -117,7 +117,7 @@ class ObservableCompactionAdapter extends LlmAdapter {
   }
 }
 
-function createContext(contextWindow = 1_000, adapter: ContextAdapter = new ContextAdapter(contextWindow)): Context {
+function createContext(contextWindow = 1_000, adapter: LlmAdapter = new ContextAdapter(contextWindow)): Context {
   const ctx = new Context()
   void new LlmRuntime(ctx)
   void new SessionProjectionRegistry(ctx)
@@ -126,10 +126,15 @@ function createContext(contextWindow = 1_000, adapter: ContextAdapter = new Cont
   return ctx
 }
 
-function agent(session: Session, model?: string): Agent {
+function agent(session: Session, model?: string, budget = false): Agent {
   return {
     id: session.id,
-    options: model === undefined ? {} : { provider: model, model },
+    options: {
+      ...model === undefined ? {} : { provider: model, model },
+      ...budget ? {
+        budget: { maxTurns: 4, maxInputTokens: 100, maxOutputTokens: 3, maxRetries: 0 },
+      } : {},
+    },
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'running',
@@ -600,7 +605,7 @@ describe('pressure measurement and retention', () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
     void new SessionProjectionRegistry(ctx)
-  void new TokenMeter(ctx)
+    void new TokenMeter(ctx)
     ctx.llm.registerAdapter(['large', 'small'], new RoutedContextAdapter({
       large: 10_000,
       small: 1_000,
@@ -628,7 +633,7 @@ describe('pressure measurement and retention', () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
     void new SessionProjectionRegistry(ctx)
-  void new TokenMeter(ctx)
+    void new TokenMeter(ctx)
     ctx.llm.registerAdapter(['unknown-context'], new ContextAdapter(1_000))
     vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
       provider,
@@ -1552,7 +1557,7 @@ describe('default one-shot summarizer', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     void new SessionProjectionRegistry(ctx)
-  void new TokenMeter(ctx)
+    void new TokenMeter(ctx)
     const compact = new ExposedCompactionEngine(ctx, { auto: false })
     await expect(compact.runSummarize(promptInput('history'), agent(Session.create(SessionId('model-less')))))
       .rejects.toThrow(/no provider\/model available for summarization/)
@@ -1678,6 +1683,38 @@ describe('automatic listener and loader composition', () => {
   function overflow(message = 'provider overflow'): Error & { code: string } {
     return Object.assign(new Error(message), { code: CONTEXT_WINDOW_EXCEEDED_CODE })
   }
+
+  it('fails pressure admission before untracked compaction for a budgeted agent', async () => {
+    const adapter = new ObservableCompactionAdapter(() => 20_000, 20_000)
+    const ctx = createContext(20_000, adapter)
+    void new BasicCompactionEngine(ctx, { thresholdRatio: 0.1, retainTokens: 10 })
+    const owner = agent(conversation(4), MODEL, true)
+
+    const failure: unknown = await preflight(ctx, owner).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(Error)
+    if (!(failure instanceof Error)) throw new TypeError('expected compaction admission failure')
+    expect((failure as Error & { code?: unknown }).code).toBe('BUDGET_ACCOUNTING_UNAVAILABLE')
+    expect(failure.message).toContain('auxiliary model usage is not tracked')
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('preserves overflow failure without dispatching untracked compaction for a budgeted agent', async () => {
+    const adapter = new ObservableCompactionAdapter(() => 10_000, 10_000)
+    const ctx = createContext(10_000, adapter)
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+    void new BasicCompactionEngine(ctx, { thresholdRatio: 1, retainTokens: 900 })
+    const owner = agent(conversation(3), MODEL, true)
+
+    expect(await recover(ctx, owner, overflow())).toBe(false)
+    expect(adapter.requests).toHaveLength(0)
+    expect(warnings).toEqual([
+      expect.stringContaining('auxiliary model usage is not tracked'),
+    ])
+  })
 
   it('compacts before request derivation above threshold using the durable routed model and remains idle below it', async () => {
     const ctx = createContext()

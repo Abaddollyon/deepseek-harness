@@ -27,3 +27,5 @@ headless 应用通过 runner 配置或 `--max-turns`、`--max-input-tokens`、`-
 ## Consequences
 
 模型步骤、重试与请求输出限制会在超额分发前停止工作。输入限制可以被一个在途响应超出，文档必须称其为阈值。聚焦的 fake-adapter 测试在无需提供方凭据的情况下覆盖请求准入、usage 对账、未知 usage、重试拒绝、CLI 校验与 headless Agent 转发。
+
+随附的 basic compaction 后端会在会话循环之外发起独立模型请求。在辅助调用共享预算计量之前，其默认模型摘要器会为预算化 Agent 在分发前以 `BUDGET_ACCOUNTING_UNAVAILABLE` 失败。无模型修剪和子类提供的模型无关摘要器仍可使用；未预算化 Agent 保留正常压缩。

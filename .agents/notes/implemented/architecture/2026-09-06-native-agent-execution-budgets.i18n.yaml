@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-06-native-agent-execution-budgets.md
-2026-09-06-native-agent-execution-budgets.md: 62046e2eb4e51d1dd44d5ac88d243dbf84074852
-2026-09-06-native-agent-execution-budgets.zh.md: f35907cbc8378015c90df5171559db24c99113a9
+2026-09-06-native-agent-execution-budgets.md: f4ecef95d3ec0edce17cb875d5be702755d1555e
+2026-09-06-native-agent-execution-budgets.zh.md: 7ce863e215604dabaa30e960ea4cf1e9ee319423
