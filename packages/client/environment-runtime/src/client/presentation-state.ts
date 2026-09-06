@@ -98,7 +98,8 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
         entries.push(entry)
         used += separator + entry.length
       }
-      return `${prefix}${entries.join(',')}${suffix}`
+      // Persist selected rows oldest-to-newest so parse restores the Map's recency order.
+      return `${prefix}${entries.reverse().join(',')}${suffix}`
     },
     subscribe(listener) {
       listeners.add(listener)

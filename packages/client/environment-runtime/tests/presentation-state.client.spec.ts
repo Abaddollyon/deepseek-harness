@@ -65,4 +65,22 @@ describe('environment presentation state', () => {
     expect(createEnvironmentPresentationStore(serialized).get(ref).draft)
       .toBe(store.get(ref).draft)
   })
+
+  test('preserves newest-session recency across repeated capped reloads', () => {
+    const first = createEnvironmentPresentationStore()
+    const refs = Array.from({ length: 13 }, (_, index) => ({
+      environmentId: 'sigil', sessionId: `cycle-${String(index).padStart(2, '0')}`,
+    }))
+    for (const [index, ref] of refs.slice(0, 12).entries()) {
+      first.update(ref, { draft: String(index).repeat(100_000), viewId: `view-${index}` })
+    }
+    const priorNewest = refs[11]!
+    const restored = createEnvironmentPresentationStore(first.serialize())
+    restored.update(refs[12]!, { draft: 'n'.repeat(100_000), viewId: 'view-12' })
+
+    const second = createEnvironmentPresentationStore(restored.serialize())
+    expect(second.get(refs[12]!)).toMatchObject({ viewId: 'view-12' })
+    expect(second.get(priorNewest)).toMatchObject({ viewId: 'view-11' })
+    expect(second.get(refs[3]!)).toMatchObject({ draft: '', viewId: 'chat' })
+  })
 })
