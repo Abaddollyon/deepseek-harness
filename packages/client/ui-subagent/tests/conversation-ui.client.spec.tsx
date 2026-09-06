@@ -120,6 +120,7 @@ describe('SubagentHeaderLineage', () => {
     expect(screen.getAllByRole('treeitem').map(row => row.textContent?.split(' ')[0])).toEqual([
       expect.stringContaining('workflow'), expect.stringContaining('active'), expect.stringContaining('finished'),
     ])
+    expect(screen.getByRole('treeitem', { name: /workflow.*1 个后代正在运行/ }).querySelector('[data-state="ongoing"]')).not.toBeNull()
     expect(screen.queryByText(/Finished prompt/)).toBeNull()
     expect(screen.getByRole('treeitem', { name: /finished/ }).title).toContain('Finished prompt')
     expect(screen.getByText(/Active prompt/)).toBeTruthy()
@@ -265,6 +266,11 @@ describe('SubagentHeaderLineage', () => {
     fireEvent.keyDown(trigger, { key: 'ArrowDown' })
     await Promise.resolve()
     expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /worker/ }))
+
+    const openButton = screen.getByRole('button', { name: '打开 worker 的会话' })
+    openButton.focus()
+    fireEvent.keyDown(openButton, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
 
     fireEvent.keyDown(document.activeElement as Element, { key: 'End' })
     expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))

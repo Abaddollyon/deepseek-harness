@@ -300,13 +300,17 @@ function CatalogRows({
         const isExpanded = expanded.has(entry.id)
         const knownLeaf = !entry.hasChildren
         const compact = !active(entry)
+        const runningDescendants = descendants.get(entry.id)?.runningCount ?? 0
         const childLoading = childCatalog === undefined
           || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
         const summary = summaries[entry.id]
         const label = entry.label ?? entry.id
         const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
         const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-        const secondary = [summary?.title, mode, activity]
+        const descendantActivity = runningDescendants > 0
+          ? t('activity.descendants', { count: runningDescendants })
+          : undefined
+        const secondary = [summary?.title, mode, activity, descendantActivity]
           .filter(value => value !== undefined)
           .join(' · ')
         const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
@@ -385,7 +389,7 @@ function CatalogRows({
                   </button>
                 )}
               <div className={css.clickarea}>
-                <StateDot state={entry.activity === 'running' ? 'ongoing' : 'done'} />
+                <StateDot state={compact ? 'done' : 'ongoing'} />
                 <span className={css.content}>
                   <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
                   {!compact && <span className={css.summary}>{secondary}</span>}
@@ -719,7 +723,7 @@ function CatalogDropdown({
 
   const navigate = (event: KeyboardEvent<HTMLDivElement>): void => {
     const items = treeItems(menuRef.current)
-    const index = items.indexOf(document.activeElement as HTMLElement)
+    const index = items.findIndex(item => item.contains(document.activeElement))
     if (event.key === 'Escape') {
       event.preventDefault()
       changeOpen(false, true)
