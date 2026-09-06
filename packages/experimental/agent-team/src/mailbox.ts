@@ -12,7 +12,7 @@ import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { errorMessage, TeamError } from './error.ts'
 import type { TeamJournal } from './journal.ts'
 import type { TeamRuntimeLifecycle } from './lifecycle.ts'
-import type { TeamRoster } from './roster.ts'
+import type { TeamMembership, TeamRoster } from './roster.ts'
 import { resolveActiveMember } from './roster.ts'
 import { messageAccepted } from './session-message.ts'
 import { TeamId, TeamMessageId } from './types.ts'
@@ -80,6 +80,17 @@ export class TeamMailbox {
 
   /**
    * Retry durable pending messages relevant to one started Team member.
+   *
+   * Pending records are captured and claimed inside the Lead transaction, behind
+   * every sender whose queued record is still flushing: a sender registers its
+   * own dispatch before its transaction releases, so recovery can only ever
+   * observe a record whose sender already owns its immediate dispatch. The
+   * flush inside the transaction is the durability gate when a persistence
+   * backend participates: the live projection already holds a record whose
+   * `appendAndFlush` rejected, so a rejected flush refuses this pass instead of
+   * delivering mail the Lead log may not hold; the retained write is retried
+   * by the next flush, after which a later pass delivers it. A start with no
+   * candidate mail pays no Lead flush.
    * @param agent - newly started exact live Agent.
    * @param signal - shared runtime cancellation.
    */
@@ -87,16 +98,37 @@ export class TeamMailbox {
     signal.throwIfAborted()
     const membership = this.roster.tryMembership(agent)
     if (membership === undefined) return
-    const state = this.journal.state(membership.root)
-    const messages = state.messages.filter(message =>
-      !state.delivered.includes(message.id)
-      && (membership.role === 'lead' || message.targetId === agent.id))
-    for (const message of messages) {
+    if (this.pendingFor(membership, agent).length === 0) return
+    await this.trackDispatch(this.recoverAdmitted(membership, agent, signal))
+  }
+
+  /** Flush, snapshot, and claim pending mail under the Lead transaction; deliver after release. */
+  private async recoverAdmitted(membership: TeamMembership, agent: Agent, signal: AbortSignal): Promise<void> {
+    const root = membership.root
+    const dispatches = await this.journal.transact(root.id, async () => {
       signal.throwIfAborted()
-      if (membership.role === 'lead' && message.delivery === 'quiet'
-        && message.targetId !== membership.root.id && this.ctx.agents.get(message.targetId) === undefined) continue
-      await this.tryDispatch(membership.root, message, signal)
-    }
+      // A Lead whose Session already retired rejects here; the recheck below
+      // covers a Lead that left the registry while the flush was in flight.
+      await this.ctx.sessions.flush(root.session)
+      signal.throwIfAborted()
+      if (this.ctx.agents.get(root.id) !== root) return []
+      // Register before releasing the transaction so recovery enters each
+      // target-local queue in durable mailbox order. Delivery checkpoints
+      // through this same journal, so it is awaited only after release.
+      return this.pendingFor(membership, agent).map(message => this.tryDispatch(root, message, signal))
+    })
+    await Promise.all(dispatches)
+  }
+
+  /** Queued-minus-delivered records one started member may retry right now. */
+  private pendingFor(membership: TeamMembership, agent: Agent): TeamMessageSnapshot[] {
+    const root = membership.root
+    const state = this.journal.state(root)
+    return state.messages.filter(message =>
+      !state.delivered.includes(message.id)
+      && (membership.role === 'lead' || message.targetId === agent.id)
+      && !(membership.role === 'lead' && message.delivery === 'quiet'
+        && message.targetId !== root.id && this.ctx.agents.get(message.targetId) === undefined))
   }
 
   /**
