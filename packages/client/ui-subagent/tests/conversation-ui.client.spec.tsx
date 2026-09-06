@@ -100,6 +100,60 @@ function hoverCatalog(trigger: HTMLElement): void {
 }
 
 describe('SubagentHeaderLineage', () => {
+  it('places active branches first and keeps inactive agents in a compact flat list', () => {
+    const done = 'done' as SessionId
+    const running = 'running' as SessionId
+    const entries: SubagentCatalogSnapshot['entries'] = [
+      { kind: 'child', id: done, label: 'finished', mode: 'one-shot', activity: 'inactive', hasChildren: false },
+      { kind: 'child', id: CHILD, label: 'workflow', mode: 'continuable', activity: 'inactive', hasChildren: true },
+      { kind: 'child', id: running, label: 'active', mode: 'one-shot', activity: 'running', hasChildren: false },
+    ]
+    const summaries = {
+      [done]: { ...summary(done, 1), title: 'Finished prompt', parentId: PARENT, origin: 'subagent' as const },
+      [CHILD]: { ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const },
+      [GRANDCHILD]: { ...summary(GRANDCHILD, 1), parentId: CHILD, origin: 'subagent' as const, running: true },
+      [running]: { ...summary(running, 1), title: 'Active prompt', parentId: PARENT, origin: 'subagent' as const, running: true },
+    }
+    const p = props(catalog({ entries }), {}, summaries)
+    const view = render(<SubagentHeaderLineage {...p} />)
+    fireEvent.click(screen.getByRole('button', { name: '2 个子代理，正在运行' }))
+    expect(screen.getAllByRole('treeitem').map(row => row.textContent?.split(' ')[0])).toEqual([
+      expect.stringContaining('workflow'), expect.stringContaining('active'), expect.stringContaining('finished'),
+    ])
+    expect(screen.queryByText(/Finished prompt/)).toBeNull()
+    expect(screen.getByRole('treeitem', { name: /finished/ }).title).toContain('Finished prompt')
+    expect(screen.getByText(/Active prompt/)).toBeTruthy()
+    expect(screen.getAllByRole('treeitem').every(row => row.getAttribute('aria-level') === '1')).toBe(true)
+    expect(entries[0]?.id).toBe(done)
+    view.rerender(<SubagentHeaderLineage {...props(catalog({ entries: entries.map(entry =>
+      entry.kind === 'child' ? { ...entry, activity: 'inactive' } : entry,
+    ) }), {}, Object.fromEntries(Object.entries(summaries).map(([id, value]) => [id, { ...value, running: false }]))) } />)
+    expect(screen.getAllByRole('treeitem')[0]?.textContent).toContain('finished')
+  })
+
+  it('expands workflow rows on click and opens their conversation with a separate action', () => {
+    const p = props(catalog(), {
+      [CHILD]: catalog({ entries: [{ kind: 'child', id: GRANDCHILD, label: 'layer two', mode: 'one-shot', activity: 'inactive', hasChildren: false }] }),
+    })
+    render(<SubagentHeaderLineage {...p} />)
+    fireEvent.click(screen.getByRole('button', { name: '2 个子代理' }))
+    const branch = screen.getByRole('treeitem', { name: /worker/ })
+    fireEvent.click(branch)
+    expect(branch.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('treeitem', { name: /layer two/ }).getAttribute('aria-level')).toBe('2')
+    expect(p.openChild).not.toHaveBeenCalled()
+    fireEvent.keyDown(branch, { key: 'Enter' })
+    expect(branch.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('treeitem', { name: /layer two/ })).toBeNull()
+    const openButton = within(branch).getByRole('button', { name: '打开 worker 的会话' })
+    fireEvent.keyDown(openButton, { key: 'Enter' })
+    expect(branch.getAttribute('aria-expanded')).toBe('false')
+    expect(p.openChild).not.toHaveBeenCalled()
+    fireEvent.click(openButton)
+    expect(p.openChild).toHaveBeenCalledExactlyOnceWith({ parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable' })
+    expect(screen.queryByRole('tree')).toBeNull()
+  })
+
   it('aggregates live descendant activity onto the closed trigger', () => {
     const summaries: Record<SessionId, SessionSummary> = {
       [CHILD]: {
@@ -157,14 +211,14 @@ describe('SubagentHeaderLineage', () => {
     expect(input.setCatalogOpen).toHaveBeenCalledWith(PARENT, true)
     expect(screen.getAllByRole('treeitem')).toHaveLength(3)
     expect(screen.getByText('正在扫描项目文件 · 可继续 · 正在运行')).toBeTruthy()
-    expect(screen.getByText('一次性 · 当前未运行')).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /reviewer/ }).title).toContain('一次性 · 当前未运行')
     const diagnostic = screen.getByRole('treeitem', { name: /会话记录损坏/ })
     expect(diagnostic.getAttribute('aria-disabled')).toBe('true')
     expect(screen.getByRole('button', { name: '展开 worker 的下级子代理' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: '展开 reviewer 的下级子代理' })).toBeNull()
     expect(screen.getByRole('treeitem', { name: /reviewer/ }).children).toHaveLength(2)
 
-    fireEvent.click(screen.getByRole('treeitem', { name: /worker/ }))
+    fireEvent.click(screen.getByRole('button', { name: '打开 worker 的会话' }))
     expect(input.openChild).toHaveBeenCalledWith({
       parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable',
     })
