@@ -97,6 +97,7 @@ function sessionAgent(session: Session, id = 'agent'): Agent {
   return {
     id: SessionId(id),
     options: {},
+    hasExecutionBudget: false,
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'running',

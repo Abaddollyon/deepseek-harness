@@ -63,6 +63,8 @@ interface Agent {
   readonly id: SessionId
   /** The provider route and model this agent's requests use. */
   readonly options: AgentOptions
+  /** Whether this live agent was constructed with an execution budget. */
+  readonly hasExecutionBudget: boolean
   /** The live session this agent drives; its log is the durable source of truth. */
   readonly session: Session
   /** The agent-owned projection of durable pending work. */
@@ -157,6 +159,20 @@ type AgentStatus = 'idle' | 'running'
 `running` describes the driver-wide drain interval and may span consecutive queued turns; it does not prove a turn is still open. Disposal removes the agent from the registry and emits `agent/disposed`; it is not a terminal status value. `followup()` returns no handle: its `MessageId` identifies durable inbox insertion, claim, and discard facts, not a later assistant output or turn ending. `whenIdle()` observes the whole agent, so callers may call a receipt-to-idle interval a run only when they explicitly own that interval ([decision](../../.agents/notes/implemented/architecture/2026-07-30-followup-enqueue-and-owned-runs.md)).
 
 ```ts type-equiv
+/** Execution limits for one live agent-loop instance. */
+interface AgentBudget {
+  /** Maximum model steps admitted across submitted turns. */
+  maxTurns: number
+  /** Response-accounted input-token threshold across model attempts. */
+  maxInputTokens: number
+  /** Maximum output tokens requested across all model attempts. */
+  maxOutputTokens: number
+  /** Maximum additional model attempts admitted after request failures. */
+  maxRetries: number
+}
+```
+
+```ts type-equiv
 /** Merge-extensible agent creation options. Persona belongs to system-prompt sections. */
 interface AgentOptions {
   /** Provider route (must have a registered adapter at call time). */
@@ -171,10 +187,12 @@ interface AgentOptions {
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
+  /** Optional execution limits enforced by the concrete agent loop. */
+  budget?: AgentBudget
 }
 ```
 
-Dispatch requires `provider` and `model` after `agent/request`. An explicit `reasoningEffort` seeds the first request on that route; exact-model resolution validates it, while omission allows the adapter default to materialize. When present, `maxTokens` must be a positive safe integer and caps every conversation-model request; omission allows the exact-model adapter default to materialize before the request header, or otherwise leaves provider behavior unchanged. An agent-scoped `deployment:persona` prompt section may shadow the global default persona.
+Dispatch requires `provider` and `model` after `agent/request`. An explicit `reasoningEffort` seeds the first request on that route; exact-model resolution validates it, while omission allows the adapter default to materialize. When present, `maxTokens` must be a positive safe integer and caps every conversation-model request; omission allows the exact-model adapter default to materialize before the request header, or otherwise leaves provider behavior unchanged. A complete `budget` uses positive step/input/output values and nonnegative retries. It limits one live loop instance: model steps stop before an excess `step/start`, retries stop before an excess provider redispatch, and output caps shrink with reported use. Input is a response-accounted continuation threshold because provider usage arrives after the request; an adapter's exact prepared-call count can reject the current request before dispatch, while missing response usage fails a required continuation. An agent-scoped `deployment:persona` prompt section may shadow the global default persona.
 
 The inbox is the delivery vocabulary — two ordered pending-message lists the agent owns as a durable projection:
 

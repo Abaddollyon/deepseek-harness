@@ -33,11 +33,21 @@ kind: "package-bundle"
 dsh --profile headless "run the tests"
 ```
 
+自动化可以应用一份完整的逐 agent 执行预算：
+
+```sh
+dsh --profile headless --provider deepseek-official --model deepseek-v4-flash --reasoning-effort provider-default --max-turns 4 --max-input-tokens 12000 --max-output-tokens 2000 --max-retries 1 "run the tests"
+```
+
 agent（智能体）会完成该任务，把提供方的每个非空推理增量流式写入 stderr 的 `dsh: reasoning:` 段，然后把最终答案写入 stdout 并退出。连续推理增量保持在同一段中；提供方未给尾换行时，runner 会在后续输出前结束该段。没有推理内容的成功运行保持 stderr 为空；失败时退出码为 1，并以 `dsh: <code>: <message>` 向 stderr 写入错误。缺失或空白任务会在任何内容运行前被拒绝。任务文本通过唯一的 `task` 设置提供：
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `task` | 必填 | 单次运行的任务文本 |
+| `budget` | — | 完整的 `maxTurns`、`maxInputTokens`、`maxOutputTokens` 与 `maxRetries` 对象；部分对象在 Agent 创建前失败 |
+| `selection` | — | 完整的逐运行 provider/model 选择，以及可选的显式推理强度 |
+
+`--provider` 与 `--model` 必须同时出现，并且只选择本次运行；它们不会修改已保存设置。`--reasoning-effort` 需要这对参数。显式的适配器强度 id 会应用到实际请求，而 `provider-default` 会省略强度，并从这个隔离选择中清除已保存强度。四个命令行预算选项也必须同时出现。`maxTurns` 限制模型步骤，`maxRetries` 限制模型请求错误后的额外尝试，`maxOutputTokens` 则通过把每次请求限制到剩余总量来跨请求分配。对于报告权威 usage 的适配器，`maxInputTokens` 是按响应计量的阈值：一个在途响应可能跨过该阈值，随后循环会在下一次请求前停止。若响应不报告 usage 且还需要另一步，运行以 `BUDGET_ACCOUNTING_UNAVAILABLE` 失败。同一错误也会停止模型支持的自动压缩，因为该辅助请求尚未计入 Agent token 计量；该请求绝不会被分发。这些限制属于这一个 Agent；启动多个 headless 子进程的调用方必须自行分配共享父预算。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-headless)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
@@ -61,11 +71,11 @@ runner 是核心 API 载体之上的直接驱动器：它通过注册表创建�
 
 ### 运行流程
 
-runner 等待整个应用结算（`ctx.get('loader')?.await()`），确保已组合的工具与适配器不会半挂载，读取共享的 [`agentDefaultModel`](../../core/agent-default-model/README.zh.md) 选择，用该 provider 与模型创建一个全新的持久化 Agent（智能体），并把任务作为普通用户消息提交。它把该 Agent 的非空推理增量流式写入 stderr、等待完全停稳，然后 flush Session，并把所属区间（从 `firstSeq` 起）折叠为最后一条非空 `assistant/message` 文本与最终 `turn/end` 原因。最后，它把最终文本写入 stdout 并请求退出。
+runner 等待整个应用结算（`ctx.get('loader')?.await()`），确保已组合的工具与适配器不会半挂载；如果未提供隔离选择，它会读取共享的 [`agentDefaultModel`](../../core/agent-default-model/README.zh.md) 选择。它用该选择与可选原生预算创建一个全新的持久化 Agent（智能体），并把任务作为普通用户消息提交。它把该 Agent 的非空推理增量流式写入 stderr、等待完全停稳，然后 flush Session，并把所属区间（从 `firstSeq` 起）折叠为最后一条非空 `assistant/message` 文本与最终 `turn/end` 原因。最后，它把最终文本写入 stdout 并请求退出。
 
 ### 叠加在 base 之上的 patch 表层
 
-patch 叠加在 `dsh-base` 之上：继承投影缓存，在基础 `system-prompt` 行上设置编码 persona，保留与 Web 表层相同的临时进程级 PTC mode 开关（`DSH_TOOLS_MODE`），禁用共享的 HMR 行，把 PTC mode 的 worker 作为核心执行能力插入，并挂载启动提供方与 runner。缓存为每个已持久化的一次性会话写入检查点，供后续消费方使用；其持久性屏障会在发布缓存行前 flush 所覆盖的日志前缀，因此可能拆分原本会合并的 JSONL 行。启动提供方（[`src/startup.ts`](src/startup.ts)）注入 `ctx.cmdlineArgs`（[`dsh-cmdline`](../../boot/cmdline/README.zh.md)），读取位置参数、打印应用自己的 `--help`，并提供 `headlessStartup`；runner 注入该服务，再从惰性配置中读取任务。
+patch 叠加在 `dsh-base` 之上：继承投影缓存，在基础 `system-prompt` 行上设置编码 persona，保留与 Web 表层相同的临时进程级 PTC mode 开关（`DSH_TOOLS_MODE`），禁用共享的 HMR 行，把 PTC mode 的 worker 作为核心执行能力插入，并挂载启动提供方与 runner。缓存为每个已持久化的一次性会话写入检查点，供后续消费方使用；其持久性屏障会在发布缓存行前 flush 所覆盖的日志前缀，因此可能拆分原本会合并的 JSONL 行。启动提供方（[`src/startup.ts`](src/startup.ts)）注入 `ctx.cmdlineArgs`（[`dsh-cmdline`](../../boot/cmdline/README.zh.md)），读取位置参数、可选选择与完整预算 flags、打印应用自己的 `--help`，并提供 `headlessStartup`；runner 注入该服务，再从惰性配置中读取这些值。
 
 ### 退出映射
 

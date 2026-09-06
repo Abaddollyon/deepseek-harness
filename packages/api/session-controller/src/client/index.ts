@@ -88,7 +88,8 @@ export const inject = [
  */
 export function apply(ctx: Context): void {
   const remotes = ctx.remote as unknown as SessionRemotes
-  const sessions = new ClientSessions(ctx, remotes)
+  const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)?.environmentId
+  const sessions = new ClientSessions(ctx, remotes, environmentId)
   ctx.remote.$on('api-session/added', (summary) => { sessions.handleSessionAdded(summary) })
   ctx.remote.$on('api-session/removed', (sessionId) => { sessions.handleSessionRemoved(sessionId) })
   ctx.remote.$on('api-session/status', (sessionId, running) => {

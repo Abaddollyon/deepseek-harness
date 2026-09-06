@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { BootPage } from './boot-page.ts'
 import { getStaticModules } from './seed.ts'
 import { STATE_LABELS } from './loader-status.ts'
+import { createClientRuntimeActivator } from './runtime-activator.ts'
 import './base.css'
 
 /** Module transport hook replaced by jsdom tests. */
@@ -76,6 +77,7 @@ export class AppWebEntry {
       const prefetching = this.prefetchImmediateTier()
       const ctx = new Context()
       this.ctx = ctx
+      ctx.provide('clientRuntimeActivator', createClientRuntimeActivator(this.modules, this.manifest))
       await this.runPluginBoot(ctx, prefetching)
       await this.mountApp(ctx)
     } catch (reason) {

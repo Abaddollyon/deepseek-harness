@@ -55,9 +55,16 @@ type WorkspaceViewActions = {
 
 /**
  * Create the workspace browser viewing store handle.
+ * @param environmentId - optional owning Host id used to isolate persisted browser state.
  * @returns the store handle (spec + type + identity + factory in one).
  */
-export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState, WorkspaceViewActions> {
+export function createWorkspaceViewStore(
+  environmentId?: string,
+): EngineStoreHandle<WorkspaceViewState, WorkspaceViewActions> {
+  const persistKey = environmentId === undefined
+    ? 'dsh.workspace.view.v6'
+    : `dsh.workspace.view.v6.${encodeURIComponent(environmentId)}`
+  if (environmentId === 'local') migrateLocalStorageKey('dsh.workspace.view.v6', persistKey)
   return defineStore({
     init: (): WorkspaceViewState => ({
       groupBy: 'workspace',
@@ -70,7 +77,7 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
     // v6 adds pinnedSessionIds; rehydration replaces the whole snapshot, so a
     // v5 blob would leave the new field undefined — the versioned key starts
     // a fresh blob instead of merging one.
-    persist: 'dsh.workspace.view.v6',
+    persist: persistKey,
     actions: {
       setGroupBy: (d, mode: SessionGroupBy) => { d.groupBy = mode },
       setOrderBy: (d, mode: SessionOrderBy) => { d.orderBy = mode },
@@ -101,4 +108,17 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       },
     },
   })
+}
+
+function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    if (localStorage.getItem(nextKey) !== null) return
+    const legacy = localStorage.getItem(legacyKey)
+    if (legacy === null) return
+    localStorage.setItem(nextKey, legacy)
+    localStorage.removeItem(legacyKey)
+  } catch {
+    // Persistence remains best-effort, matching the store engine contract.
+  }
 }

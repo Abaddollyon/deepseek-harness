@@ -788,10 +788,12 @@ export class SessionManager {
 
   /**
    * Repair one re-established Host-event generation with queryable baselines.
-   * Opened Session follow streams resume independently through API Gateway.
+   * Rebuild resident opened Session journals so a terminal failure from the
+   * previous generation cannot remain projected after the Host reconnects.
    */
   handleConnected(): void {
     void this.refreshList()
+    for (const session of this.sessions.values()) void session.resync()
     const selectedAddress = this.selected === undefined ? undefined : this.addresses.get(this.selected)
     if (selectedAddress !== undefined) void this.refreshSubagents(selectedAddress.parentSessionId)
     if (this.selected !== undefined) void this.refreshSubagents(this.selected)

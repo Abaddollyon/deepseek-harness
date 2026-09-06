@@ -1,0 +1,67 @@
+// @vitest-environment jsdom
+import { Context } from '@deepseek-ai/cordis'
+import { describe, expect, test } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
+import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
+import {
+  createEnvironmentNavigation, createEnvironmentPresentationStore,
+} from '@deepseek-ai/dsh-client-environment-runtime/client'
+import { apply, inject } from '../src/client/index.ts'
+import { ActivityToggle, EnvironmentFooterAction } from '../src/client/EnvironmentNavigation.tsx'
+
+describe('environment navigation UI seats', () => {
+  test('uses accessible SVG controls for Activity and Environments', () => {
+    let mode: 'workspaces' | 'activity' = 'workspaces'
+    const setMode = (next: typeof mode) => { mode = next }
+    const t = (key: string) => key === 'activity' ? 'Activity' : 'Environments'
+    const first = render(<ActivityToggle {...{
+      wide: true,
+      expandSidebar: () => {},
+      sidebarMode: { getSnapshot: () => mode, subscribe: () => () => {} },
+      setMode,
+      t,
+    } as never} />)
+    const bell = screen.getByRole('button', { name: 'Activity' })
+    expect(bell.getAttribute('aria-pressed')).toBe('false')
+    expect(bell.querySelector('svg[data-icon="bell"]')).not.toBeNull()
+    fireEvent.click(bell)
+    expect(mode).toBe('activity')
+    first.unmount()
+
+    render(<EnvironmentFooterAction {...{ wide: true, openOverview: () => {}, t } as never} />)
+    expect(screen.getByRole('button', { name: 'Environments' }).querySelector('svg[data-icon="server"]')).not.toBeNull()
+  })
+
+  test('registers overview and Activity below the existing shell', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry).await()
+    const slots = ctx.slots as SlotRegistry
+    ctx.provide('locale', new LocaleRuntime(ctx))
+    ctx.provide('uiSidebar', {})
+    ctx.provide('environmentNavigation', {
+      ...createEnvironmentNavigation({ kind: 'environments' }),
+      presentation: createEnvironmentPresentationStore(),
+    })
+    slots.register({
+      name: 'root',
+      children: {
+        'active.content': { kind: 'list', scope: 'root' },
+        'sidebar.workspace.section': { kind: 'list', scope: 'root' },
+        'sidebar.workspaces.header.action': { kind: 'list', scope: 'root' },
+        'sidebar.workspaces.content.overlay': { kind: 'single', scope: 'root' },
+        'sidebar.footer.action': { kind: 'list', scope: 'root' },
+      },
+    } as never, () => null)
+
+    await ctx.plugin({ apply, inject }).await()
+
+    expect(slots.spec('environment.overview.content')).toEqual({ kind: 'single', scope: 'root' })
+    expect(slots.spec('sidebar.activity')).toEqual({ kind: 'single', scope: 'root' })
+    expect(slots.entries('active.content').some(entry => entry.options.id === 'environment-overview')).toBe(true)
+    expect(slots.entries('sidebar.workspaces.header.action')).toHaveLength(1)
+    expect(slots.entries('sidebar.workspaces.content.overlay')).toHaveLength(1)
+    expect(slots.entries('sidebar.footer.action').some(entry => entry.options.id === 'environments')).toBe(true)
+    await ctx.fiber.dispose()
+  })
+})

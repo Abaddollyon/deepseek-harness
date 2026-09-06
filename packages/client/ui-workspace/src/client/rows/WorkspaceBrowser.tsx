@@ -929,6 +929,7 @@ export function WorkspaceBrowser({
   renderSlot,
   t,
 }: WorkspaceBrowserProps) {
+  const [underlyingHidden, setUnderlyingHidden] = useState(false)
   const home = useHostInfo(info => info.home)
   const pendingInteractions = useSessionPendingInteraction(state => state)
   const workspaces = useWorkspaces(state => state.items)
@@ -1254,6 +1255,7 @@ export function WorkspaceBrowser({
           </div>
         )}
         <div className={clsx(css.headerActions, wide && searchExpanded && css.headerActionsHidden)}>
+          {renderSlot('sidebar.workspaces.header.action', { wide, expandSidebar })}
           {wide && (
             <ViewOptionsMenu
               groupBy={groupBy}
@@ -1322,73 +1324,81 @@ export function WorkspaceBrowser({
       {/* Always-mounted seat keeps the region's flex slot while the list
           itself is wide-only. */}
       <div className={css.listArea}>
-        {wide && (normalizedQuery !== ''
-          ? (
-            <SearchResults
-              useSessions={useSessions}
-              open={open}
-              workspaces={workspaces}
-              archivedSessionIds={archivedSessionIds}
-              pendingInteractions={pendingInteractions}
-              query={normalizedQuery}
-              remote={remoteSearch}
-              resultLimit={searchResultLimit}
-              t={t}
-            />
-          )
-          : groupBy === 'flat'
+        <div
+          className={css.listContent}
+          aria-hidden={underlyingHidden || undefined}
+          data-obscured={underlyingHidden || undefined}
+          {...(underlyingHidden ? { inert: '' as never } : {})}
+        >
+          {wide && (normalizedQuery !== ''
             ? (
-              <FlatList
-                useSessions={useSessions} open={open} forkSession={forkSession}
-                onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+              <SearchResults
+                useSessions={useSessions}
+                open={open}
+                workspaces={workspaces}
                 archivedSessionIds={archivedSessionIds}
                 pendingInteractions={pendingInteractions}
-                orderBy={orderBy}
-                pinnedSessionIds={pinnedSessionIds}
-                togglePinnedSession={actions.togglePinnedSession}
-                sessionOrderByAccount={sessionOrderByAccount}
-                sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
-                syncSessionOrderAccount={actions.syncSessionOrderAccount}
-                setSessionOrder={actions.setSessionOrder}
+                query={normalizedQuery}
+                remote={remoteSearch}
+                resultLimit={searchResultLimit}
                 t={t}
               />
             )
-            : (
-              <SessionTree
-                useSessions={useSessions}
-                onSessionRename={onSessionRename}
-                onSessionArchive={onSessionArchive}
-                forkSession={forkSession}
-                workspaces={workspaces}
-                pendingInteractions={pendingInteractions}
-                groupExpansion={groupExpansion}
-                setGroupExpanded={actions.setGroupExpanded}
-                sessionOrderByAccount={sessionOrderByAccount}
-                sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
-                syncSessionOrderAccount={actions.syncSessionOrderAccount}
-                setSessionOrder={actions.setSessionOrder}
-                archivedSessionIds={archivedSessionIds}
-                pinnedSessionIds={pinnedSessionIds}
-                togglePinnedSession={actions.togglePinnedSession}
-                startSession={startSession}
-                createLooseSession={createLooseSession}
-                open={open}
-                insertWorkspaceBefore={insertWorkspaceBefore}
-                insertSessionBefore={insertSessionBefore}
-                orderBy={orderBy}
-                home={home}
-                t={t}
-                onRenameRequest={(workspaceId, currentTitle) => {
-                  setRenameTarget({ workspaceId, currentTitle })
-                  setRenameDraft(currentTitle)
-                  setRenameError(null)
-                }}
-                onDeleteRequest={(workspaceId, title) => {
-                  setDeleteTarget({ workspaceId, title })
-                  setDeleteError(null)
-                }}
-              />
-            ))}
+            : groupBy === 'flat'
+              ? (
+                <FlatList
+                  useSessions={useSessions} open={open} forkSession={forkSession}
+                  onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+                  archivedSessionIds={archivedSessionIds}
+                  pendingInteractions={pendingInteractions}
+                  orderBy={orderBy}
+                  pinnedSessionIds={pinnedSessionIds}
+                  togglePinnedSession={actions.togglePinnedSession}
+                  sessionOrderByAccount={sessionOrderByAccount}
+                  sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
+                  syncSessionOrderAccount={actions.syncSessionOrderAccount}
+                  setSessionOrder={actions.setSessionOrder}
+                  t={t}
+                />
+              )
+              : (
+                <SessionTree
+                  useSessions={useSessions}
+                  onSessionRename={onSessionRename}
+                  onSessionArchive={onSessionArchive}
+                  forkSession={forkSession}
+                  workspaces={workspaces}
+                  pendingInteractions={pendingInteractions}
+                  groupExpansion={groupExpansion}
+                  setGroupExpanded={actions.setGroupExpanded}
+                  sessionOrderByAccount={sessionOrderByAccount}
+                  sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
+                  syncSessionOrderAccount={actions.syncSessionOrderAccount}
+                  setSessionOrder={actions.setSessionOrder}
+                  archivedSessionIds={archivedSessionIds}
+                  pinnedSessionIds={pinnedSessionIds}
+                  togglePinnedSession={actions.togglePinnedSession}
+                  startSession={startSession}
+                  createLooseSession={createLooseSession}
+                  open={open}
+                  insertWorkspaceBefore={insertWorkspaceBefore}
+                  insertSessionBefore={insertSessionBefore}
+                  orderBy={orderBy}
+                  home={home}
+                  t={t}
+                  onRenameRequest={(workspaceId, currentTitle) => {
+                    setRenameTarget({ workspaceId, currentTitle })
+                    setRenameDraft(currentTitle)
+                    setRenameError(null)
+                  }}
+                  onDeleteRequest={(workspaceId, title) => {
+                    setDeleteTarget({ workspaceId, title })
+                    setDeleteError(null)
+                  }}
+                />
+              ))}
+        </div>
+        {renderSlot('sidebar.workspaces.content.overlay', { wide, expandSidebar, setUnderlyingHidden })}
       </div>
 
       <Modal

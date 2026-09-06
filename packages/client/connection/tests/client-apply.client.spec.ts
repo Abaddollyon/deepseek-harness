@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   apply,
+  createConnectionHandle,
   type ClientTransportHooks,
   type ConnectionGenerationSource,
   type ConnectionHandle,
@@ -71,6 +72,49 @@ async function mount(): Promise<ConnectionHandle> {
 }
 
 describe('connection client apply', () => {
+  it('creates independently injected RPC carriers without reading the page global', async () => {
+    const called: string[] = []
+    const transport = (name: string): ClientTransportHooks => ({
+      fetch: async (_url, init) => {
+        called.push(name)
+        if (typeof init.body !== 'string') throw new Error('expected string request body')
+        const request = JSON.parse(init.body) as { rpcId: string }
+        return new Response(JSON.stringify({
+          type: 'server-response',
+          rpcId: request.rpcId,
+          result: { ok: true, value: name },
+        }))
+      },
+    })
+    ;(globalThis as Win).__DSH_TRANSPORT__ = transport('global')
+
+    const local = createConnectionHandle(transport('local'))
+    const sigil = createConnectionHandle(transport('sigil'))
+
+    await expect(local.rpc.call('/api', 'fixture/read', {})).resolves.toEqual({ ok: true, value: 'local' })
+    await expect(sigil.rpc.call('/api', 'fixture/read', {})).resolves.toEqual({ ok: true, value: 'sigil' })
+    expect(called).toEqual(['local', 'sigil'])
+  })
+
+  it('keeps an explicit runtime transport authoritative on fixture pages', async () => {
+    ;(globalThis as Win).location = { hostname: '127.0.0.1', search: '?fixture' }
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (typeof init.body !== 'string') throw new Error('expected string request body')
+      const request = JSON.parse(init.body) as { rpcId: string }
+      return new Response(JSON.stringify({
+        type: 'server-response',
+        rpcId: request.rpcId,
+        result: { ok: true, value: 'remote-runtime' },
+      }))
+    })
+
+    const handle = createConnectionHandle({ fetch })
+
+    await expect(handle.rpc.call('/api', 'fixture/read', {}))
+      .resolves.toEqual({ ok: true, value: 'remote-runtime' })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('treats a runtime without browser location as local', async () => {
     delete (globalThis as Win).location
     expect((await mount()).isLoopback).toBe(true)
@@ -80,6 +124,17 @@ describe('connection client apply', () => {
     ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
     const handle = await mount()
     expect(handle.isLoopback).toBe(true)
+  })
+
+  it('provides an explicit transport factory for independent runtimes', async () => {
+    const ctx = new Context()
+    await ctx.plugin({ apply, inject: [] })
+    const transport: ClientTransportHooks = { fetch: vi.fn() }
+
+    const handle = ctx.connectionFactory.create(transport)
+
+    expect(handle).not.toBe(ctx.connection)
+    await ctx.fiber.dispose()
   })
 
   it('selects the fixture RPC transport under ?fixture', async () => {

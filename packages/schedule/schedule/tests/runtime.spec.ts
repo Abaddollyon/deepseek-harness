@@ -61,6 +61,7 @@ async function harness(): Promise<RuntimeHarness> {
   const agent: Agent = {
     id: session.id,
     options: {},
+    hasExecutionBudget: false,
     session,
     inbox,
     status: 'idle',

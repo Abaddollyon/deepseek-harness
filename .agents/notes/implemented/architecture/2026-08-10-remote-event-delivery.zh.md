@@ -74,7 +74,7 @@ $on<Event extends TypertRemoteEvent>(event: Event, listener: TypertClientEventLi
 
 物理 mux 断开会让 logical stream 以 `RemoteStreamCarrierError` 结束；Host 返回的 Remote stream error、意外正常结束、非 ready 首项或畸形事件项也会结束当前 generation。Connection 撤回该 generation，在退避后重开 `$events`；Gateway mux 只负责重建物理 WebSocket。转发事件不重放；凡正确性依赖恢复的状态，owner 必须另有查询、cursor 或 opening baseline，不能把 `$on` 当作可靠日志。
 
-Client 以 Remote 实例私有 Cordis key 分发。普通 `emit` 使用 `parallel()` 并隔离 listener 失败；Agent-scoped `waterfall` 在解析出的 Agent Context 上使用 `waterfall()`，允许结果、拒绝或 `next()` 委托。两类注册都归属调用方 fiber，且 Host 事件不会触发 Client 本地同名事件。
+Client 以 Remote 实例私有 Cordis key 分发。普通 `emit` 使用 `parallel()` 并隔离 listener 失败；Agent-scoped `waterfall` 在解析出的 Agent Context 上使用 `waterfall()`，允许结果、拒绝或 `next()` 委托。两类注册都归属调用方 fiber，且 Host 事件不会触发 Client 本地同名事件。当隔离 Cordis root 中的 presentation 使用投影的 Remote 服务时，订阅注册到该 Remote 实例所属的事件树，而 disposer 仍附着在 presentation fiber 上。这样，解析出的 Agent Context 与 listener 位于同一分派树中，同时不会延长 runtime 服务的生命周期。
 
 ### 名单：两个 face 共读的同一份声明
 

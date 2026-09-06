@@ -29,7 +29,7 @@ Mount exactly one directory-picker backend and let the workspace flow drive it: 
 
 ### Choosing a backend
 
-The [native backend](../directory-picker-native/README.md) is the right choice when the operator sits at the host's display: `directoryPicker/pick` opens one OS chooser and returns the chosen absolute path, or `null` on cancel. The [browse backend](../directory-picker-browse/README.md) works everywhere — it lists one directory level and creates child directories from the browser, so remote clients that cannot reach an OS dialog still pick a workspace. When the host situation varies between boots, compose the [adaptive chooser](../directory-picker-auto/README.md), which resolves the situation once at boot and mounts the matching backend.
+The [native backend](../directory-picker-native/README.md) is the right choice when the operator sits at the host's display: `directoryPicker/pick` opens one OS chooser and returns the chosen absolute path, or `null` on cancel. The [browse adapter](../directory-picker-browse/README.md) projects the independent `ctx.directoryBrowser` service into the legacy browse capability. Remote owners should call the separate `directoryBrowser/*` namespace, which remains available even when this picker is native. When the host situation varies between boots, compose the [adaptive chooser](../directory-picker-auto/README.md), which resolves the interactive picker once at boot.
 
 ### The capability contract
 

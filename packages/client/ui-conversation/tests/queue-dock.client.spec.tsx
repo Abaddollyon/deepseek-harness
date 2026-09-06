@@ -89,6 +89,7 @@ function kitFor(snapshot: SessionSnapshot, injected: Partial<QueueDockInjected> 
     updateQueue: vi.fn(() => Promise.resolve()),
     notify: vi.fn(),
     loadImage: vi.fn(() => Promise.resolve('blob:unused')),
+    connectionReady: createSnapshotStore(true),
     ...injected,
   }
 }
@@ -388,6 +389,33 @@ describe('QueueDock', () => {
     })
   })
 
+  it('blocks every queue write offline and restores them after reconnect', async () => {
+    const snap = snapshotWith([row('i-ready', 'before')])
+    const source = liveSession(snap)
+    const connectionReady = createSnapshotStore(false)
+    const updateQueue = vi.fn(() => Promise.resolve())
+    const view = render(
+      <QueueDock {...kitFor(snap, { connectionReady, updateQueue })} useSession={source.useSession} />,
+    )
+
+    fireEvent.click(view.getByLabelText('编辑排队消息'))
+    fireEvent.change(view.getByLabelText('编辑排队消息'), { target: { value: 'after' } })
+    const save = view.getByLabelText('保存排队消息') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    fireEvent.click(save)
+    expect(updateQueue).not.toHaveBeenCalled()
+    fireEvent.click(view.getByLabelText('取消编辑'))
+    expect((view.getByLabelText('删除排队消息') as HTMLButtonElement).disabled).toBe(true)
+    expect((view.getByLabelText('插话发送') as HTMLButtonElement).disabled).toBe(true)
+
+    act(() => { connectionReady.set(true) })
+    expect((view.getByLabelText('删除排队消息') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(view.getByLabelText('删除排队消息'))
+    await waitFor(() => {
+      expect(updateQueue).toHaveBeenCalledExactlyOnceWith(iid('i-ready'), { kind: 'remove' })
+    })
+  })
+
   it('strictly steers complete row content only while the agent is running', async () => {
     const running = snapshotWith([row('i-steer', null, 'image [image]')])
     const source = liveSession(running)
@@ -480,7 +508,7 @@ describe('QueueDock', () => {
     expect(queueDockEntry.inject).toEqual(['slots', 'conversation', 'sessions', 'uiConversation'])
     const register = vi.fn(() => () => undefined)
     const inject = vi.fn((_name: string, callback: () => () => void) => callback())
-    queueDockEntry.apply({ slots: { inject, register } } as never)
+    queueDockEntry.apply({ get: () => undefined, slots: { inject, register } } as never)
     expect(inject).toHaveBeenCalledWith('conversation.input.dock', expect.any(Function))
     expect(register).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'conversation.input.dock', id: 'queue', order: 20 }),

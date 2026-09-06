@@ -143,6 +143,23 @@ export interface ConnectionHandle {
   start(sinks: ConnectionSinks, config?: ConnectionConfig): ConnectionLoop
 }
 
+/** Factory for independent Connection handles over caller-owned transports. */
+export interface ConnectionFactory {
+  /**
+   * Create one Connection handle without consulting the page-global transport.
+   * @param transport - carrier hooks owned by the environment runtime.
+   * @returns an independent Connection handle over that transport.
+   */
+  create(transport: ClientTransportHooks): ConnectionHandle
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Factory used by independent environment runtimes. */
+    connectionFactory: ConnectionFactory
+  }
+}
+
 /** Controls retained by the sole owner of a running connection loop. */
 export interface ConnectionLoop {
   /** Stop the loop and withdraw its active generation. */
@@ -178,14 +195,15 @@ function watchBrowserNetwork(controller: ConnectionController): () => void {
 }
 
 /**
- * Client plugin body: pick the api by page mode and provide ctx.connection.
- * @param ctx - client cordis context.
+ * Create one Connection handle over an explicitly owned transport.
+ * @param transportOverride - runtime transport; omission retains the page-global local path.
+ * @returns independent Connection handle with its own generation and loop owner.
  */
-export function apply(ctx: Context): void {
+export function createConnectionHandle(transportOverride?: ClientTransportHooks): ConnectionHandle {
   const pageLocation = typeof location === 'undefined' ? undefined : location
   const fixture = pageLocation !== undefined && new URLSearchParams(pageLocation.search).has('fixture')
-  const fixtureRpc = fixture ? createFixtureConnectionRpc() : undefined
-  const transport = (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
+  const fixtureRpc = transportOverride === undefined && fixture ? createFixtureConnectionRpc() : undefined
+  const transport = transportOverride ?? (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
   const rpc = fixtureRpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
@@ -287,5 +305,14 @@ export function apply(ctx: Context): void {
       }
     },
   }
-  ctx.provide('connection', handle)
+  return handle
+}
+
+/**
+ * Client plugin body: create the page's local Connection and provide it on the client root.
+ * @param ctx - client cordis context.
+ */
+export function apply(ctx: Context): void {
+  ctx.provide('connectionFactory', { create: createConnectionHandle })
+  ctx.provide('connection', createConnectionHandle())
 }

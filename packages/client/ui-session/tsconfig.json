@@ -21,6 +21,9 @@
       "path": "../store"
     },
     {
+      "path": "../environment-runtime"
+    },
+    {
       "path": "../ui-renderer"
     },
     {

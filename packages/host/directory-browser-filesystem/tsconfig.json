@@ -1,0 +1,1 @@
+{"extends":"../../../tsconfig.base.json","compilerOptions":{"rootDir":"src","outDir":"lib/types","types":["node"]},"include":["src"],"references":[{"path":"../../../vendor/cordis"},{"path":"../../../vendor/schemastery"},{"path":"../directory-browser"},{"path":"../directory-picker"}]}

@@ -567,6 +567,46 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByRole('tab', { name: 'New view' }).getAttribute('aria-selected')).toBe('false')
   })
 
+  it('publishes the stable active view id for view-owned pointer chrome', () => {
+    const b = mount(sessionSnapshotOf())
+    const header = b.view.container.querySelector('header')
+    expect(header?.getAttribute('data-active-view')).toBe('chat')
+
+    fireEvent.click(b.view.getByRole('tab', { name: 'Trajectory' }))
+    expect(header?.getAttribute('data-active-view')).toBe('trajectory')
+  })
+
+  it('moves and activates native view tabs with roving keyboard focus', () => {
+    const viewTabs: ViewTab[] = [
+      { id: 'chat', label: 'Chat' },
+      { id: 'trajectory', label: 'Trajectory' },
+      { id: 'tasks', label: 'Tasks' },
+    ]
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { viewTabs })
+    const chat = b.view.getByRole('tab', { name: 'Chat' }) as HTMLButtonElement
+    const trajectory = b.view.getByRole('tab', { name: 'Trajectory' }) as HTMLButtonElement
+    const tasks = b.view.getByRole('tab', { name: 'Tasks' }) as HTMLButtonElement
+
+    expect(chat.tabIndex).toBe(0)
+    expect(trajectory.tabIndex).toBe(-1)
+    chat.focus()
+    fireEvent.keyDown(chat, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(trajectory)
+    expect(trajectory.getAttribute('aria-selected')).toBe('true')
+    expect(trajectory.tabIndex).toBe(0)
+
+    fireEvent.keyDown(trajectory, { key: 'End' })
+    expect(document.activeElement).toBe(tasks)
+    expect(tasks.getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.keyDown(tasks, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(chat)
+    expect(chat.getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.keyDown(chat, { key: 'Home' })
+    expect(document.activeElement).toBe(chat)
+  })
+
   it('rolls the pending workspace label back when switching fails', async () => {
     const selectWorkspace = vi.fn(async () => { throw new Error('connect failed') })
     const b = mount(

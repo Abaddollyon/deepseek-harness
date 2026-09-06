@@ -101,6 +101,9 @@
     # Resolve bind host, SSH launch, and display once at boot, then mount the
     # matching dual-face directory picker. Mount -native or -browse directly in
     # an overlay to pin the interaction.
+    - id: directory-browser
+      name: '@deepseek-ai/dsh-host-directory-browser-filesystem'
+
     - id: directory-picker
       name: '@deepseek-ai/dsh-host-directory-picker-auto'
 
@@ -192,6 +195,9 @@
         # its literals, for example: ['app.internal', ...ctx.webRuntime.trustedHosts].
         trustedHosts: !!js ctx.webRuntime.trustedHosts
 
+    - id: environment-runtime
+      name: '@deepseek-ai/dsh-client-environment-runtime'
+
     - id: api-remotes
       name: '@deepseek-ai/dsh-api-remotes'
 
@@ -215,6 +221,9 @@
 
     - id: ui-sidebar
       name: '@deepseek-ai/dsh-client-ui-sidebar'
+
+    - id: ui-environment-navigation
+      name: '@deepseek-ai/dsh-client-ui-environment-navigation'
 
     - id: ui-settings
       name: '@deepseek-ai/dsh-client-ui-settings'

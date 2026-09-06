@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
-import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { apply, Config, internals } from '../src/index.ts'
@@ -50,18 +50,21 @@ function appendTurn(
 /** Mount the real registries around a small scripted Agent factory. */
 async function bench(script: Script): Promise<{
   ctx: Context
+  createOptions(): CreateAgentOptions | undefined
   output(): { out: string; err: string; order: string[] }
-  run(): Promise<{ code: number; out: string; err: string; order: string[] }>
+  run(config?: Parameters<typeof apply>[1]): Promise<{ code: number; out: string; err: string; order: string[] }>
 }> {
   const ctx = new Context()
   let out = ''
   let err = ''
+  let createOptions: CreateAgentOptions | undefined
   const order: string[] = []
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'test-provider', model: 'test-model' })
   ctx.agents.setFactory({
     async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
+      createOptions = options
       const session = ctx.sessions.create(options.sessionId, {
         ...options.meta === undefined ? {} : { meta: options.meta },
       })
@@ -95,21 +98,46 @@ async function bench(script: Script): Promise<{
   })
   return {
     ctx,
+    createOptions: () => createOptions,
     output: () => ({ out, err, order: [...order] }),
-    run: async () => {
+    run: async (config: Parameters<typeof apply>[1] = { task: 'do the thing' }) => {
       ctx.on('session/flush', () => { order.push('flush') })
       internals.stdout = { write: (chunk: string) => { out += chunk; return true } }
       internals.stderr = { write: (chunk: string) => { err += chunk; return true } }
       const exited = new Promise<number>((resolve) => {
         ctx.provide('appExit', (code: number) => { order.push('exit'); resolve(code) })
       })
-      apply(ctx, { task: 'do the thing' })
+      apply(ctx, config)
       return { code: await exited, out, err, order }
     },
   }
 }
 
 describe('headless runner', () => {
+  it('forwards a configured native budget to Agent creation', async () => {
+    const test = await bench({
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'done', true) },
+    })
+    const budget = { maxTurns: 4, maxInputTokens: 1200, maxOutputTokens: 300, maxRetries: 0 }
+    expect(await test.run({ task: 'do the thing', budget })).toMatchObject({ code: 0 })
+    expect(test.createOptions()?.agentOptions?.budget).toEqual(budget)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('forwards a complete per-run model selection to Agent creation', async () => {
+    const test = await bench({
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'done', true) },
+    })
+    await test.run({
+      task: 'do the thing',
+      selection: { provider: 'isolated', model: 'selected', reasoningEffort: ReasoningEffortId('high') },
+    })
+    expect(test.createOptions()?.agentOptions).toMatchObject({
+      provider: 'isolated', model: 'selected', reasoningEffort: 'high',
+    })
+    await test.ctx.fiber.dispose()
+  })
+
   it('aggregates the final text across the complete idle-to-idle interval and flushes before exit', async () => {
     const test = await bench({
       before(session) {
@@ -395,5 +423,9 @@ describe('headless runner', () => {
   it('validates config: the task is required', () => {
     expect(() => new Config({} as never)).toThrow()
     expect(new Config({ task: 'x' })).toEqual({ task: 'x' })
+    expect(() => new Config({
+      task: 'x',
+      budget: { maxTurns: 1, maxInputTokens: 1, maxOutputTokens: 1, maxRetries: -1 },
+    })).toThrow()
   })
 })

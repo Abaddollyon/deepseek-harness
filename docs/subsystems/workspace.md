@@ -133,6 +133,58 @@ Sessions get their cwd at create time from whoever creates them, not from this r
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxdirectorybrowser--directorybrowser-abstract-seam"></a>
+
+### `ctx.directoryBrowser` — `DirectoryBrowser` (abstract seam)
+
+Independent browsing seam used by remote and in-app Workspace pickers.
+
+```ts cordis-catalog
+/**
+ * List one bounded directory level without opening operating-system UI.
+ * @param path - absolute directory to list; absent lists the provider root.
+ * @param signal - caller lifetime used to cancel an in-progress scan.
+ * @returns the directory entries and navigable ancestry.
+ */
+abstract list(path?: string, signal?: AbortSignal): Promise<DirectoryListing>
+
+/**
+ * Create one child directory below an existing parent.
+ * @param path - absolute existing parent directory.
+ * @param name - single non-blank child path segment.
+ * @returns the created directory's canonical absolute path.
+ */
+abstract createDirectory(path: string, name: string): Promise<string>
+```
+
+Source: [`packages/host/directory-browser/src/index.ts`](../../packages/host/directory-browser/src/index.ts)
+
+<a id="ctxdirectorybrowsercontroller--directorybrowsercontroller"></a>
+
+### `ctx.directoryBrowserController` — `DirectoryBrowserController`
+
+Host owner of the display-free `ctx.remote.directoryBrowser` namespace.
+
+```ts cordis-catalog
+/**
+ * List one bounded directory level for an in-app client.
+ * @param path - absolute directory to list; absent lists the provider root.
+ * @param signal - caller lifetime used to cancel an in-progress scan.
+ * @returns the directory entries and navigable ancestry.
+ */
+@Remote('list') async list(path: string | undefined, signal: AbortSignal): Promise<DirectoryListing>
+
+/**
+ * Create one child directory for an in-app client.
+ * @param path - absolute existing parent directory.
+ * @param name - single non-blank child path segment.
+ * @returns the created directory's canonical absolute path.
+ */
+@Remote('createDirectory') async createDirectory(path: string, name: string): Promise<string>
+```
+
+Source: [`packages/api/workspace-controller/src/directory-browser.ts`](../../packages/api/workspace-controller/src/directory-browser.ts)
+
 <a id="ctxdirectorypicker--directorypicker-abstract-seam"></a>
 
 ### `ctx.directoryPicker` — `DirectoryPicker` (abstract seam)

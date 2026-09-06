@@ -1656,6 +1656,81 @@ describe('Client Typert API', () => {
     await client.dispose()
   })
 
+  it('bridges projected listeners into their owning Remote event tree until presentation disposal', async () => {
+    const first = await eventBench()
+    const second = await eventBench()
+    const firstTarget = first.ctx.extend()
+    const secondTarget = second.ctx.extend()
+    first.ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === firstTarget ? agentId('agent-projected') : undefined,
+      resolve: id => id === 'agent-projected' ? firstTarget : undefined,
+    })
+    second.ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === secondTarget ? agentId('agent-projected') : undefined,
+      resolve: id => id === 'agent-projected' ? secondTarget : undefined,
+    })
+    const presentation = new Context()
+    presentation.reflect.provide('remote', first.ctx.get('remote'))
+    let removeProjected = (): void => {}
+    const listener = presentation.plugin(Object.assign(
+      (ctx: Context) => {
+        removeProjected = ctx.remote.$on('fixture/approval', async () => 'allowed')
+      },
+      { inject: ['remote'] },
+    ))
+    await listener
+
+    first.carrier.emit(approvalFrame('event-projected-owner', 'agent-projected', 'owner'))
+    second.carrier.emit(approvalFrame('event-projected-other', 'agent-projected', 'other'))
+    await vi.waitFor(() => {
+      expect(first.call).toHaveBeenCalledTimes(1)
+      expect(second.call).toHaveBeenCalledTimes(1)
+    })
+    expect(first.call).toHaveBeenCalledWith(
+      '/api',
+      '$events/result',
+      {
+        args: {
+          clientId: 'event-client-1',
+          eventId: 'event-projected-owner',
+          outcome: { kind: 'result', value: 'allowed' },
+        },
+      },
+      expect.any(AbortSignal),
+    )
+    expect(second.call).toHaveBeenCalledWith(
+      '/api',
+      '$events/result',
+      {
+        args: {
+          clientId: 'event-client-1',
+          eventId: 'event-projected-other',
+          outcome: { kind: 'next' },
+        },
+      },
+      expect.any(AbortSignal),
+    )
+
+    await listener.dispose()
+    removeProjected()
+    first.carrier.emit(approvalFrame('event-projected-disposed', 'agent-projected', 'disposed'))
+    await vi.waitFor(() => { expect(first.call).toHaveBeenCalledTimes(2) })
+    expect(first.call).toHaveBeenLastCalledWith(
+      '/api',
+      '$events/result',
+      {
+        args: {
+          clientId: 'event-client-1',
+          eventId: 'event-projected-disposed',
+          outcome: { kind: 'next' },
+        },
+      },
+      expect.any(AbortSignal),
+    )
+    await Promise.all([first.client.dispose(), second.client.dispose()])
+    await presentation.fiber.dispose()
+  })
+
   it('returns a scoped listener rejection to the Host', async () => {
     const call = vi.fn<ConnectionHandle['rpc']['call']>()
       .mockResolvedValue({ ok: true, value: undefined })

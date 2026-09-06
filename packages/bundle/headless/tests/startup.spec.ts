@@ -53,6 +53,8 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
     `  inject: [${HEADLESS_STARTUP_SERVICE}]`,
     '  config:',
     '    task: !!js ctx.headlessStartup.task',
+    '    budget: !!js ctx.headlessStartup.budget',
+    '    selection: !!js ctx.headlessStartup.selection',
     '- id: headless-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
     '',
@@ -86,6 +88,75 @@ describe('headless command-line provider', () => {
     expect(task).toEqual({ task: 'run the tests' })
     expect(observed.runnerConfig).toEqual({ task: 'run the tests' })
     expect(observed.exits).toEqual([])
+  })
+
+  it('projects a complete native budget from command-line flags', async () => {
+    const { task, observed } = await bootStartup([
+      '--max-turns', '4',
+      '--max-input-tokens', '1200',
+      '--max-output-tokens', '300',
+      '--max-retries', '0',
+      'run', 'the', 'tests',
+    ])
+    const expected = {
+      task: 'run the tests',
+      budget: { maxTurns: 4, maxInputTokens: 1200, maxOutputTokens: 300, maxRetries: 0 },
+    }
+    expect(task).toEqual(expected)
+    expect(observed.runnerConfig).toEqual(expected)
+  })
+
+  it('projects an isolated provider, model, and explicit reasoning selection', async () => {
+    const { task, observed } = await bootStartup([
+      '--provider', 'acme', '--model', 'large', '--reasoning-effort', 'high', 'run',
+    ])
+    const expected = { task: 'run', selection: { provider: 'acme', model: 'large', reasoningEffort: 'high' } }
+    expect(task).toEqual(expected)
+    expect(observed.runnerConfig).toEqual(expected)
+  })
+
+  it('normalizes provider-default to an absent effort on an explicit route', async () => {
+    const { task } = await bootStartup([
+      '--provider', 'acme', '--model', 'large', '--reasoning-effort', 'provider-default', 'run',
+    ])
+    expect(task).toEqual({ task: 'run', selection: { provider: 'acme', model: 'large' } })
+  })
+
+  it('keeps reasoning absent when an explicit route omits the flag', async () => {
+    const { task } = await bootStartup(['--provider', 'acme', '--model', 'large', 'run'])
+    expect(task).toEqual({ task: 'run', selection: { provider: 'acme', model: 'large' } })
+  })
+
+  it.each([
+    { args: ['--provider', 'acme', 'run'] },
+    { args: ['--model', 'large', 'run'] },
+    { args: ['--reasoning-effort', 'high', 'run'] },
+  ])('rejects an incomplete per-run model selection: $args', async ({ args }) => {
+    const { task, observed } = await bootStartup(args)
+    expect(observed.out).toContain('--provider and --model must be provided together')
+    expect(task).toBeUndefined()
+  })
+
+  it('rejects a partial native budget', async () => {
+    const { task, observed } = await bootStartup(['--max-turns', '4', 'run'])
+    expect(observed.out).toContain('all four budget options must be provided together')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('rejects non-finite and out-of-range native budget flags', async () => {
+    const { task, observed } = await bootStartup([
+      '--max-turns', 'Infinity',
+      '--max-input-tokens', '1',
+      '--max-output-tokens', '1',
+      '--max-retries', '0',
+      'run',
+    ])
+    expect(observed.out).toContain('positive safe integer')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
   })
 
   it.each([{ args: [] }, { args: ['   '] }])('rejects an invocation with no non-whitespace task ($args)', async ({ args }) => {

@@ -190,6 +190,11 @@ describe('AppFrame', () => {
     expect(slotCalls.find(c => c.key === 'details')!.props).toEqual({})
   })
 
+  it('keeps a root-scoped active content seat inside the center column', () => {
+    const { slotCalls } = mountFrame()
+    expect(slotCalls.find(c => c.key === 'active.content')?.props).toEqual({})
+  })
+
   it('keeps the conversation slot mounted while no session is current', () => {
     // No current session: the session-maybe conversation shell owns the New
     // Session view itself — the center column renders it unconditionally.

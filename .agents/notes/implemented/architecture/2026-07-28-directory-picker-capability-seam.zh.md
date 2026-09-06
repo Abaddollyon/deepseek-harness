@@ -42,6 +42,8 @@ web GUI 的「打开本地文件夹」流程被焊死在一种交互上：`host.
 
 ## 后果
 
+**2026-09-06 远程所有方修订。** 文件系统原语现在位于第二个始终可寻址的 `ctx.directoryBrowser` Service Definition 与 `directoryBrowser/*` Remote 命名空间之后。`directory-browser-filesystem` 持有有界实现；`directory-picker-browse` 成为该服务上的兼容适配器。因此自适应 picker 可以为本地窗口保留原生 `ctx.directoryPicker`，同时让拥有流程的远程客户端使用应用内浏览器，且不调用主机 OS 界面。迁移期间，旧的 `directoryPicker/list` 与 `createDirectory` 方法继续作为兼容委托。
+
 - `cordis.yml` 决定交互形态；`apps/cli` 挂 [`-auto` 选择器](../feature/2026-07-29-directory-picker-adaptive-default.zh.md)，它在启动时判定宿主处境并自行挂载 `-native` 或 `-browse`，一行仍同时切换后端与 UI；直接组合某个后端行即固定交互。
 - 协议公开生成的 `directoryPicker/list` 与 `directoryPicker/createDirectory` 方法及四个错误码；Connection fixture 提供确定性浏览树与 `directoryPicker/pick` 结果供无密钥组装测试使用。
 - 未来的新交互（或提供 `native` 交互的 Electron 提供方）只是一个双面后端包——无需网关手术，也不动 ui-workspace。

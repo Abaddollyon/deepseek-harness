@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { ScheduleId } from '@deepseek-ai/dsh-schedule'
@@ -571,6 +571,52 @@ describe('user-pinned threads', () => {
 })
 
 describe('createWorkspaceViewStore', () => {
+  it('keeps persisted workspace views independent for equal Session ids on different Hosts', () => {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+    })
+    try {
+      const local = createWorkspaceViewStore('local').create()
+      const remote = createWorkspaceViewStore('sigil').create()
+      local.actions.setGroupBy('flat')
+      remote.actions.setOrderBy('manual')
+
+      expect(createWorkspaceViewStore('local').create().getSnapshot()).toMatchObject({
+        groupBy: 'flat', orderBy: 'updated',
+      })
+      expect(createWorkspaceViewStore('sigil').create().getSnapshot()).toMatchObject({
+        groupBy: 'workspace', orderBy: 'manual',
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('migrates the legacy workspace view into the local Host key', () => {
+    const values = new Map<string, string>([
+      ['dsh.workspace.view.v6', JSON.stringify({
+        groupBy: 'flat', orderBy: 'manual', groupExpansion: {},
+        sessionOrderByAccount: {}, sessionUpdatedAtByAccount: {}, pinnedSessionIds: ['same'],
+      })],
+    ])
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+      removeItem: (key: string) => { values.delete(key) },
+    })
+    try {
+      expect(createWorkspaceViewStore('local').create().getSnapshot()).toMatchObject({
+        groupBy: 'flat', orderBy: 'manual', pinnedSessionIds: ['same'],
+      })
+      expect(values.has('dsh.workspace.view.v6')).toBe(false)
+      expect(values.has('dsh.workspace.view.v6.local')).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('stores grouping, ordering, Workspace expansion, and recent-session view order', () => {
     const store = createWorkspaceViewStore().create()
     expect(store.getSnapshot().groupBy).toBe('workspace')
