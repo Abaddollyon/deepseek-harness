@@ -19,16 +19,17 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ConnectionSource, ReconnectConfig } from './connection.ts'
+import { CONNECTION_ID_PATTERN } from './connections.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
 export type { ConnectionInvalidation, ConnectionSource, ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
-export { NativeMcpConnectionsService, SETTINGS_NS, resolveSpec } from './connections.ts'
+export { CONNECTION_ID_PATTERN, NativeMcpConnectionsService, SETTINGS_NS, createOAuthEngine, resolveSpec } from './connections.ts'
 export type {
   McpConnectionBinding, McpConnectionEngine, McpConnectionEngineFactory, McpConnectionEngineInit,
   McpConnectionEngineStatus, McpConnectionEntry, McpConnectionsSettings, McpConnectionStatusView,
-  NativeMcpConnectionsInternals, ResolvedMcpConnectionSpec,
+  McpOAuthChange, McpOAuthChangeEvent, McpOAuthRevocation, NativeMcpConnectionsInternals, ResolvedMcpConnectionSpec,
 } from './connections.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -99,9 +100,6 @@ export interface StreamableHttpConfig {
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
 }
-
-/** Connection id grammar: a credential-key segment, so it can address the Host's grant record. */
-const CONNECTION_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
 
 /**
  * Config for consuming one Host-managed connection. The endpoint, headers,
@@ -210,7 +208,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       )
     }
     const binding = owner.acquire(config.connectionId, { serverName: config.serverName })
-    ctx.effect(() => () => binding.release(), 'mcp-client.binding')
+    ctx.effect(() => () => { binding.release() }, 'mcp-client.binding')
     source = binding
   } else if ('connectionId' in config) {
     throw new Error(`mcp-client(${config.serverName}): connectionId requires transport "host-connection"`)

@@ -22,8 +22,9 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { credentialKey, credentialKeyId, credentialKeyScope, isCredentialKeySegment } from '@deepseek-ai/dsh-credentials'
-import type { CredentialKey } from '@deepseek-ai/dsh-credentials'
+import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import type { AuthorizationSession } from '@deepseek-ai/dsh-authorization'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 // Side-effect type import: declaration-merges `ctx.settings` onto Context.
 import type {} from '@deepseek-ai/dsh-settings'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -32,9 +33,9 @@ import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { errorToken } from './connection.ts'
 import type { ConnectionInvalidation, ConnectionSource } from './connection.ts'
 import { McpOAuthConnection } from './oauth.ts'
-import type { McpOAuthChange, McpOAuthRevocation, McpOAuthStatus } from './oauth.ts'
+import type { McpOAuthChangeEvent, McpOAuthOptions, McpOAuthRevocation, McpOAuthStatus } from './oauth.ts'
 
-export type { McpOAuthChange, McpOAuthRevocation } from './oauth.ts'
+export type { McpOAuthChange, McpOAuthChangeEvent, McpOAuthRevocation } from './oauth.ts'
 
 /** Settings namespace holding every host-managed MCP connection (nonsecret). */
 export const SETTINGS_NS = 'mcp-connections'
@@ -44,6 +45,14 @@ const RECORD_SCOPE = 'mcp-connections'
 
 /** Service name on `ctx`, consumed agent-side through `ctx.get`. */
 const SERVICE_NAME = 'nativeMcpConnections'
+
+/** Connection id grammar: a credential key segment of at most 64 characters, shared with the agent-side config schema. */
+export const CONNECTION_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+
+/** Whether a string may address a connection (and its grant record). */
+function isConnectionId(id: string): boolean {
+  return CONNECTION_ID_PATTERN.test(id) && isCredentialKeySegment(id)
+}
 
 /** Schema defaults, overridable per connection in the settings document. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000
@@ -129,8 +138,8 @@ function httpsUrl(value: string, path: string): URL {
  */
 function validateConnections(value: McpConnectionsSettings): void {
   for (const [id, entry] of Object.entries(value)) {
-    if (!isCredentialKeySegment(id)) {
-      throw new TypeError(`mcp-connections key "${id}" must match /^[a-z][a-z0-9-]*$/ (it addresses the grant record mcp-connections/${id})`)
+    if (!isConnectionId(id)) {
+      throw new TypeError(`mcp-connections key "${id}" must match ${String(CONNECTION_ID_PATTERN)} (it addresses the grant record mcp-connections/${id})`)
     }
     httpsUrl(entry.url, `mcp-connections.${id}.url`)
     httpsUrl(entry.issuerUrl, `mcp-connections.${id}.issuerUrl`)
@@ -175,6 +184,18 @@ export interface McpConnectionEngine {
    */
   authenticatedFetch(signal: AbortSignal): FetchLike
   /**
+   * The record identities this engine vouches for at this instant — what it
+   * last stored plus writes inside the store right now — as a classifier the
+   * service captures synchronously on every `credentials/record-updated` for
+   * the connection's key and applies to the record its asynchronous read
+   * returns. The engine's own commits are already reported through
+   * `onChange`, so only a record it did not write — an external edit, a
+   * deletion, another process's write — withdraws consumers as a change of
+   * authority, and a write the engine makes after the event cannot hide it.
+   * @returns a classifier over the bounded identities captured now.
+   */
+  captureOwnership(): (record: CredentialRecord | undefined) => boolean
+  /**
    * Local-first revocation: the local tombstone is committed before any bounded remote attempt.
    * @returns the local outcome and the bounded remote outcome.
    */
@@ -192,11 +213,12 @@ export interface McpConnectionEngineInit {
   /** Frozen connection identity and network bounds from settings. */
   spec: ResolvedMcpConnectionSpec
   /**
-   * Observer of the durable transitions the engine commits; the service maps
-   * them to consumer invalidations. The engine contains observer failures.
-   * @param change - the committed transition.
+   * Observer of the durable transitions the engine commits, each carrying the
+   * epoch and effective scope of that commit; the service maps them to
+   * consumer invalidations. The engine contains observer failures.
+   * @param event - the committed transition and its facts.
    */
-  onChange: (change: McpOAuthChange) => void
+  onChange: (event: McpOAuthChangeEvent) => void
 }
 
 /**
@@ -205,8 +227,16 @@ export interface McpConnectionEngineInit {
  */
 export type McpConnectionEngineFactory = (init: McpConnectionEngineInit) => McpConnectionEngine
 
-/** The production engine: `src/oauth.ts` over this Host's credential seam, with the service observing its transitions. */
-function defaultEngineFactory(init: McpConnectionEngineInit): McpConnectionEngine {
+/**
+ * The production engine — `src/oauth.ts` over this Host's credential seam —
+ * for one connection, with the service observing its transitions. Tests
+ * that need the real protocol engine over a fake network pass `fetch` and
+ * `now`; production passes nothing.
+ * @param init - the connection the engine serves.
+ * @param options - external fetch and clock beneath the engine's own validation.
+ * @returns the engine.
+ */
+export function createOAuthEngine(init: McpConnectionEngineInit, options: Omit<McpOAuthOptions, 'onChange'> = {}): McpConnectionEngine {
   return new McpOAuthConnection(init.ctx.credentials, {
     key: init.credentialKey,
     serverUrl: init.spec.url,
@@ -219,12 +249,17 @@ function defaultEngineFactory(init: McpConnectionEngineInit): McpConnectionEngin
     requestTimeoutMs: init.spec.requestTimeoutMs,
     responseByteLimit: init.spec.responseByteLimit,
     refreshLeewayMs: init.spec.refreshLeewayMs,
-  }, { onChange: init.onChange })
+  }, { ...options, onChange: init.onChange })
 }
 
 // ---- Resolved spec ----
 
-/** Frozen connection identity and bounds handed to the engine and transport. */
+/**
+ * Frozen connection identity and bounds handed to the engine and transport.
+ * Grant reuse across configuration changes is fenced by the engine's own
+ * grant binding (server, issuer, resource, redirect, client, scopes), which
+ * a stored grant must match exactly; no service-side generation is needed.
+ */
 export interface ResolvedMcpConnectionSpec {
   /** MCP endpoint URL (HTTPS, userinfo-free). */
   url: string
@@ -246,22 +281,15 @@ export interface ResolvedMcpConnectionSpec {
   responseByteLimit: number
   /** Refresh this long before the access token's advertised expiry, in milliseconds. */
   refreshLeewayMs: number
-  /**
-   * Per-service-instance monotonic generation of this connection's
-   * configuration, bumped on every spec change so the engine can fence grant
-   * reuse across config generations instead of silently reusing an old grant.
-   */
-  configGeneration: number
 }
 
 /**
  * The one explicit resolve step from a settings entry to the spec the engine
  * and transport run. Defaults materialize here, never inside consumers.
  * @param entry - the settings entry, schema-valid and validate()-approved.
- * @param configGeneration - the connection's current config generation.
  * @returns the frozen spec.
  */
-export function resolveSpec(entry: McpConnectionEntry, configGeneration: number): ResolvedMcpConnectionSpec {
+export function resolveSpec(entry: McpConnectionEntry): ResolvedMcpConnectionSpec {
   return Object.freeze({
     url: entry.url,
     issuerUrl: entry.issuerUrl,
@@ -273,25 +301,25 @@ export function resolveSpec(entry: McpConnectionEntry, configGeneration: number)
     requestTimeoutMs: entry.requestTimeoutMs,
     responseByteLimit: entry.responseByteLimit,
     refreshLeewayMs: entry.refreshLeewayMs,
-    configGeneration,
   })
 }
 
-/** Fingerprint for change detection; configGeneration is deliberately excluded. */
+/** Fingerprint for change detection: the spec plus the label a flow registration carries. */
 function specFingerprint(spec: ResolvedMcpConnectionSpec, label: string): string {
-  return JSON.stringify({
-    url: spec.url,
-    issuerUrl: spec.issuerUrl,
-    resourceUrl: spec.resourceUrl,
-    redirectUri: spec.redirectUri,
-    scopes: spec.scopes,
-    clientId: spec.clientId,
-    clientName: spec.clientName,
-    requestTimeoutMs: spec.requestTimeoutMs,
-    responseByteLimit: spec.responseByteLimit,
-    refreshLeewayMs: spec.refreshLeewayMs,
-    label,
-  })
+  return JSON.stringify({ ...spec, label })
+}
+
+/** The signal's state after an await, which static narrowing from an earlier check cannot know. */
+function abortedNow(signal: AbortSignal): boolean {
+  return signal.aborted
+}
+
+/** Whether two scope strings name the same set of scopes, whatever their order. */
+function sameScopeSet(a: string | undefined, b: string | undefined): boolean {
+  const scopes = (value: string | undefined): Set<string> => new Set((value ?? '').split(/\s+/).filter(scope => scope !== ''))
+  const left = scopes(a)
+  const right = scopes(b)
+  return left.size === right.size && [...left].every(scope => right.has(scope))
 }
 
 // ---- Status views ----
@@ -299,8 +327,9 @@ function specFingerprint(spec: ResolvedMcpConnectionSpec, label: string): string
 /**
  * Token-free facts about one connection for configuration UIs. `state` is
  * the engine's authorization lifecycle (or `unavailable` while no engine
- * could be constructed); it says nothing about tool discoverability, which
- * only the consuming agent's supervisor knows.
+ * could be constructed or the connection is no longer configured); it says
+ * nothing about tool discoverability, which only the consuming agent's
+ * supervisor knows.
  */
 export interface McpConnectionStatusView {
   /** The settings key addressing this connection. */
@@ -309,7 +338,7 @@ export interface McpConnectionStatusView {
   label: string
   /** MCP endpoint URL (validated userinfo-free). */
   url: string
-  /** Whether the connection is declared in settings. */
+  /** Whether the connection is declared in settings; a removed connection stays visible while consumers still bind it. */
   configured: boolean
   /** Authorization lifecycle state. */
   state: McpConnectionEngineStatus['state'] | 'unavailable'
@@ -335,24 +364,38 @@ export interface McpConnectionBinding extends ConnectionSource {
   release(): void
 }
 
-/** Live per-connection state owned by the service. */
+/**
+ * Live per-connection state owned by the service. One record per connection
+ * id for the service's whole life once a binding exists: removal from
+ * settings retires the engine and flow but keeps the record while consumers
+ * bind it, so a later re-add reaches those same consumers instead of
+ * orphaning them on a record nothing updates.
+ */
 interface ConnectionState {
   readonly id: string
   readonly credentialKey: CredentialKey
+  /** Whether settings currently declare this connection. */
+  configured: boolean
   entry: McpConnectionEntry
   spec: ResolvedMcpConnectionSpec
   engine: McpConnectionEngine | undefined
   flowDispose: (() => void) | undefined
   readonly listeners: Set<(reason: ConnectionInvalidation) => void>
   readonly consumers: Map<McpConnectionBinding, string>
-  /** Granted scope the last engine status reported; a refresh that changes it invalidates consumers. */
-  grantedScope: string | undefined
+  /**
+   * Effective scope of the grant consumers last connected against, and the
+   * record epoch it was learned at. Seeded from the first committed
+   * transition or from the stored grant at equip time, whichever is newer by
+   * epoch; a refresh whose committed scope differs from it invalidates.
+   */
+  effectiveScope: string | undefined
+  scopeEpoch: number | undefined
   epoch: number
 }
 
 /** Replaceable seams for direct unit tests. */
 export interface NativeMcpConnectionsInternals {
-  /** Engine construction override; tests substitute OAuth-free engines. */
+  /** Engine construction override; tests substitute OAuth-free engines or the real engine over a fake network. */
   readonly engineFactory?: McpConnectionEngineFactory
 }
 
@@ -365,9 +408,13 @@ declare module '@deepseek-ai/cordis' {
 
 /**
  * `ctx.nativeMcpConnections`: the Host connection owner. Settings changes
- * reconcile engines, flows, and bindings live; credential and authorization
- * events invalidate consumers immediately; a revoked or removed connection
+ * reconcile engines, flows, and bindings live; engine transitions and external
+ * credential changes invalidate consumers immediately; a revoked or removed connection
  * hands no transport and cannot resurrect without a new authority signal.
+ *
+ * Mounts only in the Host composition: an agent-scoped context is refused
+ * at construction, and Cordis refuses a second registration of the service
+ * name, so one engine per connection exists per Host.
  */
 export class NativeMcpConnectionsService extends Service {
   /** The grant store, the config document, and the flow registry are all required. */
@@ -375,7 +422,6 @@ export class NativeMcpConnectionsService extends Service {
 
   private readonly engineFactory: McpConnectionEngineFactory
   private readonly connections = new Map<string, ConnectionState>()
-  private readonly configGenerations = new Map<string, number>()
 
   /**
    * Register the settings namespace, reconcile the stored document, and wire
@@ -383,23 +429,25 @@ export class NativeMcpConnectionsService extends Service {
    * the service fiber, so disposal unwinds flows, watchers, and engines.
    * @param ctx - Host context carrying the credentials, settings, and authorization services.
    * @param internals - replaceable engine factory for direct unit tests.
+   * @throws when `ctx` is an agent-scoped context rather than the Host composition.
    */
   constructor(ctx: Context, internals: NativeMcpConnectionsInternals = {}) {
+    if (scopeOf(ctx) !== undefined) {
+      throw new Error('mcp-connections: NativeMcpConnectionsService is a Host singleton — mount it in the Host composition, not under an agent scope')
+    }
     super(ctx, SERVICE_NAME)
-    this.engineFactory = internals.engineFactory ?? defaultEngineFactory
+    this.engineFactory = internals.engineFactory ?? (init => createOAuthEngine(init))
     const scope = ctx.settings.register(SETTINGS_NS, SettingsSchema, {
       applies: 'live',
       validate: validateConnections,
     })
     scope.watch(async (next) => { await this.reconcile(next) })
     this.reconcileNow(scope.get())
+    // A successful authorization reaches consumers through the engine's own
+    // `authorized` commit, which carries the grant facts; `authorization/settled`
+    // would only repeat it and bounce every consumer twice.
     ctx.on('credentials/record-updated', (key) => {
-      if (credentialKeyScope(key) === RECORD_SCOPE) this.invalidate(credentialKeyId(key), 'stale')
-    })
-    ctx.on('authorization/settled', (key, settlement) => {
-      if (credentialKeyScope(key) === RECORD_SCOPE && settlement === 'authorized') {
-        this.invalidate(credentialKeyId(key), 'reauthorized')
-      }
+      if (credentialKeyScope(key) === RECORD_SCOPE) this.judgeRecordChange(credentialKeyId(key))
     })
     ctx.effect(() => () => this.disposeEngines(), 'mcp-connections.engines')
   }
@@ -412,10 +460,7 @@ export class NativeMcpConnectionsService extends Service {
    * @throws when no connection with this id is configured.
    */
   acquire(id: string, consumer: { serverName: string }): McpConnectionBinding {
-    const connection = this.connections.get(id)
-    if (connection === undefined) {
-      throw new Error(`mcp-connections: unknown connection "${id}" — declare it under the "${SETTINGS_NS}" settings namespace`)
-    }
+    const connection = this.connection(id)
     const listeners = new Set<(reason: ConnectionInvalidation) => void>()
     const binding: McpConnectionBinding = {
       get epoch() { return connection.epoch },
@@ -432,6 +477,7 @@ export class NativeMcpConnectionsService extends Service {
         for (const listener of listeners) connection.listeners.delete(listener)
         listeners.clear()
         connection.consumers.delete(binding)
+        this.pruneIfOrphaned(connection)
       },
     }
     connection.consumers.set(binding, consumer.serverName)
@@ -439,9 +485,10 @@ export class NativeMcpConnectionsService extends Service {
   }
 
   /**
-   * Token-free facts about one configured connection.
+   * Token-free facts about one connection: configured, or removed from
+   * settings while consumers still bind it.
    * @param id - the connection to describe.
-   * @returns the status view, or undefined when no such connection is configured.
+   * @returns the status view, or undefined when the service knows no such connection.
    */
   async describe(id: string): Promise<McpConnectionStatusView | undefined> {
     const connection = this.connections.get(id)
@@ -450,7 +497,8 @@ export class NativeMcpConnectionsService extends Service {
   }
 
   /**
-   * Token-free facts about every configured connection, in settings order.
+   * Token-free facts about every known connection, in settings order:
+   * configured ones, then removed ones that consumers still bind.
    * @returns one status view per connection.
    */
   async list(): Promise<McpConnectionStatusView[]> {
@@ -464,8 +512,8 @@ export class NativeMcpConnectionsService extends Service {
    * @returns the credential record key.
    */
   recordKeyFor(id: string): CredentialKey {
-    if (!isCredentialKeySegment(id)) {
-      throw new TypeError(`mcp-connections id "${id}" must match /^[a-z][a-z0-9-]*$/`)
+    if (!isConnectionId(id)) {
+      throw new TypeError(`mcp-connections id "${id}" must match ${String(CONNECTION_ID_PATTERN)}`)
     }
     return credentialKey(RECORD_SCOPE, id)
   }
@@ -487,17 +535,18 @@ export class NativeMcpConnectionsService extends Service {
 
   /**
    * Delete one connection's grant record outright (the "forget" operation).
-   * The record-updated event invalidates consumers on its own.
+   * The record-updated event invalidates consumers on its own: no engine
+   * wrote that deletion.
    * @param id - the connection whose grant is removed.
    */
   async removeGrant(id: string): Promise<void> {
     await this.ctx.credentials.deleteRecord(this.recordKeyFor(id))
   }
 
-  /** The connection or a loud unknown-id error naming the fix. */
+  /** The configured connection or a loud error naming the fix. */
   private connection(id: string): ConnectionState {
     const connection = this.connections.get(id)
-    if (connection === undefined) {
+    if (connection === undefined || !connection.configured) {
       throw new Error(`mcp-connections: unknown connection "${id}" — declare it under the "${SETTINGS_NS}" settings namespace`)
     }
     return connection
@@ -514,7 +563,7 @@ export class NativeMcpConnectionsService extends Service {
     const engine = connection.engine
     if (engine === undefined || signal.aborted) return undefined
     const status = await engine.status()
-    if (status.state !== 'authorized' || signal.aborted) return undefined
+    if (status.state !== 'authorized' || abortedNow(signal) || !this.stillRuns(connection, engine)) return undefined
     // The MCP SDK's StreamableHTTPClientTransport has optional properties typed
     // without `| undefined` (exactOptionalPropertyTypes mismatch with the
     // Transport interface); the SDK constructed the object, so the cast
@@ -525,14 +574,25 @@ export class NativeMcpConnectionsService extends Service {
     ) as Transport
   }
 
+  /** Whether the engine is still the one the connection runs; a swap or removal during an await retires it. */
+  private stillRuns(connection: ConnectionState, engine: McpConnectionEngine): boolean {
+    return connection.engine === engine
+  }
+
   /** Token-free view of one connection; every field is a fact the Host owns. */
   private async view(connection: ConnectionState): Promise<McpConnectionStatusView> {
-    const status = connection.engine === undefined ? undefined : await connection.engine.status()
+    let status: McpConnectionEngineStatus | undefined
+    try {
+      status = await connection.engine?.status()
+    } catch (error) {
+      // An engine that cannot read its grant is reported unavailable, never guessed at.
+      this.ctx.logger.warn('mcp-connections: connection "%s" could not report its status (%s)', connection.id, errorToken(error))
+    }
     return {
       id: connection.id,
       label: connection.entry.label ?? connection.id,
       url: connection.spec.url,
-      configured: true,
+      configured: connection.configured,
       state: status?.state ?? 'unavailable',
       inFlightAuth: this.ctx.authorization.describe(connection.credentialKey)?.inFlight ?? false,
       consumers: [...connection.consumers.values()],
@@ -541,39 +601,86 @@ export class NativeMcpConnectionsService extends Service {
   }
 
   /**
-   * Map one committed engine transition to the consumer invalidation it
-   * means. A refresh is usually invisible to consumers — but one whose
-   * granted scope changed supersedes the grant consumers connected with, so
-   * their cached tool registrations must re-established against it.
+   * Judge one `credentials/record-updated` for a connection's key. The
+   * engine's own commits are handled through its transition events; a record
+   * the engine did not write — deleted, edited, or written by another process
+   * — is a change of authority that withdraws consumers. The ownership the
+   * engine vouches for is captured here, synchronously at the event, and the
+   * record the asynchronous read returns is classified against that capture:
+   * a write the engine makes after the event can therefore never hide the
+   * change the event announced, and no judgement is dropped for coming
+   * late. Only an engine swap discards it — the swap already invalidated.
    */
-  private onEngineChange(id: string, change: McpOAuthChange): void {
-    switch (change) {
+  private judgeRecordChange(id: string): void {
+    const connection = this.connections.get(id)
+    if (connection === undefined) return
+    const engine = connection.engine
+    if (engine === undefined) {
+      this.invalidate(connection, 'stale')
+      return
+    }
+    const owns = engine.captureOwnership()
+    void this.ctx.credentials.readRecord(connection.credentialKey).then((record) => {
+      if (connection.engine !== engine) return
+      if (!owns(record)) this.invalidate(connection, 'stale')
+    }, (error: unknown) => {
+      // Unreadable is unknown authority: withdraw rather than keep serving a grant that may be gone.
+      this.ctx.logger.warn('mcp-connections: could not read the grant record of "%s" after a change (%s)', id, errorToken(error))
+      this.invalidate(connection, 'stale')
+    })
+  }
+
+  /**
+   * Map one committed engine transition to the consumer invalidation it
+   * means, using the facts the commit itself carried. A refresh is invisible
+   * to consumers unless the scope it committed differs from the scope they
+   * connected with: then their cached tool registrations belong to a grant
+   * that no longer exists and are re-established. Transitions from an engine
+   * the connection no longer runs (retired by a config swap or removal) are
+   * ignored: that path already invalidated with its own reason.
+   */
+  private onEngineChange(connection: ConnectionState, engine: McpConnectionEngine, event: McpOAuthChangeEvent): void {
+    if (connection.engine !== engine) return
+    switch (event.kind) {
       case 'authorized':
-        this.invalidate(id, 'reauthorized')
+        this.rememberScope(connection, event.epoch, event.grantedScope)
+        this.invalidate(connection, 'reauthorized')
         return
       case 'refreshed': {
-        const connection = this.connections.get(id)
-        if (connection?.engine === undefined) return
-        void connection.engine.status().then((status) => {
-          const current = this.connections.get(id)
-          if (current === undefined) return
-          if (current.grantedScope !== undefined && status.grantedScope !== current.grantedScope) {
-            this.invalidate(id, 'invalid-grant')
-          }
-          current.grantedScope = status.grantedScope
-        }, () => { /* a failed status read leaves the next authority event to re-judge */ })
+        const narrowed = connection.scopeEpoch !== undefined && !sameScopeSet(connection.effectiveScope, event.grantedScope)
+        this.rememberScope(connection, event.epoch, event.grantedScope)
+        if (narrowed) this.invalidate(connection, 'invalid-grant')
         return
       }
       case 'invalidated':
-        this.invalidate(id, 'invalid-grant')
+        this.invalidate(connection, 'invalid-grant')
         return
       case 'revoked':
-        this.invalidate(id, 'revoked')
+        this.invalidate(connection, 'revoked')
         return
       case 'disposed':
-        this.invalidate(id, 'removed')
         return
     }
+  }
+
+  /** Adopt a committed scope fact unless a newer commit already supplied one. */
+  private rememberScope(connection: ConnectionState, epoch: number | undefined, scope: string | undefined): void {
+    if (epoch === undefined || (connection.scopeEpoch !== undefined && epoch <= connection.scopeEpoch)) return
+    connection.effectiveScope = scope
+    connection.scopeEpoch = epoch
+  }
+
+  /**
+   * Seed the scope baseline from a grant that already existed when the engine
+   * was equipped (a Host restart or a config swap), so the first refresh
+   * after it is judged against the grant consumers actually connect with.
+   * A commit that lands before this read resolves is newer by epoch and wins.
+   */
+  private seedScope(connection: ConnectionState, engine: McpConnectionEngine): void {
+    void engine.status().then((status) => {
+      if (connection.engine !== engine || status.state !== 'authorized') return
+      this.rememberScope(connection, status.epoch, status.grantedScope)
+    }, () => { /* an unreadable grant seeds nothing; the first committed transition seeds instead */ })
   }
 
   /**
@@ -581,9 +688,8 @@ export class NativeMcpConnectionsService extends Service {
    * listener failures: every listener runs, a throwing one is logged without
    * changing the withdrawal.
    */
-  private invalidate(id: string, reason: ConnectionInvalidation): void {
-    const connection = this.connections.get(id)
-    if (connection === undefined) return
+  private invalidate(connection: ConnectionState, reason: ConnectionInvalidation): void {
+    const { id } = connection
     connection.epoch += 1
     for (const listener of [...connection.listeners]) {
       try {
@@ -601,47 +707,46 @@ export class NativeMcpConnectionsService extends Service {
   }
 
   /**
-   * Apply one committed settings value: add new connections, swap changed
-   * ones behind a config-generation bump and an immediate invalidation, and
-   * remove absent ones. Changes and removals invalidate BEFORE the old engine
-   * is disposed so consumers fence their live generation first.
+   * Apply one committed settings value: add new connections (re-equipping a
+   * removed one consumers still bind), swap changed ones behind an immediate
+   * invalidation, and retire absent ones. Changes and removals invalidate
+   * BEFORE the old engine is disposed so consumers fence their live
+   * generation first, and the retired engine is detached before disposal so
+   * its own `disposed` transition cannot re-signal with the wrong reason.
    */
   private async reconcile(next: McpConnectionsSettings): Promise<void> {
     const seen = new Set<string>()
     for (const [id, entry] of Object.entries(next)) {
       seen.add(id)
       const existing = this.connections.get(id)
-      const generation = this.configGenerations.get(id) ?? 0
-      const spec = resolveSpec(entry, generation)
+      const spec = resolveSpec(entry)
       if (existing === undefined) {
         this.addConnection(id, entry)
         continue
       }
-      if (specFingerprint(existing.spec, existing.entry.label ?? id) === specFingerprint(spec, entry.label ?? id)) continue
-      this.invalidate(id, 'config-changed')
-      this.retireConnection(existing)
-      await existing.engine?.dispose()
-      existing.engine = undefined
-      this.configGenerations.set(id, generation + 1)
+      const unchanged = existing.configured
+        && specFingerprint(existing.spec, existing.entry.label ?? id) === specFingerprint(spec, entry.label ?? id)
+      if (unchanged) continue
+      this.invalidate(existing, existing.configured ? 'config-changed' : 'removed')
+      await this.retireConnection(existing)
       // Swap in place: bindings capture this ConnectionState, so replacing the
       // record would orphan their listeners and pin them to the retired engine.
+      existing.configured = true
       existing.entry = entry
-      existing.spec = resolveSpec(entry, generation + 1)
-      existing.grantedScope = undefined
+      existing.spec = spec
       this.equipConnection(existing)
       // The first invalidation fences consumers synchronously; this second one
       // re-signals once the new authority exists, so a bounce that judged the
       // connection mid-swap (old engine retired, new not yet registered)
       // re-evaluates instead of holding on the disposed engine.
-      this.invalidate(id, 'config-changed')
+      this.invalidate(existing, 'config-changed')
     }
     for (const [id, existing] of [...this.connections]) {
-      if (seen.has(id)) continue
-      this.invalidate(id, 'removed')
-      this.retireConnection(existing)
-      await existing.engine?.dispose()
-      existing.engine = undefined
-      this.connections.delete(id)
+      if (seen.has(id) || !existing.configured) continue
+      existing.configured = false
+      this.invalidate(existing, 'removed')
+      await this.retireConnection(existing)
+      this.pruneIfOrphaned(existing)
     }
   }
 
@@ -650,56 +755,83 @@ export class NativeMcpConnectionsService extends Service {
     const connection: ConnectionState = {
       id,
       credentialKey: this.recordKeyFor(id),
+      configured: true,
       entry,
-      spec: resolveSpec(entry, this.configGenerations.get(id) ?? 0),
+      spec: resolveSpec(entry),
       engine: undefined,
       flowDispose: undefined,
       listeners: new Set(),
       consumers: new Map(),
-      grantedScope: undefined,
+      effectiveScope: undefined,
+      scopeEpoch: undefined,
       epoch: 0,
     }
     this.equipConnection(connection)
     this.connections.set(id, connection)
   }
 
-  /** (Re)create one connection's engine and authorization flow from its current entry and spec. */
+  /**
+   * (Re)create one connection's engine and authorization flow from its
+   * current entry and spec. A failure at either step leaves the connection
+   * configured but unavailable with nothing leaked: an engine whose flow
+   * cannot register is disposed again.
+   */
   private equipConnection(connection: ConnectionState): void {
-    let engine: McpConnectionEngine | undefined
+    connection.effectiveScope = undefined
+    connection.scopeEpoch = undefined
+    let engine: McpConnectionEngine
     try {
       engine = this.engineFactory({
         ctx: this.ctx,
         credentialKey: connection.credentialKey,
         spec: connection.spec,
-        onChange: change => this.onEngineChange(connection.id, change),
+        onChange: (event) => { this.onEngineChange(connection, engine, event) },
       })
     } catch (error) {
       // Engine construction failure leaves the connection configured but
       // unavailable; the logged token names the failure class only.
       this.ctx.logger.error('mcp-connections: connection "%s" is unavailable (%s)', connection.id, errorToken(error))
+      return
     }
-    connection.engine = engine
-    if (engine !== undefined) {
-      connection.flowDispose = this.ctx.authorization.registerFlow({
+    let flowDispose: () => void
+    try {
+      flowDispose = this.ctx.authorization.registerFlow({
         key: connection.credentialKey,
         label: connection.entry.label ?? connection.id,
         methods: [{ id: 'oauth', label: 'Sign in' }],
         run: session => engine.authorize(session),
       })
+    } catch (error) {
+      this.ctx.logger.error('mcp-connections: connection "%s" cannot register its authorization flow and is unavailable (%s)', connection.id, errorToken(error))
+      void engine.dispose().catch(() => { /* a failed disposal of an engine that never served changes nothing */ })
+      return
     }
+    connection.engine = engine
+    connection.flowDispose = flowDispose
+    this.seedScope(connection, engine)
   }
 
-  /** Withdraw one connection's flow registration; its engine is disposed by the caller. */
-  private retireConnection(connection: ConnectionState): void {
+  /** Withdraw one connection's flow registration and quiesce its engine, detached first so its transitions are ignored. */
+  private async retireConnection(connection: ConnectionState): Promise<void> {
     connection.flowDispose?.()
     connection.flowDispose = undefined
+    const engine = connection.engine
+    connection.engine = undefined
+    await engine?.dispose()
+  }
+
+  /** Forget a removed connection once nothing binds it; a bound one stays reachable for a later re-add. */
+  private pruneIfOrphaned(connection: ConnectionState): void {
+    if (!connection.configured && connection.consumers.size === 0 && connection.listeners.size === 0) {
+      this.connections.delete(connection.id)
+    }
   }
 
   /** Service teardown: tell consumers the connections are gone, then quiesce every engine. */
   private async disposeEngines(): Promise<void> {
-    for (const id of [...this.connections.keys()]) this.invalidate(id, 'removed')
-    const engines = [...this.connections.values()].map(connection => connection.engine)
+    const states = [...this.connections.values()]
+    for (const connection of states) this.invalidate(connection, 'removed')
     this.connections.clear()
-    await Promise.allSettled(engines.map(engine => engine?.dispose()))
+    await Promise.allSettled(states.map(connection => this.retireConnection(connection)))
   }
 }

@@ -24,7 +24,7 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { AuthorizationSession } from '@deepseek-ai/dsh-authorization'
-import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import { auth as sdkAuth, selectClientAuthMethod } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
@@ -57,7 +57,7 @@ export interface McpOAuthStatus {
   hasRefreshToken: boolean
   /** Advertised access-token expiry as epoch milliseconds; absent when the server advertised none. */
   accessTokenExpiresAt: number | undefined
-  /** Scope string the authorization server granted, when it reported one. */
+  /** Effective granted scope: the server's `scope` response, else the scope the grant already had (RFC 6749 §5.1, §6). */
   grantedScope: string | undefined
   /** Record epoch, absent while nothing valid is stored. */
   epoch: number | undefined
@@ -65,6 +65,20 @@ export interface McpOAuthStatus {
 
 /** Durable transitions the engine committed; the bridge resyncs or drops tools on them. */
 export type McpOAuthChange = 'authorized' | 'refreshed' | 'invalidated' | 'revoked' | 'disposed'
+
+/**
+ * One committed transition with the facts of that commit, so an observer
+ * judges scope and identity from the operation's own data rather than from a
+ * later status read that another commit may already have overtaken.
+ */
+export interface McpOAuthChangeEvent {
+  /** The transition. */
+  kind: McpOAuthChange
+  /** Record epoch the commit wrote; absent for `disposed`, which writes nothing. */
+  epoch: number | undefined
+  /** Effective granted scope of the committed grant; absent unless `authorized` or `refreshed`. */
+  grantedScope: string | undefined
+}
 
 /** Outcome of {@link McpOAuthConnection.revoke}; the local tombstone is committed before any remote attempt. */
 export interface McpOAuthRevocation {
@@ -80,7 +94,7 @@ export interface McpOAuthOptions {
   /** Clock for token expiry. Defaults to `Date.now`. */
   now?: () => number
   /** Observer of committed transitions; a throwing observer is contained. */
-  onChange?: (change: McpOAuthChange) => void
+  onChange?: (event: McpOAuthChangeEvent) => void
 }
 
 /** Request headers a managed request may not supply itself. */
@@ -147,6 +161,15 @@ function asEngineError(reason: unknown): McpOAuthError {
   return reason instanceof McpOAuthError ? reason : new McpOAuthError('managed request failed', 'NETWORK', { cause: reason })
 }
 
+/** Canonical JSON of a payload: object keys sorted at every level, so the same document fingerprints the same wherever it was parsed. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return entry
+    // Keys of one object are distinct, so two never compare equal.
+    return Object.fromEntries(Object.entries(entry as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+  })
+}
+
 function json<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
@@ -196,7 +219,17 @@ export class McpOAuthConnection {
   private readonly store: McpOAuthCredentialStore
   private readonly external: FetchLike
   private readonly now: () => number
-  private readonly onChange: ((change: McpOAuthChange) => void) | undefined
+  private readonly onChange: ((event: McpOAuthChangeEvent) => void) | undefined
+  /**
+   * Canonical fingerprint of the record this engine last stored, plus the
+   * fingerprints of writes still inside the store. Recorded inside the
+   * store's write so a `record-updated` observer can already tell the write is
+   * ours; bounded because a superseded write is no longer an identity this
+   * engine vouches for — an older own record put back by someone else is an
+   * external change, and so is a payload altered under the same epoch.
+   */
+  private ownLatest: string | undefined
+  private readonly ownPending = new Set<string>()
   private readonly clientMetadata: OAuthClientMetadata
   /** Aborted once at dispose; bounds every engine-owned request. */
   private readonly lifecycle = new AbortController()
@@ -209,7 +242,13 @@ export class McpOAuthConnection {
   private authorizing = false
   /** The refresh every waiting consumer shares; cleared when it settles. */
   private refreshing: Promise<void> | undefined
-  /** Record epoch whose access token a managed request saw rejected; forces one refresh of exactly that grant. */
+  /**
+   * Record epoch whose access token a managed request saw rejected. That
+   * token is never sent again: every later acquisition refreshes first, one
+   * shared attempt per acquiring call, until a commit moves the record past
+   * this epoch or the grant is invalidated. A transient refresh failure
+   * leaves it set on purpose — clearing it would resend a known-rejected token.
+   */
   private rejectedEpoch: number | undefined
   /** Out-of-queue work (remote revocation) dispose must await. */
   private readonly work = new Set<Promise<unknown>>()
@@ -345,9 +384,12 @@ export class McpOAuthConnection {
       }
       const first = await this.acquire(signal)
       const response = await send(first.accessToken)
-      if (response.status !== 401 || !replayable(init?.body)) return response
-      response.body?.cancel().catch(noop)
+      if (response.status !== 401) return response
+      // The rejection is remembered whether or not this request can be retried, so the next acquisition refreshes first.
       this.rejectedEpoch = first.epoch
+      // A body that was streamed cannot be sent again; the 401 is the caller's to handle.
+      if (!replayable(init?.body)) return response
+      response.body?.cancel().catch(noop)
       const second = await this.acquire(signal)
       const retried = await send(second.accessToken)
       if (retried.status === 401) await awaitFor(this.rejectGrant(second.epoch), consumer)
@@ -369,20 +411,22 @@ export class McpOAuthConnection {
     this.current?.controller.abort(new McpOAuthError('the grant was revoked while this operation ran', 'AUTH_REQUIRED'))
     this.rejectedEpoch = undefined
     let previous: GrantDocument | undefined
-    await this.store.modifyRecord(this.spec.key, (current) => {
+    let epoch = 0
+    await this.write((current) => {
       const view = viewGrantRecord(current, this.spec)
       previous = view.kind === 'grant' ? view.doc : undefined
+      epoch = (view.epoch ?? 0) + 1
       const tombstone: GrantDocument = {
         format: 1,
         binding: bindingDocument(this.spec.binding),
-        epoch: (view.epoch ?? 0) + 1,
+        epoch,
         status: 'revoked',
         ...(previous?.clientInformation === undefined ? {} : { clientInformation: previous.clientInformation }),
         ...(previous?.discovery === undefined ? {} : { discovery: previous.discovery }),
       }
-      return Promise.resolve({ kind: 'grant', payload: json(tombstone) })
+      return tombstone
     })
-    this.emit('revoked')
+    this.emit({ kind: 'revoked', epoch, grantedScope: undefined })
     const revoked: GrantDocument | undefined = previous
     if (revoked?.tokens === undefined) return { local: 'revoked', remote: 'no-grant' }
     const remote = this.revokeRemotely(revoked, revoked.tokens)
@@ -406,13 +450,68 @@ export class McpOAuthConnection {
     this.rotateGrant(reason)
     this.current?.controller.abort(reason)
     await Promise.allSettled([this.queue, ...this.work])
-    this.emit('disposed')
+    this.emit({ kind: 'disposed', epoch: undefined, grantedScope: undefined })
+  }
+
+  /**
+   * Whether a stored record is one this engine wrote. A `credentials/record-updated`
+   * observer that reads the record and asks this tells the engine's own
+   * commits — already reported through `onChange` — from an external edit,
+   * deletion, or another process's write, which it must treat as a change
+   * of authority.
+   * @param record - the record as the credential store returned it.
+   * @returns true only for exactly the record this engine last stored or is storing now.
+   */
+  ownsRecord(record: CredentialRecord | undefined): boolean {
+    return this.captureOwnership()(record)
+  }
+
+  /**
+   * The identities this engine vouches for at this instant — the record it
+   * last stored and the writes inside the store right now — as a classifier
+   * an observer can apply later. A `credentials/record-updated` observer
+   * captures it synchronously at the event and classifies the record its
+   * asynchronous read returns against that capture, so a write this engine
+   * makes afterwards can neither hide the change the event announced nor
+   * turn its own later record into a spurious external one when the read
+   * returns the record as it stood at the event.
+   * @returns a classifier over the bounded identities captured now.
+   */
+  captureOwnership(): (record: CredentialRecord | undefined) => boolean {
+    const identities = new Set(this.ownPending)
+    if (this.ownLatest !== undefined) identities.add(this.ownLatest)
+    return record => record?.kind === 'grant' && identities.has(canonical(record.payload))
+  }
+
+  /**
+   * Store one document through the credential seam, vouching for exactly
+   * that payload from inside the write until the write settles: a write the
+   * store rejects is not vouched for afterwards, so whatever it left behind
+   * reads as external (a spurious withdrawal, never a missed one).
+   */
+  private async write(build: (current: CredentialRecord | undefined) => GrantDocument): Promise<GrantDocument> {
+    let written: { document: GrantDocument; fingerprint: string } | undefined
+    try {
+      await this.store.modifyRecord(this.spec.key, (current) => {
+        const document = build(current)
+        const payload = json(document)
+        written = { document, fingerprint: canonical(payload) }
+        this.ownPending.add(written.fingerprint)
+        return Promise.resolve({ kind: 'grant', payload })
+      })
+    } finally {
+      if (written !== undefined) this.ownPending.delete(written.fingerprint)
+    }
+    if (written === undefined) throw protocolError('the credential store declined the commit')
+    this.ownLatest = written.fingerprint
+    return written.document
   }
 
   private async runAuthorize(op: Operation, session: AuthorizationSession): Promise<void> {
     const provider = this.providerFor(op, session)
     const fetchFn = this.boundedFetch(op)
-    const scope = this.spec.scopes.length === 0 ? {} : { scope: this.spec.scopes.join(' ') }
+    const requested = this.requestedScope()
+    const scope = requested === undefined ? {} : { scope: requested }
     // The SDK resolves the first call only after redirectToAuthorization ran (tokens() is undefined
     // here, so it never refreshes), and the second only after saveTokens committed the grant; the
     // callback check below refuses to continue without the state that redirect produced.
@@ -546,32 +645,42 @@ export class McpOAuthConnection {
   private async commitTokens(op: Operation, tokens: OAuthTokens): Promise<void> {
     const parsed = OAuthTokensSchema.safeParse(tokens)
     if (!parsed.success || parsed.data.token_type.toLowerCase() !== 'bearer') throw protocolError('token response is not a bearer token response')
+    // A response without `scope` grants what was requested (RFC 6749 §5.1) or, on refresh, what the grant
+    // already had (§6); the effective scope is stored so status and observers never mistake omission for narrowing.
+    const inherited = op.kind === 'authorize' ? this.requestedScope() : op.staged.tokens?.scope
+    const scope = parsed.data.scope ?? inherited
+    const effective: OAuthTokens = { ...parsed.data, ...(scope === undefined ? {} : { scope }) }
     // Discovery and registration staged so far; the document schema refuses an authorized grant without them.
-    await this.commit(op, epoch => ({
+    const committed = await this.commit(op, epoch => ({
       format: 1,
       binding: bindingDocument(this.spec.binding),
       epoch,
       status: 'authorized',
-      tokens: parsed.data,
+      tokens: effective,
       tokensIssuedAt: this.now(),
       clientInformation: this.clientInformationOf(op.staged),
       discovery: op.staged.discovery,
     }))
-    op.staged.tokens = parsed.data
+    op.staged.tokens = effective
     this.rejectedEpoch = undefined
-    this.emit(op.kind === 'authorize' ? 'authorized' : 'refreshed')
+    this.emit({ kind: op.kind === 'authorize' ? 'authorized' : 'refreshed', epoch: committed.epoch, grantedScope: scope })
+  }
+
+  /** The requested scope string, or undefined when the server chooses. */
+  private requestedScope(): string | undefined {
+    return this.spec.scopes.length === 0 ? undefined : this.spec.scopes.join(' ')
   }
 
   /** Commit that the server rejected the grant, dropping the tokens; `all` also drops registration and discovery. */
   private async commitInvalidation(op: Operation, scope: 'all' | 'tokens'): Promise<void> {
-    await this.commit(op, epoch => ({
+    const committed = await this.commit(op, epoch => ({
       format: 1,
       binding: bindingDocument(this.spec.binding),
       epoch,
       status: 'invalidated',
       ...(scope === 'all' ? {} : this.retained(op.staged)),
     }))
-    this.emit('invalidated')
+    this.emit({ kind: 'invalidated', epoch: committed.epoch, grantedScope: undefined })
   }
 
   /** Registration and discovery of the grant being invalidated, kept so re-authorization can skip both. */
@@ -587,9 +696,9 @@ export class McpOAuthConnection {
    * observed, refused once the operation is aborted or the engine disposed.
    */
   private async commit(op: Operation, build: (epoch: number) => GrantDocument): Promise<GrantDocument> {
-    let committed: GrantDocument | undefined
+    let committed: GrantDocument
     try {
-      await this.store.modifyRecord(this.spec.key, (current) => {
+      committed = await this.write((current) => {
         op.throwIfAborted()
         this.assertLive()
         const view = viewGrantRecord(current, this.spec)
@@ -597,8 +706,7 @@ export class McpOAuthConnection {
           throw new McpOAuthError('the grant changed while this operation ran; its result was discarded', 'STALE')
         }
         // The document is validated on the way in, like every record read: what is stored always parses.
-        committed = GrantDocumentSchema.parse(build((view.epoch ?? 0) + 1))
-        return Promise.resolve({ kind: 'grant', payload: json(committed) })
+        return GrantDocumentSchema.parse(build((view.epoch ?? 0) + 1))
       })
     } catch (error) {
       // The SDK swallows non-OAuth failures of a refresh and asks for a redirect instead; the recorded
@@ -606,7 +714,6 @@ export class McpOAuthConnection {
       if (error instanceof McpOAuthError) op.staged.failure = error
       throw error
     }
-    if (committed === undefined) throw protocolError('the credential store declined the commit')
     op.expectedEpoch = committed.epoch
     return committed
   }
@@ -739,9 +846,9 @@ export class McpOAuthConnection {
     if (this.disposed) throw new McpOAuthError('the MCP OAuth engine was disposed', 'DISPOSED')
   }
 
-  private emit(change: McpOAuthChange): void {
+  private emit(event: McpOAuthChangeEvent): void {
     try {
-      this.onChange?.(change)
+      this.onChange?.(event)
     } catch {
       // An observer that throws is contained: the transition it was told about already committed.
     }
