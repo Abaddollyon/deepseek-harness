@@ -77,6 +77,20 @@ describe('experimental workspace constraints', () => {
 })
 
 describe('package payload constraints', () => {
+  it('ships the public MCP Host entry and only its narrow shared-chunk family', () => {
+    expect(expectedDshPackageFiles({
+      name: '@deepseek-ai/dsh-mcp-client',
+      exports: { './host': { types: './lib/types/host.d.ts', default: './lib/host.js' } },
+    })).toEqual(['lib/index.js', 'lib/host.js', 'lib/connections-*.js', 'lib/types/**/*.d.ts'])
+  })
+
+  it('does not grant unrelated packages a Host entry or shared-chunk glob', () => {
+    expect(expectedDshPackageFiles({ name: '@deepseek-ai/dsh-other' }))
+      .toEqual(['lib/index.js', 'lib/types/**/*.d.ts'])
+    expect(expectedDshPackageFiles({ name: '@deepseek-ai/dsh-other', exports: { './host': './src/host.ts' } }))
+      .toEqual(['lib/index.js', 'lib/types/**/*.d.ts'])
+  })
+
   it('includes a declared profile patch without a package-name allowlist', () => {
     expect(expectedDshPackageFiles({
       name: '@deepseek-ai/dsh-private-profile',

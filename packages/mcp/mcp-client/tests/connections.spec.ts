@@ -13,11 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import type {
-  CredentialInfo, CredentialKey, CredentialRecord, CredentialRecordEntry, CredentialRecordInfo,
-  CredentialRef, ResolvedCredential,
-} from '@deepseek-ai/dsh-credentials'
+import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import AuthorizationService from '@deepseek-ai/dsh-authorization'
 import type { AuthorizationInteraction, AuthorizationSession } from '@deepseek-ai/dsh-authorization'
@@ -32,73 +28,11 @@ import type {
 import type { McpOAuthChangeEvent, McpOAuthRevocation } from '@deepseek-ai/dsh-mcp-client/src/connections.ts'
 import { startHttpMcpFixture } from './http-fixture.ts'
 import type { HttpMcpFixture } from './http-fixture.ts'
+import { MemoryCredentials } from './credentials-fixture.ts'
 import { Fixture as AuthorizationServerFixture } from './oauth-fixture.ts'
 import type { FixtureOptions } from './oauth-fixture.ts'
 
 // ---- Minimal in-memory seam providers (record half and document only) ----
-
-/** Records a second Host mount may share with the first, to model a restart over the same store. */
-interface MemoryCredentialsConfig {
-  records?: Map<CredentialKey, CredentialRecord>
-}
-
-class MemoryCredentials extends CredentialProvider {
-  readonly records: Map<CredentialKey, CredentialRecord>
-
-  constructor(ctx: Context, config?: MemoryCredentialsConfig) {
-    super(ctx)
-    const records: Map<CredentialKey, CredentialRecord> | undefined = config?.records
-    this.records = records ?? new Map<CredentialKey, CredentialRecord>()
-  }
-
-  resolve(_ref: CredentialRef): Promise<ResolvedCredential | undefined> {
-    throw new Error('credential references are unused in this suite')
-  }
-
-  describe(_ref: CredentialRef): Promise<CredentialInfo> {
-    throw new Error('credential references are unused in this suite')
-  }
-
-  set(_ref: CredentialRef, _value: string): Promise<void> {
-    throw new Error('credential references are unused in this suite')
-  }
-
-  unset(_ref: CredentialRef): Promise<void> {
-    throw new Error('credential references are unused in this suite')
-  }
-
-  readRecord(key: CredentialKey): Promise<CredentialRecord | undefined> {
-    return Promise.resolve(this.records.get(key))
-  }
-
-  describeRecord(key: CredentialKey): Promise<CredentialRecordInfo> {
-    const stored = this.records.get(key)
-    return Promise.resolve(stored === undefined
-      ? { configured: false, writable: true }
-      : { configured: true, kind: stored.kind, writable: true })
-  }
-
-  listRecords(): Promise<readonly CredentialRecordEntry[]> {
-    return Promise.resolve([...this.records].map(([key, record]) => ({ key, kind: record.kind })))
-  }
-
-  async modifyRecord(
-    key: CredentialKey,
-    mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
-  ): Promise<CredentialRecord | undefined> {
-    const current = this.records.get(key)
-    const next = await mutate(current)
-    if (next === undefined) return current
-    this.records.set(key, next)
-    this.ctx.emit('credentials/record-updated', key)
-    return next
-  }
-
-  deleteRecord(key: CredentialKey): Promise<void> {
-    if (this.records.delete(key)) this.ctx.emit('credentials/record-updated', key)
-    return Promise.resolve()
-  }
-}
 
 class MemorySettings extends SettingsProvider {
   doc: Record<string, unknown>

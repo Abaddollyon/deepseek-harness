@@ -72,7 +72,7 @@ kind: "package-reference"
 
 ### Host 托管连接（OAuth）
 
-当服务器要求 OAuth 时，它的端点、客户端参数与令牌属于 Host，而不是逐 agent 的插件配置。在 Host 组合中挂载一次本包的 `NativeMcpConnectionsService`，在 `mcp-connections` 设置命名空间下声明每个连接（端点、issuer、resource、重定向 URI、scope、可选客户端 id 与网络边界——全部为非机密），并让 agent 配置项按 id 指向它：
+当服务器要求 OAuth 时，它的端点、客户端参数与令牌属于 Host，而不是逐 agent 的插件配置。在 Host 组合中挂载一次本包的 Host 入口 `@deepseek-ai/dsh-mcp-client/host`——它默认导出 `NativeMcpConnectionsService`，而包根仍是 Agent namespace 插件，没有可选的服务类入口——在 `mcp-connections` 设置命名空间下声明每个连接（端点、issuer、resource、重定向 URI、scope、可选客户端 id 与网络边界——全部为非机密），并让 agent 配置项按 id 指向它：
 
 ```yaml
 - id: mcp-github
@@ -133,6 +133,8 @@ Host 服务为每个连接持有一个协议引擎：grant（授权）保存在�
 | [`src/tools.ts`](src/tools.ts) | 工具桥接：发现、命名、注册交换、执行、图片投影 |
 | [`src/transport.ts`](src/transport.ts) | 传输工厂：带清洗环境的 stdio spawn、Streamable HTTP |
 | [`src/connections.ts`](src/connections.ts) | Host 连接所有者：设置支撑的配置、逐连接引擎、授权流程、消费方绑定、无令牌状态 |
+| [`src/host.ts`](src/host.ts) | 公开的 `./host` 入口：为 Host 组合默认导出服务类；双入口构建保持单一的共享类身份 |
+| [`tsdown.config.ts`](tsdown.config.ts) | 仅 Host 的双入口构建：入口对象把 `index`/`host` 映射到各自的声明，Client face 的 falsy entry 在任何清理之前跳过，使其既不能清理也不能重写 Host 产物；清理窄化为仅顶层 JS 并保留 `lib/types` |
 | [`src/oauth.ts`](src/oauth.ts)、[`src/oauth-record.ts`](src/oauth-record.ts)、[`src/oauth-fetch.ts`](src/oauth-fetch.ts)、[`src/oauth-error.ts`](src/oauth-error.ts) | OAuth 协议引擎：授权记录、有界的发现/授权/刷新、认证托管 fetch |
 | — | 不发布运行时不变式伴生入口；MCP 世代通过工具注册表体现，但桥接在异步重新同步后不暴露独立的服务器到工具快照。 |
 

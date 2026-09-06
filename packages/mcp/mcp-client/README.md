@@ -72,7 +72,7 @@ After startup, the server's tools appear as `mcp__<serverName>__<tool>` — try 
 
 ### Host-managed connections (OAuth)
 
-When a server requires OAuth, its endpoint, client parameters, and tokens belong to the Host, not to per-agent plugin config. Mount the package's `NativeMcpConnectionsService` once in the Host composition, declare each connection under the `mcp-connections` settings namespace (endpoint, issuer, resource, redirect URI, scopes, optional client id, and the network bounds — all nonsecret), and point the agent entry at it by id:
+When a server requires OAuth, its endpoint, client parameters, and tokens belong to the Host, not to per-agent plugin config. Mount the package's Host entry `@deepseek-ai/dsh-mcp-client/host` once in the Host composition — it default-exports `NativeMcpConnectionsService`, while the package root stays the Agent namespace plugin with no selectable service-class entry — declare each connection under the `mcp-connections` settings namespace (endpoint, issuer, resource, redirect URI, scopes, optional client id, and the network bounds — all nonsecret), and point the agent entry at it by id:
 
 ```yaml
 - id: mcp-github
@@ -133,6 +133,8 @@ This section explains the design decisions behind the bridge and points at the c
 | [`src/tools.ts`](src/tools.ts) | Tool bridge: discovery, naming, registration swap, execution, image projection |
 | [`src/transport.ts`](src/transport.ts) | Transport factory: stdio spawn with scrubbed env, Streamable HTTP |
 | [`src/connections.ts`](src/connections.ts) | Host connection owner: settings-backed configs, per-connection engines, authorization flows, consumer bindings, token-free status |
+| [`src/host.ts`](src/host.ts) | Public `./host` entry: default-exports the service class for the Host composition; the two-entry build keeps one shared class identity |
+| [`tsdown.config.ts`](tsdown.config.ts) | Host-only two-entry build: the entry object maps `index`/`host` to their declarations, the Client face's falsy entry skips before any cleanup so it can neither clean nor rewrite Host artifacts, and cleanup narrows to top-level JS while preserving `lib/types` |
 | [`src/oauth.ts`](src/oauth.ts), [`src/oauth-record.ts`](src/oauth-record.ts), [`src/oauth-fetch.ts`](src/oauth-fetch.ts), [`src/oauth-error.ts`](src/oauth-error.ts) | OAuth protocol engine: grant records, bounded discovery/authorize/refresh, the authenticating managed fetch |
 | — | No runtime invariant companion is published; MCP generations contribute through the tool registry, but the bridge exposes no independent server-to-tool snapshot after an asynchronous resync. |
 

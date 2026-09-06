@@ -98,6 +98,7 @@
     "apps/web/stress-tests/reasoning-chunks.stress.ts",
     "apps/cli/tests/**/*.ts",
     "packages/*/*/tests/**/*.ts",
+    "packages/mcp/mcp-client/tsdown.config.ts",
     "scripts/**/*.ts",
     "website/**/*.ts",
     "website/.vitepress/**/*.ts"
