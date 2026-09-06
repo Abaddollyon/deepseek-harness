@@ -72,6 +72,20 @@ interface WorkspaceNavigation {
   ): Promise<SessionId>
 }
 
+interface ConversationEnvironmentNavigation {
+  readonly presentation?: {
+    get(ref: { environmentId: string; sessionId: string }): { viewId: string }
+    update(
+      ref: { environmentId: string; sessionId: string },
+      patch: { draft?: string; viewId?: string },
+    ): void
+  }
+  getSnapshot?():
+    | { readonly kind: 'environments' }
+    | { readonly kind: 'session'; readonly ref: { environmentId: string; sessionId: string }; readonly viewId: string }
+  subscribe?(listener: () => void): () => void
+}
+
 /** Resolve the session-scoped Conversation action face, failing loud. */
 function scopedConversation(sessions: ISessions, id: SessionId): IConversation {
   const scoped = sessions.scope(id)
@@ -108,17 +122,11 @@ export function apply(ctx: Context): void {
       getSnapshot: () => runtimeGeneration.getSnapshot() !== undefined,
       subscribe: (listener: () => void) => runtimeGeneration.subscribe(listener),
     }
-  const presentation = (ctx.get('environmentNavigation') as {
-    presentation?: {
-      get(ref: { environmentId: string; sessionId: string }): { viewId: string }
-      update(
-        ref: { environmentId: string; sessionId: string },
-        patch: { draft?: string; viewId?: string },
-      ): void
-    }
-  } | undefined)?.presentation
+  const environmentNavigation = ctx.get('environmentNavigation') as ConversationEnvironmentNavigation | undefined
+  const presentation = environmentNavigation?.presentation
+  const owningEnvironmentId = environmentId ?? 'local'
   const presentationRef = (sessionId: SessionId) => ({
-    environmentId: environmentId ?? 'local', sessionId,
+    environmentId: owningEnvironmentId, sessionId,
   })
   const uiConversation = new UiConversation(ctx, sessions)
 
@@ -166,6 +174,15 @@ export function apply(ctx: Context): void {
       restoreView(sessionId)
     }
   }
+  const restoreNavigationView = (): void => {
+    const location = environmentNavigation?.getSnapshot?.()
+    if (location?.kind !== 'session' || location.ref.environmentId !== owningEnvironmentId) return
+    const sessionId = sessions.list.getSnapshot().current
+    if (sessionId === undefined
+      || location.ref.sessionId !== sessionId
+      || sessions.binding(sessionId) === undefined) return
+    activateView(sessionId, location.viewId)
+  }
   const conversationViews = createSnapshotStore<readonly ViewTab[]>(viewTabs())
   const refreshViews = (): void => {
     const current = conversationViews.getSnapshot()
@@ -182,6 +199,7 @@ export function apply(ctx: Context): void {
     let currentSessionId = sessions.list.getSnapshot().current
     const disposeViews = slots.subscribe('conversation.view', refreshViews)
     const disposeLocale = ctx.locale.subscribe(refreshViews)
+    const disposeNavigation = environmentNavigation?.subscribe?.(restoreNavigationView) ?? (() => {})
     const disposeCurrent = sessions.list.subscribe(() => {
       const nextSessionId = sessions.list.getSnapshot().current
       if (nextSessionId === currentSessionId) return
@@ -190,6 +208,7 @@ export function apply(ctx: Context): void {
     })
     return () => {
       disposeCurrent()
+      disposeNavigation()
       disposeLocale()
       disposeViews()
     }

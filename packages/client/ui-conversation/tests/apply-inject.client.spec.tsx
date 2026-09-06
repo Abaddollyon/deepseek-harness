@@ -20,6 +20,35 @@ usePinnedBrowserLanguages('zh-CN')
 
 const ROOT = 'root-1' as SessionId
 
+type TestLocation =
+  | { readonly kind: 'environments'; readonly selectedId?: string }
+  | { readonly kind: 'session'; readonly ref: { environmentId: string; sessionId: string }; readonly viewId: string }
+
+function environmentNavigation(initial: TestLocation) {
+  let location = initial
+  const listeners = new Set<() => void>()
+  const states = new Map<string, { draft: string; viewId: string }>()
+  const publish = (): void => { for (const listener of [...listeners]) listener() }
+  return {
+    open(next: TestLocation) { location = next; publish() },
+    getSnapshot: () => location,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    presentation: {
+      get(ref: { environmentId: string; sessionId: string }) {
+        return states.get(JSON.stringify([ref.environmentId, ref.sessionId])) ?? { draft: '', viewId: 'chat' }
+      },
+      update(
+        ref: { environmentId: string; sessionId: string },
+        patch: { draft?: string; viewId?: string },
+      ) {
+        const key = JSON.stringify([ref.environmentId, ref.sessionId])
+        states.set(key, { ...this.get(ref), ...patch })
+      },
+      subscribe: () => () => {},
+    },
+  }
+}
+
 type ConversationInstance = ReturnType<ReturnType<typeof createConversationStore>['create']>
 type ConversationActions = ConversationInstance['actions']
 
@@ -31,10 +60,13 @@ function sessionFakeFor() {
   } satisfies SessionBehaviorOverrides
 }
 
-async function bench(options: { environmentId?: string } = {}) {
+async function bench(options: { environmentId?: string; navigation?: ReturnType<typeof environmentNavigation> } = {}) {
   const runtime = await SlotTestRuntime.create()
   if (options.environmentId !== undefined) {
     runtime.ctx.provide('environmentRuntime', { environmentId: options.environmentId } as never)
+  }
+  if (options.navigation !== undefined) {
+    runtime.ctx.provide('environmentNavigation', options.navigation as never)
   }
   runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   const connectWorkspace = vi.fn(async () => ROOT)
@@ -167,6 +199,46 @@ describe('Conversation inject API', () => {
       expect(activate).toHaveBeenLastCalledWith('custom')
     } finally {
       removeCustom?.()
+      removeChat()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('activates navigation View changes for an already-mounted current Session', async () => {
+    const navigation = environmentNavigation({
+      kind: 'session', ref: { environmentId: 'sigil', sessionId: ROOT }, viewId: 'chat',
+    })
+    const b = await bench({ environmentId: 'sigil', navigation })
+    const binding = b.runtime.ctx.uiConversation.binding(ROOT)
+    const activate = vi.spyOn(binding, 'activate')
+    const removeChat = b.slots.register(
+      { name: 'conversation.view', id: 'chat', order: 0 },
+      (() => null) as never,
+    )
+    const removeTasks = b.slots.register(
+      { name: 'conversation.view', id: 'tasks', order: 10 },
+      (() => null) as never,
+    )
+    try {
+      await b.runtime.sessions.setCurrent(ROOT)
+      activate.mockClear()
+      navigation.presentation.update(
+        { environmentId: 'sigil', sessionId: ROOT },
+        { viewId: 'tasks' },
+      )
+
+      navigation.open({
+        kind: 'session', ref: { environmentId: 'sigil', sessionId: ROOT }, viewId: 'tasks',
+      })
+
+      expect(activate).toHaveBeenLastCalledWith('tasks')
+      activate.mockClear()
+      navigation.open({
+        kind: 'session', ref: { environmentId: 'other', sessionId: ROOT }, viewId: 'chat',
+      })
+      expect(activate).not.toHaveBeenCalled()
+    } finally {
+      removeTasks()
       removeChat()
       await b.runtime.dispose()
     }
