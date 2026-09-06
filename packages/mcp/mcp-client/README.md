@@ -54,10 +54,11 @@ Add one entry per server; nothing else is required. After the harness starts, th
 
 | Field | Default | Meaning |
 |---|---|---|
-| `transport` | required | `stdio` or `streamable-http` |
+| `transport` | required | `stdio`, `streamable-http`, or `host-connection` |
 | `serverName` | required | Namespace for the server's tool names; `[A-Za-z0-9_-]{1,32}`, unique inside one registration scope |
 | `command` / `args` / `env` / `cwd` | — | stdio: executable, arguments, extra env merged over scrubbed ambient env, working directory |
 | `url` / `headers` | — | streamable-http: endpoint URL and extra request headers |
+| `connectionId` | — | host-connection: settings key of the Host-managed connection to consume; `url`/`headers` keys beside it are rejected at load |
 | `toolCallTimeoutMs` | `60,000` | Timeout per `tools/call` invocation |
 | `failOnStartupError` | `false` | Reject plugin activation when the initial connection or tool synchronization fails |
 | `reconnect.enabled` | `true` | Reconnect automatically after a lost connection |
@@ -68,6 +69,21 @@ Add one entry per server; nothing else is required. After the harness starts, th
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-mcp-client) is the exhaustive source for every accepted field.
 
 After startup, the server's tools appear as `mcp__<serverName>__<tool>` — try a prompt that uses one. If the initial connection fails, the harness still starts but no tools from that server appear, and an error is logged; set `failOnStartupError: true` to make a startup failure abort the harness instead.
+
+### Host-managed connections (OAuth)
+
+When a server requires OAuth, its endpoint, client parameters, and tokens belong to the Host, not to per-agent plugin config. Mount the package's `NativeMcpConnectionsService` once in the Host composition, declare each connection under the `mcp-connections` settings namespace (endpoint, issuer, resource, redirect URI, scopes, optional client id, and the network bounds — all nonsecret), and point the agent entry at it by id:
+
+```yaml
+- id: mcp-github
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: github
+    transport: host-connection
+    connectionId: github
+```
+
+The Host service owns one protocol engine per connection: grants live in credential records (`mcp-connections/<connectionId>`), sign-in runs as a native authorization flow (open the URL, paste the full callback URL — no local listener), and every agent request is authenticated by the engine's Host-owned fetch. Revocation, scope changes, config edits, and re-authorization take effect immediately: the agent's tools are withdrawn and re-established against the new authority, a connection whose grant is gone stays down until a human signs in again, and tokens never reach agent-side configuration, logs, or status views.
 
 ### Tool naming and coexistence
 
@@ -116,11 +132,13 @@ This section explains the design decisions behind the bridge and points at the c
 | [`src/connection.ts`](src/connection.ts) | Connection supervisor: client generations, reconnect policy, attempt budget, disposal |
 | [`src/tools.ts`](src/tools.ts) | Tool bridge: discovery, naming, registration swap, execution, image projection |
 | [`src/transport.ts`](src/transport.ts) | Transport factory: stdio spawn with scrubbed env, Streamable HTTP |
+| [`src/connections.ts`](src/connections.ts) | Host connection owner: settings-backed configs, per-connection engines, authorization flows, consumer bindings, token-free status |
+| [`src/oauth.ts`](src/oauth.ts), [`src/oauth-record.ts`](src/oauth-record.ts), [`src/oauth-fetch.ts`](src/oauth-fetch.ts), [`src/oauth-error.ts`](src/oauth-error.ts) | OAuth protocol engine: grant records, bounded discovery/authorize/refresh, the authenticating managed fetch |
 | — | No runtime invariant companion is published; MCP generations contribute through the tool registry, but the bridge exposes no independent server-to-tool snapshot after an asynchronous resync. |
 
 ### Lifecycle and sync
 
-`apply` resolves the reconnect policy, reserves the `serverName` inside the current registration scope, starts the supervisor, and awaits the initial connection plus discovery. Independent Agent scopes may reuse the same namespace because their tools and transports are isolated; a duplicate inside one scope fails at load. The supervisor serializes every sync — initial, notification, and reconnect — through one queue so two syncs can never interleave their dispose-previous/register-next swap. Disposal cancels pending reconnects, closes the live client, waits for the in-flight attempt and queued syncs to quiesce, and unregisters the current generation. The [auto-reconnect Agent Note](../../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.md) owns the reconnect decision.
+`apply` resolves the reconnect policy, reserves the `serverName` inside the current registration scope, starts the supervisor, and awaits the initial connection plus discovery. A `host-connection` entry additionally acquires a binding from the Host connection owner; the supervisor then takes every generation's transport from that binding and reacts to its invalidations: the live generation is fenced and closed behind the same close barrier disposal uses, the tool registration is withdrawn first, and re-establishment re-evaluates the authority fresh — a revoked or removed connection hands no transport and holds until the Host signals a change. Independent Agent scopes may reuse the same namespace because their tools and transports are isolated; a duplicate inside one scope fails at load. The supervisor serializes every sync — initial, notification, and reconnect — through one queue so two syncs can never interleave their dispose-previous/register-next swap. Disposal cancels pending reconnects, closes the live client, waits for the in-flight attempt and queued syncs to quiesce, and unregisters the current generation. The [auto-reconnect Agent Note](../../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.md) owns the reconnect decision.
 
 The supervisor listens for `notifications/tools/list_changed` and queues a re-sync; a fetch-phase failure keeps the previous generation registered, while a registration conflict rolls back the attempted generation. Each outage shares one attempt budget: after `maxAttempts` consecutive failures the tools are unregistered and reconnection stops, and a connection that stays up past `maxDelayMs` resets the budget.
 
@@ -194,6 +212,8 @@ These limits describe what you cannot do with this plugin and when it needs oper
 - **Image is the only durable rich-result bridge** — PNG, JPEG, WebP, and GIF enter Native context after exact capability proof. Audio and embedded-resource payloads remain execution-local with explicit diagnostics, while resource links preserve only their name and URI as text.
 - **Unsupported MCP output schemas are not enforced** — `structuredContent` falls back to `JsonValue` when the advertised schema uses vocabulary outside the harness subset.
 - **Task-required MCP tools are rejected at call time** — a tool that requires the task-based execution extension throws instead of bridging; the extension is not implemented.
+- **Host-managed connections are OAuth-only** — the settings schema has no static-header or credential-reference fields; servers needing only a fixed token use the legacy `streamable-http` transport.
+- **One Host owns each grant's refresh** — the per-connection engine serializes refresh in its process; two harness processes sharing one credential store can both refresh one grant and lose a rotation, so a grant's Host must be a deployment singleton.
 
 <a id="dev-note"></a>
 ### Dev Note
