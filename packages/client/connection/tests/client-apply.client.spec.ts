@@ -86,7 +86,10 @@ describe('connection client apply', () => {
         }))
       },
     })
-    ;(globalThis as Win).__DSH_TRANSPORT__ = transport('global')
+    Object.defineProperty(globalThis, '__DSH_TRANSPORT__', {
+      configurable: true,
+      get: () => { throw new Error('explicit transport read the page-global carrier') },
+    })
 
     const local = createConnectionHandle(transport('local'))
     const sigil = createConnectionHandle(transport('sigil'))

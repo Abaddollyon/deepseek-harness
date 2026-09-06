@@ -204,7 +204,9 @@ export function createConnectionHandle(transportOverride?: ClientTransportHooks)
   const pageLocation = typeof location === 'undefined' ? undefined : location
   const fixture = pageLocation !== undefined && new URLSearchParams(pageLocation.search).has('fixture')
   const fixtureRpc = transportOverride === undefined && fixture ? createFixtureConnectionRpc() : undefined
-  const inheritedTransport = (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
+  const inheritedTransport = transportOverride === undefined
+    ? (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
+    : undefined
   const transport = transportOverride ?? inheritedTransport
   const rpc = fixtureRpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
   let generationSource: ConnectionGenerationSource | undefined
