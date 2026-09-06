@@ -83,7 +83,7 @@ When a server requires OAuth, its endpoint, client parameters, and tokens belong
     connectionId: github
 ```
 
-The Host service owns one protocol engine per connection: grants live in credential records (`mcp-connections/<connectionId>`), sign-in runs as a native authorization flow (open the URL, paste the full callback URL — no local listener), and every agent request is authenticated by the engine's Host-owned fetch. Revocation, scope changes, config edits, and re-authorization take effect immediately: the agent's tools are withdrawn and re-established against the new authority, a connection whose grant is gone stays down until a human signs in again, and tokens never reach agent-side configuration, logs, or status views.
+The Host service owns one protocol engine per connection: grants live in credential records (`mcp-connections/<connectionId>`), sign-in runs as a native authorization flow (open the URL, paste the full callback URL — no local listener), and every agent request is authenticated by the engine's Host-owned fetch. Revocation, scope changes, config edits, and re-authorization take effect immediately: the agent's tools are withdrawn and re-established against the new authority, a connection whose grant is gone stays down until a human signs in again, and tokens never reach agent-side configuration, logs, or status views. A not-yet-authorized connection yields no transport by design, so `failOnStartupError: true` also rejects that normal cold startup — treat the combination as a configuration choice, not an OAuth failure.
 
 ### Tool naming and coexistence
 

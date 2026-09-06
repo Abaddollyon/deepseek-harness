@@ -39,6 +39,8 @@ kind: "package-group"
 - [MCP 客户端自动重连 Agent Note](../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.zh.md)——重连策略、单次中断的尝试预算与退出开关。
 - [第三方记忆 MCP 示例 Agent Note](../../.agents/notes/implemented/feature/2026-07-31-third-party-memory-mcp-examples.zh.md)——作为参考配置交付的三个默认关闭的记忆服务器 overlay。
 - [第三方记忆 MCP 指南](../../docs/user/guide/mcp-memory.zh.md)——可运行的 overlay 配置行与设置说明。
+- [MCP Host OAuth 连接 Agent Note](../../.agents/notes/implemented/feature/2026-09-06-mcp-host-oauth-connections.zh.md)——Host 持有的授权、引擎 seam 与权威感知桥接的设计。
+- [MCP Host 连接子系统参考](../../docs/subsystems/mcp.zh.md)——Host 连接所有者：设置支撑的连接条目、OAuth 引擎 seam、消费方绑定与无令牌状态视图。
 - [工具子系统参考](../../docs/subsystems/tools.zh.md)——接收已注册工具的 `ToolRuntime`。
 
 <a id="dev-note"></a>

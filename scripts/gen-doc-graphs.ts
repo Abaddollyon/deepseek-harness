@@ -266,6 +266,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Flows are registered by the plugin that knows how to obtain one credential and keyed by the record they write; the seam owns the conversation and the one-attempt-per-key lifecycle, never the protocol.',
   },
   {
+    key: 'nativeMcpConnections',
+    pkg: 'mcp-client',
+    title: 'Host-managed MCP connection owner',
+    mode: 'core',
+    consumers: ['mcp-client'],
+    note: 'Mounts once in the Host composition: owns the settings-backed nonsecret connection configs, one OAuth protocol engine and one native sign-in flow per connection, and token-free status; the same package\'s agent-side plugin consumes bindings whose transports the engine\'s Host-owned fetch authenticates.',
+  },
+  {
     key: 'sessionTelemetry',
     pkg: 'session-telemetry',
     title: 'Session telemetry seam',

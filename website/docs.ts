@@ -312,6 +312,7 @@ const subsystemGroups = [
   ]],
   ['执行与工具', 'Execution and tools', [
     ['tools.md', '工具', 'Tools'],
+    ['mcp.md', 'MCP Host 连接', 'MCP Host connections'],
     ['shell.md', 'Bash 执行', 'Bash execution'],
     ['subprocess.md', '子进程', 'Subprocesses'],
     ['terminal.md', 'PTY 会话', 'PTY sessions'],
