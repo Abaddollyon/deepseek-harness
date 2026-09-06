@@ -168,6 +168,24 @@ interface TerminalView {
 }
 
 /**
+ * Project one settled job snapshot into the terminal view every settlement
+ * lane delivers, so the account lanes cannot drift apart on the field mapping.
+ * The detail is an explicit argument: an explicit undefined must never fall
+ * back to the snapshot's own detail.
+ */
+function terminalViewOf(snapshot: JobSnapshot, detail: string | undefined): TerminalView {
+  return {
+    id: snapshot.id,
+    kind: snapshot.kind,
+    label: snapshot.label,
+    status: snapshot.status,
+    detail,
+    reported: snapshot.reported,
+    outputLimitBytes: snapshot.outputLimitBytes,
+  }
+}
+
+/**
  * Whether one run/* account append durably reached the owner session.
  * `unavailable` names the deterministic no-lane case (the owner is neither
  * live nor reachable through persistence), never a lane failure.
@@ -826,17 +844,9 @@ export class RunSupervisor {
             // registry's lanes always write a detail; the fallback only
             // covers a producer outcome that supplied none.
             const supervisorDriven = candidate.decision !== 'adoptable'
-            const view: TerminalView = {
-              id: snapshot.id,
-              kind: snapshot.kind,
-              label: snapshot.label,
-              status: snapshot.status,
-              detail: supervisorDriven
-                ? candidate.detail
-                : snapshot.detail ?? REGISTRY_NOT_RESUMABLE_DETAIL,
-              reported: snapshot.reported,
-              outputLimitBytes: snapshot.outputLimitBytes,
-            }
+            const view = terminalViewOf(snapshot, supervisorDriven
+              ? candidate.detail
+              : snapshot.detail ?? REGISTRY_NOT_RESUMABLE_DETAIL)
             this.track(pass, this.emitAbandoned(
               pass,
               owner,
@@ -856,11 +866,7 @@ export class RunSupervisor {
       if (snapshot.status === 'killed' && adopted.record.kind === 'workflow') {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
-          const view: TerminalView = {
-            id: snapshot.id, kind: snapshot.kind, label: snapshot.label,
-            status: snapshot.status, detail: snapshot.detail,
-            reported: snapshot.reported, outputLimitBytes: snapshot.outputLimitBytes,
-          }
+          const view = terminalViewOf(snapshot, snapshot.detail)
           const closure = this.emitAbandoned(pass, owner, view, 'resume-failed', adopted.record.incarnation)
           this.track(pass, closure.then(async (outcome) => {
             if (outcome !== 'unavailable') await this.clearAdoptionMarker(adopted)
@@ -875,16 +881,7 @@ export class RunSupervisor {
       if (!(snapshot.status === 'killed' && adopted.record.kind === 'workflow') && !snapshot.reported) {
         const owner = adopted.record.ownerSession ?? undefined
         if (owner !== undefined) {
-          const view: TerminalView = {
-            id: snapshot.id,
-            kind: snapshot.kind,
-            label: snapshot.label,
-            status: snapshot.status,
-            detail: snapshot.detail,
-            reported: snapshot.reported,
-            outputLimitBytes: snapshot.outputLimitBytes,
-          }
-          this.deliverNoticeWhenLive(pass, owner, view, adopted)
+          this.deliverNoticeWhenLive(pass, owner, terminalViewOf(snapshot, snapshot.detail), adopted)
         }
       }
     }

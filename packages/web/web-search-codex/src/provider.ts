@@ -153,11 +153,14 @@ export class CodexSearchProvider implements WebSearchProvider {
         )
       } catch (error: unknown) {
         const diagnostic = safeDiagnostic(stage, executable, error, this.options.maxPayloadBytes)
-        if (isAborted(signal)) throw abortedError(diagnostic)
-        if (controller.signal.reason === timeoutReason) {
-          throw timeoutError(this.options.requestTimeoutMs, diagnostic)
-        }
-        if (controller.signal.aborted) throw abortedError(diagnostic)
+        const cancellation = cancellationError(
+          signal,
+          controller.signal,
+          timeoutReason,
+          this.options.requestTimeoutMs,
+          diagnostic,
+        )
+        if (cancellation !== undefined) throw cancellation
         throw new WebError(
           CODEX_MISSING_MESSAGE,
           'WEB_PROVIDER_CONFIGURED_UNAVAILABLE',
@@ -211,11 +214,14 @@ export class CodexSearchProvider implements WebSearchProvider {
       primaryError = error
       if (error instanceof WebError) throw error
       const diagnostic = safeDiagnostic(stage, executable, error, this.options.maxPayloadBytes)
-      if (isAborted(signal)) throw abortedError(diagnostic)
-      if (controller.signal.reason === timeoutReason) {
-        throw timeoutError(this.options.requestTimeoutMs, diagnostic)
-      }
-      if (controller.signal.aborted) throw abortedError(diagnostic)
+      const cancellation = cancellationError(
+        signal,
+        controller.signal,
+        timeoutReason,
+        this.options.requestTimeoutMs,
+        diagnostic,
+      )
+      if (cancellation !== undefined) throw cancellation
       if (isAuthEvidence(error)) {
         throw new WebError(
           CODEX_AUTH_MESSAGE,
@@ -354,6 +360,19 @@ function timeoutError(milliseconds: number, cause: CodexDiagnostic): WebError {
     WEB_PROVIDER_ERROR,
     { cause },
   )
+}
+
+function cancellationError(
+  signal: AbortSignal | undefined,
+  controllerSignal: AbortSignal,
+  timeoutReason: Error,
+  timeoutMs: number,
+  diagnostic: CodexDiagnostic,
+): WebError | undefined {
+  if (isAborted(signal)) return abortedError(diagnostic)
+  if (controllerSignal.reason === timeoutReason) return timeoutError(timeoutMs, diagnostic)
+  if (controllerSignal.aborted) return abortedError(diagnostic)
+  return undefined
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
