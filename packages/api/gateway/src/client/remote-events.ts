@@ -79,6 +79,8 @@ export class ClientRemoteEvents {
 
   /**
    * Register one typed Remote Event listener in its calling fiber.
+   * A projected caller in another Cordis root retains that fiber's lifetime
+   * while registering in this Remote instance's dispatch tree.
    * @param callerCtx - fiber Context owning the registration.
    * @param event - selected forwarded event.
    * @param listener - listener derived from that event's declaration.
@@ -89,11 +91,19 @@ export class ClientRemoteEvents {
     event: Event,
     listener: TypertClientEventListener<Event>,
   ): () => void {
-    const dispose = privateEvents(callerCtx).on(
+    const register = (ctx: Context): (() => boolean) => privateEvents(ctx).on(
       this.eventKey(event),
       listener as unknown as RemoteEventListener,
     )
-    return () => { dispose() }
+    if (callerCtx.root === this.ownerCtx.root) {
+      const dispose = register(callerCtx)
+      return () => { dispose() }
+    }
+    const owned = callerCtx.effect(
+      () => register(this.ownerCtx),
+      `api-gateway.client.$on(${JSON.stringify(event)})`,
+    )
+    return () => { void owned() }
   }
 
   /** Withdraw the generation source and wait for active listener work to quiesce. */

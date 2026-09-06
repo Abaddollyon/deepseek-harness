@@ -74,7 +74,7 @@ Each time the Host opens `$events`, the API Remotes source factory installs ever
 
 A physical mux disconnect ends the logical stream with `RemoteStreamCarrierError`. A Host Remote stream error, unexpected normal completion, non-ready opening item, or malformed event item also ends the current generation. Connection withdraws that generation and reopens `$events` after backoff; Gateway mux only rebuilds the physical WebSocket. Ordinary events are not replayed. State whose correctness requires recovery must provide a query, cursor, or opening baseline and cannot treat `$on` as a reliable journal.
 
-The Client dispatches on a Cordis key private to each Remote instance. Ordinary `emit` uses `parallel()` and contains listener failures; Agent-scoped `waterfall` uses `waterfall()` on the resolved Agent Context and allows a result, rejection, or `next()` delegation. Both registration kinds belong to the calling fiber, and Host events do not trigger same-named Client-local events.
+The Client dispatches on a Cordis key private to each Remote instance. Ordinary `emit` uses `parallel()` and contains listener failures; Agent-scoped `waterfall` uses `waterfall()` on the resolved Agent Context and allows a result, rejection, or `next()` delegation. Both registration kinds belong to the calling fiber, and Host events do not trigger same-named Client-local events. When a presentation in an isolated Cordis root consumes a projected Remote service, the subscription registers in that Remote instance's owning event tree and its disposer remains attached to the presentation fiber. This keeps the resolved Agent Context and listener in one dispatch tree without extending the runtime service's lifetime.
 
 ### The allowlist: one declaration read by both faces
 
