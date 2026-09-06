@@ -418,4 +418,312 @@ describe('environment composition service', () => {
     await composition.dispose()
     await shell.fiber.dispose()
   })
+
+  test('resolves an exact remote presentation only after its runtime and UI are connected', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+    const nav = navigation({ kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'chat' })
+    let connect!: () => void
+    let remoteEnvironmentRuntime!: {
+      generation: { getSnapshot(): { environmentId: string; runtimeId: string; generation: number } | undefined }
+    }
+    const activator = {
+      deriveRoster: (roots: readonly string[]) => [...roots],
+      serviceRequirements: async () => [],
+      async withdraw() { return { resume: async () => {} } },
+      async activate(ctx: Context, ids: readonly string[]) {
+        if (ids.includes('domain')) {
+          remoteEnvironmentRuntime = ctx.environmentRuntime
+          const connection = ctx.get('connection') as ConnectionHandle
+          ctx.effect(() => connection.registerGenerationSource(async (signal, ready) => {
+            await new Promise<void>((resolve) => {
+              connect = () => { ready({ home: '/remote' }) }
+              signal.addEventListener('abort', () => { resolve() }, { once: true })
+            })
+          }))
+          const loop = connection.start({})
+          ctx.effect(() => () => { loop.stop() })
+        }
+        if (ids.includes('presentation')) {
+          ctx.reflect.provide('destinationService', { owner: ctx.environmentRuntime.environmentId })
+        }
+        return { dispose: async () => {} }
+      },
+    }
+    const service = createEnvironmentCompositionService(shell)
+    service.registerFactory(async () => ({
+      request: async () => new Response('ok'),
+      connectionTransport: { fetch: vi.fn() },
+      dispose: () => {},
+    }))
+    const composition = await service.start({
+      navigation: nav,
+      activator,
+      domain: { roots: ['domain'] },
+      presentation: { roots: ['presentation'] },
+      runtimeServices: [],
+      shellServices: [],
+    })
+
+    const callback = vi.fn((context: Context) => (context.get('destinationService') as { owner: string }).owner)
+    const resolving = service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      callback,
+    )
+    await vi.waitFor(() => { expect(connect).toBeTypeOf('function') })
+    expect(composition.getSnapshot()).toMatchObject({
+      phase: 'ready', environmentId: 'sigil', connectionState: 'connecting',
+    })
+    expect(callback).not.toHaveBeenCalled()
+    connect()
+    const owner = await resolving
+
+    expect(owner).toBe('sigil')
+    expect(nav.getSnapshot()).toMatchObject({ kind: 'session', ref: { environmentId: 'sigil' } })
+    await expect(service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      async () => {
+        const generation = remoteEnvironmentRuntime.generation.getSnapshot()
+        if (generation === undefined) throw new Error('fixture generation missing')
+        Object.defineProperty(remoteEnvironmentRuntime.generation, 'getSnapshot', {
+          value: () => ({ ...generation, generation: generation.generation + 1 }),
+        })
+      },
+    )).rejects.toThrow('generation changed during callback')
+    await composition.dispose()
+    await shell.fiber.dispose()
+  })
+
+  test('resolves a local presentation through the shell before composition starts', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('destinationService', { owner: 'local' })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    shell.reflect.provide('environmentNavigation', nav)
+    const service = createEnvironmentCompositionService(shell)
+
+    await expect(service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      () => undefined,
+    )).rejects.toThrow('remote presentation requires a running composition')
+
+    const owner = await service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'tasks' },
+      context => (context.get('destinationService') as { owner: string }).owner,
+    )
+
+    expect(owner).toBe('local')
+    expect(nav.getSnapshot()).toMatchObject({ kind: 'session', ref: { environmentId: 'local' } })
+    await shell.fiber.dispose()
+  })
+
+  test('cancels local presentation work through the caller signal', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    shell.reflect.provide('environmentNavigation', nav)
+    const service = createEnvironmentCompositionService(shell)
+    const abort = new AbortController()
+    let callbackSignal: AbortSignal | undefined
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+
+    const resolving = service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'tasks' },
+      async (_context, signal) => {
+        callbackSignal = signal
+        await held
+      },
+      { signal: abort.signal },
+    )
+    abort.abort(new DOMException('deadline elapsed', 'TimeoutError'))
+
+    await expect(resolving).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(callbackSignal?.aborted).toBe(true)
+    release()
+    await shell.fiber.dispose()
+  })
+
+  test('rejects a presentation callback when a newer navigation intent supersedes it', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+    const nav = navigation({ kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'chat' })
+    let entered!: () => void
+    const presentationEntered = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const holdPresentation = new Promise<void>((resolve) => { release = resolve })
+    const callback = vi.fn()
+    const activator = {
+      deriveRoster: (roots: readonly string[]) => [...roots],
+      serviceRequirements: async () => [],
+      async withdraw() { return { resume: async () => {} } },
+      async activate(_ctx: Context, ids: readonly string[]) {
+        if (ids.includes('presentation')) {
+          entered()
+          await holdPresentation
+        }
+        return { dispose: async () => {} }
+      },
+    }
+    const service = createEnvironmentCompositionService(shell)
+    service.registerFactory(async () => ({
+      request: async () => new Response('ok'),
+      connectionTransport: { fetch: vi.fn() },
+      dispose: () => {},
+    }))
+    const composition = await service.start({
+      navigation: nav,
+      activator,
+      domain: { roots: ['domain'] },
+      presentation: { roots: ['presentation'] },
+      runtimeServices: [],
+      shellServices: [],
+    })
+
+    const resolving = service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      callback,
+    )
+    await presentationEntered
+    nav.open({ kind: 'session', ref: { environmentId: 'local', sessionId: 'other' }, viewId: 'chat' })
+    release()
+
+    await expect(resolving).rejects.toMatchObject({ name: 'AbortError' })
+    expect(callback).not.toHaveBeenCalled()
+    await composition.dispose()
+    await shell.fiber.dispose()
+  })
+
+  test('keeps an unready remote presentation cancellable while its generation is unavailable', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    const activator = {
+      deriveRoster: (roots: readonly string[]) => [...roots],
+      serviceRequirements: async () => [],
+      async withdraw() { return { resume: async () => {} } },
+      async activate() { return { dispose: async () => {} } },
+    }
+    const service = createEnvironmentCompositionService(shell)
+    service.registerFactory(async () => ({
+      request: async () => new Response('ok'),
+      connectionTransport: { fetch: vi.fn() },
+      dispose: () => {},
+    }))
+    const composition = await service.start({
+      navigation: nav,
+      activator,
+      domain: { roots: ['domain'] },
+      presentation: { roots: ['presentation'] },
+      runtimeServices: [],
+      shellServices: [],
+    })
+    const callback = vi.fn()
+
+    await expect(service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      callback,
+      { signal: AbortSignal.timeout(25) },
+    )).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(callback).not.toHaveBeenCalled()
+    await composition.dispose()
+    await shell.fiber.dispose()
+  })
+
+  test('cancels presentation resolution when the running composition is disposed', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    let entered!: () => void
+    const presentationEntered = new Promise<void>((resolve) => { entered = resolve })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const activator = {
+      deriveRoster: (roots: readonly string[]) => [...roots],
+      serviceRequirements: async () => [],
+      async withdraw() { return { resume: async () => {} } },
+      async activate(_ctx: Context, ids: readonly string[]) {
+        if (ids.includes('presentation')) {
+          entered()
+          await held
+        }
+        return { dispose: async () => {} }
+      },
+    }
+    const service = createEnvironmentCompositionService(shell)
+    service.registerFactory(async () => ({
+      request: async () => new Response('ok'),
+      connectionTransport: { fetch: vi.fn() },
+      dispose: () => {},
+    }))
+    const composition = await service.start({
+      navigation: nav,
+      activator,
+      domain: { roots: ['domain'] },
+      presentation: { roots: ['presentation'] },
+      runtimeServices: [],
+      shellServices: [],
+    })
+    const callback = vi.fn()
+    const resolving = service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'tasks' },
+      callback,
+    )
+    await presentationEntered
+
+    const disposing = composition.dispose()
+    await expect(resolving).rejects.toMatchObject({ name: 'AbortError' })
+    release()
+    await disposing
+    expect(callback).not.toHaveBeenCalled()
+    await shell.fiber.dispose()
+  })
+
+  test('waits for an in-progress composition start before resolving local presentation', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+    shell.reflect.provide('destinationService', { owner: 'local' })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    shell.reflect.provide('environmentNavigation', nav)
+    let releaseRequirements!: () => void
+    const requirementsHeld = new Promise<void>((resolve) => { releaseRequirements = resolve })
+    const callback = vi.fn((context: Context) => (context.get('destinationService') as { owner: string }).owner)
+    const activator = {
+      deriveRoster: (roots: readonly string[]) => [...roots],
+      async serviceRequirements() { await requirementsHeld; return [] },
+      async withdraw() { return { resume: async () => {} } },
+      async activate() { return { dispose: async () => {} } },
+    }
+    const service = createEnvironmentCompositionService(shell)
+    service.registerFactory(async () => ({
+      request: async () => new Response('ok'),
+      connectionTransport: { fetch: vi.fn() },
+      dispose: () => {},
+    }))
+    const starting = service.start({
+      navigation: nav,
+      activator,
+      domain: { roots: ['domain'] },
+      presentation: { roots: ['presentation'] },
+      runtimeServices: [],
+      shellServices: [],
+    })
+    const resolving = service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'tasks' },
+      callback,
+    )
+    expect(callback).not.toHaveBeenCalled()
+    releaseRequirements()
+
+    const composition = await starting
+    await expect(resolving).resolves.toBe('local')
+    expect(callback).toHaveBeenCalledOnce()
+    await composition.dispose()
+    await shell.fiber.dispose()
+  })
 })

@@ -38,7 +38,8 @@ export { createEnvironmentCompositionService } from './composition.ts'
 export type {
   EnvironmentAppLocation, EnvironmentClientCarrier, EnvironmentClientCarrierFactory,
   EnvironmentClientRuntimeActivator, EnvironmentComposition, EnvironmentCompositionNavigation,
-  EnvironmentCompositionOptions, EnvironmentCompositionService, EnvironmentRosterSpec,
+  EnvironmentCompositionOptions, EnvironmentCompositionService, EnvironmentPresentationCallback,
+  EnvironmentPresentationResolutionOptions, EnvironmentRosterSpec,
 } from './composition.ts'
 export type { AppLocation, EnvironmentNavigation, EnvironmentNavigationService } from './navigation.ts'
 export { createEnvironmentNavigation, environmentSelection } from './navigation.ts'

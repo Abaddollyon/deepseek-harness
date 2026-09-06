@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-06-independent-host-client-runtimes.md
-2026-09-06-independent-host-client-runtimes.md: 8289477b6832087c05cccf44a92221d08f30bea0
-2026-09-06-independent-host-client-runtimes.zh.md: 228dc4a6931ff238b3b9edf97c362ff5de37adba
+2026-09-06-independent-host-client-runtimes.md: 61f78565f0d5172c0374a92af1c2dcb3444aa6f8
+2026-09-06-independent-host-client-runtimes.zh.md: a3ff6162799d5da297a2ec57800e84f081e961f2

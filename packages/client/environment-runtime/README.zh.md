@@ -13,7 +13,7 @@ kind: "package-reference"
 
 Runtime request service 只接受已注册的相对 `/api/` 路由。每次调用都绑定一个环境；当 Connection generation 变化或消失后，调用结果会被拒绝。活跃 composition snapshot 会在保持 runtime 已挂载的同时报告 `connecting`、`connected` 或 `disconnected`，记录最后连接时间，并在不改变导航的情况下重试同一个 Connection。Registry 共享同一环境的并发获取，并在最后一个 lease 释放后处置 runtime 与 carrier。
 
-应用 shell 在完整生命周期内拥有 `ctx.environmentNavigation`。在 Environments overview 中选择 Host card 时仍使用本地 control plane；只有导航打开该 Host 的 Session 时才会获取远端 runtime。有界 presentation store 会为 Host-local id 相同的 Session 分隔 draft、view、detail、scroll 与 sidebar state。浏览器持久化会在状态静止 250 ms 后写入，在 page hide 或 runtime 销毁时刷新待写状态，忽略 storage 权限和配额失败，并按最新 Session 优先的顺序把序列化结果限制在一百万个 UTF-16 code unit 内。内存状态仍立即更新，并保留持久化 snapshot 因限额省略的旧条目。Slot component 与 Host API 仍接收原生 Session id；只有 renderer Store cache 与持久化使用复合 identity。切换 Host 时可以撤下 UI registration package，而不会拆除 navigation 或 composition coordinator；renderer 会保留最后一组 root standard source 与 scope adapter，直到替代者完成安装。
+应用 shell 在完整生命周期内拥有 `ctx.environmentNavigation`。在 Environments overview 中选择 Host card 时仍使用本地 control plane；只有导航打开该 Host 的 Session 时才会获取远端 runtime。需要在目标 presentation 上执行操作的 shell integration 使用 `ctx.environmentComposition.withPresentation(location, callback, { signal })`。它会等待精确的远端 presentation 与已连接 generation，或等待恢复后的本地 shell；随后把目标 context 与组合生命周期 signal 传给 callback，并且只有同一 navigation intent、runtime 与 generation 仍为当前值时才确认结果。有界 presentation store 会为 Host-local id 相同的 Session 分隔 draft、view、detail、scroll 与 sidebar state。浏览器持久化会在状态静止 250 ms 后写入，在 page hide 或 runtime 销毁时刷新待写状态，忽略 storage 权限和配额失败，并按最新 Session 优先的顺序把序列化结果限制在一百万个 UTF-16 code unit 内。内存状态仍立即更新，并保留持久化 snapshot 因限额省略的旧条目。Slot component 与 Host API 仍接收原生 Session id；只有 renderer Store cache 与持久化使用复合 identity。切换 Host 时可以撤下 UI registration package，而不会拆除 navigation 或 composition coordinator；renderer 会保留最后一组 root standard source 与 scope adapter，直到替代者完成安装。
 
 Runtime projection 与 package 所有权见 [Web Client 架构](../../../docs/subsystems/web-client.zh.md)。
 
@@ -49,6 +49,8 @@ Runtime projection 与 package 所有权见 [Web Client 架构](../../../docs/su
 <summary>维护者工作上下文——点击展开</summary>
 
 将 runtime-owned service 置于各 environment root 之下，并将 shell-owned renderer、layout、locale 与 navigation service 保持在这些 root 之上。Host 切换必须先退役旧 presentation，再公开替代 runtime 的 service。
+
+`withPresentation` callback 应保持短生命周期，并把其收到的 signal 传入目标请求。调用方取消或 deadline、导航被替代以及 composition 销毁都会中止该 signal。忽略 signal 的操作可能在内部完成，但其结果无法通过 coordinator 的最终确认 fence。
 
 </details>
 
