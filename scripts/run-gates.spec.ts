@@ -183,7 +183,7 @@ describe('gate graph validation', () => {
 
     expect(ids).toEqual([
       'rescope-vendor', 'publint', 'constraints', 'package-dependencies', 'application-entrypoints',
-      'dsh-package-licenses', 'package-invariants', 'built-package-invariants', 'node-next-types',
+      'dsh-package-licenses', 'package-invariants', 'built-package-invariants', 'mcp-host-entry', 'node-next-types',
       'optional-dependency-imports', 'client-packages', 'client-ui-i18n', 'cordis-config',
       'runtime-closure', 'vendored-links',
     ])
@@ -505,7 +505,7 @@ describe('Node 24 lane ownership', () => {
     const subject = withPnpmEntrypoint(() => gatesForMode('ci-consumers'))
 
     expect(defaultConcurrency('ci-consumers', subject.length, 4)).toEqual({
-      workers: 11,
+      workers: 12,
       source: 'ci-consumers gate count',
     })
     expect(subject.map(item => item.id)).toEqual([
@@ -519,6 +519,7 @@ describe('Node 24 lane ownership', () => {
       'web-snapshot',
       'doc-typecheck',
       'node-next-types',
+      'mcp-host-entry',
       'built-bin-smoke',
     ])
     expect(subject.find(item => item.id === 'publint')?.needs).toEqual(['build'])
@@ -536,6 +537,7 @@ describe('Node 24 lane ownership', () => {
       'web-snapshot',
       'doc-typecheck',
       'node-next-types',
+      'mcp-host-entry',
       'built-bin-smoke',
     ]) {
       expect(subject.find(item => item.id === id)?.needs).toEqual(['built-package-invariants'])
@@ -562,9 +564,38 @@ describe('Node 24 lane ownership', () => {
         'expected-output',
         'doc-typecheck',
         'node-next-types',
+        'mcp-host-entry',
         'built-bin-smoke',
       ],
     })
+  })
+})
+
+describe('MCP Host entry artifact gate', () => {
+  it('runs the built-entry proof behind the build in every artifact lane', () => {
+    for (const [mode, needs] of [
+      ['ci-primary', ['build']],
+      ['ci-artifacts', ['build']],
+      ['ci-consumers', ['built-package-invariants']],
+      ['check-all', ['build']],
+    ] as const) {
+      const subject = withPnpmEntrypoint(() => gatesForMode(mode))
+      const gate = subject.find(item => item.id === 'mcp-host-entry')
+
+      expect(gate, mode).toMatchObject({
+        label: 'MCP Host entry proof',
+        displayCommand: 'pnpm exec tsx scripts/verify-mcp-host-entry.ts',
+        args: ['/private/pnpm.cjs', 'exec', 'tsx', 'scripts/verify-mcp-host-entry.ts'],
+        needs,
+      })
+    }
+  })
+
+  it('assumes a prebuilt tree in standalone hygiene, like publint', () => {
+    const subject = withPnpmEntrypoint(() => gatesForMode('hygiene'))
+
+    expect(subject.find(item => item.id === 'mcp-host-entry')?.needs).toBeUndefined()
+    expect(subject.find(item => item.id === 'publint')?.needs).toBeUndefined()
   })
 })
 

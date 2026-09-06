@@ -39,6 +39,8 @@ Try the worked example configurations to see the plugin in action, then read the
 - [MCP client auto-reconnect Agent Note](../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.md) — the reconnect policy, the per-outage attempt budget, and the opt-out.
 - [Third-party memory MCP examples Agent Note](../../.agents/notes/implemented/feature/2026-07-31-third-party-memory-mcp-examples.md) — three default-off memory-server overlays delivered as reference configurations.
 - [Third-party memory MCP guide](../../docs/user/guide/mcp-memory.md) — runnable overlay rows and setup instructions.
+- [MCP Host OAuth connections Agent Note](../../.agents/notes/implemented/feature/2026-09-06-mcp-host-oauth-connections.md) — the Host-owned grant, the engine seam, and the authority-aware bridge design.
+- [MCP Host connections subsystem reference](../../docs/subsystems/mcp.md) — the Host connection owner: settings-backed connection entries, the OAuth engine seam, consumer bindings, and token-free status views.
 - [Tools subsystem reference](../../docs/subsystems/tools.md) — the `ToolRuntime` that receives the registered tools.
 
 <a id="dev-note"></a>

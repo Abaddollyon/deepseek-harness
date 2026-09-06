@@ -18,12 +18,19 @@ import z from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
-import type { ReconnectConfig } from './connection.ts'
+import type { ConnectionSource, ReconnectConfig } from './connection.ts'
+import { CONNECTION_ID_PATTERN } from './connections.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
-export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type { ConnectionInvalidation, ConnectionSource, ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export { CONNECTION_ID_PATTERN, NativeMcpConnectionsService, SETTINGS_NS, createOAuthEngine, resolveSpec } from './connections.ts'
+export type {
+  McpConnectionBinding, McpConnectionEngine, McpConnectionEngineFactory, McpConnectionEngineInit,
+  McpConnectionEngineStatus, McpConnectionEntry, McpConnectionsSettings, McpConnectionStatusView,
+  McpOAuthChange, McpOAuthChangeEvent, McpOAuthRevocation, NativeMcpConnectionsInternals, ResolvedMcpConnectionSpec,
+} from './connections.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -94,14 +101,41 @@ export interface StreamableHttpConfig {
   reconnect?: ReconnectConfig
 }
 
-/** Configuration for one stdio or Streamable HTTP MCP server. */
-export type Config = StdioConfig | StreamableHttpConfig
+/**
+ * Config for consuming one Host-managed connection. The endpoint, headers,
+ * and tokens live with the Host connection owner (`nativeMcpConnections`);
+ * this instance only names which configured connection to bind. URL or header
+ * keys alongside `connectionId` are rejected at load.
+ */
+export interface HostConnectionConfig {
+  /** Selects the Host-managed connection transport. */
+  transport: 'host-connection'
+  /**
+   * Stable local namespace for this server's model-facing tool names
+   * (`mcp__<serverName>__<rawName>`). Must match `[A-Za-z0-9_-]{1,32}` and be
+   * unique across live mcp-client instances.
+   */
+  serverName: string
+  /** Settings key of the Host-managed connection to consume. */
+  connectionId: string
+  /** Per-tool-call timeout in milliseconds. */
+  toolCallTimeoutMs: number
+  /** Fail plugin activation when the initial connection or tool synchronization fails. */
+  failOnStartupError: boolean
+  /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
+  reconnect?: ReconnectConfig
+}
+
+/** Configuration for one stdio, Streamable HTTP, or Host-managed MCP server. */
+export type Config = StdioConfig | StreamableHttpConfig | HostConnectionConfig
 
 type StdioConfigInput = Omit<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>
   & Partial<Pick<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
 type StreamableHttpConfigInput = Omit<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>
   & Partial<Pick<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
-type ConfigInput = StdioConfigInput | StreamableHttpConfigInput
+type HostConnectionConfigInput = Omit<HostConnectionConfig, 'toolCallTimeoutMs' | 'failOnStartupError'>
+  & Partial<Pick<HostConnectionConfig, 'toolCallTimeoutMs' | 'failOnStartupError'>>
+type ConfigInput = StdioConfigInput | StreamableHttpConfigInput | HostConnectionConfigInput
 
 const Reconnect: z<ReconnectConfig> = z.object({
   enabled: z.boolean().default(RECONNECT_DEFAULTS.enabled),
@@ -131,6 +165,14 @@ export const Config = z.union([
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
   }),
+  z.object({
+    transport: z.const('host-connection'),
+    serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
+    connectionId: z.string().required().pattern(CONNECTION_ID_PATTERN),
+    toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+    failOnStartupError: z.boolean().default(false),
+    reconnect: Reconnect,
+  }),
 ]) as unknown as z<ConfigInput, Config>
 
 // ---- Plugin apply ----
@@ -148,6 +190,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+
+  // Host-managed connections bind their endpoint and authority through the
+  // Host connection owner; legacy configs never touch this branch. The
+  // override and missing-service checks fail THIS instance at load.
+  let source: ConnectionSource | undefined
+  if (config.transport === 'host-connection') {
+    if ('url' in config || 'headers' in config) {
+      throw new Error(
+        `mcp-client(${config.serverName}): transport "host-connection" owns url and headers through the Host connection — remove those keys from the plugin config`,
+      )
+    }
+    const owner = ctx.get('nativeMcpConnections')
+    if (owner === undefined) {
+      throw new Error(
+        `mcp-client(${config.serverName}): connectionId "${config.connectionId}" requires the nativeMcpConnections Host service — mount NativeMcpConnectionsService from @deepseek-ai/dsh-mcp-client in the Host composition`,
+      )
+    }
+    const binding = owner.acquire(config.connectionId, { serverName: config.serverName })
+    ctx.effect(() => () => { binding.release() }, 'mcp-client.binding')
+    source = binding
+  } else if ('connectionId' in config) {
+    throw new Error(`mcp-client(${config.serverName}): connectionId requires transport "host-connection"`)
+  }
 
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
@@ -170,7 +235,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
   // quiesces in-flight work, and unregisters the current generation.
-  const connection = startConnection(ctx, config, reconnect)
+  const connection = startConnection(ctx, config, reconnect, source)
 
   ctx.effect(() => {
     return () => connection.dispose()

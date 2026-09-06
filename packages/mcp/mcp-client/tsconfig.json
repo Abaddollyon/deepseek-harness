@@ -19,6 +19,15 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../settings/settings"
+    },
+    {
+      "path": "../../credentials/credentials"
+    },
+    {
+      "path": "../../credentials/authorization"
+    },
+    {
       "path": "../../core/tools"
     },
     {

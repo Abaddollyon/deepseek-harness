@@ -156,6 +156,8 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // The Web Host mounts the default-off settings owner independently of each
   // Agent-scoped delegation-tool instance.
   '@deepseek-ai/dsh-tool-subagent': ['lib/model-selection-settings.js'],
+  // The MCP Host and Agent entries share one service class through the emitted connections chunk.
+  '@deepseek-ai/dsh-mcp-client': ['lib/connections-*.js'],
   // The argv-prefix runner entry ships beside the lib as its own bundle;
   // sandbox-local resolves it through the package's ./runner export. tsdown
   // also shares its generated FFI code through a hashed runtime chunk.
@@ -184,6 +186,8 @@ export function expectedDshPackageFiles(manifest: PackageManifest): readonly str
     // Packages with an invariant export publish its runtime as a separate
     // bundle; the package-invariant gate validates the source/export pairing.
     ...manifest.exports?.['./invariant'] ? ['lib/invariant.js'] : [],
+    // A declarative Host row is a separate public entry from the root Agent namespace.
+    ...exportDefault(manifest, './host') === './lib/host.js' ? ['lib/host.js'] : [],
     ...manifest.bin ? ['lib/bin.js'] : [],
     // Worker-thread packages ship a CJS worker entry; the browser worker
     // bundle is an ES module a page loads with `new Worker(type: 'module')`.

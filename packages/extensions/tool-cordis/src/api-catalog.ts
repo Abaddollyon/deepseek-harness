@@ -1285,6 +1285,49 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'nativeMcpConnections',
+    summary: '`ctx.nativeMcpConnections`: the Host connection owner.',
+    description: '`ctx.nativeMcpConnections`: the Host connection owner. Settings changes reconcile engines, flows, and bindings live; engine transitions and external credential changes invalidate consumers immediately; a revoked or removed connection hands no transport and cannot resurrect without a new authority signal.\n\nMounts only in the Host composition: an agent-scoped context is refused at construction, and Cordis refuses a second registration of the service name, so one engine per connection exists per Host.',
+    methods: [
+      {
+        signature: 'acquire(id: string, consumer: { serverName: string }): McpConnectionBinding',
+        description: 'Bind one agent-side consumer to a configured connection.',
+        parameters: [{ name: 'id', description: 'the settings key of the connection to consume.' }, { name: 'consumer', description: 'the consumer\'s public tool namespace, for status bookkeeping.' }],
+        returns: 'the binding the mcp-client supervisor runs as its connection source.',
+        throws: ['when no connection with this id is configured.'],
+      },
+      {
+        signature: 'async describe(id: string): Promise<McpConnectionStatusView | undefined>',
+        description: 'Token-free facts about one connection: configured, or removed from settings while consumers still bind it.',
+        parameters: [{ name: 'id', description: 'the connection to describe.' }],
+        returns: 'the status view, or undefined when the service knows no such connection.',
+      },
+      {
+        signature: 'async list(): Promise<McpConnectionStatusView[]>',
+        description: 'Token-free facts about every known connection, in settings order: configured ones, then removed ones that consumers still bind.',
+        parameters: [],
+        returns: 'one status view per connection.',
+      },
+      {
+        signature: 'recordKeyFor(id: string): CredentialKey',
+        description: 'The grant record key a surface needs to drive this connection\'s authorization flow through `ctx.authorization`.',
+        parameters: [{ name: 'id', description: 'the connection whose flow key is asked.' }],
+        returns: 'the credential record key.',
+      },
+      {
+        signature: 'async revoke(id: string): Promise<McpOAuthRevocation>',
+        description: 'Revoke one connection\'s grant: the engine refuses locally and its synchronous `revoked` transition invalidates consumers before storage is awaited. The tombstone must commit before any remote revocation attempt.',
+        parameters: [{ name: 'id', description: 'the connection to revoke.' }],
+        returns: 'the local outcome and the bounded remote outcome.',
+      },
+      {
+        signature: 'async removeGrant(id: string): Promise<void>',
+        description: 'Delete one connection\'s grant record outright (the "forget" operation). The record-updated event invalidates consumers on its own: no engine wrote that deletion.',
+        parameters: [{ name: 'id', description: 'the connection whose grant is removed.' }],
+      },
+    ],
+  },
+  {
     key: 'permissionPresets',
     summary: 'Owns the deployment\'s permission presets and their write path.',
     description: 'Owns the deployment\'s permission presets and their write path. Requires a confining `ctx.shell` executor and `ctx.approval`; unmatched knob values are reported as CUSTOM_PRESET, not an error.',
@@ -3810,6 +3853,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ConfinedSandboxMode = Exclude<SandboxMode, \'danger-full-access\'>;',
   },
   {
+    name: 'ConnectionInvalidation',
+    declaration: 'export type ConnectionInvalidation = \'revoked\' | \'invalid-grant\' | \'stale\' | \'config-changed\' | \'reauthorized\' | \'removed\';',
+  },
+  {
+    name: 'ConnectionSource',
+    declaration: 'export interface ConnectionSource {\n    connect(signal: AbortSignal): Promise<Transport | undefined>;\n    onInvalidate(listener: (reason: ConnectionInvalidation) => void): () => void;\n}',
+  },
+  {
     name: 'ContentBlockMap',
     declaration: 'export interface ContentBlockMap {\n    \'text\': TextBlock;\n    \'reasoning\': ReasoningBlock;\n    \'image\': ImageBlock;\n    \'tool-call\': ToolCallBlock;\n    \'tool-result\': ToolResultBlock;\n}',
   },
@@ -4500,6 +4551,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+  },
+  {
+    name: 'McpConnectionBinding',
+    declaration: 'export interface McpConnectionBinding extends ConnectionSource {\n    readonly epoch: number;\n    release(): void;\n}',
+  },
+  {
+    name: 'McpConnectionEngineStatus',
+    declaration: 'export type McpConnectionEngineStatus = McpOAuthStatus;',
+  },
+  {
+    name: 'McpConnectionStatusView',
+    declaration: 'export interface McpConnectionStatusView {\n    id: string;\n    label: string;\n    url: string;\n    configured: boolean;\n    state: McpConnectionEngineStatus[\'state\'] | \'unavailable\';\n    inFlightAuth: boolean;\n    consumers: string[];\n    epoch: number;\n}',
+  },
+  {
+    name: 'McpOAuthRevocation',
+    declaration: 'export interface McpOAuthRevocation {\n    local: \'revoked\';\n    remote: \'no-grant\' | \'unsupported\' | \'succeeded\' | \'failed\';\n}',
+  },
+  {
+    name: 'McpOAuthStatus',
+    declaration: 'export interface McpOAuthStatus {\n    state: \'auth-required\' | \'authorized\' | \'revoked\' | \'disposed\';\n    reason?: \'no-grant\' | \'record-invalid\' | \'binding-changed\' | \'grant-invalidated\';\n    inFlight: \'authorize\' | \'refresh\' | undefined;\n    hasRefreshToken: boolean;\n    accessTokenExpiresAt: number | undefined;\n    grantedScope: string | undefined;\n    epoch: number | undefined;\n}',
   },
   {
     name: 'Message',

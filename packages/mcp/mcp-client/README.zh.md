@@ -54,10 +54,11 @@ kind: "package-reference"
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `transport` | 必填 | `stdio` 或 `streamable-http` |
+| `transport` | 必填 | `stdio`、`streamable-http` 或 `host-connection` |
 | `serverName` | 必填 | 服务器工具名称的 namespace；`[A-Za-z0-9_-]{1,32}`，在一个注册作用域内唯一 |
 | `command` / `args` / `env` / `cwd` | — | stdio：可执行文件、参数、合并到清洗过的环境之上的额外环境变量、工作目录 |
 | `url` / `headers` | — | streamable-http：端点 URL 与额外请求标头 |
+| `connectionId` | — | host-connection：要消费的 Host 托管连接的设置键；与其并列的 `url`/`headers` 键会在加载时被拒绝 |
 | `toolCallTimeoutMs` | `60,000` | 每次 `tools/call` 调用的超时 |
 | `failOnStartupError` | `false` | 初始连接或工具同步失败时拒绝插件激活 |
 | `reconnect.enabled` | `true` | 连接丢失后自动重新连接 |
@@ -68,6 +69,21 @@ kind: "package-reference"
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-mcp-client)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
 启动后，服务器的工具会以 `mcp__<serverName>__<tool>` 形式出现——试着用一条提示词调用其中一个。如果初始连接失败，harness 仍会启动，但该服务器的工具不会出现，并会记录一条错误；设置 `failOnStartupError: true` 可让启动失败改为中止 harness。
+
+### Host 托管连接（OAuth）
+
+当服务器要求 OAuth 时，它的端点、客户端参数与令牌属于 Host，而不是逐 agent 的插件配置。在 Host 组合中挂载一次本包的 Host 入口 `@deepseek-ai/dsh-mcp-client/host`——它默认导出 `NativeMcpConnectionsService`，而包根仍是 Agent namespace 插件，没有可选的服务类入口——在 `mcp-connections` 设置命名空间下声明每个连接（端点、issuer、resource、重定向 URI、scope、可选客户端 id 与网络边界——全部为非机密），并让 agent 配置项按 id 指向它：
+
+```yaml
+- id: mcp-github
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: github
+    transport: host-connection
+    connectionId: github
+```
+
+Host 服务为每个连接持有一个协议引擎：grant（授权）保存在凭据记录（`mcp-connections/<connectionId>`）中，登录以原生授权流程进行（打开 URL，粘贴完整的回调 URL——没有本地监听器），每个 agent 请求都由引擎的 Host 持有的 fetch 完成认证。撤销、scope 变化、配置编辑与重新授权立即生效：agent 的工具会被撤回并针对新权威重建，授权已消失的连接保持不可用直到有人重新登录，令牌绝不会进入 agent 侧的配置、日志或状态视图。尚未授权的连接按设计不会给出传输，因此 `failOnStartupError: true` 也会拒绝这种正常的冷启动——把这个组合当作配置选择，而不是 OAuth 失败。
 
 ### 工具命名与共存
 
@@ -116,11 +132,15 @@ kind: "package-reference"
 | [`src/connection.ts`](src/connection.ts) | 连接监督器：客户端世代、重连策略、尝试预算、dispose |
 | [`src/tools.ts`](src/tools.ts) | 工具桥接：发现、命名、注册交换、执行、图片投影 |
 | [`src/transport.ts`](src/transport.ts) | 传输工厂：带清洗环境的 stdio spawn、Streamable HTTP |
-| — | 不发布运行时不变式伴生入口；世代只能通过工具注册表观察。 |
+| [`src/connections.ts`](src/connections.ts) | Host 连接所有者：设置支撑的配置、逐连接引擎、授权流程、消费方绑定、无令牌状态 |
+| [`src/host.ts`](src/host.ts) | 公开的 `./host` 入口：为 Host 组合默认导出服务类；双入口构建保持单一的共享类身份 |
+| [`tsdown.config.ts`](tsdown.config.ts) | 仅 Host 的双入口构建：入口对象把 `index`/`host` 映射到各自的声明，Client face 的 falsy entry 在任何清理之前跳过，使其既不能清理也不能重写 Host 产物；清理窄化为仅顶层 JS 并保留 `lib/types` |
+| [`src/oauth.ts`](src/oauth.ts)、[`src/oauth-record.ts`](src/oauth-record.ts)、[`src/oauth-fetch.ts`](src/oauth-fetch.ts)、[`src/oauth-error.ts`](src/oauth-error.ts) | OAuth 协议引擎：授权记录、有界的发现/授权/刷新、认证托管 fetch |
+| — | 不发布运行时不变式伴生入口；MCP 世代通过工具注册表体现，但桥接在异步重新同步后不暴露独立的服务器到工具快照。 |
 
 ### 生命周期与同步
 
-`apply` 解析重连策略、在当前注册作用域内预留 `serverName`、启动监督器，并等待初始连接加发现完成。独立 Agent 作用域可以复用相同 namespace，因为其工具与传输彼此隔离；同一作用域内重复会在加载时失败。监督器把所有同步——初始、通知与重连——串行到同一条队列，因此两次同步绝不会交错执行各自的先 dispose 后注册交换。dispose 会取消待执行的重连、关闭活动客户端、等待进行中的尝试与排队同步完全停稳，然后注销当前世代。[自动重连 Agent Note](../../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.zh.md) 拥有重连决策。
+`apply` 解析重连策略、在当前注册作用域内预留 `serverName`、启动监督器，并等待初始连接加发现完成。`host-connection` 配置项还会从 Host 连接所有者处获取一个绑定；监督器随后从该绑定取得每个世代的传输，并响应其失效：活动世代会被隔离（fence）并在 dispose 使用的同一关闭屏障后关闭，先撤回工具注册，重建时重新求值权威——被撤销或移除的连接不会交出传输，并保持等待直到 Host 发出变化信号。独立 Agent 作用域可以复用相同 namespace，因为其工具与传输彼此隔离；同一作用域内重复会在加载时失败。监督器把所有同步——初始、通知与重连——串行到同一条队列，因此两次同步绝不会交错执行各自的先 dispose 后注册交换。dispose 会取消待执行的重连、关闭活动客户端、等待进行中的尝试与排队同步完全停稳，然后注销当前世代。[自动重连 Agent Note](../../../.agents/notes/implemented/feature/2026-08-06-mcp-client-auto-reconnect.zh.md) 拥有重连决策。
 
 监督器监听 `notifications/tools/list_changed` 并排队一次重新同步；获取阶段失败时保留上一世代注册，注册冲突则回滚本次尝试的世代。每次中断共享一个尝试预算：连续失败达到 `maxAttempts` 次后工具被注销、重连停止；连接存活超过 `maxDelayMs` 会重置预算。
 
@@ -194,6 +214,8 @@ kind: "package-reference"
 - **图片是唯一的持久丰富结果桥接**——PNG、JPEG、WebP 与 GIF 在确切能力得到证明后进入 Native 上下文。音频与嵌入资源载荷仍只存在于执行局部并带明确诊断，资源链接只以文本保留名称与 URI。
 - **不强制执行不受支持的 MCP 输出 schema**——已声明 schema 使用 harness 子集之外的词汇时，`structuredContent` 回退为 `JsonValue`。
 - **要求基于任务的 MCP 工具在调用时被拒绝**——要求使用基于任务的执行（task-based execution）扩展的工具会抛出异常而非被桥接；该扩展未实现。
+- **Host 托管连接仅支持 OAuth**——设置 schema 没有静态标头或凭据引用字段；只需要固定令牌的服务器使用旧的 `streamable-http` 传输。
+- **每个授权由一个 Host 负责刷新**——逐连接引擎在自己的进程内串行化刷新；两个共享同一凭据存储的 harness 进程可能同时刷新同一授权并丢失一次轮换，因此授权的 Host 必须是部署级单例。
 
 <a id="dev-note"></a>
 ### 开发备注

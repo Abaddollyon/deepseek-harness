@@ -2025,6 +2025,81 @@
       "doc": "packages/client/ui-conversation/README.md",
       "symbol": "ComposerChainProps",
       "source": "packages/client/ui-conversation/src/client/contract/slots.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionEntry",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionsSettings",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "ResolvedMcpConnectionSpec",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionEngine",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionEngineInit",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionEngineFactory",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionEngineStatus",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionStatusView",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpConnectionBinding",
+      "source": "packages/mcp/mcp-client/src/connections.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpOAuthStatus",
+      "source": "packages/mcp/mcp-client/src/oauth.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpOAuthChange",
+      "source": "packages/mcp/mcp-client/src/oauth.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpOAuthChangeEvent",
+      "source": "packages/mcp/mcp-client/src/oauth.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "McpOAuthRevocation",
+      "source": "packages/mcp/mcp-client/src/oauth.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "ConnectionSource",
+      "source": "packages/mcp/mcp-client/src/connection.ts"
+    },
+    {
+      "doc": "docs/subsystems/mcp.md",
+      "symbol": "ConnectionInvalidation",
+      "source": "packages/mcp/mcp-client/src/connection.ts"
     }
   ]
 }

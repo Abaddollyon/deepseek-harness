@@ -10,7 +10,10 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
-import type { Config } from './index.ts'
+import type { StdioConfig, StreamableHttpConfig } from './index.ts'
+
+/** The legacy statically configured transports; host-managed connections build their transport Host-side. */
+export type LegacyConfig = StdioConfig | StreamableHttpConfig
 
 /**
  * The subprocess seam's scrubbed parent env (credential-shaped and stale
@@ -23,12 +26,12 @@ function buildChildEnv(extra: Record<string, string>): Record<string, string> {
 }
 
 /**
- * Create an MCP transport from the resolved plugin config.
+ * Create an MCP transport from a resolved legacy plugin config.
  *
- * @param config - Resolved plugin config discriminated on `transport`.
+ * @param config - Resolved legacy config discriminated on `transport`.
  * @returns A connected-ready MCP Transport (stdio or Streamable HTTP).
  */
-export function createTransport(config: Config): Transport {
+export function createTransport(config: LegacyConfig): Transport {
   switch (config.transport) {
     case 'stdio':
       return new StdioClientTransport({

@@ -58,8 +58,10 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 
 // vi.mock is hoisted above static imports, so the modules under test see the
 // mocked SDK even through a static import.
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import type { ConnectionInvalidation, ConnectionSource } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 
 // ---- Helpers ----
 
@@ -471,6 +473,261 @@ describe('reconnect supervisor', () => {
     const staleHandler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
     await staleHandler()
     expect(mockListTools).toHaveBeenCalledTimes(listCalls)
+  })
+})
+
+// ---- Host connection source ----
+
+/** A scripted ConnectionSource: transport availability plus a fireable invalidation broadcast. */
+function fakeSource(): {
+  source: ConnectionSource & { connect: ReturnType<typeof vi.fn> }
+  fire: (reason: ConnectionInvalidation) => void
+  listenerCount: () => number
+} {
+  const listeners = new Set<(reason: ConnectionInvalidation) => void>()
+  const connect = vi.fn(async (_signal: AbortSignal) => ({} as Transport))
+  const source = {
+    connect,
+    onInvalidate: (listener: (reason: ConnectionInvalidation) => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  }
+  return {
+    source,
+    fire: (reason) => { for (const listener of [...listeners]) listener(reason) },
+    listenerCount: () => listeners.size,
+  }
+}
+
+function hostConfig(reconnect?: Config['reconnect']): Config {
+  return {
+    transport: 'host-connection',
+    serverName: 'srv',
+    connectionId: 'test-conn',
+    toolCallTimeoutMs: 60_000,
+    failOnStartupError: false,
+    ...reconnect === undefined ? {} : { reconnect },
+  }
+}
+
+describe('connection source (host-connection)', () => {
+  let ctx: Context
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    instances.length = 0
+    mockConnect.mockResolvedValue(undefined)
+    mockClose.mockImplementation(function (this: { onclose?: () => void }) {
+      this.onclose?.()
+      return Promise.resolve()
+    })
+    mockListTools.mockResolvedValue(listing('remote'))
+    mockCallTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] })
+    ctx = await mountRegistry()
+  })
+
+  /** Start the supervisor over the scripted source, bypassing apply's owner resolution. */
+  function start(source: ConnectionSource, reconnect?: Config['reconnect']) {
+    return startConnection(ctx, hostConfig(reconnect), resolveReconnectPolicy(reconnect, 'reconnect'), source)
+  }
+
+  it('holds without connecting while the authority yields no transport', async () => {
+    const { infos } = captureLogs(ctx)
+    const { source } = fakeSource()
+    source.connect.mockResolvedValue(undefined)
+
+    const handle = start(source)
+    const outcome = await handle.ready
+    await sleep(30)
+
+    expect(mockConnect).not.toHaveBeenCalled()
+    expect(outcome.error).toBeDefined()
+    expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    expect(infos.some(line => line.includes('host connection is holding'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('an invalidation closes the live generation and re-establishes immediately without outage budget', async () => {
+    const { warns, infos } = captureLogs(ctx)
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 5, maxDelayMs: 40, maxAttempts: 5 })
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+    expect(instances).toHaveLength(1)
+
+    mockListTools.mockResolvedValue(listing('revived'))
+    fire('config-changed')
+
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__revived')).toBeDefined() })
+    expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    expect(instances).toHaveLength(2)
+    // The bounce reconnected at once: no backoff wait, no attempt-budget line.
+    expect(warns.some(line => line.includes('retrying in'))).toBe(false)
+    expect(infos.some(line => line.includes('host connection invalidated (config-changed)'))).toBe(true)
+
+    // The outage budget is untouched: the next transport crash starts at attempt 1.
+    instances[1]!.onclose?.()
+    await vi.waitFor(() => {
+      expect(warns.some(line => line.includes('reconnecting in 5ms (attempt 1/5)'))).toBe(true)
+    })
+    await handle.dispose()
+  })
+
+  it('withdraws tools promptly and holds when revocation finds the authority down', async () => {
+    const { source, fire } = fakeSource()
+    const handle = start(source)
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+
+    source.connect.mockResolvedValue(undefined)
+    fire('revoked')
+
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined() })
+    await sleep(30)
+    // The revoked connection neither reconnects nor resurrects on its own.
+    expect(instances).toHaveLength(1)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    await handle.dispose()
+  })
+
+  it('revocation during an in-flight connect fences the attempt with no resurrection', async () => {
+    const { source, fire } = fakeSource()
+    const gate: PromiseWithResolvers<void> = Promise.withResolvers()
+    mockConnect.mockImplementation(() => gate.promise)
+    const handle = start(source)
+    await vi.waitFor(() => { expect(instances).toHaveLength(1) })
+
+    // Revocation takes the authority down before the fenced attempt settles.
+    source.connect.mockResolvedValue(undefined)
+    fire('revoked')
+    gate.reject(new Error('connect interrupted'))
+    await handle.ready
+    await sleep(30)
+
+    expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    expect(instances).toHaveLength(1)
+
+    // The bounce holds while the authority is down; reauthorization connects anew.
+    // Restore connect success first: the gate rejection owned only the fenced attempt.
+    mockConnect.mockResolvedValue(undefined)
+    source.connect.mockResolvedValue({})
+    fire('reauthorized')
+    await vi.waitFor(() => { expect(instances).toHaveLength(2) })
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+    await handle.dispose()
+  })
+
+  it('stops re-establishment when the fenced generation never reports that it closed', async () => {
+    vi.useFakeTimers()
+    try {
+      const { errors } = captureLogs(ctx)
+      const { source, fire } = fakeSource()
+      const handle = start(source)
+      await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+
+      // The generation ignores close(): the bounce barrier must fail closed.
+      mockClose.mockResolvedValue(undefined)
+      fire('revoked')
+      // A second bounce is already queued when the first close barrier expires.
+      fire('reauthorized')
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(errors.some(line => line.includes('during a host bounce'))).toBe(true)
+      expect(instances).toHaveLength(1)
+      // Further authority changes must not erase the unresolved close barrier.
+      fire('config-changed')
+      fire('reauthorized')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(instances).toHaveLength(1)
+      await handle.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still withdraws cached tools after an outage close timeout permanently stops reconnecting', async () => {
+    vi.useFakeTimers()
+    const { errors } = captureLogs(ctx)
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 1, maxDelayMs: 1, maxAttempts: 1 })
+    try {
+      await handle.ready
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      mockConnect.mockRejectedValue(new Error('fixture connect failed'))
+      mockClose.mockResolvedValue(undefined)
+      instances[0]!.onclose?.()
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(errors.some(line => line.includes('failed generation did not close'))).toBe(true)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      fire('revoked')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+      fire('reauthorized')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(instances).toHaveLength(2)
+    } finally {
+      await handle.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it('reauthorization revives the give-up terminal state that outage budget exhaustion reached', async () => {
+    const { errors } = captureLogs(ctx)
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 })
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+    expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    const attempts = mockConnect.mock.calls.length
+
+    mockConnect.mockResolvedValue(undefined)
+    fire('reauthorized')
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+    expect(mockConnect.mock.calls.length).toBeGreaterThan(attempts)
+    await handle.dispose()
+  })
+
+  it('a scheduled retry that finds the authority down holds instead of spending attempts', async () => {
+    const { infos } = captureLogs(ctx)
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 3 })
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+
+    source.connect.mockResolvedValue(undefined)
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => {
+      expect(infos.some(line => line.includes('host connection is holding'))).toBe(true)
+    })
+    await sleep(30)
+    expect(instances).toHaveLength(1)
+
+    // Only an authority signal re-establishes; the hold itself never retries.
+    // (The crashed generation's tools stay registered through the outage, so
+    // the new generation itself is the signal to await.)
+    source.connect.mockResolvedValue({})
+    fire('reauthorized')
+    await vi.waitFor(() => { expect(instances).toHaveLength(2) })
+    await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__remote')).toBeDefined() })
+    await handle.dispose()
+  })
+
+  it('dispose unsubscribes the source before teardown so late invalidations are inert', async () => {
+    const { source, fire, listenerCount } = fakeSource()
+    const handle = start(source)
+    await vi.waitFor(() => { expect(instances).toHaveLength(1) })
+    expect(listenerCount()).toBe(1)
+
+    await handle.dispose()
+    expect(listenerCount()).toBe(0)
+
+    fire('reauthorized')
+    await sleep(30)
+    expect(instances).toHaveLength(1)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
   })
 })
 

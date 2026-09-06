@@ -333,6 +333,7 @@ function ciPrimaryGates(): Gate[] {
       needs: ['build'],
     }),
     builtPackageInvariantsGate(['build']),
+    mcpHostEntryGate(['build']),
     builtBinSmokeGate(),
   ]
 }
@@ -433,6 +434,7 @@ function ciArtifactGates(): Gate[] {
       needs: ['build'],
     }),
     builtPackageInvariantsGate(['build']),
+    mcpHostEntryGate(['build']),
     builtBinSmokeGate(),
   ]
 }
@@ -450,6 +452,7 @@ function ciConsumerGates(): Gate[] {
     'expected-output',
     'doc-typecheck',
     'node-next-types',
+    'mcp-host-entry',
     'built-bin-smoke',
   ]
   return [
@@ -475,6 +478,7 @@ function ciConsumerGates(): Gate[] {
       label: 'node-next types',
       needs: validatedBuild,
     }),
+    mcpHostEntryGate(validatedBuild),
     builtBinSmokeGate(validatedBuild),
   ]
 }
@@ -690,6 +694,7 @@ function hygieneLeafGates(options: { artifactNeeds?: string[] } = {}): Gate[] {
     pnpmScript('dsh-package-licenses', 'verify-dsh-package-licenses', { label: 'DSH package licenses' }),
     pnpmScript('package-invariants', 'verify-package-invariants', { label: 'package invariants' }),
     builtPackageInvariantsGate(options.artifactNeeds),
+    mcpHostEntryGate(options.artifactNeeds),
     pnpmScript('node-next-types', 'verify-node-next-types', {
       label: 'node-next types',
       ...artifactOptions,
@@ -789,6 +794,23 @@ function builtBinSmokeGate(needs: string[] = ['build']): Gate {
     label: 'built-bin smoke',
     needs,
     env: { DSH_EXAMPLE_MODE: 'lib' },
+  })
+}
+
+/**
+ * The built-entry proof for the public `@deepseek-ai/dsh-mcp-client/host`
+ * entry: a real Node process loads both public MCP plugin roles through the
+ * stock Loader against the built `lib/` tree. An artifact reader wherever
+ * it runs — in check-all and the CI artifact lanes it waits for the named
+ * build stage; standalone hygiene assumes a prebuilt tree exactly like
+ * publint, and the runner refuses an absent `lib/` rather than skipping.
+ * @param needs - build-stage dependencies for built-tree aggregates; omit for the prebuilt-tree hygiene lane.
+ * @returns the gate.
+ */
+function mcpHostEntryGate(needs?: string[]): Gate {
+  return pnpmExec('mcp-host-entry', ['tsx', 'scripts/verify-mcp-host-entry.ts'], {
+    label: 'MCP Host entry proof',
+    ...needs === undefined ? {} : { needs },
   })
 }
 

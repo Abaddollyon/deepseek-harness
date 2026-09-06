@@ -1525,8 +1525,8 @@ Source: [`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src
 Requires: `tools`
 
 ```ts config-catalog
-/** Configuration for one stdio or Streamable HTTP MCP server. */
-export type Config = StdioConfig | StreamableHttpConfig
+/** Configuration for one stdio, Streamable HTTP, or Host-managed MCP server. */
+export type Config = StdioConfig | StreamableHttpConfig | HostConnectionConfig
 
 /** Config for connecting to an MCP server via a spawned child process over stdio. */
 export interface StdioConfig {
@@ -1576,6 +1576,31 @@ export interface StreamableHttpConfig {
   reconnect?: ReconnectConfig
 }
 
+/**
+ * Config for consuming one Host-managed connection. The endpoint, headers,
+ * and tokens live with the Host connection owner (`nativeMcpConnections`);
+ * this instance only names which configured connection to bind. URL or header
+ * keys alongside `connectionId` are rejected at load.
+ */
+export interface HostConnectionConfig {
+  /** Selects the Host-managed connection transport. */
+  transport: 'host-connection'
+  /**
+   * Stable local namespace for this server's model-facing tool names
+   * (`mcp__<serverName>__<rawName>`). Must match `[A-Za-z0-9_-]{1,32}` and be
+   * unique across live mcp-client instances.
+   */
+  serverName: string
+  /** Settings key of the Host-managed connection to consume. */
+  connectionId: string
+  /** Per-tool-call timeout in milliseconds. */
+  toolCallTimeoutMs: number
+  /** Fail plugin activation when the initial connection or tool synchronization fails. */
+  failOnStartupError: boolean
+  /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
+  reconnect?: ReconnectConfig
+}
+
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
   /** Reconnect automatically after a lost connection (default true). */
@@ -1589,7 +1614,7 @@ export interface ReconnectConfig {
 }
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:130`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

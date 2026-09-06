@@ -84,6 +84,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   llm: 'llm-streaming.md',
   lsp: 'lsp.md',
   messageFeedback: 'feedback.md',
+  nativeMcpConnections: 'mcp.md',
   permissionPresets: 'permission-presets.md',
   planMode: 'plan.md',
   terminals: 'terminal.md',
@@ -633,6 +634,9 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   TypertPackageRecord: 'invariants.md',
   TypertSchemaFilter: 'invariants.md',
   TypertSchemaRecord: 'invariants.md',
+  McpConnectionBinding: 'mcp.md',
+  McpConnectionStatusView: 'mcp.md',
+  McpOAuthRevocation: 'mcp.md',
 }
 
 /** TypeScript lib and pinned framework types with no repository-owned data page. */
