@@ -16,6 +16,13 @@ export type {
 } from './contract/slots.ts'
 export type { SidebarKey } from './locales.ts'
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Sidebar seat readiness marker for plugins registering child rows. */
+    uiSidebar: object
+  }
+}
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Sidebar shell controls copy. */
@@ -65,4 +72,5 @@ export function apply(ctx: ClientContext): void {
     }, SidebarRoot),
     'ui-sidebar: slot registration',
   )
+  ctx.provide('uiSidebar', {})
 }

@@ -8,6 +8,7 @@ import {
   IconEditOutline16, IconQueueOutline14, IconSendOutline14, IconTrashOutline16, projectUserText, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { QueueAction, QueueItemId, QueueRow } from '../contract/queue.ts'
+import type { ConversationController } from '../service.ts'
 import { NS } from '../locales.ts'
 import css from './QueueDock.module.css'
 
@@ -301,13 +302,13 @@ export const queueDockEntry = {
       order: 20,
       locale: NS,
       inject: (sessionId: SessionId): QueueDockInjected => {
-        const actx = ctx.sessions.scope(sessionId)
-        if (actx === undefined) throw new Error(`queue dock: session "${sessionId}" resolved no scope`)
-        const conversation = actx.get('conversation')
+        const binding = ctx.sessions.binding(sessionId)
+        if (binding === undefined) throw new Error(`queue dock: session "${sessionId}" resolved no binding`)
+        const conversation = ctx.get('conversation') as ConversationController | undefined
         if (conversation === undefined) throw new Error('queue dock: conversation service unavailable')
         return {
-          updateQueue: (itemId, action) => conversation.updateQueue(itemId, action),
-          notify: (level, text) => { conversation.input.for(actx).notify(level, text) },
+          updateQueue: (itemId, action) => conversation.updateQueueSession(binding.session, itemId, action),
+          notify: (level, text) => { conversation.input.for(binding.ctx).notify(level, text) },
           loadImage: attachment => ctx.uiConversation.imageUrl(sessionId, attachment),
         }
       },

@@ -10,6 +10,7 @@ Web Client 是由独立加载插件组装而成的浏览器侧 Cordis 应用。�
 |---|---|---|
 | Host 应用 | 业务 service 与 `packages/api/*-controller` Host entry | 拥有权威状态、持久化、mutation 顺序、访问策略与 stream 生产。 |
 | 传输与 API assembly | `client/connection`、`api/gateway`、`api/remotes` | 建立 Client generation，公开生成的 `ctx.remote` method 与 stream，转发选定的 Cordis event，并承载取消和结果。 |
+| 环境组合 | `client/environment-runtime`、`client/web` | 保持 shell 导航与复合 presentation state 持久，为每个已获取 Host 激活独立 service tree，并把选中 Host 投影到唯一 renderer。 |
 | Client model | `api/session-controller/client`、`api/workspace-controller/client` | 维护不依赖 React 的 Host 状态镜像，处理 stream/unary 竞态，拥有对象 identity 与订阅，并公开收窄的 command service。 |
 | UI adapter | `client/ui-session`、`client/ui-workspace` | 把 model observable 转换为 root 或 Session scope 的标准 Slot source，不接管业务状态所有权。 |
 | Conversation 数据 | `client/ui-conversation`、`ui-chat` 与 `ui-trajectory` 等 target package | 把标准 event 与紧凑的 Assistant 历史批次组装成相互独立的 target snapshot，并拥有共享的 Conversation shell 与输入流程。 |
@@ -22,6 +23,14 @@ Web Client 是由独立加载插件组装而成的浏览器侧 Cordis 应用。�
 Host 把组合后的 `WebBootGraph` 写入 `window.__DSH_BOOT__`，并在 parser-preloaded script 执行前安装浏览器 module-loader facade。模块系统是一张 lazy CommonJS 表：加载 bundle 只注册 factory；materialize entry 时才以同步 `require` 运行 factory，并解析 platform module 和已声明的动态依赖。
 
 Web boot kernel 创建模块系统、预取 `immediately` entry、挂载 vendored Cordis Loader，再创建图中的每个 entry。Cordis service injection 决定激活顺序；module graph 顺序只决定同步 import 能否被 materialize。完整 roster 到达 settled 状态后，`ui-renderer` hydrate 不依赖框架的 boot DOM，并调用唯一一次 context 级 `renderSlot('root')`。[Client Modules](client-modules.zh.md)负责 graph、bundle route、cache revision 与 loader 细节。
+
+## 环境组合
+
+`client/environment-runtime` 拥有本地 environment identity、持久 `ctx.environmentNavigation` 与复合 presentation state。在 Environments overview 中选择 Host 时仍使用本地 control plane；打开该 Host 的 Session 才会获取其 runtime。每个 Session location 都携带 `{ environmentId, sessionId }`；两个 Host 使用同一个 Session id 时，其 draft、选中 view 和 detail、scroll anchor 与 sidebar mode 仍彼此分隔。Slot injection 与 Host API 仍接收原生 Session id，renderer Store cache 与持久化则使用独立的复合 key。导航与这个有界 presentation store 属于 shell 的完整生命周期，因此撤下 presentation plugin 不会令协调切换的 environment adapter 一同失效。
+
+Web boot kernel 基于可信 manifest 与 memoized module system 公开 runtime activator。产品先选择 dependency root，通过 `available()` 校验必需 entry，再跨合法的强连通 package group 推导可达 closure，并把 shell 的静态 platform module 视为已提供。获取远端环境会创建新的 Cordis root，并从该环境的 carrier 创建显式 Connection，然后激活 domain roster。切换环境会撤下本地 presentation roster，把选中 runtime 的 service 投影到短生命周期 presentation context，再让 presentation roster 使用 shell 中唯一的 Slot registry、renderer、layout、locale 与 theme。Slot registry 会在这个异步交接期间保留前一组 root standard source 与 scope adapter，并在 graph 完整后发布替代者。最后一个 lease 释放后，runtime service tree 与 carrier 一并处置。
+
+功能请求通过所属 plugin 注册的路由调用 `ctx.environmentRuntime.request()`。该 service 只接受规范化的相对 `/api/` 路径，并把 request completion 绑定到活跃 runtime 与 Connection generation。generation 缺失时会在 transport 前拒绝；generation 变化后，迟到响应也会被拒绝。Connection 丢失会立即移除 generation，因此断开的 runtime 无法通过此路径提交 mutation。Composition snapshot 会在保持 presentation 挂载的同时公开 connection state 与 `lastConnectedAt`；retry 会重连同一个选中 runtime，并保留其 location 与 draft。
 
 ## Remote 通信
 
@@ -66,6 +75,7 @@ Connection 拥有 request correlation、`/api` carrier、trust check、精确 Fe
 | 持久 Session 展示 | Host Session log → packed Remote `follow`/`page` 历史 → Client `SessionEventLikeEntry` window → Conversation Context → target snapshot（`chat`、`trajectory` 或其他已注册 target）→ Slot view → React |
 | 瞬态 Session control | Host control baseline → Remote snapshot stream → `SessionManager` queue/job/projection store → Session 与 list snapshot → 标准 hook → component |
 | Workspace 状态 | Host Workspace baseline 与 increment → `ClientWorkspaceModel` → `ctx.workspaces.list` → `useWorkspaces` → sidebar、hero 与 navigation entry |
+| 环境切换 | 复合 shell location → runtime registry lease → 独立 Connection/domain context → 选中 runtime service projection → presentation roster → 共享 Slots 与 renderer |
 | scoped interaction | Host Cordis waterfall → API Remotes `$events` → Session Context 上的 `ctx.remote.$on()` → 所属 UI 包 → result 或 `next()` |
 | 用户 command | component callback → 注册项 inject face 或 Slot owner → `ctx.sessions`、`ctx.workspaces` 或生成的 scoped Remote → Host Controller → 权威 update → stream 或 event projection 回到 Client |
 
@@ -79,7 +89,7 @@ Connection 拥有 request correlation、`/api` carrier、trust check、精确 Fe
 - Session control 与 Workspace stream 在断开期间保留最后一次发布的值，再用新的 opening baseline 原子替换。
 - 普通 forwarded notification 不会 replay。需要可靠恢复的 stateful domain 必须提供 baseline、cursor 或显式 query；scoped waterfall 保留自身的 request lifetime。
 
-架构中没有统一的 Client `Runtime`、`HostFrame`、`events.mux`、`events.host` 或通用 `resync()` API。Connection 公开 generation state，Gateway 管理 logical stream，Client model 则按自身数据定义 replacement 或 resume 语义。
+架构中没有跨 Host 的单一 Client runtime、`HostFrame`、`events.mux`、`events.host` 或通用 `resync()` API。每个已获取 Host 都有独立的 Cordis service tree；其 Connection 公开 generation state，Gateway 管理 logical stream，Client model 则按自身数据定义 replacement 或 resume 语义。
 
 ## 包边界
 

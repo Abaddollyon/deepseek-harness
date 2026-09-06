@@ -38,10 +38,13 @@ export function createConversationStore(): EngineStoreHandle<ConversationStoreSt
  * @param sessionId - Session-scoped persistence suffix.
  * @returns the preferred View id, or null when storage has no usable value.
  */
-export function readConversationViewPreference(sessionId: SessionId): string | null {
+export function readConversationViewPreference(sessionId: SessionId, environmentId?: string): string | null {
   if (typeof localStorage === 'undefined') return null
   try {
-    const raw = localStorage.getItem(`${CONVERSATION_STORE_KEY}.${sessionId}`)
+    const scopeKey = environmentId === undefined
+      ? sessionId
+      : JSON.stringify([environmentId, sessionId])
+    const raw = localStorage.getItem(`${CONVERSATION_STORE_KEY}.${scopeKey}`)
     if (raw === null) return null
     const stored: unknown = JSON.parse(raw)
     if (typeof stored !== 'object' || stored === null || !('view' in stored)) return null

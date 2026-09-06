@@ -10,6 +10,7 @@ The Web Client is a browser-side Cordis application assembled from independently
 |---|---|---|
 | Host application | business services and `packages/api/*-controller` Host entries | Own authoritative state, persistence, mutation ordering, access policy, and stream production. |
 | Transport and API assembly | `client/connection`, `api/gateway`, `api/remotes` | Establish a Client generation, expose generated `ctx.remote` methods and streams, forward selected Cordis events, and carry cancellation and results. |
+| Environment composition | `client/environment-runtime`, `client/web` | Keep shell navigation and compound presentation state persistent, activate an independent service tree for each acquired Host, and project the selected Host into one renderer. |
 | Client models | `api/session-controller/client`, `api/workspace-controller/client` | Maintain React-free mirrors of Host state, resolve stream/unary races, own object identities and subscriptions, and expose narrow command services. |
 | UI adapters | `client/ui-session`, `client/ui-workspace` | Convert model observables into root or Session-scoped standard Slot sources without taking ownership of business state. |
 | Conversation data | `client/ui-conversation`, target packages such as `ui-chat` and `ui-trajectory` | Assemble standard events and compact historical Assistant runs into independent target snapshots and own the shared conversation shell and input flow. |
@@ -22,6 +23,14 @@ The dependency direction is Host state → Remote transport → Client model →
 The Host writes the composed `WebBootGraph` to `window.__DSH_BOOT__` and installs the browser module-loader facade before parser-preloaded scripts execute. The module system is a lazy CommonJS table: loading a bundle registers its factory, while materializing an entry runs the factory with synchronous `require` over platform modules and declared dynamic dependencies.
 
 The Web boot kernel creates the module system, prefetches `immediately` entries, mounts the vendored Cordis Loader, and creates every graph entry. Cordis service injection determines activation; module graph order determines only whether synchronous imports can be materialized. After the complete roster reaches a settled state, `ui-renderer` hydrates the framework-free boot DOM and calls the sole context-level `renderSlot('root')` operation. [Client Modules](client-modules.md) owns the graph, bundle route, cache revision, and loader details.
+
+## Environment composition
+
+`client/environment-runtime` owns the local environment identity, persistent `ctx.environmentNavigation`, and compound presentation state. Selecting a Host in the Environments overview stays on the local control plane; opening that Host's Session is the transition that acquires its runtime. Every Session location carries `{ environmentId, sessionId }`; drafts, selected views and details, scroll anchors, and sidebar mode therefore remain distinct when two Hosts use the same Session id. Slot injection and Host APIs still receive the native Session id, while renderer Store cache and persistence use a separate compound key. Navigation and this bounded presentation store belong to the shell lifetime, so withdrawing presentation plugins cannot collapse the environment adapter that coordinates the switch.
+
+The Web boot kernel exposes a runtime activator over its trusted manifest and memoized module system. A product selects dependency roots, validates required entries against `available()`, and derives a reachable closure across valid strongly connected package groups while treating the shell's static platform modules as supplied. Acquiring a remote environment creates a new Cordis root and an explicit Connection from that environment's carrier, then activates the domain roster. Switching environments withdraws the local presentation roster, projects the selected runtime's services into a short-lived presentation context, and activates the presentation roster against the shell's single Slot registry, renderer, layout, locale, and theme. The Slot registry holds the previous root standard sources and scope adapter through this asynchronous handoff, then publishes the replacements after the graph is complete. Releasing the last lease disposes the runtime service tree and carrier.
+
+Feature requests use `ctx.environmentRuntime.request()` over routes registered by the owning plugin. The service accepts normalized relative `/api/` paths only and binds request completion to the active runtime and Connection generation. A missing generation rejects before transport, while a generation change rejects a late response. Connection loss also removes the generation immediately, so disconnected runtimes cannot commit mutations through this path. The composition snapshot keeps the presentation mounted while exposing connection state and `lastConnectedAt`; retry reconnects the same selected runtime and preserves its location and draft.
 
 ## Remote communication
 
@@ -66,6 +75,7 @@ This pairing is not a second source of business truth. Host controllers decide d
 | durable Session display | Host Session log → packed Remote `follow`/`page` history → Client `SessionEventLikeEntry` window → Conversation Contexts → target snapshot (`chat`, `trajectory`, or another registered target) → Slot view → React |
 | transient Session control | Host control baseline → Remote snapshot stream → `SessionManager` queue/job/projection stores → Session and list snapshots → standard hooks → components |
 | Workspace state | Host Workspace baseline and increments → `ClientWorkspaceModel` → `ctx.workspaces.list` → `useWorkspaces` → sidebar, hero, and navigation entries |
+| environment switch | compound shell location → runtime registry lease → independent Connection/domain context → selected-runtime service projection → presentation roster → shared Slots and renderer |
 | scoped interaction | Host Cordis waterfall → API Remotes `$events` → `ctx.remote.$on()` on the Session Context → owning UI package → result or `next()` |
 | user command | component callback → registration inject face or Slot owner → `ctx.sessions`, `ctx.workspaces`, or generated scoped Remote → Host Controller → authoritative update → stream or event projection back to the Client |
 
@@ -79,7 +89,7 @@ Recovery follows the data's semantics:
 - Session control and Workspace streams retain the last published value while disconnected, then atomically replace it from a fresh opening baseline.
 - Ordinary forwarded notifications are not replayed. Stateful domains need a baseline, cursor, or explicit query; scoped waterfalls retain their own request lifetime.
 
-There is no monolithic Client `Runtime`, `HostFrame`, `events.mux`, `events.host`, or universal `resync()` API. The Connection exposes generation state, Gateway owns logical stream supervision, and each Client model defines replacement or resume semantics appropriate to its data.
+There is no monolithic Client runtime spanning Hosts, `HostFrame`, `events.mux`, `events.host`, or universal `resync()` API. Each acquired Host has an independent Cordis service tree; its Connection exposes generation state, Gateway owns logical stream supervision, and each Client model defines replacement or resume semantics appropriate to its data.
 
 ## Package boundaries
 

@@ -221,10 +221,15 @@ export class ClientSessions implements ISessions {
   constructor(
     private readonly rootCtx: Context,
     remote: SessionRemotes,
+    storageEnvironmentId?: string,
   ) {
+    const selectionKey = storageEnvironmentId === undefined
+      ? 'dsh.sessions.current'
+      : `dsh.sessions.current.${encodeURIComponent(storageEnvironmentId)}`
+    if (storageEnvironmentId === 'local') migrateLocalStorageKey('dsh.sessions.current', selectionKey)
     this.selection = createSnapshotStore<SessionSelection>(
       {},
-      { persist: { name: 'dsh.sessions.current' } })
+      { persist: { name: selectionKey } })
     const restored = this.selection.getSnapshot()
     this.manager = new SessionManager(
       remote,
@@ -715,5 +720,18 @@ export class ClientSessions implements ISessions {
         this.startScopeDrop(id, record)
       }
     }
+  }
+}
+
+function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    if (localStorage.getItem(nextKey) !== null) return
+    const legacy = localStorage.getItem(legacyKey)
+    if (legacy === null) return
+    localStorage.setItem(nextKey, legacy)
+    localStorage.removeItem(legacyKey)
+  } catch {
+    // Persistence remains best-effort, matching the store engine contract.
   }
 }

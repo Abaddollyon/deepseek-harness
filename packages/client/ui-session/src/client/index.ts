@@ -9,6 +9,7 @@ import type {
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { notifySubscribers } from '@deepseek-ai/dsh-client-store'
+import type {} from '@deepseek-ai/dsh-client-environment-runtime/client'
 import { standardHookPropName } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   HostObservable,
@@ -211,6 +212,7 @@ const BUILTIN_SOURCE = {
 
 /** Session-scoped source roster and renderer adapter. */
 export class UiSession extends Service {
+  private readonly environmentId: string | undefined
   private readonly descriptors: RuntimeSessionSourceDescriptor[] = [
     BUILTIN_SOURCE,
   ]
@@ -241,6 +243,7 @@ export class UiSession extends Service {
     private readonly sessions: ISessions,
   ) {
     super(ctx, 'uiSession')
+    this.environmentId = ctx.get('environmentRuntime')?.environmentId
     this.absent = this.materializeAbsent()
     this.currentBinding = this.resolveCurrent()
     this.adapter = {
@@ -256,7 +259,16 @@ export class UiSession extends Service {
     }
 
     ctx.effect(() => {
-      const disposeList = sessions.list.subscribe(() => { this.publishCurrent() })
+      let listed = new Set(sessions.list.getSnapshot().ids)
+      const disposeList = sessions.list.subscribe(() => {
+        const next = new Set(sessions.list.getSnapshot().ids)
+        for (const sessionId of listed) {
+          if (next.has(sessionId)) continue
+          ctx.slots.clearStoreScope(this.storeKey(sessionId))
+        }
+        listed = next
+        this.publishCurrent()
+      })
       return () => {
         disposeList()
         const records = [...this.bindings.values()]
@@ -416,6 +428,9 @@ export class UiSession extends Service {
     }
     const value: ScopedStandardSourceBinding = {
       key: binding.sessionId,
+      ...(this.environmentId === undefined
+        ? {}
+        : { storeKey: this.storeKey(binding.sessionId) }),
       ctx: binding.ctx,
       hooks,
       keyedHooks,
@@ -423,6 +438,12 @@ export class UiSession extends Service {
     }
     this.ctx.slots.bindStoreScope(value)
     return value
+  }
+
+  private storeKey(sessionId: SessionId): string {
+    return this.environmentId === undefined
+      ? sessionId
+      : JSON.stringify([this.environmentId, sessionId])
   }
 
   private materializeAbsent(): StandardSourceBinding {

@@ -259,6 +259,8 @@ export interface ComposerBarOwnerProps {
 
 /** Package-private operations injected into the resident composer bar. */
 export interface ComposerBarInjected {
+  /** Owning runtime mutation readiness; drafts remain editable while false. */
+  connectionReady?: ObservableSnapshot<boolean>
   keyboard: ComposerKeyboard | undefined
   addImages: ((files: readonly File[]) => string | null) | undefined
   removeImage: ((id: DraftAttachmentId) => void) | undefined

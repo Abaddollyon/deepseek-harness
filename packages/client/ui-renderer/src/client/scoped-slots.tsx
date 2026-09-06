@@ -930,6 +930,36 @@ function RootOutlet({ ownerProps }: { ownerProps: object }) {
   )
 }
 
+const NO_PRESENTATION_TRANSITION: HostObservable<boolean> = {
+  getSnapshot: () => false,
+  subscribe: () => () => {},
+}
+
+/** Unmount every presentation consumer before its owning Cordis graph retires. */
+function PresentationRoot({ ownerProps }: { ownerProps: object }) {
+  const host = useHost()
+  const transitioning = useSyncExternalStore(
+    host.presentationTransition?.subscribe ?? NO_PRESENTATION_TRANSITION.subscribe,
+    host.presentationTransition?.getSnapshot ?? NO_PRESENTATION_TRANSITION.getSnapshot,
+  )
+  if (transitioning) {
+    return (
+      <div
+        data-presentation-transition=""
+        aria-busy="true"
+        style={{ height: '100%', background: 'var(--dsw-alias-bg-base)' }}
+      />
+    )
+  }
+  return (
+    <RootStandardProvider>
+      <ScopeProvider scope="session-maybe">
+        <RootOutlet ownerProps={ownerProps} />
+      </ScopeProvider>
+    </RootStandardProvider>
+  )
+}
+
 /**
  * Build the renderer installed into the `ui-renderer` SlotRegistry
  * (ctx.slots.install(createSlotRenderer()) at boot; the service owns the
@@ -941,11 +971,7 @@ export function createSlotRenderer(): SlotRenderer {
     renderRoot(host, ownerProps) {
       return (
         <HostContext.Provider value={host}>
-          <RootStandardProvider>
-            <ScopeProvider scope="session-maybe">
-              <RootOutlet ownerProps={ownerProps} />
-            </ScopeProvider>
-          </RootStandardProvider>
+          <PresentationRoot ownerProps={ownerProps} />
         </HostContext.Provider>
       )
     },

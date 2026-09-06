@@ -146,19 +146,65 @@
   display: none;
 }
 
+/* Compact columns give Session identity and metadata separate rows. Keeping
+   every action reachable while letting each group wrap avoids the flex
+   shrink-to-zero overlap seen beside the 56px rail on phone widths. */
+@media (max-width: 640px) {
+  .header {
+    padding: 8px 8px 0;
+  }
+
+  .titleRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .titleCluster {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 4px 8px;
+  }
+
+  .crumbs {
+    flex: 1 1 100%;
+  }
+
+  .headerActions,
+  .headerUtilities {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    gap: 4px 8px;
+  }
+
+  .headerUtilities {
+    margin-left: 0;
+  }
+}
+
 /* figma Tab_Group 34:11441: 35px strip, gap 36, pad-left 8, tabs bottom-aligned. */
 .tabs {
   position: relative;
   z-index: 1;
   display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: 36px;
   margin-top: 4px;
   padding-left: 8px;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 /* figma .Tab 34:11442: 13/16 text (figma wt510, rendered 500), gap 8 to the 2px bar. */
 .tab {
   position: relative;
+  flex: none;
   padding: 0 0 11px;
   border: none;
   background: transparent;
@@ -219,7 +265,14 @@
     40px,
     calc((100% - var(--dsh-chat-content-width)) / 2 - 24px - 24px)
   );
+  display: none;
   cursor: col-resize;
+}
+
+/* Transcript width belongs only to Chat. Other registered views own their
+   full body hit-testing, including controls that can occupy these margins. */
+.root:has(.header[data-active-view='chat']) .widthHandle {
+  display: block;
 }
 
 .widthHandle[data-side='left'] {
@@ -307,7 +360,10 @@
    sticky). The scroll body holds the transcript and the sticky composer seat
    so wheel over the footer moves the flow. */
 .root[data-phase='active'] {
-  overflow: hidden;
+  /* `hidden` remains programmatically scrollable: focusing a later View tab
+     used to scroll this whole root behind the compact sidebar. The body owns
+     vertical scrolling and the tab strip owns horizontal scrolling. */
+  overflow: clip;
 }
 
 .root[data-phase='active'] .header {

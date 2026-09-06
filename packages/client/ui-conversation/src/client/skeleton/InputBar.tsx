@@ -13,7 +13,7 @@
  * trigger instead of a parallel tree.
  */
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import clsx from 'clsx'
 import {
@@ -39,14 +39,20 @@ import css from './InputBar.module.css'
 
 export type InputBarProps = ComposerBarProps
 
+const READY_SOURCE = { getSnapshot: () => true, subscribe: () => () => {} }
+
 export const InputBar = memo(function InputBar({
   useSession, useInput, inputActions, keyboard, addImages, removeImage, draftImages,
-  resolveSubmitMode, toggleCommandMenu, stop, command, t,
+  resolveSubmitMode, toggleCommandMenu, stop, command, connectionReady, t,
   renderSlot, useNotices, useLexicon, useMenuLauncher,
   useProjection, sessionId, variant, disabled: inert = false, blocked,
   workspacePickerOpen = false, onRequestWorkspace,
   placeholder, accessory,
 }: InputBarProps) {
+  const readySource = connectionReady ?? READY_SOURCE
+  const mutationsReady = useSyncExternalStore(
+    readySource.subscribe, readySource.getSnapshot, readySource.getSnapshot,
+  )
   const input = useInput(s => s)
   const notice = useNotices(s => s)
   void useLexicon // hook seat stays bound by the inject compartment; text-ref decoration rides the shell's editor transforms
@@ -122,7 +128,7 @@ export const InputBar = memo(function InputBar({
   // contract has is cleared by choosing a model, so locking it too would leave
   // the composer asking for the only thing it prevents. The other reasons to
   // be disabled do lock it — there is no session to choose a model for.
-  const modelSeatLocked = removed || inert || !live
+  const modelSeatLocked = removed || inert || !live || !mutationsReady
   const machineBusy = input?.phase === 'adjudicating' || input?.phase === 'submitting'
   // The no-workspace surface remains the resident DOM node but acts as the
   // existing picker trigger. Message controls stay locked until a Session
@@ -249,9 +255,11 @@ export const InputBar = memo(function InputBar({
   // The keymap handlers read live bar state through this ref so the editor
   // registration survives re-renders without re-arming per keystroke.
   const gate = useRef({
-    locked, machineBusy, canSteerQueue, running, subagent, resolveSubmitMode, intakeImages,
+    locked, machineBusy, mutationsReady, canSteerQueue, running, subagent, resolveSubmitMode, intakeImages,
   })
-  gate.current = { locked, machineBusy, canSteerQueue, running, subagent, resolveSubmitMode, intakeImages }
+  gate.current = {
+    locked, machineBusy, mutationsReady, canSteerQueue, running, subagent, resolveSubmitMode, intakeImages,
+  }
 
   useEffect(() => {
     if (editor === null || keyboard === undefined) return
@@ -262,7 +270,7 @@ export const InputBar = memo(function InputBar({
         return keyboard.space()
       },
       dismissPopup: () => { keyboard.dismissPopup() },
-      canSubmit: () => !gate.current.locked && !gate.current.machineBusy,
+      canSubmit: () => gate.current.mutationsReady && !gate.current.locked && !gate.current.machineBusy,
       submit: (accelerated) => {
         const g = gate.current
         // Empty-draft accelerated Enter acts on the queue instead of the
@@ -316,6 +324,7 @@ export const InputBar = memo(function InputBar({
   const interruptible = running && continuable
   const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
   const onPrimary = (): void => {
+    if (!mutationsReady) return
     if (primaryStops) {
       stop?.()
       return
@@ -454,7 +463,7 @@ export const InputBar = memo(function InputBar({
             </Tooltip>
             <div className={css.modes}>
               {accessSelect}
-              {sessionId === undefined ? null : renderSlot('conversation.input.plan', { locked })}
+              {sessionId === undefined ? null : renderSlot('conversation.input.plan', { locked: locked || !mutationsReady })}
             </div>
             {input === undefined || sessionId === undefined
               ? null
@@ -472,7 +481,7 @@ export const InputBar = memo(function InputBar({
                   type="button"
                   className={css.primary}
                   aria-label={t('input.stop')}
-                  disabled={stop === undefined}
+                  disabled={stop === undefined || !mutationsReady}
                   onMouseDown={keepFocus}
                   onClick={stop}
                 >
@@ -487,7 +496,9 @@ export const InputBar = memo(function InputBar({
                 type="button"
                 className={css.primary}
                 aria-label={primaryLabel}
-                disabled={primaryStops ? stop === undefined : empty || disabled || machineBusy}
+                disabled={primaryStops
+                  ? stop === undefined || !mutationsReady
+                  : empty || disabled || machineBusy || !mutationsReady}
                 onMouseDown={keepFocus}
                 onClick={onPrimary}
               >

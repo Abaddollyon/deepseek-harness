@@ -82,7 +82,10 @@ export interface StandardSourceBinding {
 
 /** Materialized binding for one live non-root scope. */
 export interface ScopedStandardSourceBinding extends StandardSourceBinding {
+  /** Native scope identity passed to components and Host APIs. */
   readonly key: string
+  /** Optional compound identity used only for renderer-owned Store persistence/cache. */
+  readonly storeKey?: string
   readonly ctx: Context
 }
 
@@ -125,6 +128,8 @@ export interface RenderOpts {
 
 /** Host API the `ui-renderer` SlotRegistry presents to its React renderer. */
 export interface SlotRendererHost {
+  /** True while the Host atomically replaces an owning presentation graph. */
+  readonly presentationTransition?: HostObservable<boolean>
   /**
    * Subscribe to a key's registration changes (microtask-batched).
    * @param key - slot key.

@@ -280,6 +280,7 @@
 
 /* List seat: always mounted so the shell foot never moves. */
 .listArea {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -290,6 +291,18 @@
   /* The list remains the scroll clip. This seat stays visible so the
      absolutely positioned first-boundary marker can occupy the header gap. */
   overflow: visible;
+}
+
+.listContent {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.listContent[data-obscured='true'] {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .rail .listArea {

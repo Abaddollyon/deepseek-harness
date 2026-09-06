@@ -68,6 +68,7 @@ interface BenchOptions {
   running?: boolean
   subagent?: Exclude<SessionSnapshot['subagent'], null>
   disabled?: boolean
+  connectionReady?: boolean
   inert?: boolean
   blocked?: { readonly reason: string }
   workspacePickerOpen?: boolean
@@ -174,6 +175,7 @@ function bench(over?: BenchOptions) {
     useInput: bindSnapshotSelector(shell.state),
     inputActions: shell.actions,
     keyboard: shell,
+    connectionReady: createSnapshotStore(over?.connectionReady ?? true),
     addImages: over?.addImages ?? (() => null),
     removeImage,
     draftImages: ids => ids.flatMap((id) => {
@@ -862,6 +864,12 @@ describe('running and lock semantics', () => {
     expect(textarea.getAttribute('aria-disabled')).toBe('true')
     expect(placeholderOf(view.container)).toBe('会话不可用')
     expect((view.getByLabelText('指令') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('keeps an offline runtime draft editable while disabling mutation controls', () => {
+    const { textarea, button } = bench({ draft: 'retain me', connectionReady: false })
+    expect(editableOf(textarea)).toBe(true)
+    expect(button.disabled).toBe(true)
   })
 
   it('idle primary sends and disables on empty draft', () => {

@@ -464,6 +464,49 @@ describe('current selection (migrated from ui-layout, arbitrated into the list s
     await feedList(second, [{ id: 's1' }])
     expect(second.svc.list.getSnapshot().current).toBe('s1')
   })
+
+  it('isolates persisted selection by environment identity', async () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+      removeItem: (key: string) => { storage.delete(key) },
+    })
+    const scopedBench = (environmentId: string): Bench => {
+      const ctx = new Context()
+      const api = new FakeApiClient()
+      return { ctx, api, svc: new ClientSessions(ctx, fakeRemote(api), environmentId) }
+    }
+    const local = scopedBench('local')
+    const sigil = scopedBench('sigil')
+    await feedList(local, [{ id: 'same' }])
+    await feedList(sigil, [{ id: 'other' }])
+    local.svc.open(sid('same'))
+    sigil.svc.open(sid('other'))
+
+    expect(storage.get('dsh.sessions.current.local')).toContain('same')
+    expect(storage.get('dsh.sessions.current.sigil')).toContain('other')
+  })
+
+  it('migrates the legacy local selection into the environment key', async () => {
+    const storage = new Map<string, string>([
+      ['dsh.sessions.current', JSON.stringify({ sessionId: 'same' })],
+    ])
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+      removeItem: (key: string) => { storage.delete(key) },
+    })
+    const ctx = new Context()
+    const api = new FakeApiClient()
+    const svc = new ClientSessions(ctx, fakeRemote(api), 'local')
+    const b = { ctx, api, svc }
+
+    await feedList(b, [{ id: 'same' }])
+    expect(svc.list.getSnapshot().current).toBe('same')
+    expect(storage.has('dsh.sessions.current')).toBe(false)
+    expect(storage.get('dsh.sessions.current.local')).toContain('same')
+  })
 })
 
 describe('binding and stage lifecycle', () => {

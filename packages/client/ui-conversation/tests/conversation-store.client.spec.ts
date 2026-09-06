@@ -58,11 +58,13 @@ describe('createConversationStore', () => {
 
   it('reads only a usable persisted View preference', () => {
     const sessionId = 'sess-1' as SessionId
-    const store = createConversationStore().create(sessionId)
+    const scopeKey = JSON.stringify(['sigil', sessionId])
+    const store = createConversationStore().create(scopeKey)
     store.actions.setView('trajectory')
-    expect(readConversationViewPreference(sessionId)).toBe('trajectory')
+    expect(readConversationViewPreference(sessionId, 'sigil')).toBe('trajectory')
+    expect(readConversationViewPreference(sessionId, 'local')).toBeNull()
 
-    localStorage.setItem(`${KEY}.${sessionId}`, '{invalid')
-    expect(readConversationViewPreference(sessionId)).toBeNull()
+    localStorage.setItem(`${KEY}.${scopeKey}`, '{invalid')
+    expect(readConversationViewPreference(sessionId, 'sigil')).toBeNull()
   })
 })

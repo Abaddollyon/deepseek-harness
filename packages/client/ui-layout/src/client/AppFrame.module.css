@@ -30,10 +30,22 @@
 }
 
 .centerCol {
+  position: relative;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.activeContentLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.activeContentLayer > * {
+  pointer-events: auto;
 }
 
 .detailsCol {
