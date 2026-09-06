@@ -742,6 +742,13 @@ interface PreparedLlmCall {
   /** Config fields materialized by the captured adapter rather than proposed by the caller. */
   readonly adapterDefaults: LlmCallConfigAdapterDefaults
   /**
+   * Count the exact provider input tokens for this request without dispatching it.
+   * Returns `undefined` when this adapter generation cannot prove the count.
+   * @param options - fully assembled request carrying the prepared config.
+   * @returns exact input-token count, or `undefined` when unavailable.
+   */
+  countInputTokens(options: GenerateOptions): number | undefined
+  /**
    * Dispatch this call once through the registration captured during
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
@@ -782,6 +789,13 @@ declare abstract class LlmAdapter {
    * @returns route-owned image pricing, or `undefined` when the route declares none.
    */
   imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;
+  /**
+   * Count the exact input tokens the provider will receive for one request.
+   * The default declines because a heuristic cannot enforce a hard limit.
+   * @param _options - fully assembled provider-neutral request.
+   * @returns exact input tokens, or `undefined` when unavailable.
+   */
+  countInputTokens(_options: GenerateOptions): number | undefined;
   /**
    * List models this adapter can currently advertise for one owned provider.
    * The result is advisory: an adapter may accept unlisted model ids, and

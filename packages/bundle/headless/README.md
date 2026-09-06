@@ -33,11 +33,21 @@ Run one task, get the final answer, and exit. The task is the command line itsel
 dsh --profile headless "run the tests"
 ```
 
+An automation can apply one complete per-agent execution budget:
+
+```sh
+dsh --profile headless --provider deepseek-official --model deepseek-v4-flash --reasoning-effort provider-default --max-turns 4 --max-input-tokens 12000 --max-output-tokens 2000 --max-retries 1 "run the tests"
+```
+
 The agent works through the task, streams each non-empty provider reasoning delta to stderr under a `dsh: reasoning:` heading, then prints the final answer on stdout and exits. Consecutive reasoning deltas stay in one section, and the runner closes that section before later output when the provider supplied no trailing newline. A successful run without reasoning keeps stderr empty; a failure exits 1 and prints `dsh: <code>: <message>` to stderr. A missing or blank task is rejected before anything runs. The task text is supplied through the single `task` setting:
 
 | Field | Default | Meaning |
 |---|---|---|
 | `task` | required | The task text for the single run |
+| `budget` | — | Complete `maxTurns`, `maxInputTokens`, `maxOutputTokens`, and `maxRetries` object; partial objects fail before Agent creation |
+| `selection` | — | Complete per-run provider/model selection with optional explicit reasoning effort |
+
+`--provider` and `--model` must appear together and select only this run; they do not mutate saved settings. `--reasoning-effort` requires that pair. An explicit adapter-owned id is applied to the actual request, while `provider-default` omits the effort and clears any saved effort from this isolated selection. The four command-line budget options must also appear together. `maxTurns` limits model steps, `maxRetries` limits additional attempts after model-request errors, and `maxOutputTokens` is divided across requests by clamping each request to the remaining total. `maxInputTokens` is a response-accounted threshold for adapters that report authoritative usage: one in-flight response can cross it, then the loop stops before another request. If a response reports no usage and another step is needed, the run fails with `BUDGET_ACCOUNTING_UNAVAILABLE`. These limits belong to this one Agent; a caller launching several headless children must allocate a shared parent budget itself.
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-headless) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -61,11 +71,11 @@ The runner is a direct driver over the core API carrier: it creates one fresh Ag
 
 ### Run flow
 
-The runner awaits the complete application (`ctx.get('loader')?.await()`) so the composed tools and adapters are not half-mounted, reads the shared [`agentDefaultModel`](../../core/agent-default-model/README.md) selection, creates one fresh persisted Agent with that provider and model, and submits the task as an ordinary user message. It streams that Agent's non-empty reasoning deltas to stderr, waits for quiescence, then flushes the Session and folds the owned interval (`firstSeq` onward) into the last non-empty `assistant/message` text and final `turn/end` reason. It writes the final text to stdout and requests exit.
+The runner awaits the complete application (`ctx.get('loader')?.await()`) so the composed tools and adapters are not half-mounted, reads the shared [`agentDefaultModel`](../../core/agent-default-model/README.md) selection unless an isolated selection was supplied, creates one fresh persisted Agent with that selection and optional native budget, and submits the task as an ordinary user message. It streams that Agent's non-empty reasoning deltas to stderr, waits for quiescence, then flushes the Session and folds the owned interval (`firstSeq` onward) into the last non-empty `assistant/message` text and final `turn/end` reason. It writes the final text to stdout and requests exit.
 
 ### Patch surface over base
 
-The patch rides over `dsh-base`: it inherits the projection cache, sets the coding persona on the base `system-prompt` row, keeps the same temporary process-wide PTC mode opt-in (`DSH_TOOLS_MODE`) as the Web surface, disables the shared HMR row, inserts PTC mode's worker as a core execution capability, and mounts the startup provider and the runner. The cache checkpoints each persisted one-shot session for later consumers; its durability barrier flushes each covered log prefix before publishing the cache row and may split otherwise coalesced JSONL runs. The startup provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), reads the positional argument, prints the app's `--help`, and provides `headlessStartup`; the runner injects that service and reads its task from lazy config.
+The patch rides over `dsh-base`: it inherits the projection cache, sets the coding persona on the base `system-prompt` row, keeps the same temporary process-wide PTC mode opt-in (`DSH_TOOLS_MODE`) as the Web surface, disables the shared HMR row, inserts PTC mode's worker as a core execution capability, and mounts the startup provider and the runner. The cache checkpoints each persisted one-shot session for later consumers; its durability barrier flushes each covered log prefix before publishing the cache row and may split otherwise coalesced JSONL runs. The startup provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), reads the positional argument plus optional selection and complete budget flags, prints the app's `--help`, and provides `headlessStartup`; the runner injects that service and reads its values from lazy config.
 
 ### Exit mapping
 

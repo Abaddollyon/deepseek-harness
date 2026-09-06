@@ -72,6 +72,10 @@ const handle = await ctx.agents.create({
 
 每个步骤都会发送该 agent 渲染后的系统提示词、其可见工具 schema 与会话的派生历史；模型的工具调用经过受守卫的工具流水线，每个被接纳的事实都会在下一步据此派生之前追加到会话日志。并行安全调用最多可重叠 `maxParallelToolCalls` 个；独占调用单独运行并构成排序屏障。取消是协作式的：`agent.cancel()` 中止当前活动，并在未设置 `keepInbox` 时清除待处理工作；被取消的流会终结已送达用户的文本。
 
+### 限制一次 agent 运行
+
+编程调用方可以传入 `AgentOptions.budget`，其中包含正数 `maxTurns`、`maxInputTokens` 和 `maxOutputTokens`，以及非负 `maxRetries`。`maxTurns` 计算模型步骤，包括工具后续步骤，而重试仍是同一步骤内的尝试。循环把每次请求的 `maxTokens` 限制为剩余总输出额度，并在超额步骤或重试之前停止。输入 token 使用提供方响应中的权威 usage；由于 usage 在响应后到达，一个在途请求可能跨过阈值，但不会再分发后续请求。响应没有 usage 时，后续请求以 `BUDGET_ACCOUNTING_UNAVAILABLE` 停止；提供精确 prepared-call 计数的适配器可以在分发前拒绝过大的请求。
+
 -----
 
 <a id="understand-the-implementation"></a>
@@ -97,6 +101,7 @@ const handle = await ctx.agents.create({
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：`AgentLoop` 服务、配置 schema、声明式 agent 启动、工厂注册 |
 | [`src/agent.ts`](src/agent.ts) | 具体 `ReactLoopAgent` 驱动器：收件箱、轮次／步骤状态机、取消 |
+| [`src/budget.ts`](src/budget.ts) | 请求准入时的逐 agent 步骤、token 与重试计量 |
 | [`src/tool-calls.ts`](src/tool-calls.ts) | 工具调度：独占屏障与有界并行池 |
 | [`src/runtime-context.ts`](src/runtime-context.ts) | 每步骤 runtime-context 快照处理 |
 | [`src/constants.ts`](src/constants.ts) | `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |

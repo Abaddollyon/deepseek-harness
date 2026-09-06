@@ -36,6 +36,7 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import { AgentBudgetTracker } from './budget.ts'
 
 /** Productive preflight redispatches allowed before provider recovery owns admission. */
 const MAX_REQUEST_PREFLIGHT_ATTEMPTS = 8
@@ -82,6 +83,7 @@ export class ReactLoopAgent implements Agent {
   private requestHeaderLogged = false
   private requestSurfaceGeneration: number | undefined
   private readonly runtimeContext: RuntimeContextProjection
+  private readonly budget: AgentBudgetTracker | undefined
 
   constructor(
     private loopCtx: Context,
@@ -101,6 +103,7 @@ export class ReactLoopAgent implements Agent {
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
     this.runtimeContext = new RuntimeContextProjection(this.ctx, session)
+    this.budget = options.budget === undefined ? undefined : new AgentBudgetTracker(options.budget)
   }
 
   get status(): AgentStatus {
@@ -313,6 +316,7 @@ export class ReactLoopAgent implements Agent {
           turnEnds = { kind: 'completed' }
           return false
         }
+        this.budget?.admitStep()
         signal.throwIfAborted()
         this.session.append('step/start', { turn, step })
         phase.step = step
@@ -382,6 +386,9 @@ export class ReactLoopAgent implements Agent {
       startsRequestSeries = false
       const assembler = new BlockAssembler()
       const chunkSeqs: SessionSeq[] = []
+      const budgetedRequest = this.budget === undefined
+        ? undefined
+        : { admittedInput: this.budget.admitRequest(request, preparedCall) }
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
@@ -407,7 +414,13 @@ export class ReactLoopAgent implements Agent {
             }, { surfaceOp: 'append', sourceEventSeqs: chunkSeqs })
           }
         }
+        if (budgetedRequest !== undefined) {
+          this.budget?.settleRequest(request, budgetedRequest.admittedInput, assembler.usage)
+        }
         throw error
+      }
+      if (budgetedRequest !== undefined) {
+        this.budget?.settleRequest(request, budgetedRequest.admittedInput, assembler.usage)
       }
       const finish = assembler.finish
       if (finish.kind === 'error' || finish.kind === 'aborted') {
@@ -426,6 +439,7 @@ export class ReactLoopAgent implements Agent {
         if (action?.kind !== 'retry') {
           throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
         }
+        this.budget?.admitRetry()
         continue
       }
 
@@ -502,18 +516,19 @@ export class ReactLoopAgent implements Agent {
       () => Promise.resolve(seedConfig),
     )
     signal.throwIfAborted()
-    if (!proposedConfig.provider || !proposedConfig.model) {
+    const budgetedConfig = this.budget?.clampOutput(proposedConfig) ?? proposedConfig
+    if (!budgetedConfig.provider || !budgetedConfig.model) {
       throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or supply both via the agent/request waterfall`)
     }
     let config: LlmCallConfig
     let preparedCall: PreparedLlmCall | undefined
     try {
-      preparedCall = await this.loopCtx.llm.prepareCall(proposedConfig, signal)
+      preparedCall = await this.loopCtx.llm.prepareCall(budgetedConfig, signal)
       config = preparedCall.config
     } catch (error: unknown) {
       // Middleware may serve an unregistered route; terminal dispatch still requires an adapter.
       if (!(error instanceof LlmError) || error.code !== 'NO_ADAPTER') throw error
-      config = proposedConfig
+      config = budgetedConfig
     }
     signal.throwIfAborted()
 

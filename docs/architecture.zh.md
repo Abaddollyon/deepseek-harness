@@ -102,7 +102,7 @@ turn/end
 
 输入通过同一个 inbox 到达驱动器。有些消息会立即唤醒它；注入的上下文会留在 inbox 中，直到另一条消息将其唤醒。
 
-`agent/pre-step` 决定模型看到什么。监听器可以改写已领取的消息，也可以直接拒绝它们；首次领取被拒绝或被改写为空时，仍会关闭一个不含步骤的持久轮次，因此日志会记录这次尝试。enter 决策还可以设置 `startsRequestSeries` 来开启独立的模型消息序列：loop 会随之记录一个新的 `request/header`（原因为 `series`，或在封装同时变化时为携带 `startsSeries: true` 的 `change`）。重建下游 enter 决策的监听器必须展开它（`{ ...decision, messages }`），该声明才能存活。每个步骤读取插件注册的提示词片段和工具 schema。循环记录精确路由和规范请求 header 后，`agent/request-preflight` 可以提交替换表层并要求重新执行准入；只有更新且由动作声明的 `surface.replaceGeneration` 才允许重试，循环会在八次有效重试后放行，使提供方错误恢复始终可达。
+`agent/pre-step` 决定模型看到什么。监听器可以改写已领取的消息，也可以直接拒绝它们；首次领取被拒绝或被改写为空时，仍会关闭一个不含步骤的持久轮次，因此日志会记录这次尝试。enter 决策还可以设置 `startsRequestSeries` 来开启独立的模型消息序列：loop 会随之记录一个新的 `request/header`（原因为 `series`，或在封装同时变化时为携带 `startsSeries: true` 的 `change`）。重建下游 enter 决策的监听器必须展开它（`{ ...decision, messages }`），该声明才能存活。每个步骤读取插件注册的提示词片段和工具 schema。可选的 `AgentOptions.budget` 会在下一次提供方分发前，为该实时循环实例准入模型步骤、按响应计量的输入、请求的输出与请求错误重试；提供方 usage 在一个在途响应后到达，因此输入属于续跑阈值，除非 prepared adapter 提供精确计数器。循环记录精确路由和规范请求 header 后，`agent/request-preflight` 可以提交替换表层并要求重新执行准入；只有更新且由动作声明的 `surface.replaceGeneration` 才允许重试，循环会在八次有效重试后放行，使提供方错误恢复始终可达。
 
 详情见[时序图](agent-lifecycle.zh.md)、[工具流水线](tool-execution-pipeline.zh.md)和[取消与错误恢复](subsystems/core.zh.md#the-agent-handle)。
 

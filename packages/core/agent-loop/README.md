@@ -72,6 +72,10 @@ const handle = await ctx.agents.create({
 
 Each step sends the agent's rendered system prompt, its visible tool schemas, and the session's derived history; the model's tool calls run through the guarded tool pipeline and every accepted fact is appended to the session log before the next step derives from it. Parallel-safe calls may overlap up to `maxParallelToolCalls`; exclusive calls run alone as ordering barriers. Cancellation is cooperative: `agent.cancel()` aborts the current activity and, unless `keepInbox` is set, clears pending work; a cancelled stream finalizes the text already delivered to the user.
 
+### Bound one agent run
+
+Programmatic callers can pass `AgentOptions.budget` with positive `maxTurns`, `maxInputTokens`, and `maxOutputTokens`, plus nonnegative `maxRetries`. `maxTurns` counts model steps, including tool-follow-up steps, while retries remain attempts inside one step. The loop clamps each request's `maxTokens` to the remaining total output allowance and stops before an excess step or retry. Input tokens use authoritative provider response usage; one in-flight request can cross the threshold because its usage arrives afterward, but no later request is dispatched. A response without usage stops a later request with `BUDGET_ACCOUNTING_UNAVAILABLE`; an adapter that supplies exact prepared-call counting can reject an oversized request before dispatch.
+
 -----
 
 <a id="understand-the-implementation"></a>
@@ -96,6 +100,7 @@ After `agent/request`, `ctx.llm.prepareCall()` validates adapter-owned fields an
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `AgentLoop` service, config schema, declarative agent startup, factory registration |
 | [`src/agent.ts`](src/agent.ts) | The concrete `ReactLoopAgent` driver: inbox, turn/step machine, cancellation |
+| [`src/budget.ts`](src/budget.ts) | Per-agent step, token, and retry accounting at request admission |
 | [`src/tool-calls.ts`](src/tool-calls.ts) | Tool scheduling: exclusive barriers and the bounded parallel pool |
 | [`src/runtime-context.ts`](src/runtime-context.ts) | Per-step runtime-context snapshot handling |
 | [`src/constants.ts`](src/constants.ts) | `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |

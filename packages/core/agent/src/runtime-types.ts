@@ -21,6 +21,18 @@ declare module '@deepseek-ai/dsh-system-prompt' {
   }
 }
 
+/** Execution limits for one live agent-loop instance. */
+export interface AgentBudget {
+  /** Maximum model steps admitted across submitted turns. */
+  maxTurns: number
+  /** Response-accounted input-token threshold across model attempts. */
+  maxInputTokens: number
+  /** Maximum output tokens requested across all model attempts. */
+  maxOutputTokens: number
+  /** Maximum additional model attempts admitted after request failures. */
+  maxRetries: number
+}
+
 /** Merge-extensible agent creation options. Persona belongs to system-prompt sections. */
 export interface AgentOptions {
   /** Provider route (must have a registered adapter at call time). */
@@ -35,6 +47,8 @@ export interface AgentOptions {
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
+  /** Optional execution limits enforced by the concrete agent loop. */
+  budget?: AgentBudget
 }
 
 /** Options for {@link Agent.cancel}. */
