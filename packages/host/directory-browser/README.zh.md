@@ -50,3 +50,5 @@ kind: "package-reference"
 ### 开发备注
 
 保持该服务与交互式选择器独立。即使 `ctx.directoryPicker` 提供原生选择器，远程浏览也必须可用。
+
+不发布运行时不变式 companion；此 Service Definition 只持有不可变的请求与结果类型，全部可变文件系统观察均由所选提供方持有。

@@ -283,7 +283,7 @@ describe('environment composition service', () => {
             await new Promise<void>((resolve) => {
               connect = () => { ready({ home: '/home/test' }) }
               drop = resolve
-              signal.addEventListener('abort', resolve, { once: true })
+              signal.addEventListener('abort', () => { resolve() }, { once: true })
             })
           }))
           const loop = connection.start({}, {
@@ -328,9 +328,10 @@ describe('environment composition service', () => {
       expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'disconnected' })
     })
     expect(presentations).toBe(1)
-    expect(composition.getSnapshot().phase === 'ready'
+    const disconnected = composition.getSnapshot()
+    expect(disconnected.phase === 'ready'
       && connected.phase === 'ready'
-      && composition.getSnapshot().runtime === connected.runtime).toBe(true)
+      && disconnected.runtime === connected.runtime).toBe(true)
     const selected = nav.getSnapshot()
 
     composition.retry()

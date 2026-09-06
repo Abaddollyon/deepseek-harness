@@ -15,13 +15,14 @@ describe('environment navigation UI seats', () => {
     let mode: 'workspaces' | 'activity' = 'workspaces'
     const setMode = (next: typeof mode) => { mode = next }
     const t = (key: string) => key === 'activity' ? 'Activity' : 'Environments'
-    const first = render(<ActivityToggle {...{
+    const activityProps = {
       wide: true,
       expandSidebar: () => {},
       sidebarMode: { getSnapshot: () => mode, subscribe: () => () => {} },
       setMode,
       t,
-    } as never} />)
+    } as unknown as Parameters<typeof ActivityToggle>[0]
+    const first = render(<ActivityToggle {...activityProps} />)
     const bell = screen.getByRole('button', { name: 'Activity' })
     expect(bell.getAttribute('aria-pressed')).toBe('false')
     expect(bell.querySelector('svg[data-icon="bell"]')).not.toBeNull()
@@ -29,7 +30,8 @@ describe('environment navigation UI seats', () => {
     expect(mode).toBe('activity')
     first.unmount()
 
-    render(<EnvironmentFooterAction {...{ wide: true, openOverview: () => {}, t } as never} />)
+    const footerProps = { wide: true, openOverview: () => {}, t } as unknown as Parameters<typeof EnvironmentFooterAction>[0]
+    render(<EnvironmentFooterAction {...footerProps} />)
     expect(screen.getByRole('button', { name: 'Environments' }).querySelector('svg[data-icon="server"]')).not.toBeNull()
   })
 

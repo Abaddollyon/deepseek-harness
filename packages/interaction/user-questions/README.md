@@ -77,3 +77,5 @@ None.
 </details>
 
 **Runtime invariant:** The single provider slot is validated at registration and answers return directly to their caller. When `ctx.pendingInteractions` is composed, `ask()` reports only a content-free begin/end lifecycle around answerer dispatch; that observer has no answer authority.
+
+No runtime invariant companion is published; provider uniqueness is enforced at registration, and pending-observer symmetry is checked at the exact `ask()` dispatch boundary that owns both begin and end.

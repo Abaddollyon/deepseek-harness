@@ -62,3 +62,5 @@ kind: "package-reference"
 无。
 
 </details>
+
+不发布运行时不变式 companion；注册表的快照与排队变更流是同一次原子变更的两种视图，其包测试直接校验 revision、清理与观察者隔离。

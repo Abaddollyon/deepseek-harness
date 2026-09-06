@@ -51,3 +51,5 @@ None; this package does not assemble provider requests.
 ### Dev Note
 
 Keep listing memory bounded and preserve the fully-qualified-path fence. The provider must never invoke an OS chooser.
+
+No runtime invariant companion is published; bounded listing, path validation, and cancellation are checked directly at the provider's filesystem operation boundary, and the package owns no independent event stream or second snapshot to compare.

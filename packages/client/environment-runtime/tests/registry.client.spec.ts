@@ -15,7 +15,7 @@ function runtime(environmentId: string): EnvironmentRuntime {
       getSnapshot: () => ({ environmentId, runtimeId: `${environmentId}-runtime`, generation: 1 }),
       subscribe: () => () => {},
     },
-    request: { request: vi.fn() },
+    request: { request: vi.fn(), registerRoute: vi.fn(() => () => {}), dispose: vi.fn() },
     dispose: vi.fn(async () => { await context.fiber.dispose() }),
   }
 }

@@ -52,3 +52,5 @@ None; this package does not assemble provider requests.
 ### Dev Note
 
 Do not move filesystem code back into this adapter. The independent browser is what lets remote clients browse while a local native chooser remains composed.
+
+No runtime invariant companion is published; this stateless adapter delegates each call to the authoritative directory-browser service and owns no independent lifecycle or mutable observation.

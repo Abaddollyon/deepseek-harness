@@ -61,3 +61,5 @@ None; this package neither assembles nor sends a provider request.
 None.
 
 </details>
+
+No runtime invariant companion is published; the registry's snapshot and queued change stream are two views of the same atomic mutation, and its package tests check revision, cleanup, and observer isolation directly.

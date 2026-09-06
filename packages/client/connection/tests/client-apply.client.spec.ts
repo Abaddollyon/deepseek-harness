@@ -98,7 +98,7 @@ describe('connection client apply', () => {
 
   it('keeps an explicit runtime transport authoritative on fixture pages', async () => {
     ;(globalThis as Win).location = { hostname: '127.0.0.1', search: '?fixture' }
-    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+    const fetch = vi.fn(async (_url: URL, init: RequestInit) => {
       if (typeof init.body !== 'string') throw new Error('expected string request body')
       const request = JSON.parse(init.body) as { rpcId: string }
       return new Response(JSON.stringify({
@@ -133,7 +133,7 @@ describe('connection client apply', () => {
 
     const handle = ctx.connectionFactory.create(transport)
 
-    expect(handle).not.toBe(ctx.connection)
+    expect(handle).not.toBe(ctx.get('connection'))
     await ctx.fiber.dispose()
   })
 

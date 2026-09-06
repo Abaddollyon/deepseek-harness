@@ -10180,6 +10180,9 @@ importers:
       '@deepseek-ai/dsh-output-retention':
         specifier: workspace:^
         version: link:../../packages/util/output-retention
+      '@deepseek-ai/dsh-pending-interactions':
+        specifier: workspace:^
+        version: link:../../packages/interaction/pending-interactions
       '@deepseek-ai/dsh-permission-presets':
         specifier: workspace:^
         version: link:../../packages/interaction/permission-presets

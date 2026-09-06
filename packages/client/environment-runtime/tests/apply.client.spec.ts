@@ -12,7 +12,7 @@ async function runtimeContext(): Promise<Context> {
   const ctx = new Context()
   ctx.provide('connection', {
     generation: { getSnapshot: () => undefined, subscribe: () => () => {} },
-  } as ConnectionHandle)
+  } as unknown as ConnectionHandle)
   ctx.provide('connectionFactory', { create: vi.fn() } as ConnectionFactory)
   await ctx.plugin({ apply, inject })
   return ctx
@@ -27,7 +27,7 @@ describe('local environment runtime plugin', () => {
     })
     ctx.provide('connection', {
       generation: { getSnapshot: () => undefined, subscribe: () => () => {} },
-    } as ConnectionHandle)
+    } as unknown as ConnectionHandle)
     ctx.provide('connectionFactory', { create: vi.fn() } as ConnectionFactory)
 
     await expect(ctx.plugin({ apply, inject })).resolves.toBeDefined()
@@ -44,7 +44,7 @@ describe('local environment runtime plugin', () => {
     })
     ctx.provide('connection', {
       generation: { getSnapshot: () => undefined, subscribe: () => () => {} },
-    } as ConnectionHandle)
+    } as unknown as ConnectionHandle)
     ctx.provide('connectionFactory', { create: vi.fn() } as ConnectionFactory)
     await ctx.plugin({ apply, inject })
 
@@ -123,7 +123,7 @@ describe('local environment runtime plugin', () => {
     vi.stubGlobal('fetch', fetch)
     ctx.provide('connection', {
       generation: { getSnapshot: () => ({ id: 7 }), subscribe: () => () => {} },
-    } as ConnectionHandle)
+    } as unknown as ConnectionHandle)
     ctx.provide('connectionFactory', { create: vi.fn() } as ConnectionFactory)
 
     await ctx.plugin({ apply, inject })

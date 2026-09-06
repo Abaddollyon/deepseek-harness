@@ -45,7 +45,8 @@ describe('environment runtime activation', () => {
       },
       createConnection: createConnectionHandle,
       activate: async (ctx) => {
-        const result = await ctx.connection.rpc.call('/api', 'fixture/read', {})
+        const connection = ctx.get('connection') as ReturnType<typeof createConnectionHandle>
+        const result = await connection.rpc.call('/api', 'fixture/read', {})
         ctx.provide('transportFixture', result)
       },
     })

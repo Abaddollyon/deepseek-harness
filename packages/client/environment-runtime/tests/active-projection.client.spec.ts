@@ -128,7 +128,8 @@ describe('active environment runtime projection', () => {
     finishLocal()
     await projection.whenIdle()
     await vi.waitFor(() => { expect(disposed).toContain('local') })
-    expect(projection.getSnapshot().environmentId).toBe('sigil')
+    const snapshot = projection.getSnapshot()
+    expect(snapshot.phase === 'ready' ? snapshot.environmentId : undefined).toBe('sigil')
     await projection.dispose()
   })
 
@@ -181,7 +182,8 @@ describe('active environment runtime projection', () => {
     expect(projection.getSnapshot()).toMatchObject({
       phase: 'ready', environmentId: 'sigil', connectionState: 'connecting',
     })
-    expect(projection.getSnapshot().phase === 'ready' && projection.getSnapshot().runtime === runtime).toBe(true)
+    const mounted = projection.getSnapshot()
+    expect(mounted.phase === 'ready' && mounted.runtime === runtime).toBe(true)
 
     generation.set({ environmentId: 'sigil', runtimeId: runtime.runtimeId, generation: 1 })
     connectionState.set('connected')

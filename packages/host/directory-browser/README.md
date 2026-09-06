@@ -50,3 +50,5 @@ None; this package does not assemble provider requests.
 ### Dev Note
 
 Keep this service independent from the interactive picker. Remote browsing must remain available even when `ctx.directoryPicker` serves a native chooser.
+
+No runtime invariant companion is published; this Service Definition owns immutable request and result types while its selected provider owns all mutable filesystem observations.

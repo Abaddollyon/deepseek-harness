@@ -12,6 +12,8 @@ Status: implemented
 
 交互层以 `ctx.pendingInteractions` 提供进程本地观察 registry。Approval 与 question 服务只在实际分派 answerer 的区间调用 `begin()` 及其幂等结束能力；snapshot 与排队 delta 公开不透明 identity、kind、可选 agent/session identity、epoch、revision 与时间戳，不公开请求内容或回答方法。Observer 失败、延迟、dispose 与迟到订阅都不能影响 [approval seam](../feature/2026-07-06-approval-seam.zh.md) 与 [Web permission and approval](../feature/2026-07-23-web-permission-and-approval.zh.md) 描述的权威 waterfall。
 
+分发闭包遵循同一所有权边界。交付 approval 或 question 服务的 assembly 也交付 `dsh-pending-interactions`；Python SDK runtime 直接声明该 registry，而不依赖自动安装 peer。通过生成 client map 暴露的公共 discriminator property 带有显式 literal type，使 reflection 与 declaration 生成看到的合同和 TypeScript 消费方一致。
+
 客户端模块层提供 `ctx.clientSurfaces`。注册项命名精确 path、显式 roots 与唯一 root plugin。id、path、root 或必需的 injected dependency 不可用时注册失败；lookup 组成当前传递 `inject` 与动态 `external` 闭包。带有 `dsh.client.defaultRoot: false` 的 package 不进入普通图，除非普通 root 依赖它，因此没有该 metadata 的 package 保持既有 Web 启动行为。
 
 Connection 只接受已注册 surface id 来生成或认证非根 launch URL。浏览器认证只在 registry 选择的精确 pathname 上交换进程 token，并重定向至相同的干净 pathname。Frontend Static 把该已注册 path 识别为 index 入口，并通过 WebServer 的通用 index render variant 传递其 id，使 Client Modules 注入对应图，同时共享其他 index contributor。
@@ -34,6 +36,6 @@ Surface URL 只携带既有 launch token query，绝不接受调用方提供的 
 
 ## Consequences
 
-Core 现在提供两个可复用 seam，而不是 avatar 专用行为：交互生产方只发布生命周期，任何浏览器伴侣都能注册依赖闭包 surface。代价是新增一个进程本地 registry，并在每次 surface 渲染时组成图；注册方必须准确枚举 roots，必需 package 消失会使 path 无法发现，直到依赖恢复。
+Core 现在提供两个可复用 seam，而不是 avatar 专用行为：交互生产方只发布生命周期，任何浏览器伴侣都能注册依赖闭包 surface。代价是新增一个进程本地 registry，并在每次 surface 渲染时组成图；注册方必须准确枚举 roots，分发 root 必须声明被动 registry，必需 package 消失会使 path 无法发现，直到依赖恢复。
 
 聚焦测试固定无 surface 的普通行为、精确 token 交换与干净 redirect、两个独立 surface fixture、依赖闭包、禁止 package 排除、注册冲突与 dispose、交互分派中的 cancellation 与 failure、observer failure containment，以及迟到 observer。
