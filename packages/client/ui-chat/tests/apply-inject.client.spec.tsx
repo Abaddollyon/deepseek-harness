@@ -45,8 +45,21 @@ function sessionFakeFor() {
   } satisfies SessionBehaviorOverrides
 }
 
-async function bench() {
+async function bench(options: { environmentId?: string } = {}) {
   const runtime = await SlotTestRuntime.create()
+  const presentationState = new Map<string, { scrollAnchor?: string }>()
+  const presentation = {
+    get: (ref: { environmentId: string; sessionId: string }) =>
+      presentationState.get(JSON.stringify([ref.environmentId, ref.sessionId])) ?? {},
+    update: (ref: { environmentId: string; sessionId: string }, patch: { scrollAnchor?: string }) => {
+      const key = JSON.stringify([ref.environmentId, ref.sessionId])
+      presentationState.set(key, { ...presentationState.get(key), ...patch })
+    },
+  }
+  if (options.environmentId !== undefined) {
+    runtime.ctx.provide('environmentRuntime', { environmentId: options.environmentId } as never)
+    runtime.ctx.provide('environmentNavigation', { presentation } as never)
+  }
   runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   const layout = { openDetails: vi.fn(), closeDetails: vi.fn() }
   runtime.ctx.provide('layout', layout as never)
@@ -71,7 +84,7 @@ async function bench() {
     'details': { kind: 'single', scope: 'session' },
   }, (_props: { renderSlot?: unknown }) => null)
   await runtime.mount({ inject: [...injectConversation], apply: applyConversation })
-  await runtime.mount({ inject: [...injectChat], apply: applyChat })
+  const chatFeature = await runtime.mount({ inject: [...injectChat], apply: applyChat })
   runtime.renderRoot()
 
   const chatViewApi = (id: SessionId) => {
@@ -83,7 +96,7 @@ async function bench() {
     ) => ChatViewInjected)(id, instance.actions)
     return { instance, injected }
   }
-  return { runtime, layout, openWorkspacePath, session, chatViewApi }
+  return { runtime, layout, openWorkspacePath, session, chatFeature, chatViewApi, presentation }
 }
 
 describe('Chat inject API', () => {
@@ -183,6 +196,22 @@ describe('Chat inject API', () => {
     expect(loaded).toEqual(expect.any(String))
     expect(b.session.readAttachment).toHaveBeenCalledWith(ATTACHMENT.attachmentId)
     expect(injected.loadImage.peek?.(ATTACHMENT)).toBe(loaded)
+    await b.runtime.dispose()
+  })
+
+  it('restores compound Chat scroll after its Host presentation is retired and recreated', async () => {
+    const b = await bench({ environmentId: 'local' })
+    const position = { anchorKey: 'node-7', anchorTop: 84, scrollTop: 1_494 }
+    b.chatViewApi(ROOT).injected.chatScroll.save(position)
+
+    await b.chatFeature.dispose()
+    await b.runtime.mount({ inject: [...injectChat], apply: applyChat })
+
+    expect(b.chatViewApi(ROOT).injected.chatScroll.read()).toEqual(position)
+    expect(b.presentation.get({ environmentId: 'local', sessionId: ROOT }).scrollAnchor)
+      .toContain('node-7')
+    expect(b.presentation.get({ environmentId: 'sigil', sessionId: ROOT }).scrollAnchor)
+      .toBeUndefined()
     await b.runtime.dispose()
   })
 })

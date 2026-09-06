@@ -41,6 +41,36 @@ const CHAT_NODE_INJECT: ChatNodeTurnDataInjected = {
   },
 }
 
+/** Encode semantic Chat scroll geometry into the target-neutral persisted anchor field. */
+function encodeChatScroll(position: ChatScrollPosition | null): string {
+  if (position === null) return ''
+  const encoded = JSON.stringify(position)
+  if (encoded.length <= 1_024) return encoded
+  // An unusually large row key cannot fit the generic anchor field; raw geometry
+  // still restores the reader approximately and the empty key skips row correction.
+  return JSON.stringify({ anchorKey: '', anchorTop: 0, scrollTop: position.scrollTop })
+}
+
+/** Decode only complete finite scroll geometry; malformed older state means bottom-follow. */
+function decodeChatScroll(encoded: string | undefined): ChatScrollPosition | null {
+  if (encoded === undefined || encoded === '') return null
+  try {
+    const value: unknown = JSON.parse(encoded)
+    if (typeof value !== 'object' || value === null) return null
+    const candidate = value as Partial<Record<keyof ChatScrollPosition, unknown>>
+    if (typeof candidate.anchorKey !== 'string'
+      || typeof candidate.anchorTop !== 'number' || !Number.isFinite(candidate.anchorTop)
+      || typeof candidate.scrollTop !== 'number' || !Number.isFinite(candidate.scrollTop)) return null
+    return {
+      anchorKey: candidate.anchorKey,
+      anchorTop: candidate.anchorTop,
+      scrollTop: candidate.scrollTop,
+    }
+  } catch {
+    return null
+  }
+}
+
 /** Services required by the Chat target and its presentation registrations. */
 export const inject = [
   'slots', 'sessions', 'uiSession', 'uiConversation', 'layout', 'locale',
@@ -52,6 +82,16 @@ export const inject = [
  * @param ctx - Client root context.
  */
 export function apply(ctx: Context): void {
+  const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)?.environmentId
+  const presentation = (ctx.get('environmentNavigation') as {
+    presentation?: {
+      get(ref: { environmentId: string; sessionId: string }): { scrollAnchor?: string }
+      update(ref: { environmentId: string; sessionId: string }, patch: { scrollAnchor?: string }): void
+    }
+  } | undefined)?.presentation
+  const presentationRef = (sessionId: SessionId) => ({
+    environmentId: environmentId ?? 'local', sessionId,
+  })
   const chatSources = new WeakMap<SessionBinding, ObservableSnapshot<ChatSnapshot>>()
   const chatSource = (binding: SessionBinding): ObservableSnapshot<ChatSnapshot> => {
     let source = chatSources.get(binding)
@@ -136,8 +176,12 @@ export function apply(ctx: Context): void {
             save: (position) => {
               if (position === null) chatScrollPositions.delete(sessionId)
               else chatScrollPositions.set(sessionId, position)
+              presentation?.update(presentationRef(sessionId), {
+                scrollAnchor: encodeChatScroll(position),
+              })
             },
-            read: () => chatScrollPositions.get(sessionId) ?? null,
+            read: () => chatScrollPositions.get(sessionId)
+              ?? decodeChatScroll(presentation?.get(presentationRef(sessionId)).scrollAnchor),
           },
           forkAt: (seq) => {
             ctx.sessions.fork({ sessionId, atSeq: seq, increaseTitle: true })
