@@ -25,7 +25,7 @@
 import type { HostObservable, PropsHooks, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pull the owner SlotMap merges into programs that resolve the
 // runtime shares below.
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type { SidebarSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionSearchResultItem } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
@@ -51,12 +51,22 @@ export interface DirectoryFlowOwnerProps {
   onError: (message: string) => void
 }
 
+/** Owner control for a body that visually and semantically replaces the workspace list. */
+export interface WorkspaceContentOverlayOwnerProps extends SidebarSectionOwnerProps {
+  /** Hide and inert the underlying list while an overlay owns the browsing region. */
+  setUnderlyingHidden(hidden: boolean): void
+}
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /** Directory-flow hole under the conversation empty-state picker (declared by the WorkspacePicker entry). */
     'conversation.hero.workspace.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
     /** Directory-flow hole under the sidebar browsing region (declared by the WorkspaceBrowser entry). */
     'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
+    /** Compact actions rendered with the existing Workspaces section heading. */
+    'sidebar.workspaces.header.action': { kind: 'list'; scope: 'root'; owner: SidebarSectionOwnerProps }
+    /** Alternate body rendered inside the existing Workspaces browsing region. */
+    'sidebar.workspaces.content.overlay': { kind: 'single'; scope: 'root'; owner: WorkspaceContentOverlayOwnerProps }
   }
 }
 
@@ -149,7 +159,11 @@ export type WorkspaceBrowserInjected = {
 /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
 export type WorkspaceBrowserProps =
   PropsRuntime<'sidebar.workspaces'>
-  & PropsRenderSlots<'sidebar.workspaces.directoryFlow'>
+  & PropsRenderSlots<
+    | 'sidebar.workspaces.directoryFlow'
+    | 'sidebar.workspaces.header.action'
+    | 'sidebar.workspaces.content.overlay'
+  >
   & PropsStore<ReturnType<typeof createWorkspaceViewStore>>
   & Omit<WorkspaceBrowserInjected, 'hooks'>
   & PropsHooks<WorkspaceBrowserInjected['hooks']>

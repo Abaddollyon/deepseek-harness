@@ -24,7 +24,7 @@ function stubAgent(ctx: Context, rawId: string): Agent {
   const session = Session.create(id)
   const agent: Agent = {
     id,
-    options: {},
+    options: {}, hasExecutionBudget: false,
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',

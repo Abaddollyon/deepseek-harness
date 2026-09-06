@@ -1923,6 +1923,11 @@
     },
     {
       "doc": "docs/subsystems/core.md",
+      "symbol": "AgentBudget",
+      "source": "packages/core/agent/src/runtime-types.ts"
+    },
+    {
+      "doc": "docs/subsystems/core.md",
       "symbol": "AgentOptions",
       "source": "packages/core/agent/src/runtime-types.ts"
     },

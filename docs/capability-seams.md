@@ -45,6 +45,7 @@ flowchart LR
   pkg_api_workspace_controller["api-workspace-controller"]
   svc_workspaceController["ctx.workspaceController<br/>Host Workspace Remote controller"]
   svc_directoryPickerController["ctx.directoryPickerController<br/>Host directory-picking Remote controller"]
+  svc_directoryBrowserController["ctx.directoryBrowserController<br/>Host directory-browsing Remote controller"]
   svc_invariants["ctx.invariants<br/>Package-owned invariant registry"]
   pkg_scope["scope"]
   pkg_typert_registry["typert-registry"]
@@ -159,6 +160,8 @@ flowchart LR
   pkg_fs_sandbox["fs-sandbox"]
   pkg_user_approval["user-approval"]
   svc_approval["ctx.approval<br/>Approval seam"]
+  pkg_pending_interactions["pending-interactions"]
+  svc_pendingInteractions["ctx.pendingInteractions<br/>Passive pending-interaction lifecycle"]
   pkg_permission_presets["permission-presets"]
   svc_permissionPresets["ctx.permissionPresets<br/>Permission presets"]
   pkg_code_runtime["code-runtime"]
@@ -200,16 +203,21 @@ flowchart LR
   svc_spillStore["ctx.spillStore<br/>Spill storage seam"]
   pkg_spill_local["spill-local"]
   pkg_spill_policy["spill-policy"]
+  pkg_host_directory_browser["host-directory-browser"]
+  svc_directoryBrowser["ctx.directoryBrowser<br/>Display-free directory browsing seam"]
+  pkg_host_directory_browser_filesystem["host-directory-browser-filesystem"]
+  pkg_host_directory_picker_browse["host-directory-picker-browse"]
   pkg_host_directory_picker["host-directory-picker"]
   svc_directoryPicker["ctx.directoryPicker<br/>Workspace-directory picking seam"]
   pkg_host_directory_picker_native["host-directory-picker-native"]
-  pkg_host_directory_picker_browse["host-directory-picker-browse"]
   pkg_host_webserver["host-webserver"]
   svc_webServer["ctx.webServer<br/>HTTP route registration"]
   pkg_client_connection["client-connection"]
   pkg_client_modules["client-modules"]
   pkg_client_hmr["client-hmr"]
   svc_clientModules["ctx.clientModules<br/>Client plugin graph host"]
+  svc_clientSurfaces["ctx.clientSurfaces<br/>Named client surface registry"]
+  pkg_host_frontend_static["host-frontend-static"]
   pkg_workflow["workflow"]
   svc_workflowEngine["ctx.workflowEngine<br/>Workflow script engine"]
   pkg_workflow_worker_thread["workflow-worker-thread"]
@@ -233,6 +241,7 @@ flowchart LR
   pkg_api_session_controller --> svc_sessionSkillCatalog
   pkg_api_settings_controller --> svc_credentialsController
   pkg_api_settings_controller --> svc_settingsController
+  pkg_api_workspace_controller --> svc_directoryBrowserController
   pkg_api_workspace_controller --> svc_directoryPickerController
   pkg_api_workspace_controller --> svc_workspaceController
   pkg_attachment --> svc_attachments
@@ -241,6 +250,7 @@ flowchart LR
   pkg_bash_local --> svc_shell
   pkg_bash_sandbox --> svc_shell
   pkg_client_modules --> svc_clientModules
+  pkg_client_modules --> svc_clientSurfaces
   pkg_code_runtime --> svc_codeRuntime
   pkg_code_runtime_worker_thread --> svc_codeRuntime
   pkg_commands --> svc_commands
@@ -262,6 +272,8 @@ flowchart LR
   pkg_fs_local --> svc_fs
   pkg_fs_sandbox --> svc_fs
   pkg_goal --> svc_goals
+  pkg_host_directory_browser --> svc_directoryBrowser
+  pkg_host_directory_browser_filesystem --> svc_directoryBrowser
   pkg_host_directory_picker --> svc_directoryPicker
   pkg_host_directory_picker_browse --> svc_directoryPicker
   pkg_host_directory_picker_native --> svc_directoryPicker
@@ -279,6 +291,7 @@ flowchart LR
   pkg_lsp_stdio --> svc_lsp
   pkg_mcp_client --> svc_nativeMcpConnections
   pkg_message_feedback --> svc_messageFeedback
+  pkg_pending_interactions --> svc_pendingInteractions
   pkg_permission_presets --> svc_permissionPresets
   pkg_plan_mode --> svc_planMode
   pkg_plugin_package_inventory_deepseek --> svc_deepseekLlmApiExtensions
@@ -359,6 +372,8 @@ flowchart LR
   svc_attachments --> pkg_tool_fs
   svc_authorization --> pkg_llm_pi_ai
   svc_clientModules --> pkg_client_hmr
+  svc_clientSurfaces --> pkg_client_connection
+  svc_clientSurfaces --> pkg_host_frontend_static
   svc_codeRuntime --> pkg_tools
   svc_compaction --> pkg_compaction_basic
   svc_cordisInspect --> pkg_tool_cordis
@@ -366,6 +381,8 @@ flowchart LR
   svc_credentials --> pkg_llm_deepseek
   svc_credentials --> pkg_llm_pi_ai
   svc_deepseekLlmApiExtensions --> pkg_llm_deepseek
+  svc_directoryBrowser --> pkg_api_workspace_controller
+  svc_directoryBrowser --> pkg_host_directory_picker_browse
   svc_directoryPicker --> pkg_api_workspace_controller
   svc_dynamicCordisRunner --> pkg_tool_cordis
   svc_e2b --> pkg_fs_e2b
@@ -387,6 +404,8 @@ flowchart LR
   svc_llm --> pkg_compaction_basic
   svc_lsp --> pkg_tool_lsp
   svc_nativeMcpConnections --> pkg_mcp_client
+  svc_pendingInteractions --> pkg_user_approval
+  svc_pendingInteractions --> pkg_user_questions
   svc_sandbox --> pkg_bash_sandbox
   svc_sandbox --> pkg_terminal_bash
   svc_sandboxPolicy --> pkg_bash_sandbox
@@ -489,6 +508,7 @@ flowchart LR
 | `ctx.settingsController` | `core` | [`api-settings-controller`](../packages/api/settings-controller) | - | - | - | Projects the user-settings seam onto the generated Remote namespace: the read is always redacted and every refusal is classified here, not on the seam Definition. |
 | `ctx.workspaceController` | `core` | [`api-workspace-controller`](../packages/api/workspace-controller) | - | - | - | Owns Workspace commands and reconnect-safe Workspace state delivery through the generated Remote namespace. |
 | `ctx.directoryPickerController` | `core` | [`api-workspace-controller`](../packages/api/workspace-controller) | - | - | - | Carries the picking seam onto the wire: capability gating, cancellation, and the seam-coded failures a browser directory flow discriminates on. |
+| `ctx.directoryBrowserController` | `core` | [`api-workspace-controller`](../packages/api/workspace-controller) | - | - | - | Carries display-free listing and child-directory creation onto a dedicated Remote namespace without invoking the Host interactive picker. |
 | `ctx.invariants` | `core` | [`invariants`](../packages/runtime-diagnostics/invariants) | - | [`session`](../packages/core/session), [`agent`](../packages/core/agent), [`scope`](../packages/core/scope), [`agent-loop`](../packages/core/agent-loop) | - | Companion subpaths register owner-local checks; the service owns selection, uniqueness, child fibers, and package-attributed failures. |
 | `ctx.typert` | `core` | [`typert-registry`](../packages/typert/registry) | - | [`typert-loader`](../packages/typert/loader), [`api-gateway`](../packages/api/gateway) | - | Plugins register live zod contributions directly or through dsh-typert-loader; the API gateway consumes invocation descriptors and providers, while other runtime consumers query schemas and reflection metadata at their own edges. |
 | `ctx.typertGateway` | `core` | [`api-gateway`](../packages/api/gateway) | - | - | - | Associates generated Remote descriptors with live Cordis services, resolves registered identities, and exposes unary calls through the shared Connection RPC carrier. |
@@ -528,6 +548,7 @@ flowchart LR
 | `ctx.sandbox` | `seam` | [`sandbox`](../packages/sandbox/sandbox) | [`sandbox-local`](../packages/sandbox/sandbox-local) | [`bash-sandbox`](../packages/shell/bash-sandbox), [`terminal-bash`](../packages/terminal/terminal-bash) | - | Consumers hand over the exact argv they are about to spawn; same-world backends wrap it under a per-call policy and report enforcement. |
 | `ctx.sandboxPolicy` | `core` | [`sandbox-policy`](../packages/sandbox/sandbox-policy) | - | [`bash-sandbox`](../packages/shell/bash-sandbox), [`fs-sandbox`](../packages/fs/fs-sandbox), [`terminal-bash`](../packages/terminal/terminal-bash) | - | The one home for the deployment default mode + workspace root; only the sandboxed executor and provider read the service (the tool layers use the pure `sandbox/mode` fold it also exports). Both enforcing families read it so bash and fs cannot confine to different roots. |
 | `ctx.approval` | `seam` | [`user-approval`](../packages/interaction/user-approval) | - | [`tools`](../packages/core/tools), [`tool-bash`](../packages/shell/tool-bash), [`acp`](../packages/acp/acp) | - | One-shot permission decisions dispatched over the `approval/request` waterfall; answerers are listeners (the ACP bridge for its own agents), absence fails closed to `unavailable`. |
+| `ctx.pendingInteractions` | `core` | [`pending-interactions`](../packages/interaction/pending-interactions) | - | [`user-approval`](../packages/interaction/user-approval), [`user-questions`](../packages/interaction/user-questions) | - | Publishes content-free snapshots and queued lifecycle edges around existing answerer waterfalls; observers receive no answer authority and cannot delay settlement. |
 | `ctx.permissionPresets` | `core` | [`permission-presets`](../packages/interaction/permission-presets) | - | - | - | User-facing preset table (`workspace-write`/`danger-full-access`) bundling the sandbox-mode and approval-policy knobs; a switch writes one `permission/preset` event through to both knob events. |
 | `ctx.codeRuntime` | `seam` | [`code-runtime`](../packages/code-runtime/code-runtime) | [`code-runtime-worker-thread`](../packages/code-runtime/code-runtime-worker-thread), [`experimental-code-runtime-python`](../packages/experimental/code-runtime-python) | [`tools`](../packages/core/tools) | - | Runs one model-written program against host-provided async bindings; backends differ by substrate and language (the tool registry consumes it for PTC mode). |
 | `ctx.fs` | `seam` | [`fs`](../packages/fs/fs) | [`fs-local`](../packages/fs/fs-local), [`fs-sandbox`](../packages/fs/fs-sandbox), [`fs-e2b`](../packages/e2b/fs-e2b) | [`tool-fs`](../packages/fs/tool-fs) | [`fs-observation-policy`](../packages/fs/fs-observation-policy) | tool-fs executes read/write/edit through ctx.fs; fs-sandbox fences mutations by the shared sandbox mode; fs-observation-policy contributes observed-state checks through the fs/* event gate. |
@@ -539,9 +560,11 @@ flowchart LR
 | `ctx.jobStore` | `seam` | [`jobs-store-domain`](../packages/jobs/jobs-store-domain) | [`jobs-store-domain`](../packages/jobs/jobs-store-domain) | [`jobs-local`](../packages/jobs/jobs-local), [`run-supervisor`](../packages/jobs/run-supervisor) | - | jobs-store-domain declares the JobStore seam and provides it over the storage domain form; jobs-local mirrors records here when persist is enabled and restores them at boot; run-supervisor reads restored records to reconcile them. |
 | `ctx.web` | `seam` | [`web`](../packages/web/web) | [`web-search-exa`](../packages/web/web-search-exa), [`web-search-perplexity`](../packages/web/web-search-perplexity), [`web-search-deepseek`](../packages/web/web-search-deepseek), [`web-fetch-http`](../packages/web/web-fetch-http) | [`tool-web`](../packages/web/tool-web) | - | Search and fetch providers register into one ctx.web seam; tool-web owns the stable model-facing names. |
 | `ctx.spillStore` | `seam` | [`spill`](../packages/spill/spill) | [`spill-local`](../packages/spill/spill-local) | [`spill-policy`](../packages/spill/spill-policy) | - | The backend saves oversized tool text and returns a model-facing locator plus retrieval hint; spill-policy is the tools/post-execute consumer that decides when to spill. |
+| `ctx.directoryBrowser` | `seam` | [`host-directory-browser`](../packages/host/directory-browser) | [`host-directory-browser-filesystem`](../packages/host/directory-browser-filesystem) | [`host-directory-picker-browse`](../packages/host/directory-picker-browse), [`api-workspace-controller`](../packages/api/workspace-controller) | - | Keeps bounded filesystem listing and child creation available to remote clients independently from the Host interactive picker. |
 | `ctx.directoryPicker` | `seam` | [`host-directory-picker`](../packages/host/directory-picker) | [`host-directory-picker-native`](../packages/host/directory-picker-native), [`host-directory-picker-browse`](../packages/host/directory-picker-browse) | [`api-workspace-controller`](../packages/api/workspace-controller) | - | Discriminated interaction capability: the native backend opens one OS chooser on the host display, the browse backend serves listing/creation primitives for the in-app browser; dual-face backends fill ui-workspace directory-flow slots from their browser halves (no wire advertisement). |
 | `ctx.webServer` | `core` | [`host-webserver`](../packages/host/webserver) | - | [`client-connection`](../packages/client/connection), [`client-modules`](../packages/client/modules), [`client-hmr`](../packages/client/hmr) | - | Plain node:http carrier: named-route registry, index transform taps, and the static dist fallback; web-transport plugins register their own routes. |
 | `ctx.clientModules` | `core` | [`client-modules`](../packages/client/modules) | - | [`client-hmr`](../packages/client/hmr) | - | Composes the __DSH_BOOT__ entry graph from an incremental dsh.client scan, serves plugin bundles, and notifies rebuilt/graph-changed subscribers. |
+| `ctx.clientSurfaces` | `core` | [`client-modules`](../packages/client/modules) | - | [`client-connection`](../packages/client/connection), [`host-frontend-static`](../packages/host/frontend-static) | - | Registers exact authenticated index paths and composes dependency-closed boot graphs while keeping opt-out packages off the ordinary root graph. |
 | `ctx.workflowEngine` | `seam` | [`workflow`](../packages/workflow/workflow) | [`workflow-worker-thread`](../packages/workflow/workflow-worker-thread) | [`tool-workflow`](../packages/workflow/tool-workflow), [`tool-ralph`](../packages/workflow/tool-ralph) | - | One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents. |
 | `ctx.webhookRuntime` | `core` | [`webhook`](../packages/webhook/webhook) | - | [`webhook-github`](../packages/webhook/webhook-github) | - | Provider adapters dispatch authenticated deliveries; trusted plugins register independent process-local rules, and the runtime turns non-null results into ordinary Workspace-backed Sessions without delivery or completion state. |
 | `ctx.lsp` | `seam` | [`lsp`](../packages/lsp/lsp) | [`lsp-stdio`](../packages/lsp/lsp-stdio) | [`tool-lsp`](../packages/lsp/tool-lsp) | - | Provider registration and selection plus normalized query execution over exactly four operations; the seam offers no protocol escape hatch, so a backend translates into the normalized request and result. |

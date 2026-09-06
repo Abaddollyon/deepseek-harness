@@ -88,6 +88,12 @@ export class Session implements SessionFace {
   /** Bumped by stream replacement to invalidate an in-flight doOpen. Stale
    *  passes drop all writes once the generation moves on. */
   private openGeneration = 0
+  /** Latest reconnect request served by the serialized resync runner. */
+  private resyncRevision = 0
+  /** One runner coalesces requests that arrive while the old stream is closing. */
+  private resyncPromise: Promise<void> | null = null
+  /** Final teardown fence: a resync already in flight must never reopen afterward. */
+  private disposed = false
   private loadingOlder = false
   /** Shared low-water target of the running jump loop; null when no jump is paging. */
   private jumpTargetSeq: SessionSeq | null = null
@@ -433,20 +439,24 @@ export class Session implements SessionFace {
   }
 
   /** Rebuild an opened history source after address replacement.
-   *  Invalidates any in-flight open first; queue state belongs to the independently
-   *  reconnecting control stream and remains untouched. */
-  async resync(): Promise<void> {
-    if (this.openState === 'cold') return // never opened: no window to rebuild (doOpen flips to 'loading' synchronously, so cold implies no in-flight open)
-    this.openGeneration++
-    const events = this.events
-    this.events = undefined
-    await events?.dispose()
-    this.openPromise = null
-    this.openState = 'cold'
-    this.openError = null
-    this.baseSeq = SessionLogOffset(0)
-    this.notifier.markDirty()
-    await this.open()
+   *  Concurrent requests share one close/open pass unless another request arrives
+   *  after that pass begins opening; that later request is serialized behind it.
+   *  Queue state belongs to the independently reconnecting control stream and
+   *  remains untouched.
+   * @returns when the latest requested replacement stream has opened.
+   */
+  resync(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    if (this.resyncPromise === null && this.openState === 'cold') {
+      return Promise.resolve() // never opened: no window to rebuild (doOpen flips to 'loading' synchronously)
+    }
+    this.resyncRevision++
+    if (this.resyncPromise !== null) return this.resyncPromise
+    const promise = this.runResyncs().finally(() => {
+      if (this.resyncPromise === promise) this.resyncPromise = null
+    })
+    this.resyncPromise = promise
+    return promise
   }
 
   // ---- Subscription API (useSyncExternalStore direct wiring) ----
@@ -574,13 +584,42 @@ export class Session implements SessionFace {
     for (const requestId of [...this.submissionSettlements.keys()]) {
       this.retireFailedSubmission(requestId)
     }
+    this.disposed = true
+    this.resyncRevision++
     this.openGeneration++
     const events = this.events
     this.events = undefined
-    await events?.dispose()
+    const resync = this.resyncPromise
+    await Promise.all([events?.dispose(), resync])
   }
 
   // ---- Private ----
+
+  /** Serialize stream replacement and coalesce requests received during close. */
+  private async runResyncs(): Promise<void> {
+    while (!this.disposed) {
+      this.openGeneration++
+      const events = this.events
+      this.events = undefined
+      await events?.dispose()
+      if (this.isDisposed()) return
+
+      // Requests received while the prior stream was closing all share this replacement.
+      const servedRevision = this.resyncRevision
+      this.openPromise = null
+      this.openState = 'cold'
+      this.openError = null
+      this.baseSeq = SessionLogOffset(0)
+      this.notifier.markDirty()
+      await this.open()
+      if (servedRevision === this.resyncRevision) return
+    }
+  }
+
+  /** Read the teardown fence across async boundaries. */
+  private isDisposed(): boolean {
+    return this.disposed
+  }
 
   /** @param generation - openGeneration at launch; stale passes cannot publish after replacement. */
   private async doOpen(generation: number): Promise<void> {

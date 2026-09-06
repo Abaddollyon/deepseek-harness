@@ -9,12 +9,14 @@
     "src/index.ts",
     "src/types.ts",
     "src/commands.ts",
+    "src/directory-browser.ts",
     "src/directory-picker.ts",
     "src/feed.ts"
   ],
   "references": [
     { "path": "../../../vendor/cordis" },
     { "path": "../../core/session" },
+    { "path": "../../host/directory-browser" },
     { "path": "../../host/directory-picker" },
     { "path": "../../storage/storage-domain" },
     { "path": "../../typert/protocol" },

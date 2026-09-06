@@ -32,7 +32,8 @@ import { en, zh, type WorkspaceKey } from './locales.ts'
 export type { UiWorkspace } from './navigation.ts'
 export type {
   DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
-  WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
+  WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspaceContentOverlayOwnerProps,
+  WorkspacePickerInjected, WorkspacePickerProps,
 } from './contract/slots.ts'
 export type { WorkspaceKey } from './locales.ts'
 
@@ -72,6 +73,8 @@ export const inject = [
 export function apply(ctx: Context): void {
   const sessions = ctx.get('sessions') as ISessions
   const workspaces = ctx.get('workspaces') as IWorkspaces
+  const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)
+    ?.environmentId
   const uiWorkspace = new UiWorkspaceService(
     ctx, ctx.remote.directoryPicker, workspaces, sessions)
   ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list } })
@@ -140,8 +143,12 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register(
     {
       name: 'sidebar.workspaces',
-      children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } },
-      store: createWorkspaceViewStore(),
+      children: {
+        'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+        'sidebar.workspaces.header.action': { kind: 'list', scope: 'root' },
+        'sidebar.workspaces.content.overlay': { kind: 'single', scope: 'root' },
+      },
+      store: createWorkspaceViewStore(environmentId),
       inject: browserInjected,
       locale: NS,
     },

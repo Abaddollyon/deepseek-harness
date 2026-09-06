@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentBudget, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
@@ -34,10 +34,46 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions']
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /** Optional complete native model-execution budget. */
+  budget?: AgentBudget
+  /** Optional complete per-run model selection. */
+  selection?: ModelSelection
+}
+
+const BUDGET_KEYS = ['maxTurns', 'maxInputTokens', 'maxOutputTokens', 'maxRetries'] as const
+const AGENT_BUDGET_SCHEMA: z<AgentBudget> = z.object({
+  maxTurns: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
+  maxInputTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
+  maxOutputTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
+  maxRetries: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).required(),
+})
+const MODEL_SELECTION_SCHEMA: z<ModelSelection> = z.object({
+  provider: z.string().required(),
+  model: z.string().required(),
+  reasoningEffort: z.string(),
+}) as z<ModelSelection>
+
+function validateBudget(value: unknown): AgentBudget | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('headless budget must be an object')
+  }
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (!(BUDGET_KEYS as readonly string[]).includes(key)) throw new TypeError(`headless budget has unknown key "${key}"`)
+  }
+  for (const key of BUDGET_KEYS) {
+    const candidate = record[key]
+    const valid = Number.isSafeInteger(candidate) && (key === 'maxRetries' ? Number(candidate) >= 0 : Number(candidate) > 0)
+    if (!valid) throw new TypeError(`headless budget.${key} must be ${key === 'maxRetries' ? 'a nonnegative' : 'a positive'} safe integer`)
+  }
+  return structuredClone(value) as AgentBudget
 }
 
 export const Config: z<Config> = z.object({
   task: z.string().required(),
+  budget: z.union([AGENT_BUDGET_SCHEMA, z.never()]),
+  selection: z.union([MODEL_SELECTION_SCHEMA, z.never()]),
 })
 
 /** Outcome of one owned run interval. */
@@ -165,7 +201,7 @@ function fail(io: HeadlessIo, error: unknown): void {
  * @param task - one-shot task text.
  * @param io - process-facing effects.
  */
-async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
+async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> {
   // Loader siblings mount concurrently. Await the complete application before
   // creating an Agent so its scoped tools and adapters are not half-composed.
   await ctx.get('loader')?.await()
@@ -175,7 +211,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   // Early process shutdown can dispose the tree while settlement is pending.
   if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
-  const selection = defaultModel.currentSelection()
+  const selection = config.selection ?? defaultModel.currentSelection()
   // This bundle composes no preset roster, so the model-facing rows sit in the
   // host plane and the agent reads them from the global layer. A deployment
   // that DOES configure one has to join it here first
@@ -183,7 +219,12 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   const { agent } = await agents.create({
     sessionId: brandString<SessionId>(`session-${randomUUID()}`),
     meta: { cwd: process.cwd() },
-    agentOptions: { provider: selection.provider, model: selection.model },
+    agentOptions: {
+      provider: selection.provider,
+      model: selection.model,
+      ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+      ...config.budget === undefined ? {} : { budget: config.budget },
+    },
     setup: (agentCtx) => {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
@@ -194,7 +235,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   const stopReasoning = streamReasoning(ctx, agent, io.stderr)
   try {
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: task }],
+      content: [{ type: 'text', text: config.task }],
       source: { kind: 'user' },
     }))
     await agent.whenIdle()
@@ -216,6 +257,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
  * @param config - validated task config.
  */
 export function apply(ctx: Context, config: Config): void {
+  const budget = validateBudget(config.budget)
   // Read through the global service store, not the property proxy: appExit is
   // an optional host value, never an injected dependency.
   const exit = ctx.get('appExit')
@@ -223,5 +265,10 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('headless-runner: the launcher must provide ctx.appExit before the tree mounts')
   }
   const io: HeadlessIo = { stdout: internals.stdout, stderr: internals.stderr, exit }
-  void run(ctx, config.task, io).catch((error: unknown) => { fail(io, error) })
+  void run(ctx, {
+    task: config.task,
+    ...budget === undefined ? {} : { budget },
+    ...config.selection === undefined ? {} : { selection: structuredClone(config.selection) },
+  }, io)
+    .catch((error: unknown) => { fail(io, error) })
 }

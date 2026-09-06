@@ -28,6 +28,7 @@ const SPAWN_TIMEOUT_MS = 60_000
 const cliVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 const dshBin = join(repoRoot, 'apps/cli/lib/bin.js')
 const invalidProvider = fileURLToPath(new URL('./fixtures/invalid-provider.cordis.yml', import.meta.url))
+const budgetMockAdapter = fileURLToPath(new URL('./fixtures/budget-mock-llm.mjs', import.meta.url))
 
 async function runBuiltBin(
   args: readonly string[] = [],
@@ -588,6 +589,57 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     } finally {
       await server.close()
       rmSync(home, { recursive: true, force: true })
+    }
+  }, SPAWN_TIMEOUT_MS + 30_000)
+
+  it('enforces headless budget flags through the published profile command', async () => {
+    for (const selection of [
+      { flag: 'off', expected: 'off' },
+      { flag: undefined, expected: undefined },
+    ]) {
+      const home = mkdtempSync(join(tmpdir(), 'dsh-built-headless-budget-'))
+      const requestsFile = join(home, 'requests.log')
+      const overlay = join(home, 'budget.patch.yml')
+      writeFileSync(overlay, [
+        '- insert:',
+        '    - id: budget-mock-llm',
+        `      name: ${pathToFileURL(budgetMockAdapter).href}`,
+        '',
+      ].join('\n'))
+      try {
+        const result = await runBuiltBin([
+          '--profile', 'headless',
+          '--patch', overlay,
+          '--provider', 'budget-mock',
+          '--model', 'selected-model',
+          ...selection.flag === undefined ? [] : ['--reasoning-effort', selection.flag],
+          '--max-turns', '1',
+          '--max-input-tokens', '100',
+          '--max-output-tokens', '16',
+          '--max-retries', '0',
+          'prove', 'the', 'native', 'budget',
+        ], {
+          DSH_HOME: home,
+          DSH_BUDGET_MOCK_REQUESTS_FILE: requestsFile,
+          DSH_PERMISSION_MODE: 'danger-full-access',
+          DSH_TELEMETRY_DISABLED: '1',
+        })
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('BUDGET_EXCEEDED')
+        const requests = readFileSync(requestsFile, 'utf8').trim().split('\n')
+          .map(line => JSON.parse(line) as {
+            toolCount: number
+            provider: string
+            model: string
+            reasoningEffort?: string
+          })
+        const agentRequests = requests.filter(request => request.toolCount > 0)
+        expect(agentRequests).toHaveLength(1)
+        expect(agentRequests[0]).toMatchObject({ provider: 'budget-mock', model: 'selected-model' })
+        expect(agentRequests[0]?.reasoningEffort).toBe(selection.expected)
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
     }
   }, SPAWN_TIMEOUT_MS + 30_000)
 

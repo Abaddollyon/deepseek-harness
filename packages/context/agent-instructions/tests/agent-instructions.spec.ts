@@ -197,6 +197,7 @@ function stubAgent(cwd?: string, seed: readonly SessionEvent[] = []): Agent {
     ctx: new Context(),
     id: SessionId('a1'),
     options: {},
+    hasExecutionBudget: false,
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle',

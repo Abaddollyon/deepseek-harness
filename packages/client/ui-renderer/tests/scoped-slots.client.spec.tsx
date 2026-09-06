@@ -120,6 +120,7 @@ function makeHost() {
       : <>{children}</>,
   }
   const scopeRevision = observable(0)
+  const presentationTransition = observable(false)
   let activeScopeAdapter = sessionAdapter
 
   const bump = (key: string) => {
@@ -127,6 +128,7 @@ function makeHost() {
     for (const fn of [...(subs.get(key) ?? [])]) fn()
   }
   const host: SlotRendererHost = {
+    presentationTransition,
     subscribe: (key, fn) => {
       const set = subs.get(key) ?? new Set()
       set.add(fn)
@@ -236,6 +238,7 @@ function makeHost() {
       activeScopeAdapter = adapter
       scopeRevision.set(scopeRevision.getSnapshot() + 1)
     },
+    setPresentationTransition: (value: boolean) => { presentationTransition.set(value) },
   }
 }
 
@@ -287,6 +290,25 @@ function mountChainRoot(h: Fake, children: Record<string, DeclaredSpec>, body: (
 }
 
 describe('root outlet', () => {
+  it('unmounts presentation consumers while their owning graph transitions', () => {
+    const h = makeHost()
+    const cleanup = vi.fn()
+    function Shell() {
+      useEffect(() => cleanup, [])
+      return <b>shell</b>
+    }
+    h.add('root', { component: Shell })
+    const view = render(<>{createSlotRenderer().renderRoot(h.host, {})}</>)
+    expect(view.container.textContent).toBe('shell')
+
+    act(() => { h.setPresentationTransition(true) })
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(view.container.querySelector('[data-presentation-transition]')).not.toBeNull()
+
+    act(() => { h.setPresentationTransition(false) })
+    expect(view.container.textContent).toBe('shell')
+  })
+
   it('renders the root registration and fails loud when root is unregistered (boot order)', () => {
     const h = makeHost()
     h.add('root', { component: () => <b>shell</b> })

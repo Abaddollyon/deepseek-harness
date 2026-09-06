@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SettingsRootComponentProps } from '../src/client/shell-contract.ts'
@@ -41,12 +42,14 @@ function mount({
     { id: 'welcome', order: -100 },
     { id: 'credential', order: 0 },
   ],
+  triggerContent = SEAT_CONTENT['settings.trigger'],
 }: {
   wide?: boolean
   connectionState?: ConnectionSnapshot
   onboardingActive?: boolean
   rows?: Row[]
   steps?: Step[]
+  triggerContent?: ReactNode
 } = {}) {
   // Mutable row source standing in for the bound useSections hook; bump()
   // plays a ledger change through the same observable contract.
@@ -58,6 +61,7 @@ function mount({
   const renderSlot = vi.fn(
     ((key: string, _owner: unknown, opts?: { only?: string }) => {
       if (key === 'settings.section') return <div data-testid={`section-${opts?.only ?? 'all'}`} />
+      if (key === 'settings.trigger') return triggerContent
       return SEAT_CONTENT[key]
     }) as SettingsRootComponentProps['renderSlot'],
   )
@@ -121,10 +125,10 @@ function openPanel() {
 }
 
 describe('SettingsRoot trigger', () => {
-  it('renders the trigger seat content as the accessible name (no aria-label of its own)', () => {
+  it('labels the trigger with the localized Settings name', () => {
     const { renderSlot } = mount()
     const trigger = screen.getByRole('button', { name: 'Settings' })
-    expect(trigger.hasAttribute('aria-label')).toBe(false)
+    expect(trigger.getAttribute('aria-label')).toBe('Settings')
     expect(renderSlot).toHaveBeenCalledWith('settings.trigger', { wide: true })
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(trigger)
@@ -135,6 +139,13 @@ describe('SettingsRoot trigger', () => {
   it('hands the rail state to the trigger seat', () => {
     const { renderSlot } = mount({ wide: false })
     expect(renderSlot).toHaveBeenCalledWith('settings.trigger', { wide: false })
+  })
+
+  it('keeps an icon-only rail trigger named and able to open the dialog', () => {
+    mount({ wide: false, triggerContent: <svg aria-hidden="true" /> })
+    const trigger = screen.getByRole('button', { name: 'Settings' })
+    fireEvent.click(trigger)
+    expect(screen.getByRole('dialog')).toBeTruthy()
   })
 
   it('shows outage, retry progress, and a two-second recovery confirmation', () => {

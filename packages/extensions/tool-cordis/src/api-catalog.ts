@@ -776,6 +776,44 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'directoryBrowser',
+    summary: 'Independent browsing seam used by remote and in-app Workspace pickers.',
+    description: 'Independent browsing seam used by remote and in-app Workspace pickers.',
+    methods: [
+      {
+        signature: 'abstract list(path?: string, signal?: AbortSignal): Promise<DirectoryListing>',
+        description: 'List one bounded directory level without opening operating-system UI.',
+        parameters: [{ name: 'path', description: 'absolute directory to list; absent lists the provider root.' }, { name: 'signal', description: 'caller lifetime used to cancel an in-progress scan.' }],
+        returns: 'the directory entries and navigable ancestry.',
+      },
+      {
+        signature: 'abstract createDirectory(path: string, name: string): Promise<string>',
+        description: 'Create one child directory below an existing parent.',
+        parameters: [{ name: 'path', description: 'absolute existing parent directory.' }, { name: 'name', description: 'single non-blank child path segment.' }],
+        returns: 'the created directory\'s canonical absolute path.',
+      },
+    ],
+  },
+  {
+    key: 'directoryBrowserController',
+    summary: 'Host owner of the display-free `ctx.remote.directoryBrowser` namespace.',
+    description: 'Host owner of the display-free `ctx.remote.directoryBrowser` namespace.',
+    methods: [
+      {
+        signature: '@Remote(\'list\') async list(path: string | undefined, signal: AbortSignal): Promise<DirectoryListing>',
+        description: 'List one bounded directory level for an in-app client.',
+        parameters: [{ name: 'path', description: 'absolute directory to list; absent lists the provider root.' }, { name: 'signal', description: 'caller lifetime used to cancel an in-progress scan.' }],
+        returns: 'the directory entries and navigable ancestry.',
+      },
+      {
+        signature: '@Remote(\'createDirectory\') async createDirectory(path: string, name: string): Promise<string>',
+        description: 'Create one child directory for an in-app client.',
+        parameters: [{ name: 'path', description: 'absolute existing parent directory.' }, { name: 'name', description: 'single non-blank child path segment.' }],
+        returns: 'the created directory\'s canonical absolute path.',
+      },
+    ],
+  },
+  {
     key: 'directoryPicker',
     summary: 'Abstract directory-picking service.',
     description: 'Abstract directory-picking service. Subclass, implement `capability()`, and load the subclass as a plugin — it registers as `ctx.directoryPicker` (one implementation per context; loading a second throws, cordis\' standard duplicate-service behavior). The capability object must be stable for the service lifetime: consumers may capture it across calls.',
@@ -2867,15 +2905,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the transformed body.',
       },
       {
-        signature: 'collectIndexInjections(): IndexInjection[]',
+        signature: 'collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]',
         description: 'Gather the structured injection table: one `webserver/index-inject` emit, every subscriber pushes its current rows. Fresh per call, so subscribers read live state (module graph, theme preference) at emit time.',
-        parameters: [],
+        parameters: [{ name: 'context', description: 'optional variant supplied to injection contributors.' }],
         returns: 'rows in subscriber activation order.',
       },
       {
-        signature: 'renderIndex(html: string): string',
+        signature: 'renderIndex(html: string, context: IndexRenderContext = {}): string',
         description: 'Render one index.html body: the structured injection table first, then the raw `tapIndex` transforms over the result.',
-        parameters: [{ name: 'html', description: 'the raw index.html body.' }],
+        parameters: [{ name: 'html', description: 'the raw index.html body.' }, { name: 'context', description: 'optional variant supplied to injection contributors.' }],
         returns: 'the transformed body.',
       },
     ],
@@ -3475,10 +3513,10 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'webserver/index-inject',
     mode: 'emit',
-    signature: '\'webserver/index-inject\'(table: IndexInjection[]): void',
+    signature: '\'webserver/index-inject\'(table: IndexInjection[], context?: IndexRenderContext): void',
     summary: 'Collect the structured index injection table.',
     description: 'Collect the structured index injection table. Emitted on every index render and every worker boot-payload request; listeners push their current rows, so a row\'s data is read fresh at emit time.',
-    parameters: [{ name: 'table', description: 'Mutable row table; listeners append in activation order.' }],
+    parameters: [{ name: 'table', description: 'Mutable row table; listeners append in activation order.' }, { name: 'context', description: 'Optional index-render variant selected by the index owner.' }],
   },
   {
     name: 'workflow/agent-end',
@@ -3541,6 +3579,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface Agent {\n    readonly id: SessionId;\n}',
   },
   {
+    name: 'AgentBudget',
+    declaration: 'export interface AgentBudget {\n    maxTurns: number;\n    maxInputTokens: number;\n    maxOutputTokens: number;\n    maxRetries: number;\n}',
+  },
+  {
     name: 'AgentCancelCause',
     declaration: 'export type AgentCancelCause = {\n    readonly kind: \'user\';\n} | {\n    readonly kind: \'parent\';\n} | {\n    readonly kind: \'hook\';\n    readonly reason: string;\n} | {\n    readonly kind: \'disposed\';\n};',
   },
@@ -3554,7 +3596,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentOptions',
-    declaration: 'export interface AgentOptions {\n    provider?: string;\n    model?: string;\n    reasoningEffort?: ReasoningEffortId;\n    maxTokens?: number;\n}',
+    declaration: 'export interface AgentOptions {\n    provider?: string;\n    model?: string;\n    reasoningEffort?: ReasoningEffortId;\n    maxTokens?: number;\n    budget?: AgentBudget;\n}',
   },
   {
     name: 'AgentPreset',
@@ -4293,6 +4335,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type IndexInjectionPlacement = \'head\' | \'body\';',
   },
   {
+    name: 'IndexRenderContext',
+    declaration: 'export interface IndexRenderContext {\n    readonly variant?: string;\n}',
+  },
+  {
     name: 'InspectorId',
     declaration: 'export type InspectorId<Role extends string> = Branded<Role>;',
   },
@@ -4438,7 +4484,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmAdapter',
-    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;\n    countInputTokens(_options: GenerateOptions): number | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'LlmCallConfig',
@@ -4722,7 +4768,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PreparedAdapterCall',
-    declaration: 'export interface PreparedAdapterCall {\n    readonly model: LlmResolvedModelInfo;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export interface PreparedAdapterCall {\n    readonly model: LlmResolvedModelInfo;\n    countInputTokens?(options: GenerateOptions): number | undefined;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'PreparedDeepSeekLlmApiExtension',
@@ -4734,7 +4780,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PreparedLlmCall',
-    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    countInputTokens(options: GenerateOptions): number | undefined;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'PreparedReferencedMessage',

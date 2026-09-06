@@ -111,7 +111,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md) · [`SessionId`](subsystems/core.md)
 
-Source: [`packages/core/agent-loop/src/index.ts:311`](../packages/core/agent-loop/src/index.ts)
+Source: [`packages/core/agent-loop/src/index.ts:321`](../packages/core/agent-loop/src/index.ts)
 
 <a id="deepseek-aidsh-agent-presets"></a>
 
@@ -338,7 +338,7 @@ export interface ConnectionConfig {
 }
 ```
 
-Source: [`packages/client/connection/src/index.ts:70`](../packages/client/connection/src/index.ts)
+Source: [`packages/client/connection/src/index.ts:71`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -797,8 +797,14 @@ Requires: `agentDefaultModel` · `agents` · `sessions`
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /** Optional complete native model-execution budget. */
+  budget?: AgentBudget
+  /** Optional complete per-run model selection. */
+  selection?: ModelSelection
 }
 ```
+
+Depends on: [`AgentBudget`](../packages/core/agent/src/index.ts) · [`ModelSelection`](subsystems/core.md)
 
 Source: [`packages/bundle/headless/src/index.ts:34`](../packages/bundle/headless/src/index.ts)
 
@@ -867,19 +873,19 @@ export interface Config {
 
 Source: [`packages/hooks/hooks-codex/src/index.ts:45`](../packages/hooks/hooks-codex/src/index.ts)
 
-<a id="deepseek-aidsh-host-directory-picker-browse"></a>
+<a id="deepseek-aidsh-host-directory-browser-filesystem"></a>
 
-## `@deepseek-ai/dsh-host-directory-picker-browse`
+## `@deepseek-ai/dsh-host-directory-browser-filesystem`
 
 ```ts config-catalog
 /** Validated plugin configuration. */
 export interface Config {
-  /** Complete-result bound of one listing level; see {@link BrowseDirectoryPicker.Config}. */
+  /** Complete-result bound of one listing level. */
   maxEntries: number
 }
 ```
 
-Source: [`packages/host/directory-picker-browse/src/index.ts:181`](../packages/host/directory-picker-browse/src/index.ts)
+Source: [`packages/host/directory-browser-filesystem/src/index.ts:179`](../packages/host/directory-browser-filesystem/src/index.ts)
 
 <a id="deepseek-aidsh-host-frontend-static"></a>
 
@@ -895,7 +901,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/host/frontend-static/src/index.ts:30`](../packages/host/frontend-static/src/index.ts)
+Source: [`packages/host/frontend-static/src/index.ts:31`](../packages/host/frontend-static/src/index.ts)
 
 <a id="deepseek-aidsh-host-webserver"></a>
 
@@ -923,7 +929,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/host/webserver/src/index.ts:58`](../packages/host/webserver/src/index.ts)
+Source: [`packages/host/webserver/src/index.ts:65`](../packages/host/webserver/src/index.ts)
 
 <a id="deepseek-aidsh-invariants"></a>
 
@@ -3311,7 +3317,7 @@ export interface Config {
 export type ApprovalPolicy = 'ask' | 'never'
 ```
 
-Source: [`packages/interaction/user-approval/src/index.ts:127`](../packages/interaction/user-approval/src/index.ts)
+Source: [`packages/interaction/user-approval/src/index.ts:128`](../packages/interaction/user-approval/src/index.ts)
 
 <a id="deepseek-aidsh-web"></a>
 
@@ -3580,6 +3586,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-api-remotes` — requires `typertGateway` ([`packages/api/remotes/src/index.ts`](../packages/api/remotes/src/index.ts))
 - `@deepseek-ai/dsh-api-workspace-controller` — requires `typert` · `workspaceRegistry` ([`packages/api/workspace-controller/src/index.ts`](../packages/api/workspace-controller/src/index.ts))
 - `@deepseek-ai/dsh-authorization` — requires `credentials` ([`packages/credentials/authorization/src/index.ts`](../packages/credentials/authorization/src/index.ts))
+- `@deepseek-ai/dsh-client-environment-runtime` ([`packages/client/environment-runtime/src/index.ts`](../packages/client/environment-runtime/src/index.ts))
 - `@deepseek-ai/dsh-client-locale` ([`packages/client/locale/src/index.ts`](../packages/client/locale/src/index.ts))
 - `@deepseek-ai/dsh-client-modules` — requires `webServer` · `loader` ([`packages/client/modules/src/index.ts`](../packages/client/modules/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-agent-preset` ([`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts))
@@ -3593,6 +3600,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-deliverables` — requires `systemPrompt` ([`packages/client/ui-deliverables/src/index.ts`](../packages/client/ui-deliverables/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-directory-picker-browse` ([`packages/client/ui-directory-picker-browse/src/index.ts`](../packages/client/ui-directory-picker-browse/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-directory-picker-native` ([`packages/client/ui-directory-picker-native/src/index.ts`](../packages/client/ui-directory-picker-native/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-environment-navigation` ([`packages/client/ui-environment-navigation/src/index.ts`](../packages/client/ui-environment-navigation/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-goal` ([`packages/client/ui-goal/src/index.ts`](../packages/client/ui-goal/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-input-trigger` ([`packages/client/ui-input-trigger/src/index.ts`](../packages/client/ui-input-trigger/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-jobs` ([`packages/client/ui-jobs/src/index.ts`](../packages/client/ui-jobs/src/index.ts))
@@ -3629,10 +3637,12 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-fs-e2b` — requires `e2b` ([`packages/e2b/fs-e2b/src/index.ts`](../packages/e2b/fs-e2b/src/index.ts))
 - `@deepseek-ai/dsh-fs-observation-policy` ([`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-auto` — requires `webServer` · `loader` ([`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts))
+- `@deepseek-ai/dsh-host-directory-picker-browse` — requires `directoryBrowser` ([`packages/host/directory-picker-browse/src/index.ts`](../packages/host/directory-picker-browse/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker-native` ([`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
+- `@deepseek-ai/dsh-pending-interactions` ([`packages/interaction/pending-interactions/src/index.ts`](../packages/interaction/pending-interactions/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — requires `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
 - `@deepseek-ai/dsh-session-checkpoint-policy` — requires `llm` · `sessionPersistence` · `sessions` · `tools` ([`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts))
@@ -3662,6 +3672,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-credentials` — abstract `CredentialProvider` ([`packages/credentials/credentials/src/index.ts`](../packages/credentials/credentials/src/index.ts))
 - `@deepseek-ai/dsh-file-reference` — abstract `FileReferenceService` ([`packages/context/file-reference/src/index.ts`](../packages/context/file-reference/src/index.ts))
 - `@deepseek-ai/dsh-fs` — abstract `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
+- `@deepseek-ai/dsh-host-directory-browser` — abstract `DirectoryBrowser` ([`packages/host/directory-browser/src/index.ts`](../packages/host/directory-browser/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker` — abstract `DirectoryPicker` ([`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts))
 - `@deepseek-ai/dsh-jobs` — abstract `JobRegistry` ([`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts))
 - `@deepseek-ai/dsh-sandbox` — abstract `SandboxProvider` ([`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts))

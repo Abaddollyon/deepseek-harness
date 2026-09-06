@@ -209,6 +209,21 @@ describe('UiSession bindings', () => {
     await ctx.fiber.dispose()
   })
 
+  it('binds renderer Store state to compound Host Session identity', () => {
+    const ctx = new Context()
+    const bench = createSessionsBench(ctx)
+    ctx.provide('environmentRuntime', { environmentId: 'sigil' } as never)
+    const service = createUiSession(ctx, bench)
+    const id = sessionId('same')
+    bench.binding(id)
+
+    expect(service.adapter.resolve(id)).toMatchObject({
+      key: id,
+      storeKey: '["sigil","same"]',
+      props: { sessionId: id },
+    })
+  })
+
   it('renders the empty area and a Session-keyed selected area', () => {
     const ctx = new Context()
     const bench = createSessionsBench(ctx)

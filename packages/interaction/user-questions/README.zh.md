@@ -76,4 +76,6 @@ kind: "package-reference"
 
 </details>
 
-**运行时不变式：** 不发布伴生入口。单个 provider slot 在注册时校验，ask 结果直接返回调用方；该 seam 不发布独立 request/answer 审计流。
+**运行时不变式：** 单个 provider slot 在注册时校验，回答直接返回调用方。组合 `ctx.pendingInteractions` 时，`ask()` 仅在 answerer 派发前后报告无内容的开始／结束生命周期；该观察者没有回答权限。
+
+不发布运行时不变式 companion；提供方唯一性在注册时强制，pending 观察的对称性则在同时持有开始与结束的准确 `ask()` 派发边界校验。

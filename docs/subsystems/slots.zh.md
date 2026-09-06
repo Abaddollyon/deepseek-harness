@@ -114,7 +114,10 @@ root
 │  ├─ sidebar.brand.name
 │  ├─ sidebar.footer.action
 │  ├─ sidebar.workspaces
-│  │  └─ sidebar.workspaces.directoryFlow
+│  │  ├─ sidebar.workspaces.directoryFlow
+│  │  ├─ sidebar.workspaces.header.action
+│  │  └─ sidebar.workspaces.content.overlay
+│  │     └─ sidebar.activity
 │  └─ sidebar.settings
 │     ├─ settings.trigger
 │     ├─ settings.header

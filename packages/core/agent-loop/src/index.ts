@@ -200,6 +200,16 @@ function assertAgentOptions(options: AgentOptions): void {
     && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
     throw new TypeError('agent maxTokens must be a positive safe integer')
   }
+  const budget = options.budget
+  if (budget === undefined) return
+  for (const key of ['maxTurns', 'maxInputTokens', 'maxOutputTokens'] as const) {
+    if (!Number.isSafeInteger(budget[key]) || budget[key] <= 0) {
+      throw new TypeError(`agent budget.${key} must be a positive safe integer`)
+    }
+  }
+  if (!Number.isSafeInteger(budget.maxRetries) || budget.maxRetries < 0) {
+    throw new TypeError('agent budget.maxRetries must be a nonnegative safe integer')
+  }
 }
 
 /** Prepared-but-unpublished agent resources sharing one memoized teardown. */

@@ -200,7 +200,7 @@ Source: [`packages/interaction/user-approval/src/types.ts:55`](../packages/inter
 }
 ```
 
-Source: [`packages/interaction/user-approval/src/index.ts:33`](../packages/interaction/user-approval/src/index.ts)
+Source: [`packages/interaction/user-approval/src/index.ts:34`](../packages/interaction/user-approval/src/index.ts)
 
 ### `assistant/*`
 

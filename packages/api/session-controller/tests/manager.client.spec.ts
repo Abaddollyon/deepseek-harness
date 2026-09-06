@@ -749,7 +749,7 @@ describe('remaining branches', () => {
 })
 
 describe('connected generation', () => {
-  it('refreshes query baselines without rebuilding independently resumed Session sources', async () => {
+  it('refreshes query baselines and rebuilds resident opened Session sources', async () => {
     const api = new FakeApiClient()
     api.onHistory = () => Promise.resolve(ok({
       records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[],
@@ -760,12 +760,27 @@ describe('connected generation', () => {
     const openedSession = manager.get(S1)
     await openedSession.open()
     manager.get(S2) // instantiated but never opened
-    const historyCallsBefore = api.callsOf('session.history').length
+    api.failStreams(new RemoteError('gateway/internal', 'Environment stream disconnected', {}))
+    await vi.waitFor(() => {
+      expect(openedSession.getSnapshot()).toMatchObject({
+        openState: 'error',
+        openError: { message: 'Environment stream disconnected' },
+      })
+    })
+    api.onHistory = () => Promise.resolve(ok({
+      records: entries(plainTurn(SessionSeq(6), 1, 'c', 'd')) as never[],
+      hasMore: false,
+      modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    }))
     manager.handleConnected()
     await vi.waitFor(() => {
       expect(api.callsOf('session.list').length).toBe(1)
     })
-    expect(api.callsOf('session.history')).toHaveLength(historyCallsBefore)
+    await vi.waitFor(() => {
+      expect(openedSession.getSnapshot()).toMatchObject({ openState: 'open', openError: null })
+    })
+    expect(api.followStarts.filter(id => id === S1)).toHaveLength(2)
+    expect(api.followStarts).not.toContain(S2)
   })
 
   it('retains the durable parent address and refreshes its catalogs across reconnect', async () => {

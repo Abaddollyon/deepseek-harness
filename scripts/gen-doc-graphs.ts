@@ -199,6 +199,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Carries the picking seam onto the wire: capability gating, cancellation, and the seam-coded failures a browser directory flow discriminates on.',
   },
   {
+    key: 'directoryBrowserController',
+    pkg: 'api-workspace-controller',
+    title: 'Host directory-browsing Remote controller',
+    mode: 'core',
+    note: 'Carries display-free listing and child-directory creation onto a dedicated Remote namespace without invoking the Host interactive picker.',
+  },
+  {
     key: 'invariants',
     pkg: 'invariants',
     title: 'Package-owned invariant registry',
@@ -519,6 +526,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'One-shot permission decisions dispatched over the `approval/request` waterfall; answerers are listeners (the ACP bridge for its own agents), absence fails closed to `unavailable`.',
   },
   {
+    key: 'pendingInteractions',
+    pkg: 'pending-interactions',
+    title: 'Passive pending-interaction lifecycle',
+    mode: 'core',
+    consumers: ['user-approval', 'user-questions'],
+    note: 'Publishes content-free snapshots and queued lifecycle edges around existing answerer waterfalls; observers receive no answer authority and cannot delay settlement.',
+  },
+  {
     key: 'permissionPresets',
     pkg: 'permission-presets',
     title: 'Permission presets',
@@ -615,6 +630,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'The backend saves oversized tool text and returns a model-facing locator plus retrieval hint; spill-policy is the tools/post-execute consumer that decides when to spill.',
   },
   {
+    key: 'directoryBrowser',
+    pkg: 'host-directory-browser',
+    title: 'Display-free directory browsing seam',
+    mode: 'seam',
+    implementations: ['host-directory-browser-filesystem'],
+    consumers: ['host-directory-picker-browse', 'api-workspace-controller'],
+    note: 'Keeps bounded filesystem listing and child creation available to remote clients independently from the Host interactive picker.',
+  },
+  {
     key: 'directoryPicker',
     pkg: 'host-directory-picker',
     title: 'Workspace-directory picking seam',
@@ -638,6 +662,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'core',
     consumers: ['client-hmr'],
     note: 'Composes the __DSH_BOOT__ entry graph from an incremental dsh.client scan, serves plugin bundles, and notifies rebuilt/graph-changed subscribers.',
+  },
+  {
+    key: 'clientSurfaces',
+    pkg: 'client-modules',
+    title: 'Named client surface registry',
+    mode: 'core',
+    consumers: ['client-connection', 'host-frontend-static'],
+    note: 'Registers exact authenticated index paths and composes dependency-closed boot graphs while keeping opt-out packages off the ordinary root graph.',
   },
   {
     key: 'workflowEngine',

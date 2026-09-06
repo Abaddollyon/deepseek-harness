@@ -202,7 +202,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-来源：[`packages/interaction/user-approval/src/index.ts:32`](../packages/interaction/user-approval/src/index.ts)
+来源：[`packages/interaction/user-approval/src/index.ts:34`](../packages/interaction/user-approval/src/index.ts)
 
 ### `assistant/*`
 

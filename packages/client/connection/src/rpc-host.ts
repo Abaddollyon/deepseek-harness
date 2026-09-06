@@ -2,6 +2,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-modules'
 import {
   RpcId,
   type ClientRequest,
@@ -18,6 +19,7 @@ import type {
   ConnectionFetchRoute,
   ConnectionFetchHandler,
   HostConnectionFetch,
+  ConnectionRpcChannelOptions,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcFailure,
   ConnectionRpcHandler,
@@ -78,7 +80,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
   get rpc(): HostConnectionRpc {
     const owner = this.ctx
     return {
-      handle: (channel, handler) => this.register(owner, channel, handler),
+      handle: (channel, handler, options) => this.register(owner, channel, handler, options),
       intercept: (channel, matches, handler) =>
         this.registerInterceptor(owner, channel, matches, handler),
     }
@@ -99,13 +101,22 @@ export class HostConnectionService extends Service implements HostConnectionHand
   }
 
   /** Authenticate an index request through the process-token exchange or cookie. */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
-    return this.browserAuth.authorizeIndex(request, response)
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, surfaceId?: string): boolean {
+    return this.browserAuth.authorizeIndex(request, response, this.surfacePath(surfaceId))
   }
 
   /** Add this process's launch token to the clean application URL. */
-  authenticatedUrl(baseUrl: string): string {
-    return this.browserAuth.authenticatedUrl(baseUrl)
+  authenticatedUrl(baseUrl: string, surfaceId?: string): string {
+    return this.browserAuth.authenticatedUrl(baseUrl, this.surfacePath(surfaceId))
+  }
+
+  private surfacePath(surfaceId: string | undefined): string {
+    if (surfaceId === undefined) return '/'
+    const definition = this.ctx.get('clientSurfaces')?.get(surfaceId)
+    if (definition === undefined) {
+      throw new Error(`connection: unknown client surface ${JSON.stringify(surfaceId)}`)
+    }
+    return definition.path
   }
 
   /**
@@ -153,8 +164,10 @@ export class HostConnectionService extends Service implements HostConnectionHand
     owner: Context,
     channel: string,
     handler: ConnectionRpcHandler,
+    options?: ConnectionRpcChannelOptions,
   ): () => Promise<void> {
     assertChannel(channel)
+    const maxBodyBytes = rpcChannelBodyLimit(options)
     const fetchHandler = rpcFetchHandler(channel, handler)
     const route: WebRoute = {
       kind: 'prefix',
@@ -166,7 +179,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
           res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
           return
         }
-        await bridge(req, res, fetchHandler)
+        await bridge(req, res, fetchHandler, maxBodyBytes)
       },
     }
     return owner.effect(
@@ -280,6 +293,18 @@ function assertChannel(channel: string): void {
   if (!CHANNEL_PATTERN.test(channel) || channel === '/api') {
     throw new Error(`connection: invalid or reserved RPC channel ${JSON.stringify(channel)}`)
   }
+}
+
+function rpcChannelBodyLimit(options: ConnectionRpcChannelOptions | undefined): number | undefined {
+  if (options === undefined) return undefined
+  if (typeof options !== 'object' || options === null || Array.isArray(options)
+    || Object.keys(options).length !== 1 || !Object.hasOwn(options, 'maxBodyBytes')) {
+    throw new Error('connection: RPC channel body limit options must contain only maxBodyBytes')
+  }
+  if (!Number.isSafeInteger(options.maxBodyBytes) || options.maxBodyBytes <= 0) {
+    throw new Error('connection: RPC channel body limit maxBodyBytes must be a positive safe integer')
+  }
+  return options.maxBodyBytes
 }
 
 function assertFetchRoute(route: ConnectionFetchRoute): void {

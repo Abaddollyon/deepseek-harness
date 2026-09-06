@@ -35,6 +35,7 @@ function stubAgent(rawId: string, supplied?: Session): StubAgent {
   const agent: Agent = {
     id: session.id,
     options: {},
+    hasExecutionBudget: false,
     session,
     inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     get status() { return status },

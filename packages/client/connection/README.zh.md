@@ -27,12 +27,14 @@ kind: "package-reference"
 
 浏览器通过 HTTP POST 执行 Remote 一元调用；API Gateway 自己拥有 `/api/remote.mux` WebSocket 及其逻辑流。进程内组合通过 `connection.rpc.open` 提供等价的 Remote 流，不打开 WebSocket。Host half 拥有唯一 `/api` route、Fetch bridge、浏览器认证、Host/Origin 校验与精确 `GET`/`HEAD` 路由注册表。Typert Gateway 认领生成的 Remote endpoint，功能包注册 Session 日志下载等非 JSON 响应，未认领的请求返回 404。Loopback hostname 判定只供浏览器侧当前页面状态使用，留在包内。
 
+专用 JSON channel 可以通过 `ctx.connection.rpc.handle(channel, handler, { maxBodyBytes })` 注册。这个正安全整数上限只作用于该 route，并在请求 chunk 到达时、JSON 解析与 handler 分发之前执行。省略 options 参数会保留 carrier 级默认值。
+
 -----
 
 <a id="browser-authentication-and-request-trust"></a>
 ## 浏览器认证与请求信任
 
-每个 Host RPC 方法和 WebSocket stream 都要求同一个浏览器会话，不存在按方法区分的 loopback 层。每个进程生成一个随机启动令牌。`dsh-web-app` 打印并打开带 `?token=...` 的普通根 URL；`frontend-static` 把根路径和 index 请求交给 `ctx.connection.authorizeIndex`，后者只在 `GET /` 接受该令牌，写入绑定 authority 的签名 cookie，再重定向到干净的 `/`。缺失、过期、畸形或 authority 不匹配的 cookie 会在 RPC 分发前得到 401。静态资源保持公开。HTTP 载体不在根路径交换之外接受 query token，也不接受 Authorization header token。
+每个 Host RPC 方法和 WebSocket stream 都要求同一个浏览器会话，不存在按方法区分的 loopback 层。每个进程生成一个随机启动令牌。`dsh-web-app` 打印并打开带 `?token=...` 的普通根 URL；`frontend-static` 把根路径和 index 请求交给 `ctx.connection.authorizeIndex`，后者只在 `GET /` 接受该令牌，写入绑定 authority 的签名 cookie，再重定向到干净的 `/`。已注册 client surface 可以把自身 id 传给 `authenticatedUrl` 与 `authorizeIndex`；Connection 会解析 registry 持有的精确 path，只在那里交换，并重定向到同一干净 path。未知 id 与调用方控制的 return path 从结构上被拒绝。缺失、过期、畸形或 authority 不匹配的 cookie 会在 RPC 分发前得到 401。静态资源保持公开。HTTP 载体不在获准 index 交换之外接受 query token，也不接受 Authorization header token。
 
 cookie 签名密钥是 `ctx.credentials` 中由 `client-connection/browser-session` 拥有的 grant 记录。本地提供方把它持久化到 `$DSH_HOME/.credentials.yaml`；`BrowserAuth` 在 Connection 激活期间加载或创建该记录，并把密钥留在内存中，因此请求认证同步执行。删除或替换该记录会在下一次 Connection 激活时生效。cookie 携带绝对签发与过期区间，`cookieMaxAgeDays` 默认设为 30 天，并在确定性名称与签名 payload 中同时绑定规范化 hostname 和 port。它是 host-only、`Path=/`、`HttpOnly`、`SameSite=Strict`；随附服务器使用 loopback HTTP，因此刻意不设置 `Secure`。
 
@@ -58,7 +60,7 @@ API Gateway Client 把内部 `$events` logical stream 注册为唯一 generation
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **`/api` 桥把每个请求体整体缓冲在内存里**：`maxRequestBodyBytes`（默认 300 MiB，按默认 200 MiB 图片总量上限经 base64 膨胀加信封余量得出）因此同时是单请求的驻留内存上界；要降低它而不缩小图片限额，需要流式请求体路径。
+- **HTTP bridge 会把每个已接受的请求体整体缓冲在内存里**：`maxRequestBodyBytes` 设置共享 `/api` 上限（默认 300 MiB，按默认 200 MiB 图片总量上限经 base64 膨胀加信封余量得出），专用 JSON channel 则可选择更小的 `maxBodyBytes`；要避免缓冲已接受的请求体，需要流式分发路径。
 - **浏览器 cookie 不带 `Secure`**：随附载体是 loopback HTTP；若部署经明文网络暴露同一 authority，bearer cookie 可能在传输中泄露。
 - **没有 logout 操作**：清除浏览器 cookie 会结束单个浏览器会话；删除 owner 凭据记录并重启 `dsh` 会撤销全部会话。
 

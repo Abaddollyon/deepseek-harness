@@ -300,6 +300,7 @@
    cancels the wide shell inset so the nested scrollbar can sit at the sidebar
    edge; the browser restores that inset inside its own rows. */
 .regionArea {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;

@@ -862,6 +862,31 @@ describe('remaining branches', () => {
 })
 
 describe('resync', () => {
+  it('coalesces reconnects while the prior stream is still disposing and leaves no orphan', async () => {
+    const { api, session } = makeSession()
+    api.onHistory = () => histResponse(plainTurn(SessionSeq(0), 0, '旧', '窗'))
+    await session.open()
+    const firstEvents = Reflect.get(session, 'events') as { dispose(): Promise<unknown> }
+    const originalDispose = firstEvents.dispose.bind(firstEvents)
+    const disposalGate = deferred<undefined>()
+    vi.spyOn(firstEvents, 'dispose').mockImplementationOnce(async () => {
+      await disposalGate.promise
+      await originalDispose()
+    })
+
+    const first = session.resync()
+    const second = session.resync()
+    await Promise.resolve()
+    expect(api.followStarts).toEqual([SID])
+
+    disposalGate.resolve(undefined)
+    await Promise.all([first, second])
+    expect(api.followStarts).toEqual([SID, SID])
+    expect(api.activeFollows(SID)).toBe(1)
+    await session.dispose()
+    expect(api.activeFollows(SID)).toBe(0)
+  })
+
   it('keeps the old feed until the reconnect snapshot, then repairs queued live gaps', async () => {
     const { api, session } = makeSession()
     api.onHistory = () => histResponse(plainTurn(SessionSeq(0), 0, '旧', '窗'))

@@ -39,6 +39,10 @@ application combo 脚本在启动时注册插件 factory；模块主体仍保持
 
 外壳播种一张冻结模块表（`PLATFORM_MODULES`：React、Cordis 与静态 UI 库）；每个动态 bundle 都精确针对该基座解析其 external。`dsh.client.external` 只添加基座之外的精确请求，每个请求由其命名的动态包 row 或精确静态表键回答。纯类型 import 会被擦除，不产生请求。组合阶段会拒绝畸形请求、缺失提供方、自请求与同步请求环。
 
+### 命名客户端界面
+
+`ctx.clientSurfaces.register({ id, path, roots, rootPlugin })` 会在调用方 fiber 生命周期内发布精确的已认证 index 入口。它的启动图包含 modules bootstrap package、声明的 roots、唯一 root plugin，以及这些项目的传递 `dsh.client.inject` 与动态 `external` 依赖。注册会拒绝缺失 requirement 以及重复 id 或 path。声明 `dsh.client.defaultRoot: false` 的 package 不进入普通根图，除非普通 package 依赖它；省略该 metadata 会保留既有默认根行为。
+
 ### 构建要求
 
 宿主提供的是已构建的客户端 bundle，因此启动前 `pnpm run build` 必须已产出每个 `lib/client.js`；缺失 bundle 会以一条构建说明加包／路径列表的方式让激活大声失败。源码启动会把宿主侧导入映射到 TypeScript 源码，但仍消费这一构建后的客户端导出。本包自身不接受任何插件配置。

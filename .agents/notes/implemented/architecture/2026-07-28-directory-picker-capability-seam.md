@@ -42,6 +42,8 @@ Placement and policy rulings folded into this decision:
 
 ## Consequences
 
+**2026-09-06 remote-owner refinement.** The filesystem primitives now live behind a second, always-addressable `ctx.directoryBrowser` Service Definition and the `directoryBrowser/*` Remote namespace. `directory-browser-filesystem` owns the bounded implementation; `directory-picker-browse` is a compatibility adapter over that service. The adaptive picker may therefore keep `ctx.directoryPicker` native for a local window while an owning remote client uses the in-app browser without invoking host OS UI. The legacy `directoryPicker/list` and `createDirectory` verbs remain as compatibility delegates during migration.
+
 - `cordis.yml` chooses the interaction; `apps/cli` mounts the [`-auto` chooser](../feature/2026-07-29-directory-picker-adaptive-default.md), which resolves the host's situation at boot and mounts `-native` or `-browse` itself, one row still swapping backend and UI together; composing a backend row directly pins the interaction.
 - The wire exposes generated `directoryPicker/list` and `directoryPicker/createDirectory` methods with four error codes; the Connection fixture serves a deterministic browse tree and `directoryPicker/pick` result for keyless assembled tests.
 - A future interaction (or an Electron provider of the `native` interaction) is one dual-face backend package — no gateway surgery, no ui-workspace edits.

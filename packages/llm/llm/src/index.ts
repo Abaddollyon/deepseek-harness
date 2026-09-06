@@ -167,6 +167,13 @@ export interface PreparedLlmCall {
   /** Config fields materialized by the captured adapter rather than proposed by the caller. */
   readonly adapterDefaults: LlmCallConfigAdapterDefaults
   /**
+   * Count the exact provider input tokens for this request without dispatching it.
+   * Returns `undefined` when this adapter generation cannot prove the count.
+   * @param options - fully assembled request carrying the prepared config.
+   * @returns exact input-token count, or `undefined` when unavailable.
+   */
+  countInputTokens(options: GenerateOptions): number | undefined
+  /**
    * Dispatch this call once through the registration captured during
    * preparation. The request's call-config fields must match {@link config};
    * reuse or mismatch fails with `INVALID_PREPARED_CALL`.
@@ -180,6 +187,8 @@ export interface PreparedLlmCall {
 export interface PreparedAdapterCall {
   /** Exact model metadata from the same adapter generation as {@link stream}. */
   readonly model: LlmResolvedModelInfo
+  /** Count exact provider input tokens without dispatch, when supported. */
+  countInputTokens?(options: GenerateOptions): number | undefined
   /** Dispatch through that generation without re-reading dynamic connection facts. */
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 }
@@ -223,6 +232,16 @@ export abstract class LlmAdapter {
   }
 
   /**
+   * Count the exact input tokens the provider will receive for one request.
+   * The default declines because a heuristic cannot enforce a hard limit.
+   * @param _options - fully assembled provider-neutral request.
+   * @returns exact input tokens, or `undefined` when unavailable.
+   */
+  countInputTokens(_options: GenerateOptions): number | undefined {
+    return undefined
+  }
+
+  /**
    * List models this adapter can currently advertise for one owned provider.
    * The result is advisory: an adapter may accept unlisted model ids, and
    * consumers must not turn absence into request rejection.
@@ -262,6 +281,7 @@ export abstract class LlmAdapter {
   async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     return {
       model: await this.resolveModel(provider, model, signal),
+      countInputTokens: options => this.countInputTokens(options),
       stream: options => this.stream(options),
     }
   }
@@ -913,6 +933,19 @@ export class LlmRuntime extends TypertRemoteService {
       ...modelInfo.inputModalities === undefined
         ? {}
         : { inputModalities: Object.freeze([...modelInfo.inputModalities]) },
+      countInputTokens: (options: GenerateOptions): number | undefined => {
+        if (!callConfigEquals(options, resolvedConfig)) {
+          throw new LlmError(
+            'prepared LLM call config changed before input-token accounting',
+            'INVALID_PREPARED_CALL',
+          )
+        }
+        const count = adapterCall.countInputTokens?.(options)
+        if (count !== undefined && (!Number.isSafeInteger(count) || count < 0)) {
+          throw new LlmError('adapter returned an invalid input-token count', 'INVALID_TOKEN_COUNT')
+        }
+        return count
+      },
       stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
         if (dispatched) {
           throw new LlmError('a prepared LLM call can only be dispatched once', 'INVALID_PREPARED_CALL')

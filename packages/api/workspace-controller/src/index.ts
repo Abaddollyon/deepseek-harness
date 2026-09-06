@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { WorkspaceCommands } from './commands.ts'
 import { DirectoryPickerController } from './directory-picker.ts'
+import { DirectoryBrowserController } from './directory-browser.ts'
 import { WorkspaceFeed } from './feed.ts'
 import type {
   WorkspaceArchiveSessionRequest,
@@ -22,6 +23,7 @@ import type {
 
 export type * from './types.ts'
 export { DirectoryPickerController } from './directory-picker.ts'
+export { DirectoryBrowserController } from './directory-browser.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -47,6 +49,7 @@ export class WorkspaceController extends TypertRemoteService {
     // stays pending until a picking backend is composed, so a host without one
     // registers no picking namespace instead of answering an unservable verb.
     ctx.plugin(DirectoryPickerController)
+    ctx.plugin(DirectoryBrowserController)
   }
 
   /**

@@ -17,6 +17,7 @@ export type {
   ConnectionFetchRoute,
   ConnectionIndexRequest,
   ConnectionIndexResponse,
+  ConnectionRpcChannelOptions,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcFailure,
   ConnectionRpcHandler,

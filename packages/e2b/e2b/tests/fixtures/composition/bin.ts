@@ -19,6 +19,7 @@ const session = Session.create(ownerId)
 const owner: Agent = {
   id: ownerId,
   options: {},
+  hasExecutionBudget: false,
   session,
   inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
   status: 'idle',

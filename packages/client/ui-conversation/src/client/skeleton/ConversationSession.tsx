@@ -1,6 +1,6 @@
 /** Strict per-session header/body content inserted into the resident conversation layout. */
 
-import { useEffect } from 'react'
+import { useEffect, type KeyboardEvent } from 'react'
 import clsx from 'clsx'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -21,6 +21,30 @@ interface Breadcrumb {
   readonly id: SessionId
   readonly displayTitle: string
   readonly subagent: boolean
+}
+
+function moveViewTab(
+  event: KeyboardEvent<HTMLButtonElement>,
+  tabs: readonly { readonly id: string }[],
+  currentIndex: number,
+  selectView: (id: string) => void,
+): void {
+  let nextIndex: number
+  switch (event.key) {
+    case 'ArrowRight': nextIndex = (currentIndex + 1) % tabs.length; break
+    case 'ArrowLeft': nextIndex = (currentIndex - 1 + tabs.length) % tabs.length; break
+    case 'Home': nextIndex = 0; break
+    case 'End': nextIndex = tabs.length - 1; break
+    default: return
+  }
+  const next = tabs[nextIndex]
+  if (next === undefined) return
+  event.preventDefault()
+  selectView(next.id)
+  event.currentTarget.parentElement
+    ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+    .item(nextIndex)
+    .focus()
 }
 
 function deriveAncestry(list: SessionListState, id: SessionId): readonly Breadcrumb[] {
@@ -72,6 +96,7 @@ export function ConversationSessionHeader({
     <header
       className={clsx(css.header, hideChrome && css.headerHidden)}
       aria-hidden={hideChrome || undefined}
+      data-active-view={active?.id}
     >
       {!hideChrome && (
         <>
@@ -136,14 +161,16 @@ export function ConversationSessionHeader({
           </div>
           {tabs.length > 1 && (
             <div className={css.tabs} role="tablist">
-              {tabs.map(viewTab => (
+              {tabs.map((viewTab, index) => (
                 <button
                   key={viewTab.id}
                   type="button"
                   role="tab"
                   aria-selected={viewTab.id === active?.id}
+                  tabIndex={viewTab.id === active?.id ? 0 : -1}
                   className={clsx(css.tab, viewTab.id === active?.id && css.tabActive)}
                   onClick={() => { selectView(viewTab.id) }}
+                  onKeyDown={(event) => { moveViewTab(event, tabs, index, selectView) }}
                 >
                   {viewTab.label}
                 </button>

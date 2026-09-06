@@ -67,6 +67,8 @@ interface Agent {
   readonly id: SessionId
   /** The provider route and model this agent's requests use. */
   readonly options: AgentOptions
+  /** Whether this live agent was constructed with an execution budget. */
+  readonly hasExecutionBudget: boolean
   /** The live session this agent drives; its log is the durable source of truth. */
   readonly session: Session
   /** The agent-owned projection of durable pending work. */
@@ -161,6 +163,20 @@ type AgentStatus = 'idle' | 'running'
 `running` 描述整个驱动器的排空区间，可能跨越连续的排队轮次；它不能证明某个轮次仍然打开。dispose 会把 agent 从注册表移除并发出 `agent/disposed`；它不是一个终态 status 值。`followup()` 不返回句柄：其 `MessageId` 标识的是持久的 inbox 插入、认领与丢弃事实，而非之后的助手输出或轮次结束。`whenIdle()` 观察的是整个 agent，因此只有当调用方明确拥有从回执到空闲的这段区间时，才能把它称为一次 run（[决策](../../.agents/notes/implemented/architecture/2026-07-30-followup-enqueue-and-owned-runs.zh.md)）。
 
 ```ts type-equiv
+/** Execution limits for one live agent-loop instance. */
+interface AgentBudget {
+  /** Maximum model steps admitted across submitted turns. */
+  maxTurns: number
+  /** Response-accounted input-token threshold across model attempts. */
+  maxInputTokens: number
+  /** Maximum output tokens requested across all model attempts. */
+  maxOutputTokens: number
+  /** Maximum additional model attempts admitted after request failures. */
+  maxRetries: number
+}
+```
+
+```ts type-equiv
 /** Merge-extensible agent creation options. Persona belongs to system-prompt sections. */
 interface AgentOptions {
   /** Provider route (must have a registered adapter at call time). */
@@ -175,10 +191,12 @@ interface AgentOptions {
   reasoningEffort?: ReasoningEffortId
   /** Maximum output tokens for each conversation-model request. */
   maxTokens?: number
+  /** Optional execution limits enforced by the concrete agent loop. */
+  budget?: AgentBudget
 }
 ```
 
-在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。显式 `reasoningEffort` 会为该路由的首次请求提供初始值；确切模型解析会校验该值，省略时则允许填入适配器默认值。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
+在 `agent/request` 之后，分发要求 `provider` 与 `model` 都存在。显式 `reasoningEffort` 会为该路由的首次请求提供初始值；确切模型解析会校验该值，省略时则允许填入适配器默认值。提供 `maxTokens` 时，它必须是正安全整数，并限制每次对话模型请求的输出；省略时，系统会在写入请求 header 前填入确切模型的适配器默认值，否则提供方行为保持不变。完整 `budget` 使用正数步骤／输入／输出值与非负重试数。它限制一个实时循环实例：模型步骤在超额 `step/start` 前停止，重试在超额提供方重新分发前停止，输出上限随报告的用量缩减。由于提供方 usage 在请求后到达，输入是按响应计量的续跑阈值；适配器的精确 prepared-call 计数可以在分发前拒绝当前请求，而响应 usage 缺失会使必需的续跑失败。agent 作用域的 `deployment:persona` 提示词段落可以遮蔽全局默认 persona。
 
 inbox 即投递词汇——agent 以持久投影形式拥有的两条有序待处理消息列表：
 

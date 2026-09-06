@@ -312,7 +312,16 @@ export class ConversationController extends Service implements IConversation {
 
   /** Apply one operation to a pending queue occurrence. */
   async updateQueue(itemId: QueueItemId, action: QueueAction): Promise<void> {
-    const session = this.scopedSession('updateQueue')
+    await this.updateQueueSession(this.scopedSession('updateQueue'), itemId, action)
+  }
+
+  /**
+   * Apply one operation to an explicitly owned Session binding.
+   * @param session - exact Session binding that owns the queue occurrence.
+   * @param itemId - pending queue occurrence identity.
+   * @param action - mutation to apply to that occurrence.
+   */
+  async updateQueueSession(session: SessionFace, itemId: QueueItemId, action: QueueAction): Promise<void> {
     const result = await session.updateQueue(itemId, action)
     if (!result.ok) {
       if (

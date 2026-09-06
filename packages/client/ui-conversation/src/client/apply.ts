@@ -72,6 +72,20 @@ interface WorkspaceNavigation {
   ): Promise<SessionId>
 }
 
+interface ConversationEnvironmentNavigation {
+  readonly presentation?: {
+    get(ref: { environmentId: string; sessionId: string }): { viewId: string }
+    update(
+      ref: { environmentId: string; sessionId: string },
+      patch: { draft?: string; viewId?: string },
+    ): void
+  }
+  getSnapshot?():
+    | { readonly kind: 'environments' }
+    | { readonly kind: 'session'; readonly ref: { environmentId: string; sessionId: string }; readonly viewId: string }
+  subscribe?(listener: () => void): () => void
+}
+
 /** Resolve the session-scoped Conversation action face, failing loud. */
 function scopedConversation(sessions: ISessions, id: SessionId): IConversation {
   const scoped = sessions.scope(id)
@@ -98,11 +112,31 @@ export function apply(ctx: Context): void {
   const sessions = ctx.sessions
   const slots = ctx.slots
   const workspaceNavigation = ctx.get('uiWorkspace') as unknown as WorkspaceNavigation
+  const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)?.environmentId
+  const runtimeGeneration = (ctx.get('environmentRuntime') as {
+    generation?: { getSnapshot(): unknown; subscribe(listener: () => void): () => void }
+  } | undefined)?.generation
+  const connectionReady = runtimeGeneration === undefined
+    ? { getSnapshot: () => true, subscribe: () => () => {} }
+    : {
+      getSnapshot: () => runtimeGeneration.getSnapshot() !== undefined,
+      subscribe: (listener: () => void) => runtimeGeneration.subscribe(listener),
+    }
+  const environmentNavigation = ctx.get('environmentNavigation') as ConversationEnvironmentNavigation | undefined
+  const presentation = environmentNavigation?.presentation
+  const owningEnvironmentId = environmentId ?? 'local'
+  const presentationRef = (sessionId: SessionId) => ({
+    environmentId: owningEnvironmentId, sessionId,
+  })
   const uiConversation = new UiConversation(ctx, sessions)
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-conversation: dictionaries')
   const t = ctx.locale.bind(NS)
   const conversationStore = createConversationStore()
+  const mountedConversationActions = new Map<SessionId, {
+    readonly binding: unknown
+    readonly actions: BoundActions<typeof conversationStore>
+  }>()
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.settingsScope.bind<ConversationSettings>({ namespace: CONVERSATION_SETTINGS_NAMESPACE }),
   )
@@ -134,14 +168,48 @@ export function apply(ctx: Context): void {
     const active = resolveActiveView(viewTabs(), preferred)
     if (active !== undefined) uiConversation.binding(sessionId).activate(active.id)
   }
+  const restoredView = (sessionId: SessionId): string | null =>
+    readConversationViewPreference(sessionId, environmentId)
+      ?? presentation?.get(presentationRef(sessionId)).viewId
+      ?? null
+  const initialView = (sessionId: SessionId): string | null => {
+    const location = environmentNavigation?.getSnapshot?.()
+    if (location?.kind === 'session'
+      && location.ref.environmentId === owningEnvironmentId
+      && location.ref.sessionId === sessionId) return location.viewId
+    return restoredView(sessionId)
+  }
+  const rememberMountedConversation = (
+    sessionId: SessionId,
+    actions: BoundActions<typeof conversationStore>,
+  ): void => {
+    const binding = sessions.binding(sessionId)
+    if (binding === undefined) return
+    const previous = mountedConversationActions.get(sessionId)
+    if (previous?.binding === binding && previous.actions === actions) return
+    mountedConversationActions.set(sessionId, { binding, actions })
+    const preferred = initialView(sessionId)
+    activateView(sessionId, preferred)
+    if (preferred !== null) actions.setView(preferred)
+  }
   const restoreView = (sessionId: SessionId): void => {
-    activateView(sessionId, readConversationViewPreference(sessionId))
+    activateView(sessionId, restoredView(sessionId))
   }
   const restoreCurrentView = (): void => {
     const sessionId = sessions.list.getSnapshot().current
     if (sessionId !== undefined && sessions.binding(sessionId) !== undefined) {
       restoreView(sessionId)
     }
+  }
+  const restoreNavigationView = (): void => {
+    const location = environmentNavigation?.getSnapshot?.()
+    if (location?.kind !== 'session' || location.ref.environmentId !== owningEnvironmentId) return
+    const sessionId = sessions.list.getSnapshot().current
+    if (sessionId === undefined || location.ref.sessionId !== sessionId) return
+    const mounted = mountedConversationActions.get(sessionId)
+    if (mounted === undefined || mounted.binding !== sessions.binding(sessionId)) return
+    activateView(sessionId, location.viewId)
+    mounted.actions.setView(location.viewId)
   }
   const conversationViews = createSnapshotStore<readonly ViewTab[]>(viewTabs())
   const refreshViews = (): void => {
@@ -159,6 +227,7 @@ export function apply(ctx: Context): void {
     let currentSessionId = sessions.list.getSnapshot().current
     const disposeViews = slots.subscribe('conversation.view', refreshViews)
     const disposeLocale = ctx.locale.subscribe(refreshViews)
+    const disposeNavigation = environmentNavigation?.subscribe?.(restoreNavigationView) ?? (() => {})
     const disposeCurrent = sessions.list.subscribe(() => {
       const nextSessionId = sessions.list.getSnapshot().current
       if (nextSessionId === currentSessionId) return
@@ -167,6 +236,7 @@ export function apply(ctx: Context): void {
     })
     return () => {
       disposeCurrent()
+      disposeNavigation()
       disposeLocale()
       disposeViews()
     }
@@ -239,14 +309,21 @@ export function apply(ctx: Context): void {
       'conversation.view': { kind: 'list', scope: 'session' },
     },
     store: conversationStore,
-    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionInjected => ({
-      hooks: { conversationViews },
-      bindDraftMirror: write => inputHub.shell(sessionId).bindMirror(write),
-      openView: (view, focus) => {
-        activateView(sessionId, view)
-        actions.openView(view, focus)
-      },
-    }),
+    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionInjected => {
+      rememberMountedConversation(sessionId, actions)
+      return {
+        hooks: { conversationViews },
+        bindDraftMirror: write => inputHub.shell(sessionId).bindMirror((draft) => {
+          write(draft)
+          presentation?.update(presentationRef(sessionId), { draft })
+        }),
+        openView: (view, focus) => {
+          activateView(sessionId, view)
+          actions.openView(view, focus)
+          presentation?.update(presentationRef(sessionId), { viewId: view })
+        },
+      }
+    },
   }, ConversationSession)
 
   const registerConversationHeader = () => slots.register({
@@ -258,14 +335,18 @@ export function apply(ctx: Context): void {
       'conversation.session.header.utilities': { kind: 'list', scope: 'session' },
     },
     store: conversationStore,
-    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionHeaderInjected => ({
-      hooks: { conversationViews },
-      open: (id) => { sessions.open(id) },
-      selectView: (view) => {
-        activateView(sessionId, view)
-        actions.setView(view)
-      },
-    }),
+    inject: (sessionId: SessionId, actions: BoundActions<typeof conversationStore>): ConversationSessionHeaderInjected => {
+      rememberMountedConversation(sessionId, actions)
+      return {
+        hooks: { conversationViews },
+        open: (id) => { sessions.open(id) },
+        selectView: (view) => {
+          activateView(sessionId, view)
+          actions.setView(view)
+          presentation?.update(presentationRef(sessionId), { viewId: view })
+        },
+      }
+    },
   }, ConversationSessionHeader)
 
   const registerComposerBar = () => slots.register({
@@ -283,6 +364,7 @@ export function apply(ctx: Context): void {
     inject: (sessionId: SessionId | undefined): ComposerBarInjected => {
       if (sessionId === undefined) {
         return {
+          connectionReady,
           keyboard: undefined,
           addImages: undefined,
           removeImage: undefined,
@@ -303,6 +385,7 @@ export function apply(ctx: Context): void {
       const shell = inputHub.shell(sessionId)
       const inputTriggers = inputHub.inputTriggers(sessionId)
       return {
+        connectionReady,
         keyboard: shell,
         addImages: (files) => {
           try {

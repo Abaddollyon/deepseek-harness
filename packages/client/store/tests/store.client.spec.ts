@@ -256,6 +256,26 @@ describe('defineStore', () => {
     expect(backing.has('spec.chat')).toBe(true)
   })
 
+  it('migrates a legacy local Session key into the compound Host scope', () => {
+    const backing = new Map<string, string>([
+      ['spec.chat.s1', JSON.stringify({ draft: 'legacy' })],
+    ])
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => backing.get(key) ?? null,
+      setItem: (key: string, value: string) => { backing.set(key, value) },
+      removeItem: (key: string) => { backing.delete(key) },
+    })
+    const handle = defineStore({
+      init: () => ({ draft: '' }),
+      persist: 'spec.chat',
+      actions: { setDraft: (draft, value: string) => { draft.draft = value } },
+    })
+
+    expect(handle.create(JSON.stringify(['local', 's1'])).getSnapshot().draft).toBe('legacy')
+    expect(backing.has('spec.chat.s1')).toBe(false)
+    expect(backing.has(`spec.chat.${JSON.stringify(['local', 's1'])}`)).toBe(true)
+  })
+
   it('clearPersisted is a no-op without a persist declaration or without storage', () => {
     const inst = declare().create('s1')   // no persist key declared
     expect(() => { inst.clearPersisted() }).not.toThrow()

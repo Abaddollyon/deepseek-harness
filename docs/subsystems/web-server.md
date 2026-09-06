@@ -120,17 +120,19 @@ applyIndexTaps(html: string): string
  * Gather the structured injection table: one `webserver/index-inject` emit,
  * every subscriber pushes its current rows. Fresh per call, so subscribers
  * read live state (module graph, theme preference) at emit time.
+ * @param context - optional variant supplied to injection contributors.
  * @returns rows in subscriber activation order.
  */
-collectIndexInjections(): IndexInjection[]
+collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]
 
 /**
  * Render one index.html body: the structured injection table first, then
  * the raw `tapIndex` transforms over the result.
  * @param html - the raw index.html body.
+ * @param context - optional variant supplied to injection contributors.
  * @returns the transformed body.
  */
-renderIndex(html: string): string
+renderIndex(html: string, context: IndexRenderContext = {}): string
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
@@ -151,9 +153,10 @@ Collect the structured index injection table. Emitted on every index render and 
  * render and every worker boot-payload request; listeners push their
  * current rows, so a row's data is read fresh at emit time.
  * @param table - Mutable row table; listeners append in activation order.
+ * @param context - Optional index-render variant selected by the index owner.
  * @mode emit
  */
-'webserver/index-inject'(table: IndexInjection[]): void
+'webserver/index-inject'(table: IndexInjection[], context?: IndexRenderContext): void
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)

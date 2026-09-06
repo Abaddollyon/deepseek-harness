@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-05-dedicated-rpc-body-limits.md
+2026-09-05-dedicated-rpc-body-limits.md: b5f1840ca25dd050dc48cfaa403acd0f297a9974
+2026-09-05-dedicated-rpc-body-limits.zh.md: 2e0f27423e96cee30b7f8de6995007b71012d24e

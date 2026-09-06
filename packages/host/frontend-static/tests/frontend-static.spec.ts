@@ -30,7 +30,7 @@ afterEach(async () => {
 })
 
 /** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
-async function loadComposition(): Promise<Context> {
+async function loadComposition(withSurface = false): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-frontend-static-'))
   const dist = join(root, 'dist')
   await mkdir(dist)
@@ -60,6 +60,18 @@ async function loadComposition(): Promise<Context> {
 
   context = new Context()
   context.baseUrl = pathToFileURL(root).href + '/'
+  if (withSurface) {
+    const definition = {
+      id: 'companion',
+      path: '/companion',
+      roots: [] as string[],
+      rootPlugin: '@fixture/companion',
+    }
+    context.provide('clientSurfaces', {
+      get: (id: string) => id === definition.id ? definition : undefined,
+      findByPath: (path: string) => path === definition.path ? definition : undefined,
+    } as never)
+  }
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
@@ -96,6 +108,36 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
 }
 
 describe('real Loader composition', () => {
+  it('serves a registered surface through exact token exchange and a clean redirect', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition(true)
+    let renderedVariant: string | undefined
+    loaded.on('webserver/index-inject', (table, renderContext) => {
+      renderedVariant = renderContext?.variant
+      table.push({ kind: 'global', name: '__FIXTURE_SURFACE__', value: renderContext?.variant })
+    })
+    const port = loaded.webServer.port
+    const launch = new URL(loaded.connection.authenticatedUrl(
+      `http://127.0.0.1:${String(port)}/ignored?return=/wrong#fragment`,
+      'companion',
+    ))
+    expect(launch.pathname).toBe('/companion')
+    expect([...launch.searchParams.keys()]).toEqual(['token'])
+    expect(launch.hash).toBe('')
+
+    const exchange = await fetch(launch, { redirect: 'manual' })
+    expect(exchange.status).toBe(303)
+    expect(exchange.headers.get('location')).toBe('/companion')
+    const setCookie = exchange.headers.get('set-cookie')
+    if (setCookie === null) throw new Error('surface exchange did not set a cookie')
+    const page = await request(port, '/companion', {
+      headers: { cookie: setCookie.split(';', 1)[0]! },
+    })
+    expect(page).toMatchObject({ status: 200, type: 'text/html; charset=utf-8' })
+    expect(page.body).toContain('__FIXTURE_SURFACE__')
+    expect(renderedVariant).toBe('companion')
+    expect((await request(port, '/unregistered')).status).toBe(404)
+  })
+
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
     const unloaded = [...loaded.loader.entries()]
