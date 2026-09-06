@@ -118,6 +118,8 @@ Each refresh allows at most fifteen seconds, four MiB across replies, ten pages,
 
 ### Failures and recovery
 
+Known status-less provider overloads, including Codex’s “Our servers are currently overloaded” error, map to `SERVER` for the provider-owned retry policy. Unknown failures remain `PI_AI_ERROR`; generic “try again” text alone does not enable retries.
+
 A route pi-ai does not ship needs `api`, `baseURL`, and a non-empty `models` list; an unserviceable profile is refused where it is written, naming the route and model. Failures carry stable codes: a credential that cannot be used fails with `INVALID_CREDENTIAL` naming the route and reference, a route whose `apiKeyEnv` reference resolves to nothing fails with `MISSING_CREDENTIAL`, an unconfigured model fails with `UNKNOWN_MODEL`, and terminal provider failures distinguish `QUOTA` from transient `RATE_LIMIT`. `GenerateOptions.stop` is rejected with `UNSUPPORTED_OPTION` because pi-ai's common streaming UI cannot guarantee it across providers.
 
 -----
