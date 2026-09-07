@@ -125,6 +125,8 @@ class FakeSessions {
 }
 
 class FakeWorkspaces implements IWorkspaces {
+  declare readonly feed: IWorkspaces['feed']
+  declare readonly retryFeed: IWorkspaces['retryFeed']
   readonly list: MutableSource<WorkspaceSnapshot>
   readonly archiveCalls: SessionId[] = []
   onArchive: IWorkspaces['archiveSession'] = async (sessionId) => {

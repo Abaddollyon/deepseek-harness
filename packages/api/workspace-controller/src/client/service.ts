@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { WorkspaceView } from '../types.ts'
+import type { WorkspaceFeedRecovery, WorkspaceFeedSnapshot } from './feed.ts'
 import type { ClientWorkspaceModel, WorkspaceSnapshot } from './model.ts'
 
 /** Structured create failure for callers that distinguish Host business errors. */
@@ -33,6 +34,10 @@ export interface WorkspaceSource {
 export interface IWorkspaces {
   /** Host-authoritative Workspace rows, order, archive set, and follow lifecycle. */
   readonly list: WorkspaceSource
+  /** Sanitized follow readiness diagnostics, independent of retained rows. */
+  readonly feed: { getSnapshot(): WorkspaceFeedSnapshot; subscribe(listener: () => void): () => void }
+  /** Retry only a failed Workspace read subscription; never replay commands. */
+  retryFeed(): void
   /**
    * Register an existing path as a Workspace.
    * @param input - Host create payload.
@@ -79,15 +84,20 @@ export interface IWorkspaces {
 /** Owns the bare Workspace snapshot and Workspace-only commands. */
 export class WorkspaceController extends Service implements IWorkspaces {
   readonly list: WorkspaceSource
+  readonly feed: WorkspaceFeedRecovery['snapshot']
 
   /**
    * @param ctx - Client root Context.
    * @param model - Remote-backed Workspace state model.
+   * @param recovery - Resource-owned follow lifecycle.
    */
-  constructor(ctx: Context, private readonly model: ClientWorkspaceModel) {
+  constructor(ctx: Context, private readonly model: ClientWorkspaceModel, private readonly recovery: WorkspaceFeedRecovery) {
     super(ctx, 'workspaces')
     this.list = model
+    this.feed = recovery.snapshot
   }
+
+  retryFeed(): void { this.recovery.retry() }
 
   async create(input: { path: string }): Promise<WorkspaceView> {
     const result = await this.model.create(input)

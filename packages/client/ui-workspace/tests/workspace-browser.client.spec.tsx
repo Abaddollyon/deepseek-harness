@@ -67,6 +67,8 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     useSidebarQuery: bindSnapshotSelector(query),
     setSidebarQuery: (value) => { query.set(value) },
     useSessionFeed: hook({ state: 'ready', error: null, attempt: 0 }),
+    useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'ready', attempt: 0, generation: 1, hasBaseline: true, lastSuccessfulAt: 1, failure: null, canRetry: false }),
+    retryWorkspaceFeed: vi.fn(),
     useNavigationError: hook(null),
     retryFeed: vi.fn(),
     wide: true,
@@ -2098,5 +2100,24 @@ describe('feed readiness and active sidebar controls', () => {
   it('shows explicit creation failures in the persistent sidebar', () => {
     mount({ useNavigationError: hook('create-failed') })
     expect(screen.getByRole('alert').textContent).toBe(zh['navigation.failed'])
+  })
+})
+
+
+describe('Workspace-only readiness failure', () => {
+  it('names Workspaces, preserves sessions and query, and retries only the Workspace resource', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('retained', 1)])),
+      useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'error', attempt: 2, generation: 3, hasBaseline: false, lastSuccessfulAt: null, failure: 'service-unavailable', canRetry: true }),
+    })
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.error'])
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.initial'])
+    expect(screen.queryByText(zh['feed.error'])).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: zh['workspaceFeed.retry'] }))
+    expect(b.props.retryWorkspaceFeed).toHaveBeenCalledOnce()
+    expect(b.props.retryFeed).not.toHaveBeenCalled()
+    rerender(b, { useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'error', attempt: 0, generation: 4, hasBaseline: true, lastSuccessfulAt: 1, failure: 'terminal', canRetry: false }) })
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.retained'])
+    expect(screen.queryByRole('button', { name: zh['workspaceFeed.retry'] })).toBeNull()
   })
 })

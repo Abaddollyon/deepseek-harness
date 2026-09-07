@@ -8,6 +8,10 @@
 
 .root {
   --dsh-sidebar-inline-padding: 12px;
+  --dsh-sidebar-footer-height: 42px;
+  --dsh-sidebar-footer-radius: 12px;
+  --dsh-sidebar-footer-padding: 0 10px 0 8px;
+  --dsh-sidebar-footer-gap: 8px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -323,6 +327,16 @@
   flex: none;
   display: flex;
   flex-direction: column;
+}
+
+/* Footer slots share one shell-owned hit box and text anchor. */
+.footArea :global(.dsh-sidebar-footer-row) {
+  min-height: var(--dsh-sidebar-footer-height);
+  height: var(--dsh-sidebar-footer-height);
+  box-sizing: border-box;
+  border-radius: var(--dsh-sidebar-footer-radius);
+  padding: var(--dsh-sidebar-footer-padding);
+  gap: var(--dsh-sidebar-footer-gap);
 }
 
 .settingsArea,

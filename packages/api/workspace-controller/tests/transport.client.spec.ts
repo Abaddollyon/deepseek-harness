@@ -9,6 +9,7 @@ import {
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { RemoteError, type RemoteFailure, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { WorkspaceFeedRecovery } from '../src/client/feed.ts'
 import * as WorkspaceClientPlugin from '../src/client/index.ts'
 import {
   ClientWorkspaceModel,
@@ -233,6 +234,81 @@ describe('Workspace Controller Client apply', () => {
     expect(ctx.get('workspaces')).toBeUndefined()
   })
 
+  it('recovers temporary Workspace absence without restarting healthy Session ownership', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    const remote = new ScriptedWorkspaceRemote([
+      { frames: [], error: new RemoteError('gateway/service-unavailable', 'Workspace is starting', { endpoint: 'workspace/follow' }) },
+      { frames: [baseline('saved')], hold: true },
+    ])
+    provideClientServices(ctx, remote)
+    const fiber = ctx.plugin(WorkspaceClientPlugin, { followRetryDelaysMs: [10] })
+    await fiber
+    await waitFor(() => { expect(remote.calls).toBe(1) })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(ctx.workspaces.list.getSnapshot()).toMatchObject({ state: 'idle', phase: 'ready', items: [{ workspaceId: 'saved' }] })
+    expect(remote.calls).toBe(2)
+    await fiber.dispose()
+    vi.useRealTimers()
+  })
+
+  it('exhausts its readiness budget, retains rows, and coalesces manual retry clicks', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    const missing = new RemoteError('gateway/service-unavailable', 'Starting', { endpoint: 'workspace/follow' })
+    const remote = new ScriptedWorkspaceRemote([
+      { frames: [baseline('saved')], error: missing },
+      { frames: [], error: missing },
+      { frames: [baseline('restored')], hold: true },
+    ])
+    provideClientServices(ctx, remote)
+    const fiber = ctx.plugin(WorkspaceClientPlugin, { followRetryDelaysMs: [10] })
+    await fiber
+    await vi.advanceTimersByTimeAsync(10)
+    expect(ctx.workspaces.feed.getSnapshot()).toMatchObject({ state: 'error', attempt: 1, hasBaseline: true, failure: 'service-unavailable', canRetry: true })
+    expect(ctx.workspaces.list.getSnapshot()).toMatchObject({ state: 'error', phase: 'ready', items: [{ workspaceId: 'saved' }] })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(remote.calls).toBe(2)
+    ctx.workspaces.retryFeed()
+    ctx.workspaces.retryFeed()
+    ctx.workspaces.retryFeed()
+    await waitFor(() => { expect(ctx.workspaces.feed.getSnapshot().state).toBe('ready') })
+    expect(remote.calls).toBe(3)
+    expect(ctx.workspaces.list.getSnapshot().items[0]?.workspaceId).toBe('restored')
+    await fiber.dispose()
+    vi.useRealTimers()
+  })
+
+  it.each(['gateway/unauthorized', 'gateway/method-unavailable', 'gateway/internal'])('does not retry terminal %s errors', async (code) => {
+    const ctx = new Context()
+    const remote = new ScriptedWorkspaceRemote([{ frames: [], error: { code, message: 'Terminal failure', data: {} } }])
+    provideClientServices(ctx, remote)
+    const fiber = ctx.plugin(WorkspaceClientPlugin, { followRetryDelaysMs: [0] })
+    await fiber
+    await waitFor(() => { expect(ctx.workspaces.feed.getSnapshot().state).toBe('error') })
+    expect(ctx.workspaces.feed.getSnapshot()).toMatchObject({ failure: 'terminal', canRetry: false })
+    ctx.workspaces.retryFeed()
+    await Promise.resolve()
+    expect(remote.calls).toBe(1)
+    await fiber.dispose()
+  })
+
+  it('cancels backoff when the owning plugin is disposed', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    const remote = new ScriptedWorkspaceRemote([{ frames: [], error: new RemoteError('gateway/service-unavailable', 'Starting', { endpoint: 'workspace/follow' }) }])
+    provideClientServices(ctx, remote)
+    const fiber = ctx.plugin(WorkspaceClientPlugin, { followRetryDelaysMs: [100] })
+    await fiber
+    await waitFor(() => { expect(ctx.workspaces.feed.getSnapshot().state).toBe('retrying') })
+    const service = ctx.workspaces
+    await fiber.dispose()
+    service.retryFeed()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(remote.calls).toBe(1)
+    vi.useRealTimers()
+  })
+
   it('publishes exhausted carrier retries as a gateway/internal error state', async () => {
     const ctx = new Context()
     // Neither generation reaches an accepted baseline, so the retry budget runs
@@ -452,7 +528,7 @@ describe('WorkspaceController', () => {
     const remote = new CommandWorkspaceRemote()
     const model = new ClientWorkspaceModel(remote)
     model.replaceBaseline({ items: [workspace('one')], archivedSessionIds: [] })
-    const controller = new WorkspaceController(new Context(), model)
+    const controller = new WorkspaceController(new Context(), model, new WorkspaceFeedRecovery(workspaceClient(remote), model, []))
 
     expect(controller.list).toBe(model)
     await expect(controller.create({ path: '/work/created' })).resolves.toMatchObject({ workspaceId: 'created' })
@@ -467,7 +543,12 @@ describe('WorkspaceController', () => {
 
   it('maps generated business failures to the command facade errors', async () => {
     const remote = new CommandWorkspaceRemote()
-    const controller = new WorkspaceController(new Context(), new ClientWorkspaceModel(remote))
+    const model = new ClientWorkspaceModel(remote)
+    const controller = new WorkspaceController(
+      new Context(),
+      model,
+      new WorkspaceFeedRecovery(workspaceClient(remote), model, []),
+    )
     const missingWorkspace = new RemoteError('workspace/not-found', 'gone', { workspaceId: wid('missing') })
     const missingSession = new RemoteError('session/not-found', 'missing session', { sessionId: sid('session') })
 

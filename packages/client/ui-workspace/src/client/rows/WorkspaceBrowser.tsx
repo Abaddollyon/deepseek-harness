@@ -931,6 +931,8 @@ export function WorkspaceBrowser({
   useSidebarQuery,
   setSidebarQuery,
   useSessionFeed,
+  useWorkspaceFeed,
+  retryWorkspaceFeed,
   useNavigationError,
   retryFeed,
   useSessionPendingInteraction,
@@ -1007,9 +1009,10 @@ export function WorkspaceBrowser({
   const query = useSidebarQuery(value => value)
   const setQuery = setSidebarQuery
   const feed = useSessionFeed(value => value)
+  const workspaceFeed = useWorkspaceFeed(value => value)
   const navigationError = useNavigationError(value => value)
   const hasRows = useSessions(value => value.ids.length > 0)
-  const ready = feed.state === 'ready' && workspacePhase === 'ready' && workspaceError === null
+  const ready = feed.state === 'ready' && workspaceFeed.state === 'ready' && workspacePhase === 'ready' && workspaceError === null
   const [searchExpanded, setSearchExpanded] = useState(false)
   const normalizedQuery = sanitizeSearchQuery(query).trim()
   const [remoteSearch, setRemoteSearch] = useState<RemoteSearchState>({
@@ -1340,9 +1343,17 @@ export function WorkspaceBrowser({
           {t(navigationError === 'not-ready' ? 'navigation.notReady' : 'navigation.failed')}
         </div>
       )}
-      {wide && !underlyingHidden && !ready && (
-        <div role={feed.state === 'error' || workspaceError !== null ? 'alert' : 'status'} className={css.searchStatus}>
-          {t(feed.state === 'stale' ? 'feed.stale' : feed.state === 'error' || workspaceError !== null ? 'feed.error' : 'feed.loading')}
+      {wide && !underlyingHidden && workspaceFeed.state !== 'ready' && (
+        <div role={workspaceFeed.state === 'error' ? 'alert' : 'status'} className={css.searchStatus}>
+          {t(workspaceFeed.state === 'error' ? 'workspaceFeed.error' : 'workspaceFeed.loading')}
+          {t(workspaceFeed.hasBaseline ? 'workspaceFeed.retained' : 'workspaceFeed.initial')}
+          {workspaceFeed.state === 'error' && !workspaceFeed.canRetry && t('workspaceFeed.terminal')}
+          {workspaceFeed.canRetry && <button type="button" onClick={retryWorkspaceFeed}>{t('workspaceFeed.retry')}</button>}
+        </div>
+      )}
+      {wide && !underlyingHidden && feed.state !== 'ready' && (
+        <div role={feed.state === 'error' ? 'alert' : 'status'} className={css.searchStatus}>
+          {t(feed.state === 'stale' ? 'feed.stale' : feed.state === 'error' ? 'feed.error' : 'feed.loading')}
           {(feed.state === 'error' || feed.state === 'stale') && (
             <button type="button" onClick={retryFeed}>{t('feed.retry')}</button>
           )}

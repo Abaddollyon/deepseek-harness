@@ -135,7 +135,7 @@ type FooterProps = PropsRuntime<'sidebar.footer.action'>
 export function EnvironmentFooterAction(props: FooterProps) {
   const owner = props
   return (
-    <button type="button" className={css.footerButton} aria-label={props.t('environments')} onClick={props.openOverview}>
+    <button type="button" className={`${css.footerButton} dsh-sidebar-footer-row ${owner.wide ? '' : css.railFooterButton}`} aria-label={props.t('environments')} onClick={props.openOverview}>
       <ServerIcon />
       {owner.wide && <span>{props.t('environments')}</span>}
     </button>

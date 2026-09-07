@@ -72,4 +72,16 @@ describe('SidebarRoot.module.css', () => {
     expect(declarations('.fallbackBrandName')?.get('font-size')).toBe('17px')
     expect(declarations('.fallbackBrandName')?.get('white-space')).toBe('nowrap')
   })
+
+  it('publishes one footer row contract for every slot occupant', () => {
+    const root = declarations('.root')
+    expect(root?.get('--dsh-sidebar-footer-height')).toBe('42px')
+    expect(root?.get('--dsh-sidebar-footer-radius')).toBe('12px')
+    expect(declarations('.footArea :global(.dsh-sidebar-footer-row)')?.get('height')).toBe(
+      'var(--dsh-sidebar-footer-height)',
+    )
+    expect(declarations('.footArea :global(.dsh-sidebar-footer-row)')?.get('padding')).toBe(
+      'var(--dsh-sidebar-footer-padding)',
+    )
+  })
 })

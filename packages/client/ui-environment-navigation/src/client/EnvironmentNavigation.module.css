@@ -68,17 +68,30 @@
 .footerButton {
   display: flex;
   width: 100%;
-  min-height: 36px;
+  min-height: var(--dsh-sidebar-footer-height, 42px);
+  height: var(--dsh-sidebar-footer-height, 42px);
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 8px;
+  gap: var(--dsh-sidebar-footer-gap, 8px);
+  padding: var(--dsh-sidebar-footer-padding, 0 10px 0 8px);
+  box-sizing: border-box;
+  border-radius: var(--dsh-sidebar-footer-radius, 12px);
 }
 
 .footerButton:hover,
 .headerButton:hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.railFooterButton {
+  width: 36px;
+  min-height: 36px;
+  height: 36px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  border-radius: 50%;
+  corner-shape: round;
 }
 
 .modeTabs {
