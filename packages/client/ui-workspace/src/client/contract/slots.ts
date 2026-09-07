@@ -109,6 +109,7 @@ export type WorkspaceBrowserInjected = {
     /** Query shared by the visible Workspaces or Activity list. */
     sidebarQuery: HostObservable<string>
     /** Session baseline readiness, independent of transport connectivity. */
+    workspaceFeed: HostObservable<import('@deepseek-ai/dsh-api-workspace-controller/client').WorkspaceFeedSnapshot>
     sessionFeed: HostObservable<import('@deepseek-ai/dsh-api-session-controller/client').SessionFeedSnapshot>
     /** Latest explicit navigation failure. */
     navigationError: HostObservable<string | null>
@@ -117,6 +118,8 @@ export type WorkspaceBrowserInjected = {
   setSidebarQuery(query: string): void
   /** Retry an unavailable session feed. */
   retryFeed(): void
+  /** Retry only the unavailable Workspace subscription. */
+  retryWorkspaceFeed(): void
   /**
    * Start a New Session in a Workspace: reuse-or-create its blank session and
    * open it; without an explicit workspace, inherit the current Session

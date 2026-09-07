@@ -126,6 +126,7 @@ export function apply(ctx: Context): void {
       else presentation.setSidebarQuery(query)
     },
     retryFeed: () => { sessions.retryFeed() },
+    retryWorkspaceFeed: () => { workspaces.retryFeed() },
     searchSessions,
     searchResultLimit: sessions.searchResultLimit,
     renameSession: async (sessionId, title) => {
@@ -155,7 +156,7 @@ export function apply(ctx: Context): void {
     createWorkspace: input => workspaces.create(input),
     hooks: {
       directoryFlow: browserFlowSource, hostInfo, sidebarQuery,
-      sessionFeed: sessions.feed, navigationError: uiWorkspace.navigationError,
+      workspaceFeed: workspaces.feed, sessionFeed: sessions.feed, navigationError: uiWorkspace.navigationError,
     },
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
