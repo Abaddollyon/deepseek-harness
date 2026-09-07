@@ -19,6 +19,7 @@ export interface WorkspaceFeedSnapshot {
 
 /** Serializes Workspace subscriptions and fences callbacks before asynchronous teardown. */
 export class WorkspaceFeedRecovery {
+  /** Sanitized follow readiness diagnostics exposed to mounted client surfaces. */
   readonly snapshot = createSnapshotStore<WorkspaceFeedSnapshot>({
     endpoint: 'workspace/follow', state: 'loading', attempt: 0, generation: 0,
     hasBaseline: false, lastSuccessfulAt: null, failure: null, canRetry: false,
