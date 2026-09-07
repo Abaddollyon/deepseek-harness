@@ -506,3 +506,17 @@
 .root[data-phase='settling'] .composerSeat {
   visibility: hidden;
 }
+
+/* Feature views own a bounded viewport. The transcript's retained scrollTop
+   must never become a feature's starting position or expand its 100% height. */
+.scrollBody:has([data-feature-view]) {
+  overflow: clip;
+  scrollbar-gutter: auto;
+}
+.root[data-phase='active'] .viewArea[data-feature-view] {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  --vesper-feature-page-padding: 20px clamp(12px, 3vw, 28px) 28px;
+}

@@ -104,6 +104,7 @@ export function apply(ctx: Context): void {
   }
   const stored = readPersistedPresentation()
   const presentation = createEnvironmentPresentationStore(stored)
+  ctx.effect(() => () => { presentation.dispose() }, 'environment-runtime: presentation sources')
   const navigation = {
     ...createEnvironmentNavigation({ kind: 'environments' }),
     presentation,

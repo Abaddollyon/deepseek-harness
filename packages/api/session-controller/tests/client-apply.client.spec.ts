@@ -106,6 +106,14 @@ async function flush(): Promise<void> {
 }
 
 describe('Session Controller Client apply', () => {
+  it('validates a finite readiness retry schedule', () => {
+    expect(SessionClient.Config().controlRetryDelaysMs).toEqual([250, 500, 1000, 2000, 4000])
+    expect(SessionClient.Config({ controlRetryDelaysMs: [] }).controlRetryDelaysMs).toEqual([])
+    for (const delays of [[-1], [0.5], [60_001], Array.from({ length: 21 }, () => 1)]) {
+      expect(() => SessionClient.Config({ controlRetryDelaysMs: delays })).toThrow()
+    }
+  })
+
   it('routes Session Remote Events and connection generations into the object layer', async () => {
     const connected = vi.spyOn(ClientSessions.prototype, 'handleConnected')
     const error = vi.spyOn(ClientSessions.prototype, 'handleSessionError')
@@ -144,7 +152,6 @@ describe('Session Controller Client apply', () => {
 
   it('accepts the control baseline, retries a carrier generation, and reports terminal protocol failure', async () => {
     const accept = vi.spyOn(ClientSessions.prototype, 'handleControlFrame')
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const bench = await mount(GENERATION)
     await flush()
 
@@ -159,10 +166,10 @@ describe('Session Controller Client apply', () => {
 
     bench.api.pushControl({ type: 'baseline', value: bench.api.controlBaseline } as never)
     await vi.waitFor(() => {
-      expect(logged).toHaveBeenCalledWith(
-        '[session-controller] control stream failed:',
-        expect.objectContaining({ message: 'session control stream emitted more than one opening snapshot' }),
-      )
+      expect(bench.sessions.feed.getSnapshot()).toMatchObject({
+        state: 'stale',
+        error: { code: 'gateway/internal', message: 'session control stream emitted more than one opening snapshot' },
+      })
     })
   })
 

@@ -1,5 +1,6 @@
 /** Simplified Chinese environment navigation copy. */
 export const zh = {
+  'sidebar.mode': '侧边栏模式',
   'activity': '活动',
   'workspaces': '工作区',
   'environments': '环境',
@@ -13,6 +14,7 @@ export type EnvironmentNavigationKey = keyof typeof zh
 
 /** English environment navigation copy. */
 export const en = {
+  'sidebar.mode': 'Sidebar mode',
   'activity': 'Activity',
   'workspaces': 'Workspaces',
   'environments': 'Environments',

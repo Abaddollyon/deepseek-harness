@@ -3796,6 +3796,9 @@ importers:
       '@deepseek-ai/dsh-client-connection':
         specifier: workspace:^
         version: link:../connection
+      '@deepseek-ai/dsh-client-environment-runtime':
+        specifier: workspace:^
+        version: link:../environment-runtime
       '@deepseek-ai/dsh-client-locale':
         specifier: workspace:^
         version: link:../locale

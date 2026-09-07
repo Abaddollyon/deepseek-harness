@@ -1,3 +1,4 @@
+import { createEnvironmentNavigation, createEnvironmentPresentationStore } from '@deepseek-ai/dsh-client-environment-runtime/client'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -104,6 +105,7 @@ class MutableSource<T> {
 }
 
 class FakeSessions {
+  readonly feed = new MutableSource({ state: 'ready', error: null, attempt: 0 })
   readonly list: MutableSource<SessionListState>
   readonly create: ReturnType<typeof vi.fn<ISessions['create']>>
   readonly open: ReturnType<typeof vi.fn<(id: SessionId) => void>>
@@ -185,10 +187,14 @@ class FakeDirectoryPicker {
 interface BenchOptions {
   readonly workspaces?: WorkspaceSnapshot
   readonly sessions?: SessionListState
+  readonly navigation?: ReturnType<typeof createEnvironmentNavigation> & {
+    presentation: ReturnType<typeof createEnvironmentPresentationStore>
+  }
 }
 
 function bench(options: BenchOptions = {}) {
   const ctx = new Context()
+  if (options.navigation !== undefined) ctx.provide('environmentNavigation', options.navigation)
   const directoryPicker = new FakeDirectoryPicker()
   const workspaces = new FakeWorkspaces(options.workspaces ?? workspaceState([], [], 'pending'))
   const sessions = new FakeSessions(options.sessions ?? sessionState([], undefined, 'pending'))
@@ -277,15 +283,14 @@ describe('UiWorkspaceService', () => {
       expect(b.sessions.open).toHaveBeenLastCalledWith(sid('opened-recent-home'))
     })
 
-    const empty = bench()
+    const empty = bench({ sessions: sessionState(), workspaces: workspaceState() })
     empty.uiWorkspace.startSession()
     expect(empty.sessions.clear).toHaveBeenCalledOnce()
 
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     b.sessions.create.mockRejectedValueOnce(new Error('create failed'))
     b.uiWorkspace.startSession(wid('recent-home'))
     await vi.waitFor(() => {
-      expect(warning).toHaveBeenCalledWith('new session failed:', expect.any(Error))
+      expect(b.uiWorkspace.navigationError.getSnapshot()).toBe('create-failed')
     })
   })
 
@@ -357,6 +362,7 @@ describe('UiWorkspaceService', () => {
   })
 
   it('stops initial navigation when its Cordis lifetime is disposed', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const success = bench()
     const resolved = Promise.withResolvers<SessionId>()
     success.sessions.create.mockImplementation(() => resolved.promise)
@@ -377,7 +383,6 @@ describe('UiWorkspaceService', () => {
     failure.sessions.list.set(sessionState())
     await vi.waitFor(() => { expect(failure.sessions.create).toHaveBeenCalledOnce() })
     const staleReconciles = failure.workspaces.list.listenersSnapshot()
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     await failure.ctx.fiber.dispose()
     rejected.reject(new Error('late failure'))
     await flush()
@@ -452,4 +457,57 @@ describe('UiWorkspaceService', () => {
       rpcError: { code: 'directory-picker/exists' },
     })
   })
+})
+
+describe('explicit shell navigation', () => {
+  it('reopens the selected Session from Environments and navigates an untargeted New Session to a blank conversation', async () => {
+    const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState() })
+    const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
+    b.ctx.provide('environmentNavigation', navigation)
+    b.ctx.provide('environmentRuntime', { environmentId: 'local' } as never)
+    b.uiWorkspace.openSession(sid('current'))
+    expect(navigation.getSnapshot()).toEqual({ kind: 'session', ref: { environmentId: 'local', sessionId: 'current' }, viewId: 'chat' })
+    navigation.open({ kind: 'environments' })
+    b.uiWorkspace.openSession(sid('current'))
+    expect(navigation.getSnapshot().kind).toBe('session')
+    navigation.open({ kind: 'environments' })
+    b.uiWorkspace.startSession()
+    expect(navigation.getSnapshot()).toEqual({ kind: 'new-session', environmentId: 'local', viewId: 'chat' })
+    expect(b.sessions.create).not.toHaveBeenCalled()
+    await b.ctx.fiber.dispose()
+  })
+
+  it('shows unready and creation failures without abandoning the current route', async () => {
+    const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState() })
+    const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
+    b.ctx.provide('environmentNavigation', navigation)
+    b.sessions.feed.set({ state: 'error', error: null, attempt: 0 })
+    b.uiWorkspace.startSession()
+    expect(b.uiWorkspace.navigationError.getSnapshot()).toBe('not-ready')
+    expect(b.sessions.clear).not.toHaveBeenCalled()
+    b.sessions.feed.set({ state: 'ready', error: null, attempt: 0 })
+    b.sessions.create.mockRejectedValueOnce(new Error('denied'))
+    b.uiWorkspace.createLooseSession()
+    await vi.waitFor(() => { expect(b.uiWorkspace.navigationError.getSnapshot()).toBe('create-failed') })
+    expect(navigation.getSnapshot().kind).toBe('environments')
+    expect(b.sessions.open).not.toHaveBeenCalled()
+    await b.ctx.fiber.dispose()
+  })
+})
+
+it.each(['overview', 'activity', 'dispose'] as const)('does not let delayed creation override %s', async (action) => {
+  const navigation = { ...createEnvironmentNavigation({ kind: 'session', ref: { environmentId: 'local', sessionId: 'current' }, viewId: 'chat' }), presentation: createEnvironmentPresentationStore() }
+  const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState(), navigation })
+  let complete!: (sessionId: SessionId) => void
+  b.sessions.create.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve }))
+  b.uiWorkspace.createLooseSession()
+  if (action === 'overview') navigation.open({ kind: 'environments' })
+  if (action === 'activity') navigation.presentation.setSidebarMode('local', 'activity')
+  if (action === 'dispose') await b.ctx.fiber.dispose()
+  const retained = navigation.getSnapshot()
+  complete(sid('created'))
+  await flush()
+  expect(b.sessions.open).not.toHaveBeenCalled()
+  expect(navigation.getSnapshot()).toBe(retained)
+  if (action !== 'dispose') await b.ctx.fiber.dispose()
 })

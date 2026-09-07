@@ -22,6 +22,7 @@ function sessions() {
   const byId = { same: { sessionId: 'same' } }
   return {
     open: vi.fn((sessionId: string) => { current = sessionId; for (const listener of [...listeners]) listener() }),
+    clear: vi.fn(() => { current = undefined; for (const listener of [...listeners]) listener() }),
     list: {
       getSnapshot: () => ({ current, byId, phase: 'ready' as const }),
       subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -726,4 +727,33 @@ describe('environment composition service', () => {
     await composition.dispose()
     await shell.fiber.dispose()
   })
+})
+
+test('a blank navigation clears once and lets a subsequent domain open publish even the same Session', async () => {
+  const shell = new Context()
+  shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+  shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
+  const local = sessions()
+  local.open('same')
+  shell.reflect.provide('sessions', local)
+  const nav = navigation({ kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'chat' })
+  const service = createEnvironmentCompositionService(shell)
+  service.registerFactory(async () => ({ request: async () => new Response('ok'), connectionTransport: { fetch: vi.fn() }, dispose: () => {} }))
+  const composition = await service.start({
+    navigation: nav,
+    activator: {
+      deriveRoster: roots => [...roots],
+      activate: async () => ({ dispose: async () => {} }),
+      withdraw: async () => ({ resume: async () => {} }),
+    },
+    domain: { roots: [] }, presentation: { roots: [] }, runtimeServices: [], shellServices: [],
+  })
+  nav.open({ kind: 'new-session', environmentId: 'local', viewId: 'chat' })
+  expect(local.clear).toHaveBeenCalledOnce()
+  local.open('same')
+  expect(local.clear).toHaveBeenCalledOnce()
+  expect(local.list.getSnapshot().current).toBe('same')
+  expect(nav.getSnapshot()).toEqual({ kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'chat' })
+  await composition.dispose()
+  await shell.fiber.dispose()
 })

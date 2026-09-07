@@ -48,7 +48,7 @@ Connection 拥有 request correlation、`/api` carrier、trust check、精确 Fe
 
 [`api/session-controller`](../../packages/api/session-controller/README.zh.md)公开 Session list、search、creation、selection data、prompt、queue、cancellation、pagination 及 follow/control stream 等 Host command。其 Client 侧按 `ClientSessions → SessionManager → Session` 组织：
 
-- `ClientSessions` 提供 `ctx.sessions`，拥有 Session scope 与稳定的 `SessionBinding` object，并投影选中的 list state。
+- `ClientSessions` 提供 `ctx.sessions`，拥有 Session scope 与稳定的 `SessionBinding` object，并投影选中的 list state。`feed` source 区分数据就绪状态与连接状态；`retryFeed()` 重新获取 control baseline 与权威 list，同时保留已有 Session。
 - `SessionManager` 拥有 list baseline、实时 list/control update、惰性 Session instance、queue、projection store、subagent catalog，以及 pull 与后到 update 之间的冲突顺序。
 - 每个 `Session` 拥有一段由 `SessionEventLikeEntry` value 表示的连续逻辑 event window、pagination、follow、prompt/control state 与供 adapter 消费的 observable snapshot。
 
@@ -103,3 +103,5 @@ Connection 拥有 request correlation、`/api` carrier、trust check、精确 Fe
 - [API Gateway](../api-gateway.zh.md)：Host method、生成的 Remote contribution、stream 与 forwarded event。
 - [Web Client Slots](slots.zh.md)：component、hook、store、injection 与 placement。
 - [Conversation](conversation.zh.md)：持久 event correlation、target snapshot，以及 Chat 或 Trajectory view contribution。
+
+导航也接受不带 Session id、但包含 Host 身份的 `new-session` location。Composition 对该导航意图只清除一次选择，因此后续 composer 或 domain 的打开操作可以选择并导航到真实 Session。侧边栏 presentation 提供跨模式共享的查询，并直接读取现有工作区视图 store 中按 Host 隔离的固定会话数据源；环境 presentation 持久化不重复存储固定状态。

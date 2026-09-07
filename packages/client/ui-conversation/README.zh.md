@@ -48,6 +48,8 @@ Session 首次绑定或缓存的 Session 成为 current 时，shell 会在渲染
 
 普通 composer 运行时，如果草稿为空或输入不可用，主指针操作保持为 Stop。可提交的文字或附件会把同一位置切换为 Queue Send；清空或成功提交草稿后恢复 Stop。繁忙态 Enter 设置继续选择 Queue 或 Steer 键盘操作。可继续 subagent 保留独立的 Send 与 Stop 操作（[决策](../../../.agents/notes/implemented/bug-fix/2026-08-20-running-draft-primary-send.zh.md)）。
 
+非 Chat 视图获得有界的功能视口，并在原生 environment/session store 存活期间按该 store 和视图保留主滚动位置。功能通过 `data-feature-scroll` 标记主滚动容器；未标记的视图使用视图区。Shell 等待延迟内容后恢复位置，不套用聊天记录的偏移量，用户的显式滚动优先。常驻 composer 保持挂载；Chat 保留自身的锚点和跟随底部策略（[决策](../../../.agents/notes/implemented/bug-fix/2026-09-07-feature-view-scroll.zh.md)）。
+
 <a id="temporary-composer-entries"></a>
 ## 临时 composer entry
 

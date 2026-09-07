@@ -24,6 +24,8 @@ The Host writes the composed `WebBootGraph` to `window.__DSH_BOOT__` and install
 
 The Web boot kernel creates the module system, prefetches `immediately` entries, mounts the vendored Cordis Loader, and creates every graph entry. Cordis service injection determines activation; module graph order determines only whether synchronous imports can be materialized. After the complete roster reaches a settled state, `ui-renderer` hydrates the framework-free boot DOM and calls the sole context-level `renderSlot('root')` operation. [Client Modules](client-modules.md) owns the graph, bundle route, cache revision, and loader details.
 
+Navigation also accepts a Host-qualified `new-session` location without a Session id. The composition clears selection once for that location intent, so subsequent composer or domain opens can select and navigate to a real Session. Sidebar presentation exposes one query across modes and direct Host-qualified pin sources from the existing workspace view stores; pin data is not duplicated in environment presentation persistence.
+
 ## Environment composition
 
 `client/environment-runtime` owns the local environment identity, persistent `ctx.environmentNavigation`, and compound presentation state. Selecting a Host in the Environments overview stays on the local control plane; opening that Host's Session is the transition that acquires its runtime. Every Session location carries `{ environmentId, sessionId }`; drafts, selected views and details, scroll anchors, and sidebar mode therefore remain distinct when two Hosts use the same Session id. Slot injection and Host APIs still receive the native Session id, while renderer Store cache and persistence use a separate compound key. Navigation and this bounded presentation store belong to the shell lifetime, so withdrawing presentation plugins cannot collapse the environment adapter that coordinates the switch.
@@ -48,7 +50,7 @@ Each API controller package owns a paired Host and Client face. The Host side ow
 
 [`api/session-controller`](../../packages/api/session-controller/README.md) exposes Host commands for list, search, creation, selection data, prompt, queue, cancellation, pagination, and follow/control streams. Its Client side is organized as `ClientSessions → SessionManager → Session`:
 
-- `ClientSessions` provides `ctx.sessions`, owns Session scopes and stable `SessionBinding` objects, and projects the selected list state.
+- `ClientSessions` provides `ctx.sessions`, owns Session scopes and stable `SessionBinding` objects, and projects the selected list state. Its `feed` source distinguishes data readiness from connection state; `retryFeed()` retries the control baseline and authoritative list without clearing retained Sessions.
 - `SessionManager` owns the list baseline, live list/control updates, lazy Session instances, queues, projection stores, subagent catalogs, and conflict ordering between pulls and later updates.
 - Each `Session` owns one contiguous logical-event window represented by `SessionEventLikeEntry` values, paging, follow, prompt/control state, and the observable snapshot consumed by adapters.
 

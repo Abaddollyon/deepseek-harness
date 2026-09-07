@@ -1,3 +1,4 @@
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { describe, expect, test } from 'vitest'
 import { createEnvironmentPresentationStore } from '../src/client/presentation-state.ts'
 
@@ -83,4 +84,40 @@ describe('environment presentation state', () => {
     expect(second.get(priorNewest)).toMatchObject({ viewId: 'view-11' })
     expect(second.get(refs[3]!)).toMatchObject({ draft: '', viewId: 'chat' })
   })
+})
+
+test('shares one query and the existing Host-qualified pin sources without another persisted pin set', () => {
+  const presentation = createEnvironmentPresentationStore()
+  const local = createSnapshotStore<readonly string[]>(['same'])
+  const remote = createSnapshotStore<readonly string[]>(['other'])
+  const stored = ['saved']
+  presentation.registerWorkspacePinReader(() => stored)
+  presentation.registerWorkspacePins('local', local)
+  presentation.registerWorkspacePins('sigil', remote)
+  expect(presentation.getPinnedSessionIds('local')).toBe(local.getSnapshot())
+  expect(presentation.getPinnedSessionIds('sigil')).toBe(remote.getSnapshot())
+  expect(presentation.getPinnedSessionIds('offline')).toBe(stored)
+  presentation.setSidebarQuery('needle')
+  expect(presentation.getSidebarQuery()).toBe('needle')
+  local.set(['changed'])
+  expect(presentation.getPinnedSessionIds('local')).toEqual(['changed'])
+  expect(presentation.serialize()).not.toContain('changed')
+})
+
+test('pin subscriptions release with their effect while retained sources remain readable until shell disposal', () => {
+  const presentation = createEnvironmentPresentationStore()
+  const pins = createSnapshotStore<readonly string[]>(['first'])
+  let changes = 0
+  presentation.subscribe(() => { changes++ })
+  const release = presentation.registerWorkspacePins('local', pins)
+  expect(changes).toBe(1)
+  release()
+  pins.set(['retained'])
+  expect(changes).toBe(1)
+  expect(presentation.getPinnedSessionIds('local')).toEqual(['retained'])
+  presentation.registerWorkspacePins('local', pins)
+  presentation.dispose()
+  pins.set(['later'])
+  expect(changes).toBe(2)
+  expect(presentation.getPinnedSessionIds('local')).toEqual([])
 })

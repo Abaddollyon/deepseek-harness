@@ -1,6 +1,6 @@
 /** Strict per-session header/body content inserted into the resident conversation layout. */
 
-import { useEffect, type KeyboardEvent } from 'react'
+import { useEffect, useRef, type KeyboardEvent } from 'react'
 import clsx from 'clsx'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -10,6 +10,7 @@ import type {
 import { conversationPhase } from '../contract/snapshot.ts'
 import { resolveActiveView } from '../view-selection.ts'
 import css from './ConversationRoot.module.css'
+import { bindFeatureScroll } from './feature-scroll.ts'
 
 /** Full props composed from the strict session body contract. */
 export type ConversationSessionProps = ConversationSessionSlotProps
@@ -201,6 +202,13 @@ export function ConversationSession({
   const inputState = useInput(s => s)
   const storedDraft = useStore(s => s.draft)
   const viewRequest = useStore(s => s.viewRequest ?? null)
+  const areaRef = useRef<HTMLDivElement>(null)
+  const featureId = active !== undefined && active.id !== 'chat' ? active.id : undefined
+  useEffect(() => {
+    if (featureId === undefined || areaRef.current === null) return
+    return bindFeatureScroll(areaRef.current, actions, featureId)
+  }, [actions, featureId])
+
 
   useEffect(() => {
     if (inputState.draft === '' && storedDraft !== '') inputActions.setDraft(storedDraft)
@@ -212,7 +220,7 @@ export function ConversationSession({
 
   if (session.blank && conversationPhase(session, conversation) === 'blank') return null
   return (
-    <div className={css.viewArea}>
+    <div ref={areaRef} className={css.viewArea} data-feature-view={featureId}>
       {active !== undefined && renderSlot('conversation.view', {
         viewRequest,
         openView,

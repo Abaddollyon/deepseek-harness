@@ -5,7 +5,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {
-  EnvironmentId, EnvironmentNavigationService, EnvironmentSidebarMode,
+  EnvironmentId, EnvironmentSidebarMode,
 } from '@deepseek-ai/dsh-client-environment-runtime/client'
 import {
   ActivityContent, ActivityToggle, EnvironmentFooterAction, EnvironmentOverview,
@@ -29,7 +29,7 @@ export const inject = ['slots', 'locale', 'uiSidebar', 'environmentNavigation']
  * @param ctx - shell Cordis root.
  */
 export function apply(ctx: Context): void {
-  const navigation = ctx.environmentNavigation as EnvironmentNavigationService
+  const navigation = ctx.environmentNavigation
   const presentation = navigation.presentation
   ctx.effect(
     () => ctx.locale.register('environmentNavigation', { zh, en }),
@@ -37,7 +37,8 @@ export function apply(ctx: Context): void {
   )
   const activeEnvironment = (): EnvironmentId => {
     const location = navigation.getSnapshot()
-    return location.kind === 'session' ? location.ref.environmentId : location.selectedId ?? 'local'
+    return location.kind === 'session' ? location.ref.environmentId
+      : location.kind === 'new-session' ? location.environmentId : location.selectedId ?? 'local'
   }
   let sidebarMode = presentation.getSidebarMode(activeEnvironment())
   const modeListeners = new Set<() => void>()
@@ -78,7 +79,7 @@ export function apply(ctx: Context): void {
     order: -100,
     locale: 'environmentNavigation',
     inject: () => ({
-      sidebarMode: modeSource,
+      hooks: { sidebarMode: modeSource },
       setMode: (mode: EnvironmentSidebarMode) => {
         presentation.setSidebarMode(activeEnvironment(), mode)
       },
@@ -90,7 +91,7 @@ export function apply(ctx: Context): void {
     locale: 'environmentNavigation',
     children: { 'sidebar.activity': { kind: 'single', scope: 'root' } },
     inject: () => ({
-      sidebarMode: modeSource,
+      hooks: { sidebarMode: modeSource },
       setMode: (mode: EnvironmentSidebarMode) => {
         presentation.setSidebarMode(activeEnvironment(), mode)
       },

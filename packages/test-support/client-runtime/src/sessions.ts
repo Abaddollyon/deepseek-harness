@@ -7,7 +7,7 @@ import {
 import type {
   AgentContext, ISessions, ProjectionsFace, SessionBinding, SessionFace, SessionListState,
   SessionEventLikeEntry, SessionLiveEventEntry, SessionSearchResultItem,
-  SessionSnapshot, SessionSummary, SubmissionHandle,
+  SessionSnapshot, SessionSummary, SubmissionHandle, SessionFeedSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
@@ -193,12 +193,14 @@ interface SessionRecord {
 export class TestSessions implements ISessions {
   /** The useSessions standard feed (list rows + current selection). */
   readonly list: SnapshotStore<SessionListState>
+  /** Fixture-controlled readiness; declared data is immediately available by default. */
+  readonly feed = createSnapshotStore<SessionFeedSnapshot>({ state: 'ready', error: null, attempt: 0 })
   private readonly records = new Map<SessionId, SessionRecord>()
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'create' | 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'refresh' | 'search' | 'fork'
+      | 'clear' | 'refresh' | 'retryFeed' | 'search' | 'fork'
     args: unknown[]
   }[] = []
 
@@ -218,6 +220,11 @@ export class TestSessions implements ISessions {
       ids: [], byId: {}, current: undefined, phase: 'ready',
       subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
     })
+  }
+
+  /** Record an explicit retry; fixture owners control subsequent readiness changes. */
+  retryFeed(): void {
+    this.calls.push({ method: 'retryFeed', args: [] })
   }
 
   /**

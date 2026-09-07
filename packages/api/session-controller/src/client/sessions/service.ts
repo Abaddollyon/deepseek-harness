@@ -31,6 +31,7 @@ import type { SessionFace } from '../contract/session.ts'
 import type { AgentContext, ISessions } from '../contract/sessions.ts'
 import { createScope, scopeOf as scopeTagOf } from '../scope.ts'
 import { SessionManager } from './manager.ts'
+import { SessionFeedRecovery, type SessionFeedSnapshot } from '../feed.ts'
 import type { SessionRemotes } from './remotes.ts'
 import type { SessionListPhase, SessionSearchResultItem, SubagentCatalogSnapshot } from './manager.ts'
 import type { Session } from './session.ts'
@@ -189,6 +190,8 @@ export class ClientSessions implements ISessions {
   readonly searchResultLimit = SESSION_SEARCH_RESULT_LIMIT
   /** List snapshot store (list RPC + host stream increments; re-pulled on reconnect) — the useSessions standard feed, current included. */
   readonly list: SnapshotStore<SessionListState>
+  readonly feed: SnapshotStore<SessionFeedSnapshot>
+  private readonly recovery: SessionFeedRecovery
   /** The object-layer instance cluster and frame dispatch entry. */
   private readonly manager: SessionManager
   /**
@@ -222,6 +225,7 @@ export class ClientSessions implements ISessions {
     private readonly rootCtx: Context,
     remote: SessionRemotes,
     storageEnvironmentId?: string,
+    controlRetryDelaysMs: readonly number[] = [],
   ) {
     const selectionKey = storageEnvironmentId === undefined
       ? 'dsh.sessions.current'
@@ -240,6 +244,13 @@ export class ClientSessions implements ISessions {
       ids: [], byId: {}, current: undefined, phase: 'pending',
       subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
     })
+    this.recovery = new SessionFeedRecovery(remote, controlRetryDelaysMs,
+      (frame) => { this.handleControlFrame(frame) },
+      async () => {
+        await this.manager.refreshList()
+        return this.manager.getListSnapshot().error
+      })
+    this.feed = this.recovery.snapshot
     // The manager owns wire truth; the store is its projection. Manager
     // notifications are already microtask-batched.
     const disposeManagerProjection = this.manager.subscribe(() => {
@@ -257,6 +268,7 @@ export class ClientSessions implements ISessions {
     rootCtx.effect(() => async () => {
       disposeStageFollower()
       disposeManagerProjection()
+      await this.recovery.dispose()
       const scopes = [...this.scopes]
       this.scopes.clear()
       this.deferredRemovals.clear()
@@ -266,6 +278,11 @@ export class ClientSessions implements ISessions {
       await this.manager.dispose()
     }, 'session-controller.client.sessions')
     rootCtx.reflect.provide('sessions', this, undefined)
+  }
+
+  /** Start or manually retry the Session feed without changing selection or drafts. */
+  retryFeed(): void {
+    this.recovery.retry()
   }
 
   /**
@@ -319,6 +336,7 @@ export class ClientSessions implements ISessions {
    * per the masked-gap contract until the next open() moves the stage.
    */
   clear(): void {
+    this.selection.set({})
     this.manager.clearSelection()
   }
 
@@ -633,10 +651,10 @@ export class ClientSessions implements ISessions {
       }
     }
     const persisted = this.selection.getSnapshot().sessionId
-    // No current (cleared, or masked gap) wipes the persisted cell — a reload
-    // stays on empty; the in-memory selection still resurfaces a masked id.
+    // Only an authoritative list can discard a restored selection; the
+    // pending first read has not established whether that Session exists.
     if (current === undefined) {
-      if (persisted !== undefined) this.selection.set({})
+      if (phase === 'ready' && persisted !== undefined) this.selection.set({})
     } else if (byId[current] !== undefined
       && (persisted !== current
         || this.selection.getSnapshot().subagentAddress?.childSessionId !== currentAddress?.childSessionId
