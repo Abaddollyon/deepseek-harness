@@ -80,3 +80,32 @@
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+.modeTabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  flex: none;
+}
+
+.modeTabs[data-wide='true'] .headerButton {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: 32px;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.modeTabs[data-wide='false'] {
+  flex-direction: column;
+  align-items: center;
+  padding: 0;
+}
+
+.modeTabs[data-wide='false'] .headerButton {
+  width: 36px;
+  height: 36px;
+}

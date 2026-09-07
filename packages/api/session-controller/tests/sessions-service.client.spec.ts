@@ -419,6 +419,38 @@ describe('current selection (migrated from ui-layout, arbitrated into the list s
     expect(b.svc.list.getSnapshot().current).toBe('s1') // failed open leaves the selection alone
   })
 
+  it('preserves persisted selection through a failed initial read while explicit clear still removes it', async () => {
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+      removeItem: (key: string) => { storage.delete(key) },
+    })
+    const original = bench()
+    await feedList(original, [{ id: 'saved' }])
+    original.svc.open(sid('saved'))
+    await original.ctx.plugin(() => {})
+    await original.ctx.fiber.dispose()
+    const restored = bench()
+    restored.api.onList = async () => err(new RemoteError(
+      'gateway/service-unavailable', 'Starting', { endpoint: 'session/list' },
+    ))
+    await restored.svc.refresh()
+    expect(restored.svc.list.getSnapshot().phase).toBe('pending')
+    expect(storage.get('dsh.sessions.current')).toContain('saved')
+    await feedList(restored, [{ id: 'saved' }])
+    expect(restored.svc.list.getSnapshot().current).toBe('saved')
+    await restored.ctx.plugin(() => {})
+    await restored.ctx.fiber.dispose()
+    const cleared = bench()
+    cleared.svc.clear()
+    expect(storage.get('dsh.sessions.current')).not.toContain('saved')
+    await feedList(cleared, [{ id: 'saved' }])
+    expect(cleared.svc.list.getSnapshot().current).toBeUndefined()
+    await cleared.ctx.plugin(() => {})
+    await cleared.ctx.fiber.dispose()
+  })
+
   it('clear() blanks list.current and the persisted selection', async () => {
     const storage = new Map<string, string>()
     vi.stubGlobal('localStorage', {

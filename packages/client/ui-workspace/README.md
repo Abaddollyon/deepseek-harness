@@ -11,6 +11,8 @@ English | [中文](README.zh.md)
 
 `dsh-client-ui-workspace` is the shared Workspace browser and picker of the dsh web client: users browse grouped or flat Session rows in the sidebar, pick a Workspace for a new session from the Session Intent hero, and manage Workspaces and Sessions with add, rename, reorder, search, fork, and archive actions; the same Workspace menu and add flow serve both surfaces. Pending user interactions surface as amber warning dots, active Schedule projections surface as non-interactive alarm markers in ordinary and search rows, and the shared sidebar projection hides subagent-origin sessions. Distinct canonical paths remain separate id-keyed Workspaces, and adding a folder goes through a directory-flow child hole that a composed picker package's client half fills.
 
+The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces. The existing Host-qualified persisted view store remains the sole pin owner and exposes its source to shell Activity providers.
+
 ## Table of Contents
 
 - [Use this package](#use-this-package)

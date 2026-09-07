@@ -48,6 +48,8 @@ Default sends commit optimistically: Enter clears the draft, occurrence table, a
 
 While a normal composer is running, its primary pointer action remains Stop when the draft is empty or input is unavailable. Actionable text or attachments switch the same seat to Queue Send; clearing or successfully submitting the draft restores Stop. The busy-Enter setting continues to select the Queue or Steer keyboard action. Continuable subagents keep separate Send and Stop actions ([decision](../../../.agents/notes/implemented/bug-fix/2026-08-20-running-draft-primary-send.md)).
 
+Non-Chat views receive a bounded feature viewport and retain their primary scroll position by native environment/session store and view while that store remains alive. A feature marks its primary scroller with `data-feature-scroll`; unmarked views use the view area. The shell restores delayed content without applying transcript offsets, and explicit reader movement takes precedence. The resident composer remains mounted; Chat retains its own anchor and bottom-follow policy ([decision](../../../.agents/notes/implemented/bug-fix/2026-09-07-feature-view-scroll.md)).
+
 <a id="temporary-composer-entries"></a>
 ## Temporary composer entries
 

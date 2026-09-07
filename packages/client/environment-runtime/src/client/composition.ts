@@ -547,7 +547,8 @@ function resolvePresentationServices(
 }
 
 function environmentOf(location: EnvironmentAppLocation): EnvironmentId | undefined {
-  return location.kind === 'session' ? location.ref.environmentId : undefined
+  return location.kind === 'session' ? location.ref.environmentId
+    : location.kind === 'new-session' ? location.environmentId : undefined
 }
 
 function followSessionLocation(
@@ -561,6 +562,7 @@ function followSessionLocation(
       subscribe(listener: () => void): () => void
     }
     open?(sessionId: string): void
+    clear?(): void
     refresh?(): Promise<void>
   } | undefined
   if (sessions?.list === undefined || sessions.open === undefined) return () => {}
@@ -568,9 +570,19 @@ function followSessionLocation(
   let refreshTarget: string | undefined
   let locationTarget: string | undefined
   let locationHydrated = false
+  let blankIntent: EnvironmentAppLocation | undefined
   const sync = (): void => {
     if (stopped) return
     const location = navigation.getSnapshot()
+    if (location.kind === 'new-session' && location.environmentId === environmentId) {
+      if (blankIntent === location) return
+      blankIntent = location
+      locationTarget = undefined
+      locationHydrated = false
+      if (sessions.list?.getSnapshot().current !== undefined) sessions.clear?.()
+      return
+    }
+    blankIntent = undefined
     if (location.kind !== 'session' || location.ref.environmentId !== environmentId) return
     const snapshot = sessions.list?.getSnapshot()
     if (snapshot === undefined) return
@@ -623,8 +635,9 @@ function publishSessionOpens(
   let previous = sessions.list.getSnapshot().current
   return sessions.list.subscribe(() => {
     const current = sessions.list?.getSnapshot().current
-    if (current === undefined || current === previous) return
+    if (current === previous) return
     previous = current
+    if (current === undefined) return
     const location = navigation.getSnapshot()
     if (location.kind === 'session'
       && location.ref.environmentId === environmentId

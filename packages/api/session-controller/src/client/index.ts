@@ -2,7 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent/types'
-import { createSessionControlStream } from './transport.ts'
+import z from '@deepseek-ai/schemastery'
 import { ClientSessions } from './sessions/service.ts'
 import type { SessionRemotes } from './sessions/remotes.ts'
 import type {} from '../remote-events.ts'
@@ -21,6 +21,7 @@ export type {
   SessionJournalChange,
   SessionRemote,
 } from './transport.ts'
+export type { SessionFeedSnapshot } from './feed.ts'
 export { createScope, scopeOf } from './scope.ts'
 export type { AgentContext, AgentScopeHandle } from './scope.ts'
 export { SessionCreateError, SessionForkError } from './sessions/service.ts'
@@ -82,14 +83,26 @@ export const inject = [
   'remote.subagents',
 ]
 
+/** Client recovery timing; an empty list disables automatic service-readiness retries. */
+export const Config: z<Config> = z.object({
+  controlRetryDelaysMs: z.array(z.natural().max(60_000)).max(20).default([250, 500, 1000, 2000, 4000]),
+})
+
+/** Resolved Client Session recovery configuration. */
+export interface Config {
+  /** Millisecond delays for successive temporary service-absence retries; at most 20. */
+  controlRetryDelaysMs: number[]
+}
+
 /**
  * Install Client Session state and its reconnecting control stream.
  * @param ctx - Client Cordis context.
+ * @param config - Validated Client recovery schedule.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   const remotes = ctx.remote as unknown as SessionRemotes
   const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)?.environmentId
-  const sessions = new ClientSessions(ctx, remotes, environmentId)
+  const sessions = new ClientSessions(ctx, remotes, environmentId, config.controlRetryDelaysMs)
   ctx.remote.$on('api-session/added', (summary) => { sessions.handleSessionAdded(summary) })
   ctx.remote.$on('api-session/removed', (sessionId) => { sessions.handleSessionRemoved(sessionId) })
   ctx.remote.$on('api-session/status', (sessionId, running) => {
@@ -102,16 +115,14 @@ export function apply(ctx: Context): void {
     sessions.handleSessionError(sessionId, message)
   })
 
-  const control = createSessionControlStream(remotes, {
-    accept: (frame) => { sessions.handleControlFrame(frame) },
-    failed: (error) => { console.error('[session-controller] control stream failed:', error) },
+  sessions.retryFeed()
+  ctx.on('connection/reset', () => {
+    sessions.handleConnected()
+    sessions.retryFeed()
   })
-  control.start()
-  ctx.on('connection/reset', () => { sessions.handleConnected() })
   if (ctx.remote.$host.home !== undefined) sessions.handleConnected()
   ctx.typert.contexts.registerClient('agent', {
     identity: candidate => sessions.scopeOf(candidate),
     resolve: sessionId => sessions.resolveAgentScope(sessionId),
   })
-  ctx.effect(() => async () => { await control.dispose() }, 'session-controller.client.control')
 }

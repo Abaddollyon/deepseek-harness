@@ -9,10 +9,19 @@ import type {
 import type {
   IWorkspaces, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type {} from '@deepseek-ai/dsh-client-environment-runtime/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /** Workspace archive and directory operations consumed by Client UI domains. */
 export interface UiWorkspace {
+  /** Observable failure from the latest explicit creation attempt. */
+  readonly navigationError: ObservableSnapshot<string | null>
+  /**
+   * Open a Session through both selection and the shared shell navigation owner.
+   * @param sessionId - Session identifier on this Workspace service's Host.
+   */
+  openSession(sessionId: SessionId): void
   /**
    * Resolve the reusable or newly created blank Session for a Workspace.
    * @param workspaceId - target Workspace.
@@ -71,6 +80,9 @@ export class DirectoryBrowseError extends Error {
 
 /** Implements Workspace archive and directory UI operations. */
 class UiWorkspaceService extends Service implements UiWorkspace {
+  readonly navigationError = createSnapshotStore<string | null>(null)
+  private intent = 0
+  private disposed = false
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
 
   /**
@@ -87,6 +99,24 @@ class UiWorkspaceService extends Service implements UiWorkspace {
   ) {
     super(ctx, 'uiWorkspace')
     ctx.effect(() => this.watchNavigation(), 'ui-workspace: Workspace navigation policy')
+    ctx.effect(() => {
+      const navigation = ctx.get('environmentNavigation')
+      const environmentId = (ctx.get('environmentRuntime') as { environmentId: string } | undefined)?.environmentId ?? 'local'
+      let mode = navigation?.presentation.getSidebarMode(environmentId)
+      const offLocation = navigation?.subscribe(() => { this.intent++ })
+      const offPresentation = navigation?.presentation.subscribe(() => {
+        const next = navigation.presentation.getSidebarMode(environmentId)
+        if (next === mode) return
+        mode = next
+        this.intent++
+      })
+      return () => {
+        this.disposed = true
+        this.intent++
+        offPresentation?.()
+        offLocation?.()
+      }
+    }, 'ui-workspace: explicit navigation lifetime')
   }
 
   async connectWorkspace(workspaceId: WorkspaceId): Promise<SessionId> {
@@ -113,31 +143,60 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     return attempt
   }
 
+  openSession(sessionId: SessionId): void {
+    this.intent++
+    this.navigationError.set(null)
+    this.sessions.open(sessionId)
+    this.navigate(sessionId)
+  }
+
+  private navigate(sessionId?: SessionId): void {
+    const navigation = this.ctx.get('environmentNavigation')
+    const environmentId = (this.ctx.get('environmentRuntime') as { environmentId: string } | undefined)?.environmentId ?? 'local'
+    navigation?.open(sessionId === undefined
+      ? { kind: 'new-session', environmentId, viewId: 'chat' }
+      : { kind: 'session', ref: { environmentId, sessionId }, viewId: 'chat' })
+  }
+
   startSession(workspaceId?: WorkspaceId): void {
+    const intent = ++this.intent
+    this.navigationError.set(null)
+    const feed = this.sessions.feed.getSnapshot()
     const workspace = this.workspaces.list.getSnapshot()
+    if (feed.state !== 'ready' || workspace.phase !== 'ready' || workspace.error !== null) {
+      this.navigationError.set('not-ready')
+      return
+    }
     const sessions = this.sessions.list.getSnapshot()
     const current = sessions.current
     const currentWorkspaceId = current === undefined
       ? undefined
       : workspace.items.find(item => item.sessionIds.includes(current))?.workspaceId
-    const recent = workspace.phase === 'ready' && sessions.phase === 'ready'
+    const recent = sessions.phase === 'ready'
       ? recentWorkspace(workspace.items, sessions.byId)
       : undefined
     const target = workspaceId ?? currentWorkspaceId ?? recent
     if (target === undefined) {
       this.sessions.clear()
+      this.navigate()
       return
     }
     void this.connectWorkspace(target).then(
-      (sessionId) => { this.sessions.open(sessionId) },
-      (reason: unknown) => { console.warn('new session failed:', reason) },
+      (sessionId) => { if (!this.disposed && intent === this.intent) this.openSession(sessionId) },
+      (_reason: unknown) => { if (!this.disposed && intent === this.intent) this.navigationError.set('create-failed') },
     )
   }
 
   createLooseSession(): void {
+    const intent = ++this.intent
+    this.navigationError.set(null)
+    if (this.sessions.feed.getSnapshot().state !== 'ready') {
+      this.navigationError.set('not-ready')
+      return
+    }
     void this.sessions.create({}).then(
-      (sessionId) => { this.sessions.open(sessionId) },
-      (reason: unknown) => { console.warn('loose session failed:', reason) },
+      (sessionId) => { if (!this.disposed && intent === this.intent) this.openSession(sessionId) },
+      (_reason: unknown) => { if (!this.disposed && intent === this.intent) this.navigationError.set('create-failed') },
     )
   }
 
@@ -172,7 +231,8 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       if (initial !== 'waiting') return
       const workspace = this.workspaces.list.getSnapshot()
       const sessions = this.sessions.list.getSnapshot()
-      if (workspace.phase !== 'ready' || sessions.phase !== 'ready') return
+      if (workspace.phase !== 'ready' || workspace.error !== null || sessions.phase !== 'ready'
+        || this.sessions.feed.getSnapshot().state !== 'ready') return
       if (sessions.current !== undefined) {
         initial = 'done'
         return
@@ -200,9 +260,11 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     }
     const disposeWorkspaces = this.workspaces.list.subscribe(reconcile)
     const disposeSessions = this.sessions.list.subscribe(reconcile)
+    const disposeFeed = this.sessions.feed.subscribe(reconcile)
     reconcile()
     return () => {
       disposed = true
+      disposeFeed()
       disposeSessions()
       disposeWorkspaces()
     }

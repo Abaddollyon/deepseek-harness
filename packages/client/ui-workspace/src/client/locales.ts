@@ -6,6 +6,13 @@
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
+  'section.activity': '活动',
+  'feed.loading': '正在加载工作区和会话…',
+  'feed.error': '无法加载会话。',
+  'feed.stale': '正在显示上次加载的会话。连接已中断。',
+  'feed.retry': '重试',
+  'navigation.notReady': '会话尚未就绪，请稍后重试。',
+  'navigation.failed': '无法创建会话，请重试。',
   'group.ungrouped': '未分组',
   'session.new': '新会话',
   'session.untitled': '新会话 · {time}',
@@ -83,6 +90,13 @@ export type WorkspaceKey = keyof typeof zh
 
 /** English dictionary, checked complete against the zh key set. */
 export const en = {
+  'section.activity': 'Activity',
+  'feed.loading': 'Loading workspaces and sessions…',
+  'feed.error': 'Sessions could not be loaded.',
+  'feed.stale': 'Showing previously loaded sessions. The feed is unavailable.',
+  'feed.retry': 'Retry',
+  'navigation.notReady': 'Sessions are not ready yet. Try again when loading finishes.',
+  'navigation.failed': 'The session could not be created. Try again.',
   'group.ungrouped': 'Ungrouped',
   'session.new': 'New Session',
   'session.untitled': 'New Session · {time}',

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceSnapshot as WorkspaceListState, WorkspaceView, WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
@@ -61,7 +62,13 @@ function dragData(): Pick<DataTransfer, 'effectAllowed' | 'dropEffect' | 'setDat
 
 function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
   const store = createWorkspaceViewStore().create()
+  const query = createSnapshotStore('')
   const props: WorkspaceBrowserProps = {
+    useSidebarQuery: bindSnapshotSelector(query),
+    setSidebarQuery: (value) => { query.set(value) },
+    useSessionFeed: hook({ state: 'ready', error: null, attempt: 0 }),
+    useNavigationError: hook(null),
+    retryFeed: vi.fn(),
     wide: true,
     expandSidebar: vi.fn(),
     useSessions: hook(sessionState([])),
@@ -2069,5 +2076,27 @@ describe('WorkspaceBrowser', () => {
     await waitFor(() => { expect(owner?.open).toBe(true) })
     await act(async () => { owner!.onPicked('/tmp/project') })
     await waitFor(() => { expect(startSession).toHaveBeenCalledWith(wid('created')) })
+  })
+})
+
+describe('feed readiness and active sidebar controls', () => {
+  it('distinguishes loading, failed, stale, and successfully empty feeds', () => {
+    const b = mount({ useSessionFeed: hook({ state: 'loading', error: null, attempt: 0 }) })
+    expect(screen.getByRole('status').textContent).toContain(zh['feed.loading'])
+    expect(screen.queryByText(zh['empty.none'])).toBeNull()
+    rerender(b, { useSessionFeed: hook({ state: 'error', error: null, attempt: 0 }) })
+    expect(screen.getByRole('alert').textContent).toContain(zh['feed.error'])
+    fireEvent.click(screen.getByRole('button', { name: zh['feed.retry'] }))
+    expect(b.props.retryFeed).toHaveBeenCalledOnce()
+    rerender(b, { useSessionFeed: hook({ state: 'stale', error: null, attempt: 1 }), useSessions: hook(sessionState([summary('retained', 1)])) })
+    expect(screen.getByRole('status').textContent).toContain(zh['feed.stale'])
+    expect(screen.queryByText(zh['empty.none'])).toBeNull()
+    rerender(b, { useSessionFeed: hook({ state: 'ready', error: null, attempt: 0 }), useSessions: hook(sessionState([])) })
+    expect(screen.getByText(zh['empty.none'])).not.toBeNull()
+  })
+
+  it('shows explicit creation failures in the persistent sidebar', () => {
+    mount({ useNavigationError: hook('create-failed') })
+    expect(screen.getByRole('alert').textContent).toBe(zh['navigation.failed'])
   })
 })

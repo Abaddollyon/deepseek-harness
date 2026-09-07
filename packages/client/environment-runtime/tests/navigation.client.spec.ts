@@ -83,3 +83,12 @@ describe('environment navigation', () => {
     expect(changes).toHaveBeenCalledTimes(2)
   })
 })
+
+test('returns to the most recent conversation across multiple overview visits, including blank content', () => {
+  const navigation = createEnvironmentNavigation({ kind: 'new-session', environmentId: 'sigil', viewId: 'chat' })
+  navigation.open({ kind: 'environments', selectedId: 'sigil' })
+  navigation.open({ kind: 'environments', selectedId: 'local' })
+  navigation.backToSession()
+  expect(navigation.getSnapshot()).toEqual({ kind: 'new-session', environmentId: 'sigil', viewId: 'chat' })
+  expect(environmentSelection(navigation).getSnapshot()).toBe('sigil')
+})

@@ -9,9 +9,9 @@ kind: "package-reference"
 
 ## 概述
 
-这个浏览器 UI plugin 渲染 Environments overview seat、现有 Workspaces 标题中的紧凑铃铛切换、现有浏览区中的 Activity 内容，以及底部 server 操作。它消费 `environment-runtime` 提供的持久 `ctx.environmentNavigation` service；处置本 plugin 只移除自己的 Slot registration 与订阅，因此选中 location 和复合 presentation state 能跨 Host 切换与 UI remount 保留。
+这个浏览器 UI plugin 渲染 Environments overview seat、现有浏览区上方带标签的 Workspaces 与 Activity 控件、现有浏览区中的 Activity 内容，以及底部 server 操作。它消费 `environment-runtime` 提供的持久 `ctx.environmentNavigation` service；处置本 plugin 只移除自己的 Slot registration 与订阅，因此选中 location 和复合 presentation state 能跨 Host 切换与 UI remount 保留。
 
-Overview 在 `active.content` 中渲染，并保留共享 sidebar 与 renderer。产品 package 通过 `environment.overview.content` 和 `sidebar.activity` 填充环境清单与活动 row。Sidebar mode 按 Host 分别存储。
+Overview 在 `active.content` 中渲染，并保留共享 sidebar 与 renderer。产品 package 通过 `environment.overview.content` 和 `sidebar.activity` 填充环境清单与活动 row。Sidebar mode 按 Host 分别存储。展开时显示两个名称；收起栏提供分别标注的图标与明确的选中状态。Activity 隐藏工作区专属控件，并将共享查询应用于自己的行。
 
 环境 runtime projection 见 [Web Client 架构](../../../docs/subsystems/web-client.zh.md)，注册规则见 [Web Client Slots](../../../docs/subsystems/slots.zh.md)。
 

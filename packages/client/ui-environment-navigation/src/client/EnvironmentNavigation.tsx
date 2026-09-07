@@ -1,8 +1,8 @@
-import { useEffect, useSyncExternalStore } from 'react'
+import { useEffect } from 'react'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
-import type { SidebarFooterActionOwnerProps, SidebarSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { WorkspaceContentOverlayOwnerProps } from '@deepseek-ai/dsh-client-ui-workspace/client'
+import type { SidebarSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {
   AppLocation, EnvironmentSidebarMode,
 } from '@deepseek-ai/dsh-client-environment-runtime/client'
@@ -46,17 +46,17 @@ export function EnvironmentOverview(props: OverviewProps) {
 }
 
 interface ActivityInjected {
-  readonly sidebarMode: ObservableSnapshot<EnvironmentSidebarMode>
+  readonly hooks: { readonly sidebarMode: ObservableSnapshot<EnvironmentSidebarMode> }
   setMode(mode: EnvironmentSidebarMode): void
 }
 
 type ActivityToggleProps = PropsRuntime<'sidebar.workspaces.header.action'>
-  & ActivityInjected
+  & InjectFace<ActivityInjected>
   & PropsLocale<'environmentNavigation'>
 
 type ActivityContentProps = PropsRuntime<'sidebar.workspaces.content.overlay'>
   & PropsRenderSlots<'sidebar.activity'>
-  & ActivityInjected
+  & InjectFace<ActivityInjected>
   & PropsLocale<'environmentNavigation'>
 
 function BellIcon() {
@@ -78,29 +78,36 @@ function ServerIcon() {
   )
 }
 
-/** Compact bell in the existing Workspaces header. */
+/** Explicit Workspaces and Activity destinations in expanded and rail layouts. */
 export function ActivityToggle(props: ActivityToggleProps) {
-  const mode = useSyncExternalStore(props.sidebarMode.subscribe, props.sidebarMode.getSnapshot)
+  const mode = props.useSidebarMode(value => value)
   return (
-    <button
-      type="button"
-      className={css.headerButton}
-      aria-label={props.t('activity')}
-      aria-pressed={mode === 'activity'}
-      onClick={() => {
-        props.setMode(mode === 'activity' ? 'workspaces' : 'activity')
-        if (!props.wide) props.expandSidebar()
-      }}
-    >
-      <BellIcon />
-    </button>
+    <div className={css.modeTabs} data-wide={props.wide} role="group" aria-label={props.t('sidebar.mode')}>
+      {(['workspaces', 'activity'] as const).map(destination => (
+        <button
+          key={destination}
+          type="button"
+          className={css.headerButton}
+          aria-label={props.t(destination)}
+          title={props.t(destination)}
+          aria-pressed={mode === destination}
+          onClick={() => {
+            props.setMode(destination)
+            if (!props.wide) props.expandSidebar()
+          }}
+        >
+          {destination === 'activity' ? <BellIcon /> : <ServerIcon />}
+          {props.wide && <span>{props.t(destination)}</span>}
+        </button>
+      ))}
+    </div>
   )
 }
 
 /** Activity body occupying the existing Workspaces region when selected. */
 export function ActivityContent(props: ActivityContentProps) {
-  const mode = useSyncExternalStore(props.sidebarMode.subscribe, props.sidebarMode.getSnapshot)
-  const owner = props as ActivityContentProps & WorkspaceContentOverlayOwnerProps
+  const mode = props.useSidebarMode(value => value)
+  const owner = props
   useEffect(() => {
     owner.setUnderlyingHidden(mode === 'activity')
     return () => { owner.setUnderlyingHidden(false) }
@@ -117,7 +124,7 @@ export function ActivityContent(props: ActivityContentProps) {
 }
 
 interface FooterInjected {
-  openOverview(): void
+  openOverview(this: void): void
 }
 
 type FooterProps = PropsRuntime<'sidebar.footer.action'>
@@ -126,7 +133,7 @@ type FooterProps = PropsRuntime<'sidebar.footer.action'>
 
 /** Bottom server action that opens the in-app environment overview. */
 export function EnvironmentFooterAction(props: FooterProps) {
-  const owner = props as FooterProps & SidebarFooterActionOwnerProps
+  const owner = props
   return (
     <button type="button" className={css.footerButton} aria-label={props.t('environments')} onClick={props.openOverview}>
       <ServerIcon />

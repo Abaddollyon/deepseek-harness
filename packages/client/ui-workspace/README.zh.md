@@ -11,6 +11,8 @@ kind: "package-reference"
 
 `dsh-client-ui-workspace` 是 dsh Web 客户端的共享 Workspace 浏览器与选择器：用户在侧边栏浏览分组或扁平的 Session 行，在 Session Intent 主视觉区为新会话选择 Workspace，并可用添加、重命名、重排序、搜索、fork 与归档操作管理 Workspace 与 Session；两个界面共用同一套 Workspace 菜单与添加流程。待处理的用户交互以琥珀色警告点呈现，活动 Schedule projection 会在普通行与搜索结果中显示不可交互的闹钟，共享侧边栏投影还会隐藏 subagent 来源的会话。不同的规范化路径仍作为由 id 区分的独立 Workspace；添加文件夹走目录流子 slot，由组合的选择器包 client half 填充。
 
+浏览器分别呈现会话 feed 的加载、失败、保留旧行和成功空结果；只有工作区也已就绪，才显示空状态文案。显式新建会话的失败会保留在侧边栏中。每次显式打开操作都使用共享 shell 导航，包括从 Environments 返回当前会话以及进入空白新会话。查询与 Activity 共享，分组、排序和添加工作区控件只适用于 Workspaces。现有按 Host 隔离的持久化视图 store 是固定会话的唯一所有者，并向 shell 的 Activity provider 提供数据源。
+
 ## 目录
 
 - [使用本包](#use-this-package)
