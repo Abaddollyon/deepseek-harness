@@ -6,6 +6,19 @@
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
+  'section.activity': '活动',
+  'feed.loading': '正在加载工作区和会话…',
+  'feed.error': '无法加载会话。',
+  'workspaceFeed.error': '无法加载工作区。',
+  'workspaceFeed.loading': '正在加载工作区…',
+  'workspaceFeed.retained': '保留上次加载的数据；执行状态未知。',
+  'workspaceFeed.initial': '尚未加载工作区数据。',
+  'workspaceFeed.terminal': '请检查连接权限和客户端兼容性。',
+  'workspaceFeed.retry': '重试工作区',
+  'feed.stale': '正在显示上次加载的会话。连接已中断。',
+  'feed.retry': '重试',
+  'navigation.notReady': '会话尚未就绪，请稍后重试。',
+  'navigation.failed': '无法创建会话，请重试。',
   'group.ungrouped': '未分组',
   'session.new': '新会话',
   'session.untitled': '新会话 · {time}',
@@ -83,6 +96,19 @@ export type WorkspaceKey = keyof typeof zh
 
 /** English dictionary, checked complete against the zh key set. */
 export const en = {
+  'section.activity': 'Activity',
+  'feed.loading': 'Loading workspaces and sessions…',
+  'feed.error': 'Sessions could not be loaded.',
+  'workspaceFeed.error': 'Workspaces could not be loaded.',
+  'workspaceFeed.loading': 'Loading workspaces…',
+  'workspaceFeed.retained': ' Last loaded rows are retained; execution status is unknown.',
+  'workspaceFeed.initial': ' Workspace data has not loaded yet.',
+  'workspaceFeed.terminal': ' Check connection access and client compatibility.',
+  'workspaceFeed.retry': 'Retry workspaces',
+  'feed.stale': 'Showing previously loaded sessions. The feed is unavailable.',
+  'feed.retry': 'Retry',
+  'navigation.notReady': 'Sessions are not ready yet. Try again when loading finishes.',
+  'navigation.failed': 'The session could not be created. Try again.',
   'group.ungrouped': 'Ungrouped',
   'session.new': 'New Session',
   'session.untitled': 'New Session · {time}',

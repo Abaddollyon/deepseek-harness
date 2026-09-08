@@ -9,6 +9,7 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { SessionFeedSnapshot } from '../feed.ts'
 import type { AgentContext } from '../scope.ts'
 import type { SessionSearchResultItem } from '../sessions/manager.ts'
 import type { SessionBinding, SessionListState } from '../sessions/service.ts'
@@ -21,6 +22,10 @@ export type { AgentContext } from '../scope.ts'
 export interface ISessions {
   /** The useSessions standard feed (list rows + current selection; read face — writes stay inside the domain). */
   readonly list: ObservableSnapshot<SessionListState>
+  /** Control baseline and list readiness, separate from physical connectivity. */
+  readonly feed: ObservableSnapshot<SessionFeedSnapshot>
+  /** Retry the Session feed with a fresh bounded budget, preserving selection and drafts. */
+  retryFeed(): void
   /**
    * The `session.search` result bound the wire schema fixes, exposed to
    * presentation as injected data. Not per-connection state: every transport

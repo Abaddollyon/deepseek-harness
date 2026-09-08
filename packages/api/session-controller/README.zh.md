@@ -29,6 +29,8 @@ kind: "package-reference"
 
 Client adapter 提供 `SessionEventStream`，即绑定到一个普通 Session 或 direct subagent address 的 Gateway `RemoteJournalStream`。它在读取首个 page 前打开 follow，只发布连续的 `replace`、`prepend` 和 `append` 变更，并通过 tail page 修复重连或 seq 缺口。普通 record 覆盖 `[event.seq, event.seq]`，packed row 覆盖 `[event.seq, event.seq + memberCount - 1]`。业务、persistence 或无法恢复的连续性错误会终止 stream，只有物理载体断开才触发自动恢复。Host generation 重新建立后，Client 会重建每个仍驻留且已打开的 journal，清除断开 generation 的 terminal error，并保留旧窗口直至 replacement snapshot 到达。旧 stream 关闭期间的并发重建请求会合并，replacement opening 期间到达的请求则按序执行，因此重连后每个 Session 只拥有一个 follow stream，最终销毁也不会再次打开它。`SessionControlStream` 是 Gateway `RemoteSnapshotStream`；每代都以完整的进程本地 baseline 开始，因此重连会替换 queue、jobs 和 projection 状态，而不会把瞬态值当作 durable event。在同一代内，仍滞留在队列中的 projection frame 一旦被同一 `(session, key)` 的更新帧赶上，就会被原地取代而不再投递——每个 projection frame 都携带该单元的完整值及其水位 seq，Client 按 seq 高者获胜应用——而 queue 与 jobs frame 始终按推送顺序到达。
 
+`ctx.sessions.feed` 独立于传输连接状态发布 Session 数据就绪状态：`loading`、有界的 `retrying`、`ready`、终止性 `error`，或保留已接受数据的 `stale`。只有接受 control baseline 且成功读取权威列表后才进入就绪状态。只有带类型的 `gateway/service-unavailable` 失败会触发自动就绪重试；身份验证失败、其他业务失败以及无效协议均保持可见。`retryFeed()` 启动新一轮有界尝试，不清除选择、保留的 Session 对象或草稿。替换和 dispose 会阻止旧操作完成后的回调生效，并在打开新 control iterator 前关闭旧 iterator。首次列表读取尚未完成时，不会清除持久化选择。
+
 Session 对象还承载本地提交回显：`session.beginSubmission` 在调用方序列化与 prompt 之前，同步把一条回显写入 `SessionSnapshot.pendingSubmissions`，会话 UI 因此能在点击提交的当帧显示消息。prompt 的 `requestId` 就是关联标识，Host 本就把它回显为 durable user source 的 `rpcId`，queue occurrence 也把它投影为 `SessionQueuedItem.rpcId`。回显在观察到其 durable event 或 queue occurrence 后延迟一个动画帧退休（该延迟保证 transcript 节点可渲染之前回显仍在），带标识的 prompt 失败或被放弃时立即退休，销毁时按 failed 退休；每次退休恰好触发一次注册的 `onRetire` 回调。回显只存在于 Client 内存，刷新与重连只从 durable event 重建会话。
 
 -----
@@ -40,6 +42,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 |---|---:|---|
 | `coldBlankProbeMaxBytes` | `1,024` | 可进行空白状态验证的冷 Session 工件最大物理大小；`0` 禁用探测 |
 | `nativeOpen` | 平台探测 | 是否能把 Session 工作区路径交给原生桌面打开器 |
+
+Client 入口接受 `controlRetryDelaysMs`，默认为 `[250, 500, 1000, 2000, 4000]`。收到带类型的服务暂时缺失响应后，每个条目安排一次额外尝试；空数组禁用自动就绪重试。schema 最多允许 20 个延迟值，每个值均为 0 到 60,000 毫秒的整数。物理载体恢复仍由 Gateway 负责。
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
 

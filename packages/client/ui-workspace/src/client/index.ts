@@ -8,6 +8,8 @@
  * client half (see the contract module doc). Export discipline:
  * packages/client/AGENTS.md.
  */
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type {} from '@deepseek-ai/dsh-client-environment-runtime/client'
 import type { Context } from '@deepseek-ai/cordis'
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -24,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type { WorkspaceBrowserInjected, WorkspacePickerInjected } from './contract/slots.ts'
 import { UiWorkspaceService } from './navigation.ts'
-import { createWorkspaceViewStore } from './stores.ts'
+import { createPersistedWorkspacePinReader, createWorkspaceViewStore } from './stores.ts'
 import { WorkspaceBrowser } from './rows/WorkspaceBrowser.tsx'
 import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { en, zh, type WorkspaceKey } from './locales.ts'
@@ -75,6 +77,20 @@ export function apply(ctx: Context): void {
   const workspaces = ctx.get('workspaces') as IWorkspaces
   const environmentId = (ctx.get('environmentRuntime') as { environmentId?: string } | undefined)
     ?.environmentId
+  const presentation = ctx.get('environmentNavigation')?.presentation
+  const viewHandle = createWorkspaceViewStore(environmentId)
+  const view = viewHandle.create()
+  const sharedViewHandle = { ...viewHandle, create: () => view }
+  presentation?.registerWorkspacePinReader(createPersistedWorkspacePinReader())
+  ctx.effect(() => presentation?.registerWorkspacePins(environmentId ?? 'local', {
+    getSnapshot: () => view.getSnapshot().pinnedSessionIds,
+    subscribe: listener => view.subscribe(listener),
+  }) ?? (() => {}), 'ui-workspace: shared persisted pins')
+  const localQuery = createSnapshotStore('')
+  const sidebarQuery = presentation === undefined ? localQuery : {
+    getSnapshot: () => presentation.getSidebarQuery(),
+    subscribe: (listener: () => void) => presentation.subscribe(listener),
+  }
   const uiWorkspace = new UiWorkspaceService(
     ctx, ctx.remote.directoryPicker, workspaces, sessions)
   ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list } })
@@ -104,7 +120,13 @@ export function apply(ctx: Context): void {
     startSession: (workspaceId) => { uiWorkspace.startSession(workspaceId) },
     // Ungrouped creation is owned by the Cordis navigation service.
     createLooseSession: () => { uiWorkspace.createLooseSession() },
-    open: (sessionId) => { sessions.open(sessionId) },
+    open: (sessionId) => { uiWorkspace.openSession(sessionId) },
+    setSidebarQuery: (query) => {
+      if (presentation === undefined) localQuery.set(query)
+      else presentation.setSidebarQuery(query)
+    },
+    retryFeed: () => { sessions.retryFeed() },
+    retryWorkspaceFeed: () => { workspaces.retryFeed() },
     searchSessions,
     searchResultLimit: sessions.searchResultLimit,
     renameSession: async (sessionId, title) => {
@@ -132,7 +154,10 @@ export function apply(ctx: Context): void {
       await workspaces.insertSessionBefore(workspaceId, sessionId, beforeSessionId)
     },
     createWorkspace: input => workspaces.create(input),
-    hooks: { directoryFlow: browserFlowSource, hostInfo },
+    hooks: {
+      directoryFlow: browserFlowSource, hostInfo, sidebarQuery,
+      workspaceFeed: workspaces.feed, sessionFeed: sessions.feed, navigationError: uiWorkspace.navigationError,
+    },
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
     createWorkspace: input => workspaces.create(input),
@@ -148,7 +173,7 @@ export function apply(ctx: Context): void {
         'sidebar.workspaces.header.action': { kind: 'list', scope: 'root' },
         'sidebar.workspaces.content.overlay': { kind: 'single', scope: 'root' },
       },
-      store: createWorkspaceViewStore(environmentId),
+      store: sharedViewHandle,
       inject: browserInjected,
       locale: NS,
     },

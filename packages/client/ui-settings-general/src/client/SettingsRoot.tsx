@@ -183,7 +183,7 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
         <button
           ref={triggerButton}
           type="button"
-          className={clsx(css.trigger, !wide && css.rail)}
+          className={clsx(css.trigger, 'dsh-sidebar-footer-row', !wide && css.rail)}
           aria-label={t('trigger')}
           aria-haspopup="dialog"
           aria-expanded={open}

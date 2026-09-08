@@ -1,3 +1,4 @@
+import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import {
   sessionKey,
   type EnvironmentId,
@@ -29,6 +30,22 @@ export interface EnvironmentPresentationStore {
   getSidebarMode(environmentId: EnvironmentId): EnvironmentSidebarMode
   /** Set one Host's sidebar mode. */
   setSidebarMode(environmentId: EnvironmentId, mode: EnvironmentSidebarMode): void
+  /** @returns the shared query applied to the visible sidebar list. */
+  getSidebarQuery(): string
+  /** @param query - search text shared by Workspaces and Activity. */
+  setSidebarQuery(query: string): void
+  /** @param environmentId - owning Host.
+   * @returns pinned Session ids from its existing workspace view store. */
+  getPinnedSessionIds(environmentId: EnvironmentId): readonly string[]
+  /** Register the existing persisted pin source, retained across presentation withdrawal.
+   * @param environmentId - owning Host.
+   * @param source - pin source from the existing workspace view store.
+   * @returns unsubscribe; the retained readonly source leaves with the shell. */
+  registerWorkspacePins(environmentId: EnvironmentId, source: ObservableSnapshot<readonly string[]>): () => void
+  /** @param reader - reads persisted pins for Hosts whose workspace UI has not mounted. */
+  registerWorkspacePinReader(reader: (environmentId: EnvironmentId) => readonly string[]): void
+  /** Release retained pin subscriptions when the owning shell is disposed. */
+  dispose(): void
   /** Serialize presentation-only state for bounded persistence. */
   serialize(): string
   /** Subscribe to presentation changes. */
@@ -40,6 +57,7 @@ interface PersistedState {
   readonly sidebar: Readonly<Record<string, EnvironmentSidebarMode>>
 }
 
+const EMPTY_PINS: readonly string[] = Object.freeze([])
 const EMPTY_SESSION: SessionPresentationState = Object.freeze({ draft: '', viewId: 'chat' })
 const MAX_SESSIONS = 200
 const MAX_TEXT = 100_000
@@ -56,6 +74,10 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
   const sessions = new Map(Object.entries(restored.sessions))
   const sidebar = new Map(Object.entries(restored.sidebar))
   const listeners = new Set<() => void>()
+  let query = ''
+  const pinSources = new Map<EnvironmentId, ObservableSnapshot<readonly string[]>>()
+  const pinDisposers = new Map<EnvironmentId, () => void>()
+  let readPins: (environmentId: EnvironmentId) => readonly string[] = () => EMPTY_PINS
   const publish = (): void => {
     for (const listener of [...listeners]) listener()
   }
@@ -83,6 +105,36 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
       if (sidebar.get(environmentId) === mode) return
       sidebar.set(environmentId, mode)
       publish()
+    },
+    getSidebarQuery: () => query,
+    setSidebarQuery(next) {
+      if (query === next) return
+      query = next
+      publish()
+    },
+    getPinnedSessionIds(environmentId) {
+      return pinSources.get(environmentId)?.getSnapshot() ?? readPins(environmentId)
+    },
+    registerWorkspacePins(environmentId, source) {
+      pinDisposers.get(environmentId)?.()
+      pinSources.set(environmentId, source)
+      const off = source.subscribe(publish)
+      pinDisposers.set(environmentId, off)
+      publish()
+      return () => {
+        off()
+        if (pinDisposers.get(environmentId) === off) pinDisposers.delete(environmentId)
+      }
+    },
+    registerWorkspacePinReader(reader) {
+      readPins = reader
+      publish()
+    },
+    dispose() {
+      for (const off of pinDisposers.values()) off()
+      pinDisposers.clear()
+      pinSources.clear()
+      listeners.clear()
     },
     serialize() {
       const sidebarJson = JSON.stringify(Object.fromEntries(sidebar))

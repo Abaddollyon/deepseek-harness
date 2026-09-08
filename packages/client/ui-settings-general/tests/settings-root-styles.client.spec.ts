@@ -37,4 +37,11 @@ describe('SettingsRoot responsive layout', () => {
     expect(narrow).toMatch(/\.navCell\s*\{[^}]*flex:\s*none/)
     expect(block('.options')).toContain('overflow-y: auto')
   })
+
+  it('keeps the settings footer aligned with the shell footer contract', () => {
+    expect(block('.triggerRow')).toContain('width: 100%')
+    expect(block('.triggerRow')).toContain('margin: 0')
+    expect(block('.trigger')).toContain('height: var(--dsh-sidebar-footer-height, 42px)')
+    expect(block('.trigger')).toContain('padding: var(--dsh-sidebar-footer-padding, 0 10px 0 8px)')
+  })
 })

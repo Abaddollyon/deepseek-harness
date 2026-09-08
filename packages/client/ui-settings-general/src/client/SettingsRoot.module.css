@@ -3,8 +3,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  width: calc(100% + 4px);
-  margin: 4px -2px;
+  width: 100%;
+  margin: 0;
 }
 
 .triggerRow.railRow {
@@ -19,12 +19,12 @@
   align-items: center;
   gap: 8px;
   width: auto;
-  height: 42px;
+  height: var(--dsh-sidebar-footer-height, 42px);
   margin: 0;
-  padding: 0 10px 0 8px;
+  padding: var(--dsh-sidebar-footer-padding, 0 10px 0 8px);
   box-sizing: border-box;
   border: none;
-  border-radius: 12px;
+  border-radius: var(--dsh-sidebar-footer-radius, 12px);
   background: transparent;
   cursor: pointer;
   overflow: hidden;

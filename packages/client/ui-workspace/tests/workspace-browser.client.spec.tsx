@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceSnapshot as WorkspaceListState, WorkspaceView, WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
@@ -61,7 +62,15 @@ function dragData(): Pick<DataTransfer, 'effectAllowed' | 'dropEffect' | 'setDat
 
 function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
   const store = createWorkspaceViewStore().create()
+  const query = createSnapshotStore('')
   const props: WorkspaceBrowserProps = {
+    useSidebarQuery: bindSnapshotSelector(query),
+    setSidebarQuery: (value) => { query.set(value) },
+    useSessionFeed: hook({ state: 'ready', error: null, attempt: 0 }),
+    useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'ready', attempt: 0, generation: 1, hasBaseline: true, lastSuccessfulAt: 1, failure: null, canRetry: false }),
+    retryWorkspaceFeed: vi.fn(),
+    useNavigationError: hook(null),
+    retryFeed: vi.fn(),
     wide: true,
     expandSidebar: vi.fn(),
     useSessions: hook(sessionState([])),
@@ -2069,5 +2078,46 @@ describe('WorkspaceBrowser', () => {
     await waitFor(() => { expect(owner?.open).toBe(true) })
     await act(async () => { owner!.onPicked('/tmp/project') })
     await waitFor(() => { expect(startSession).toHaveBeenCalledWith(wid('created')) })
+  })
+})
+
+describe('feed readiness and active sidebar controls', () => {
+  it('distinguishes loading, failed, stale, and successfully empty feeds', () => {
+    const b = mount({ useSessionFeed: hook({ state: 'loading', error: null, attempt: 0 }) })
+    expect(screen.getByRole('status').textContent).toContain(zh['feed.loading'])
+    expect(screen.queryByText(zh['empty.none'])).toBeNull()
+    rerender(b, { useSessionFeed: hook({ state: 'error', error: null, attempt: 0 }) })
+    expect(screen.getByRole('alert').textContent).toContain(zh['feed.error'])
+    fireEvent.click(screen.getByRole('button', { name: zh['feed.retry'] }))
+    expect(b.props.retryFeed).toHaveBeenCalledOnce()
+    rerender(b, { useSessionFeed: hook({ state: 'stale', error: null, attempt: 1 }), useSessions: hook(sessionState([summary('retained', 1)])) })
+    expect(screen.getByRole('status').textContent).toContain(zh['feed.stale'])
+    expect(screen.queryByText(zh['empty.none'])).toBeNull()
+    rerender(b, { useSessionFeed: hook({ state: 'ready', error: null, attempt: 0 }), useSessions: hook(sessionState([])) })
+    expect(screen.getByText(zh['empty.none'])).not.toBeNull()
+  })
+
+  it('shows explicit creation failures in the persistent sidebar', () => {
+    mount({ useNavigationError: hook('create-failed') })
+    expect(screen.getByRole('alert').textContent).toBe(zh['navigation.failed'])
+  })
+})
+
+
+describe('Workspace-only readiness failure', () => {
+  it('names Workspaces, preserves sessions and query, and retries only the Workspace resource', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('retained', 1)])),
+      useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'error', attempt: 2, generation: 3, hasBaseline: false, lastSuccessfulAt: null, failure: 'service-unavailable', canRetry: true }),
+    })
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.error'])
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.initial'])
+    expect(screen.queryByText(zh['feed.error'])).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: zh['workspaceFeed.retry'] }))
+    expect(b.props.retryWorkspaceFeed).toHaveBeenCalledOnce()
+    expect(b.props.retryFeed).not.toHaveBeenCalled()
+    rerender(b, { useWorkspaceFeed: hook({ endpoint: 'workspace/follow', state: 'error', attempt: 0, generation: 4, hasBaseline: true, lastSuccessfulAt: 1, failure: 'terminal', canRetry: false }) })
+    expect(screen.getByRole('alert').textContent).toContain(zh['workspaceFeed.retained'])
+    expect(screen.queryByRole('button', { name: zh['workspaceFeed.retry'] })).toBeNull()
   })
 })

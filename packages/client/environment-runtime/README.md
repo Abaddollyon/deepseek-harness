@@ -17,6 +17,8 @@ The application shell owns `ctx.environmentNavigation` for its full lifetime. Se
 
 See [Web Client architecture](../../../docs/subsystems/web-client.md) for runtime projection and package ownership.
 
+Shell locations include a Host-qualified blank `new-session` conversation. Explicit workspace actions publish navigation even when the selected Session id is unchanged; `backToSession()` returns to the most recently opened conversation and `canBackToSession()` reports its availability. The shared sidebar query belongs to presentation state. Pin access reads the existing Host workspace view store, with persisted reads for Hosts that have not mounted; it does not serialize another pin set. Pin subscriptions leave with the UI registration, retained presentation sources leave with the shell, and equal Session ids on different Hosts remain independent.
+
 ## Table of Contents
 
 - [Model Experience](#model-experience)

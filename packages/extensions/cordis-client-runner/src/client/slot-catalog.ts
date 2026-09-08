@@ -2219,7 +2219,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     doc: 'Alternate body rendered inside the existing Workspaces browsing region.',
     registerOptions: [],
     ownerProps: [
-      '/** Owner control for a body that visually and semantically replaces the workspace list. */\nexport interface WorkspaceContentOverlayOwnerProps extends SidebarSectionOwnerProps {\n  /** Hide and inert the underlying list while an overlay owns the browsing region. */\n  setUnderlyingHidden(hidden: boolean): void\n}',
+      '/** Owner control for a body that visually and semantically replaces the workspace list. */\nexport interface WorkspaceContentOverlayOwnerProps extends SidebarSectionOwnerProps {\n  /** Hide and inert the underlying list while an overlay owns the browsing region. */\n  setUnderlyingHidden(this: void, hidden: boolean): void\n}',
     ],
     ownerPropsReferences: [
       'SidebarSectionOwnerProps',

@@ -122,3 +122,38 @@ function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
     // Persistence remains best-effort, matching the store engine contract.
   }
 }
+
+/**
+ * Read persisted workspace pins without mounting another store instance.
+ * @returns a reader with stable arrays until the stored pin payload changes.
+ */
+export function createPersistedWorkspacePinReader(): (environmentId: string) => readonly string[] {
+  const cache = new Map<string, { raw: string | null; pins: readonly string[] }>()
+  return (environmentId) => {
+    let raw: string | null = null
+    try {
+      if (typeof localStorage !== 'undefined') {
+        raw = localStorage.getItem(`dsh.workspace.view.v6.${encodeURIComponent(environmentId)}`)
+        if (raw === null && environmentId === 'local') raw = localStorage.getItem('dsh.workspace.view.v6')
+      }
+    } catch {
+      // Denied browser storage has no available persisted pins.
+    }
+    const previous = cache.get(environmentId)
+    if (previous !== undefined && previous.raw === raw) return previous.pins
+    let pins: readonly string[] = []
+    if (raw !== null) {
+      try {
+        const value: unknown = JSON.parse(raw)
+        if (typeof value === 'object' && value !== null && 'pinnedSessionIds' in value
+          && Array.isArray(value.pinnedSessionIds)) {
+          pins = value.pinnedSessionIds.filter((id): id is string => typeof id === 'string')
+        }
+      } catch {
+        // Malformed persisted presentation is unavailable; it is never a Host failure.
+      }
+    }
+    cache.set(environmentId, { raw, pins })
+    return pins
+  }
+}

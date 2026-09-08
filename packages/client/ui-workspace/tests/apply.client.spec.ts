@@ -48,6 +48,8 @@ async function bench() {
     insertSessionBefore,
   } as never)
   ctx.provide('sessions', {
+    feed: { getSnapshot: () => ({ state: 'ready', error: null, attempt: 0 }), subscribe },
+    retryFeed: vi.fn(),
     list: {
       getSnapshot: () => ({
         ids: [], byId: {}, current: undefined, phase: 'ready',
@@ -176,9 +178,9 @@ describe('ui-workspace apply', () => {
       declare(b.slots, 'sidebar.workspaces')
       await b.ctx.plugin({ inject: [...inject], apply }).await()
       const browser = (b.slots.entries('sidebar.workspaces')[0]!.inject as () => WorkspaceBrowserInjected)()
-      // A failed loose create is a console diagnostic; nothing opens.
+      // A failed loose create publishes a visible error; nothing opens.
       browser.createLooseSession()
-      await vi.waitFor(() => { expect(warn).toHaveBeenCalledWith('loose session failed:', expect.any(Error)) })
+      await vi.waitFor(() => { expect(b.ctx.uiWorkspace.navigationError.getSnapshot()).toBe('create-failed') })
       // An unresolvable session binding rejects the rename instead of renaming blind.
       await expect(browser.renameSession('missing' as never, 'title'))
         .rejects.toThrow('unknown session "missing"')

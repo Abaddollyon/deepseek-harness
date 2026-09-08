@@ -18,7 +18,7 @@ describe('environment navigation UI seats', () => {
     const activityProps = {
       wide: true,
       expandSidebar: () => {},
-      sidebarMode: { getSnapshot: () => mode, subscribe: () => () => {} },
+      useSidebarMode: (selector: (value: typeof mode) => unknown) => selector(mode),
       setMode,
       t,
     } as unknown as Parameters<typeof ActivityToggle>[0]
@@ -38,7 +38,7 @@ describe('environment navigation UI seats', () => {
   test('registers overview and Activity below the existing shell', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()
-    const slots = ctx.slots as SlotRegistry
+    const slots = ctx.slots
     ctx.provide('locale', new LocaleRuntime(ctx))
     ctx.provide('uiSidebar', {})
     ctx.provide('environmentNavigation', {
@@ -66,4 +66,54 @@ describe('environment navigation UI seats', () => {
     expect(slots.entries('sidebar.footer.action').some(entry => entry.options.id === 'environments')).toBe(true)
     await ctx.fiber.dispose()
   })
+})
+
+test('expanded and rail modes expose both labeled destinations and the selected mode', () => {
+  let mode: 'workspaces' | 'activity' = 'workspaces'
+  let expanded = 0
+  const props = {
+    wide: true,
+    expandSidebar: () => { expanded++ },
+    useSidebarMode: (select: (value: typeof mode) => unknown) => select(mode),
+    setMode: (next: typeof mode) => { mode = next },
+    t: (key: string) => ({ workspaces: 'Workspaces', activity: 'Activity', 'sidebar.mode': 'Sidebar mode' })[key],
+  } as unknown as Parameters<typeof ActivityToggle>[0]
+  const view = render(<ActivityToggle {...props} />)
+  const snapshot = () => [...view.container.querySelectorAll('button')].map(button => ({
+    label: button.getAttribute('aria-label'), pressed: button.getAttribute('aria-pressed'), text: button.textContent,
+  }))
+  expect(snapshot()).toMatchInlineSnapshot(`
+    [
+      {
+        "label": "Workspaces",
+        "pressed": "true",
+        "text": "Workspaces",
+      },
+      {
+        "label": "Activity",
+        "pressed": "false",
+        "text": "Activity",
+      },
+    ]
+  `)
+  fireEvent.click(view.getByRole('button', { name: 'Activity' }))
+  view.rerender(<ActivityToggle {...props} wide={false} />)
+  expect(snapshot()).toMatchInlineSnapshot(`
+    [
+      {
+        "label": "Workspaces",
+        "pressed": "false",
+        "text": "",
+      },
+      {
+        "label": "Activity",
+        "pressed": "true",
+        "text": "",
+      },
+    ]
+  `)
+  fireEvent.click(view.getByRole('button', { name: 'Workspaces' }))
+  expect(mode).toBe('workspaces')
+  expect(expanded).toBe(1)
+  view.unmount()
 })

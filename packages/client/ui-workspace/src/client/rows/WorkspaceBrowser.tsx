@@ -223,6 +223,8 @@ type SessionTreeProps = Pick<
   'useSessions' | 'startSession' | 'createLooseSession' | 'open' | 'forkSession'
   | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
 > & {
+  /** Empty wording requires a successfully loaded baseline. */
+  showEmpty: boolean
   /** Pending interaction state projected from the session UI domain. */
   pendingInteractions: PendingInteractionSnapshot
   /** Host account home for POSIX hover-path abbreviation. */
@@ -312,7 +314,7 @@ function PinnedSessionSection({ rows, currentId, now, onOpen, onRename, onFork, 
 
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
-  useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds,
+  useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds, showEmpty,
   pinnedSessionIds, togglePinnedSession,
   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
@@ -469,7 +471,7 @@ function SessionTree({
           onTogglePinned={togglePinnedSession}
           t={t}
         />
-        {groups.length === 0 && pinnedRows.length === 0 && (
+        {showEmpty && groups.length === 0 && pinnedRows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {groups.map((group) => {
@@ -645,9 +647,10 @@ function SessionTree({
 function FlatList({
   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
   pinnedSessionIds, togglePinnedSession, pendingInteractions,
-  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
+  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, showEmpty, t,
 }: Pick<
   SessionTreeProps,
+  | 'showEmpty'
   | 'useSessions'
   | 'open'
   | 'forkSession'
@@ -743,7 +746,7 @@ function FlatList({
           flat
           t={t}
         />
-        {rows.length === 0 && pinnedRows.length === 0 && (
+        {showEmpty && rows.length === 0 && pinnedRows.length === 0 && (
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {rows.map((node) => {
@@ -925,6 +928,13 @@ export function WorkspaceBrowser({
   searchResultLimit,
   useDirectoryFlow,
   useHostInfo,
+  useSidebarQuery,
+  setSidebarQuery,
+  useSessionFeed,
+  useWorkspaceFeed,
+  retryWorkspaceFeed,
+  useNavigationError,
+  retryFeed,
   useSessionPendingInteraction,
   renderSlot,
   t,
@@ -934,6 +944,7 @@ export function WorkspaceBrowser({
   const pendingInteractions = useSessionPendingInteraction(state => state)
   const workspaces = useWorkspaces(state => state.items)
   const workspacePhase = useWorkspaces(state => state.phase)
+  const workspaceError = useWorkspaces(state => state.error)
   const archivedSessionIds = useWorkspaces(state => state.archivedSessionIds)
   // Live occupancy of this surface's directory-flow hole (the same source the
   // flow reads): a composition without a picking affordance can add nothing.
@@ -995,7 +1006,13 @@ export function WorkspaceBrowser({
   useCurrentGroupReveal(reveal, actions.setGroupExpanded)
   // The query outlives the tree and the input (both wide-only) so collapsing
   // does not silently drop an in-progress filter.
-  const [query, setQuery] = useState('')
+  const query = useSidebarQuery(value => value)
+  const setQuery = setSidebarQuery
+  const feed = useSessionFeed(value => value)
+  const workspaceFeed = useWorkspaceFeed(value => value)
+  const navigationError = useNavigationError(value => value)
+  const hasRows = useSessions(value => value.ids.length > 0)
+  const ready = feed.state === 'ready' && workspaceFeed.state === 'ready' && workspacePhase === 'ready' && workspaceError === null
   const [searchExpanded, setSearchExpanded] = useState(false)
   const normalizedQuery = sanitizeSearchQuery(query).trim()
   const [remoteSearch, setRemoteSearch] = useState<RemoteSearchState>({
@@ -1048,7 +1065,7 @@ export function WorkspaceBrowser({
   }, [normalizedQuery, wide, searchExpanded, searchOnExpand])
 
   useEffect(() => {
-    if (normalizedQuery === '') {
+    if (normalizedQuery === '' || underlyingHidden || !ready) {
       setRemoteSearch({ query: '', status: 'idle', items: [], hasMore: false })
       return
     }
@@ -1082,7 +1099,7 @@ export function WorkspaceBrowser({
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [normalizedQuery, searchSessions])
+  }, [normalizedQuery, searchSessions, underlyingHidden, ready])
 
   // Rename dialog (browser-owned so it outlives row unmounts during collapse).
   const [renameTarget, setRenameTarget] = useState<{ workspaceId: WorkspaceId; currentTitle: string } | null>(null)
@@ -1191,10 +1208,11 @@ export function WorkspaceBrowser({
 
   return (
     <div className={clsx(css.root, !wide && css.rail)}>
+      {renderSlot('sidebar.workspaces.header.action', { wide, expandSidebar })}
       <div className={css.sectionHeader}>
         {wide && (
           <span className={clsx(css.sectionLabel, css.wide, searchExpanded && css.sectionLabelHidden)}>
-            {groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')}
+            {underlyingHidden ? t('section.activity') : groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')}
           </span>
         )}
         {wide && (
@@ -1255,8 +1273,7 @@ export function WorkspaceBrowser({
           </div>
         )}
         <div className={clsx(css.headerActions, wide && searchExpanded && css.headerActionsHidden)}>
-          {renderSlot('sidebar.workspaces.header.action', { wide, expandSidebar })}
-          {wide && (
+          {wide && !underlyingHidden && (
             <ViewOptionsMenu
               groupBy={groupBy}
               orderBy={orderBy}
@@ -1268,7 +1285,7 @@ export function WorkspaceBrowser({
           {/* Adding is the button's one action, so a composition with no
               picking affordance has nothing to offer here: the region hides the
               button rather than leaving a dead one in the header. */}
-          {directoryFlowAvailable && (
+          {directoryFlowAvailable && !underlyingHidden && (
             <Tooltip label={t('workspace.add')} side="bottom" delayMs={500}>
               <button
                 ref={wsPlusRef}
@@ -1321,6 +1338,27 @@ export function WorkspaceBrowser({
         </Tooltip>
       </div>}
 
+      {wide && navigationError !== null && (
+        <div role="alert" className={css.searchStatus}>
+          {t(navigationError === 'not-ready' ? 'navigation.notReady' : 'navigation.failed')}
+        </div>
+      )}
+      {wide && !underlyingHidden && workspaceFeed.state !== 'ready' && (
+        <div role={workspaceFeed.state === 'error' ? 'alert' : 'status'} className={css.searchStatus}>
+          {t(workspaceFeed.state === 'error' ? 'workspaceFeed.error' : 'workspaceFeed.loading')}
+          {t(workspaceFeed.hasBaseline ? 'workspaceFeed.retained' : 'workspaceFeed.initial')}
+          {workspaceFeed.state === 'error' && !workspaceFeed.canRetry && t('workspaceFeed.terminal')}
+          {workspaceFeed.canRetry && <button type="button" onClick={retryWorkspaceFeed}>{t('workspaceFeed.retry')}</button>}
+        </div>
+      )}
+      {wide && !underlyingHidden && feed.state !== 'ready' && (
+        <div role={feed.state === 'error' ? 'alert' : 'status'} className={css.searchStatus}>
+          {t(feed.state === 'stale' ? 'feed.stale' : feed.state === 'error' ? 'feed.error' : 'feed.loading')}
+          {(feed.state === 'error' || feed.state === 'stale') && (
+            <button type="button" onClick={retryFeed}>{t('feed.retry')}</button>
+          )}
+        </div>
+      )}
       {/* Always-mounted seat keeps the region's flex slot while the list
           itself is wide-only. */}
       <div className={css.listArea}>
@@ -1330,7 +1368,7 @@ export function WorkspaceBrowser({
           data-obscured={underlyingHidden || undefined}
           {...(underlyingHidden ? { inert: '' as never } : {})}
         >
-          {wide && (normalizedQuery !== ''
+          {wide && (ready || hasRows) && (normalizedQuery !== ''
             ? (
               <SearchResults
                 useSessions={useSessions}
@@ -1347,6 +1385,7 @@ export function WorkspaceBrowser({
             : groupBy === 'flat'
               ? (
                 <FlatList
+                  showEmpty={ready}
                   useSessions={useSessions} open={open} forkSession={forkSession}
                   onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
                   archivedSessionIds={archivedSessionIds}
@@ -1363,6 +1402,7 @@ export function WorkspaceBrowser({
               )
               : (
                 <SessionTree
+                  showEmpty={ready}
                   useSessions={useSessions}
                   onSessionRename={onSessionRename}
                   onSessionArchive={onSessionArchive}

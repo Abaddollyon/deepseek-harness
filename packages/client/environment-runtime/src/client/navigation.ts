@@ -6,6 +6,7 @@ import type { EnvironmentPresentationStore } from './presentation-state.ts'
 export type AppLocation =
   | { readonly kind: 'environments'; readonly selectedId?: EnvironmentId }
   | { readonly kind: 'session'; readonly ref: SessionRef; readonly viewId: string }
+  | { readonly kind: 'new-session'; readonly environmentId: EnvironmentId; readonly viewId: string }
 
 /** Persistent-shell navigation over environment overview and Session content. */
 export interface EnvironmentNavigation {
@@ -17,6 +18,10 @@ export interface EnvironmentNavigation {
    * @param location - destination committed after readiness.
    */
   openWhen(readiness: Promise<unknown>, location: AppLocation): Promise<void>
+  /** @returns whether a conversation has been opened in this shell. */
+  canBackToSession(): boolean
+  /** Restore the most recently opened conversation, including a blank conversation. */
+  backToSession(): void
   /** Restore the preceding location without disposing its Host runtime. */
   back(): void
   /** Read the current immutable location. */
@@ -46,10 +51,12 @@ declare module '@deepseek-ai/cordis' {
 export function createEnvironmentNavigation(initialLocation: AppLocation): EnvironmentNavigation {
   let current = snapshot(initialLocation)
   const history: AppLocation[] = []
+  let lastSession = current.kind === 'environments' ? undefined : current
   let intentRevision = 0
   const listeners = new Set<() => void>()
   const publish = (next: AppLocation): void => {
     current = snapshot(next)
+    if (current.kind !== 'environments') lastSession = current
     for (const listener of [...listeners]) listener()
   }
   return {
@@ -64,6 +71,13 @@ export function createEnvironmentNavigation(initialLocation: AppLocation): Envir
       if (ownRevision !== intentRevision) return
       history.push(current)
       publish(location)
+    },
+    canBackToSession: () => lastSession !== undefined,
+    backToSession() {
+      if (lastSession === undefined) return
+      intentRevision += 1
+      history.push(current)
+      publish(lastSession)
     },
     back() {
       intentRevision += 1
@@ -89,13 +103,15 @@ export function environmentSelection(navigation: EnvironmentNavigation): Environ
   return {
     getSnapshot: () => {
       const location = navigation.getSnapshot()
-      return location.kind === 'session' ? location.ref.environmentId : undefined
+      return location.kind === 'session' ? location.ref.environmentId
+        : location.kind === 'new-session' ? location.environmentId : undefined
     },
     subscribe: listener => navigation.subscribe(listener),
   }
 }
 
 function snapshot(location: AppLocation): AppLocation {
+  if (location.kind === 'new-session') return Object.freeze({ ...location })
   return location.kind === 'environments'
     ? Object.freeze({
       kind: 'environments' as const,

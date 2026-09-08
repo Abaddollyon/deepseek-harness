@@ -1,7 +1,7 @@
 /** Test-owned workspaces face: the renderer standard-kit observable plus recorded actions. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
-  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
+  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceFeedSnapshot,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -31,6 +31,14 @@ type WorkspaceStub<Key extends WorkspaceAction> = (
 export class TestWorkspaces implements IWorkspaces {
   /** The useWorkspaces standard feed. */
   readonly list: SnapshotStore<WorkspaceFixtureSnapshot>
+
+  /** Writable resource readiness for mounted UI tests. */
+  readonly feed = createSnapshotStore<WorkspaceFeedSnapshot>({ endpoint: 'workspace/follow', state: 'ready', attempt: 0, generation: 1, hasBaseline: true, lastSuccessfulAt: 1, failure: null, canRetry: false })
+
+  retryFeed(): void {
+    this.calls.push({ method: 'retryFeed', args: [] })
+    this.stubs.get('retryFeed')?.()
+  }
 
   /** Calls observed on the action face, newest last. */
   readonly calls: { method: string; args: unknown[] }[] = []

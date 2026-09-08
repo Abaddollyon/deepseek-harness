@@ -17,6 +17,8 @@ Runtime request service 只接受已注册的相对 `/api/` 路由。每次调�
 
 Runtime projection 与 package 所有权见 [Web Client 架构](../../../docs/subsystems/web-client.zh.md)。
 
+Shell location 包含带 Host 身份的空白 `new-session` 会话。显式工作区操作即使没有改变当前 Session id，也会发布导航；`backToSession()` 返回最近打开的会话，`canBackToSession()` 表示该目标是否可用。共享侧边栏查询由 presentation state 持有。固定会话读取现有 Host 工作区视图 store，尚未挂载的 Host 则读取其持久化数据；不会再序列化一套固定状态。固定状态订阅随 UI 注册释放，保留的 presentation source 随 shell 释放，不同 Host 上相同的 Session id 仍彼此独立。
+
 ## 目录
 
 - [模型体验](#model-experience)
