@@ -891,6 +891,7 @@ describe('mapStopReason / mapUsage', () => {
     'Anthropic stream ended before message_stop',
     'OpenAI Responses stream ended before a terminal response event',
     'openrouter stream ended without a terminal event',
+    'bridge_previous_response_not_found: Upstream websocket closed before response.completed',
     'Stream ended without finish_reason',
     // HTTP/2 stream resets: nghttp2's `stream ID N; CODE; received from peer`
     // wording, Node's NGHTTP2_* error-code rendering, and the RST_STREAM frame

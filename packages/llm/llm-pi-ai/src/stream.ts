@@ -69,6 +69,11 @@ function classifyPiAiError(message: string): string {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
+  // The Codex bridge reports a lost websocket continuation with a stale
+  // previous_response_id. It is a transport interruption and must re-enter
+  // the normal retry path instead of becoming a permanent PI_AI_ERROR.
+  if (/\bbridge_previous_response_not_found\b/i.test(message)
+    && /upstream websocket closed before response\.completed/i.test(message)) return 'TRANSPORT'
   // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
   // stream ID N; <CODE>; received from peer`. Both fragments are required:
   // bare `stream error` is generic phrasing application-level failures also
