@@ -393,6 +393,7 @@ describe('LocalSubprocessRuntime', () => {
       const ctx = new Context()
       const fiber = await ctx.plugin(IsolatedLocalSubprocessRuntime)
       const service = ctx.subprocess as InstanceType<typeof IsolatedLocalSubprocessRuntime>
+      service.internals = { platform: 'darwin' }
       const handle = await ctx.subprocess.spawnTerminal({
         argv: ['shell'], cwd: process.cwd(), rows: 24, cols: 80, graceMs: 1,
       })
@@ -599,6 +600,7 @@ describe('LocalSubprocessRuntime', () => {
       const disposalErrors: unknown[] = []
       ctx.logger.error = ((error: unknown) => { disposalErrors.push(error) }) as typeof ctx.logger.error
       const fiber = await ctx.plugin(IsolatedLocalSubprocessRuntime)
+      ;(ctx.subprocess as InstanceType<typeof IsolatedLocalSubprocessRuntime>).internals = { platform: 'darwin' }
       const alive = new Set([124])
       ;(ctx.subprocess as InstanceType<typeof IsolatedLocalSubprocessRuntime>).terminalInspector = {
         foregroundPgid: () => 123,
@@ -874,8 +876,9 @@ describe('LocalSubprocessRuntime', () => {
   it('disposal contains a spawn-failure rejection that races teardown', async () => {
     const ctx = new Context()
     const fiber = await ctx.plugin(LocalSubprocessRuntime)
-    // Dispose before the rejection continuation removes the handle from the
-    // live set, so teardown itself must swallow the rejected done.
+    // The direct-spawn backend reports cwd failure before cancellation can kill
+    // a native bootstrap; teardown must contain that pending rejection.
+    ;(ctx.subprocess as LocalSubprocessRuntime).internals = { platform: 'darwin' }
     const handle = ctx.subprocess.spawn(spec('true', { cwd: '/nonexistent-dir-dsh-subprocess-test' }))
     await fiber.dispose()
     await expect(handle.done).rejects.toThrow()

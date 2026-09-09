@@ -805,7 +805,7 @@ describe('SessionProjectionCache cold write-back', () => {
     await cache.writeBack(meta, SessionLogOffset(0), rows(1, ['new']), {})
 
     expect(await storedRecord(root, meta.id)).toEqual({
-      identity: { createdAt: 2, isSeeded: false, inheritedEventCount: SessionLogOffset(0) },
+      identity: { formatVersion: SESSION_FORMAT_VERSION, createdAt: 2, isSeeded: false, inheritedEventCount: SessionLogOffset(0) },
       rows: rows(1, ['new']),
     })
   })

@@ -101,8 +101,10 @@ export const RELEASED_V0_EVENT_DISPOSITIONS: Readonly<Record<string, ReleasedV0P
   'todo/write': disposition(['todos']),
   'tool-workflow/agent-end': disposition(['runId', 'seq', 'outcome']),
   'tool-workflow/agent-start': disposition(['runId', 'seq', 'label', 'childId'], ['phase']),
+  'tool-workflow/log': disposition(['runId', 'message', 'ordinal'], ['truncated']),
+  'tool-workflow/phase': disposition(['runId', 'title', 'ordinal']),
   'tool-workflow/run-end': disposition(['runId', 'stopReason']),
-  'tool-workflow/run-start': disposition(['runId', 'name']),
+  'tool-workflow/run-start': disposition(['runId', 'name'], ['parentCallId']),
   'tool/call': disposition(['turn', 'step', 'callId', 'name', 'arguments']),
   'tool/code-dispatch': disposition(
     ['rootCallId', 'parentCallId', 'subCallId', 'name', 'arguments', 'isError', 'content'],

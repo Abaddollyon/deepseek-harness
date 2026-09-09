@@ -61,13 +61,12 @@ async function mockCompletionServer(): Promise<{ url: string; requests: unknown[
   return { url: `http://127.0.0.1:${address.port}`, requests, headers }
 }
 
-async function makeHarness(storageDir: string) {
+async function makeHarness(storageDir?: string) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
-  await ctx.plugin(JsonlSessionPersistence, { root: storageDir })
-  await new Promise(resolve => setTimeout(resolve, 50))
+  if (storageDir !== undefined) await ctx.plugin(JsonlSessionPersistence, { root: storageDir })
   return ctx
 }
 
@@ -584,9 +583,26 @@ describe('HarnessSdkJsonRpcServer', () => {
     }
   })
 
+  it('rejects reuse of a disposed durable session id in the same persistence root', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-durable-child-'))
+    const ctx = await makeHarness(storageDir)
+    try {
+      const sessionId = SessionId('durable-child')
+      const child = await ctx.agents.create({ sessionId })
+      await child.dispose()
+      expect(ctx.agents.get(sessionId)).toBeUndefined()
+      expect((await ctx.sessionPersistence.stat(sessionId))?.header.id).toBe(sessionId)
+      await expect(ctx.agents.create({ sessionId })).rejects.toThrow('already exists')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
   it('correlates reused local ids by parent scope when runs settle out of order', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-subagent-reuse-'))
-    const ctx = await makeHarness(storageDir)
+    // This correlation case owns ephemeral local lifecycles; durable IDs cannot be reused.
+    const ctx = await makeHarness()
     try {
       const transport = new FakeTransport()
       const server = new HarnessSdkJsonRpcServer(ctx, transport)

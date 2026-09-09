@@ -164,6 +164,7 @@ class SystemdScopeOwner implements BoundProcessOwner {
   private stopped = false
   private observation: Promise<void> | undefined
   private killFailure: Error | undefined
+  private stopFailure: Error | undefined
   private wakeGeneration = 0
   private wakeWaiter: { generation: number; resolve: () => void } | undefined
 
@@ -229,6 +230,21 @@ class SystemdScopeOwner implements BoundProcessOwner {
     }
   }
 
+  /** Stop an owned transient scope whose launcher exited before bootstrap consumption. */
+  stopUnconsumedScope(): void {
+    if (this.stopped || !existsSync(this.files.requestPath)) return
+    const result = this.runSync(this.systemctl, [
+      '--user', 'stop', this.unit,
+    ], { encoding: 'utf8', env: managerEnvironment(), timeout: SYSTEMCTL_TIMEOUT_MS })
+    const output = `${result.stdout}\n${result.stderr}`
+    if ((result.error !== undefined || result.status !== 0) && !MISSING_UNIT.test(output)) {
+      this.stopFailure = result.error ?? new Error(
+        `systemctl could not stop ${this.unit}: ${output.trim() || `exit ${String(result.status)}`}`,
+      )
+    }
+    this.wakeObservation()
+  }
+
   private absentUnit(): boolean {
     this.observeRequestConsumption()
     if (this.establishment === 'established') return false
@@ -261,7 +277,12 @@ class SystemdScopeOwner implements BoundProcessOwner {
     return { loadState, activeState }
   }
 
+  private throwStopFailure(): void {
+    if (this.stopFailure !== undefined) throw this.stopFailure
+  }
+
   private async rangeActive(): Promise<boolean> {
+    this.throwStopFailure()
     this.observeRequestConsumption()
     const result = await this.query(this.systemctl, [
       '--user',
@@ -270,6 +291,7 @@ class SystemdScopeOwner implements BoundProcessOwner {
       '--property=LoadState',
       '--property=ActiveState',
     ])
+    this.throwStopFailure()
     const output = `${result.stdout}\n${result.stderr}`
     if (result.status === 0) {
       const { loadState, activeState } = this.parseUnitState(result.stdout)
@@ -359,6 +381,7 @@ function scopeArgs(unitBase: string, invocation: RunnerInvocation, argv: readonl
 function directOutcome(
   child: ReturnType<typeof spawn>,
   files: LinuxLaunchFiles,
+  stopUnconsumedScope: () => void,
 ): Promise<SubprocessOutcome> {
   return new Promise((resolveOutcome, rejectOutcome) => {
     let settled = false
@@ -371,12 +394,13 @@ function directOutcome(
       if (settled) return
       settled = true
       try {
+        if (existsSync(files.requestPath)) stopUnconsumedScope()
         const startup = readLinuxStartupError(files.startupErrorPath)
         if (startup !== undefined) {
           rejectOutcome(deserializeRunnerError(startup.error))
           return
         }
-        if (existsSync(files.requestPath)) {
+        if (existsSync(files.requestPath) && signal === null) {
           rejectOutcome(new Error('subprocess scope exited before its bootstrap consumed the launch request'))
           return
         }
@@ -424,12 +448,13 @@ export function prepareLinuxTerminalScope(
   const invocation = internals.runnerInvocation ?? spawnRunnerInvocation()
   const files = createLinuxLaunchFiles({ cwd: spec.cwd, env: targetEnv })
   const unitBase = unitStem('dsh-terminal')
+  let owner: SystemdScopeOwner | undefined
   return {
     command: internals.systemdRun ?? 'systemd-run',
     args: scopeArgs(unitBase, invocation, spec.argv),
     cwd: process.cwd(),
     env: runnerEnvironment(files.requestPath, invocation),
-    bindOwner: direct => new SystemdScopeOwner(
+    bindOwner: direct => owner = new SystemdScopeOwner(
       `${unitBase}.scope`,
       files,
       direct,
@@ -439,9 +464,10 @@ export function prepareLinuxTerminalScope(
       internals.sleep ?? sleepWithAbort,
     ),
     resolveOutcome: (outcome) => {
+      owner?.stopUnconsumedScope()
       const startup = readLinuxStartupError(files.startupErrorPath)
       if (startup !== undefined) throw deserializeRunnerError(startup.error)
-      if (existsSync(files.requestPath)) {
+      if (existsSync(files.requestPath) && outcome.signal === null) {
         throw new Error('terminal scope exited before its bootstrap consumed the launch request')
       }
       return outcome
@@ -497,7 +523,7 @@ export function launchLinuxScope(
     stdin: child.stdin,
     stdout: child.stdout,
     stderr: child.stderr,
-    direct: directOutcome(child, files),
+    direct: directOutcome(child, files, () => { owner.stopUnconsumedScope() }),
     owner,
   }
 }

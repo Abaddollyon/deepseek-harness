@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { PassThrough } from 'node:stream'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   launchLinuxScope,
   prepareLinuxTerminalScope,
@@ -56,6 +56,11 @@ class FakeChild extends EventEmitter {
 }
 
 const directories: string[] = []
+
+beforeEach(() => {
+  // Fake child identities must never reach a host process group.
+  vi.spyOn(process, 'kill').mockImplementation(() => { throw new Error('fake process group absent') })
+})
 
 afterEach(() => {
   for (const directory of directories.splice(0)) {
@@ -205,12 +210,80 @@ describe('Linux scope establishment and quiescence', () => {
     expect(spawnSync).toHaveBeenCalledWith('/bin/systemctl', expect.arrayContaining([
       'kill', '--kill-whom=all', '--signal=SIGTERM',
     ]), expect.anything())
-    const direct = expect(result.direct).rejects.toThrow('before its bootstrap consumed')
+    const direct = expect(result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
     child.exit(null, 'SIGTERM')
     await direct
     await expect(waiting).resolves.toBeUndefined()
     expect(existsSync(requestPath)).toBe(true)
     result.owner.cleanup?.()
+  })
+
+  it('stops an active scope when cancellation exits its launcher before request consumption', async () => {
+    const processKill = vi.spyOn(process, 'kill')
+    const firstQuery = Promise.withResolvers<ReturnType<typeof activeUnit>>()
+    const query = vi.fn()
+      .mockImplementationOnce(async () => await firstQuery.promise)
+      .mockResolvedValueOnce(activeUnit('inactive'))
+    const launched = launch(query)
+    const waiting = launched.result.owner.waitForExit()
+    launched.result.owner.signal('SIGTERM')
+    expect(processKill).toHaveBeenCalledExactlyOnceWith(-321, 'SIGTERM')
+    expect(launched.child.kills).toEqual(['SIGTERM'])
+    expect(existsSync(launched.requestPath)).toBe(true)
+    launched.child.exit(null, 'SIGTERM')
+    expect(launched.spawnSync).toHaveBeenLastCalledWith('/bin/systemctl', [
+      '--user', 'stop', expect.stringMatching(/^dsh-subprocess-.*\.scope$/u),
+    ], expect.anything())
+    firstQuery.resolve(activeUnit())
+    await expect(launched.result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
+    await expect(waiting).resolves.toBeUndefined()
+    expect(query).toHaveBeenCalledTimes(2)
+    launched.result.owner.cleanup?.()
+    expect(existsSync(launched.requestPath)).toBe(false)
+  })
+
+  it('preserves range cleanup failure separately from a signalled bootstrap outcome', async () => {
+    const launched = launch(async () => activeUnit(), {
+      spawnSync: vi.fn(() => ({ status: 1, stdout: '', stderr: 'stop denied' })) as never,
+    })
+    launched.child.exit(null, 'SIGTERM')
+    await expect(launched.result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
+    await expect(launched.result.owner.waitForExit()).rejects.toThrow('stop denied')
+    launched.result.owner.cleanup?.()
+  })
+
+  it('retains failed scope stop across successful escalation while a query is pending', async () => {
+    const processKill = vi.spyOn(process, 'kill')
+    const firstQuery = Promise.withResolvers<ReturnType<typeof activeUnit>>()
+    const query = vi.fn()
+      .mockImplementationOnce(async () => await firstQuery.promise)
+      .mockRejectedValue(new Error('unexpected second query after stop failure'))
+    const runSync = vi.fn()
+      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'stop denied' })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+    const launched = launch(query, { spawnSync: runSync as never })
+    const waiting = launched.result.owner.waitForExit()
+    const failure = expect(waiting).rejects.toThrow('stop denied')
+    launched.child.exit(null, 'SIGTERM')
+    launched.result.owner.signal('SIGKILL')
+    expect(runSync.mock.calls).toHaveLength(2)
+    expect(processKill).not.toHaveBeenCalled()
+    firstQuery.resolve(activeUnit())
+    await failure
+    expect(query).toHaveBeenCalledOnce()
+    await expect(launched.result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
+    launched.result.owner.cleanup?.()
+  })
+
+  it('preserves startup failure even when the unconsumed bootstrap later receives a signal', async () => {
+    const launched = launch(async () => missingUnit())
+    writeLinuxStartupError(linuxLaunchFilesFromLocator(launched.requestPath), {
+      type: 'error', error: { name: 'Error', message: 'bootstrap load failed', code: 'ENOENT' },
+    })
+    launched.child.exit(null, 'SIGTERM')
+    await expect(launched.result.direct).rejects.toMatchObject({ code: 'ENOENT', message: 'bootstrap load failed' })
+    await expect(launched.result.owner.waitForExit()).resolves.toBeUndefined()
+    launched.result.owner.cleanup?.()
   })
 
   it('accepts request consumption followed by rapid --collect unload as stopped', async () => {
@@ -559,6 +632,23 @@ describe('Linux PTY bootstrap reuse', () => {
     expect(existsSync(linuxLaunchFilesFromLocator(requestPath).directory)).toBe(false)
   })
 
+  it('stops an unconsumed PTY scope and preserves its observed signal', async () => {
+    const spawnSync = vi.fn(() => ({ status: 0, stdout: '', stderr: '' }))
+    const scope = prepareLinuxTerminalScope(terminalSpec, { TARGET: 'yes' }, {
+      spawnSync: spawnSync as never,
+      systemctlQuery: async () => activeUnit('inactive'),
+    })
+    const requestPath = scope.env[SUBPROCESS_RUNNER_ENV]!
+    directories.push(linuxLaunchFilesFromLocator(requestPath).directory)
+    const owner = scope.bindOwner({ running: () => false, signal: vi.fn() })
+    expect(scope.resolveOutcome({ exitCode: null, signal: 'SIGTERM' })).toEqual({ exitCode: null, signal: 'SIGTERM' })
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', [
+      '--user', 'stop', expect.stringMatching(/^dsh-terminal-.*\.scope$/u),
+    ], expect.anything())
+    await expect(owner.waitForExit()).resolves.toBeUndefined()
+    scope.cleanup()
+  })
+
   it('surfaces PTY pre-exec errors instead of launcher outcomes', () => {
     const scope = prepareLinuxTerminalScope(terminalSpec, { TARGET: 'yes' })
     const requestPath = scope.env[SUBPROCESS_RUNNER_ENV]
@@ -573,6 +663,7 @@ describe('Linux PTY bootstrap reuse', () => {
   })
 
   it('uses default owner dependencies and rejects an unconsumed request', () => {
+    childProcessMocks.spawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' })
     const scope = prepareLinuxTerminalScope(terminalSpec, { TARGET: 'yes' })
     const requestPath = scope.env[SUBPROCESS_RUNNER_ENV]
     if (requestPath === undefined) throw new Error('missing PTY request')

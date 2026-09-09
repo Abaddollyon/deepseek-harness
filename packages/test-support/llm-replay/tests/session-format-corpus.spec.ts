@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedMigrationError } from '@deepseek-ai/dsh-session-format-catalog'
-import { expectedUnsupported, unversionedProtocolFixtures } from './session-format-corpus-inventory.ts'
+import { expectedInvalid, expectedUnsupported, unversionedProtocolFixtures } from './session-format-corpus-inventory.ts'
 import { parseSessionLog } from '../src/index.ts'
 
 const repoRoot = resolve(import.meta.dirname, '../../../..')
@@ -64,6 +65,33 @@ function assertRestoration(
   expect((refusal as Error).message, key + ': exact refusal reason').toBe(unsupported.reason)
 }
 
+function assertInvalidPredecessor(
+  key: string,
+  sourceVersion: number,
+  highestVersion: number,
+  bytes: Buffer,
+  restore: () => unknown,
+  invalid: Unsupported & { sha256: string },
+): void {
+  expect(sourceVersion, key + ': invalid fixture must be historical').toBeLessThan(SESSION_FORMAT_VERSION)
+  expect(sourceVersion, key + ': invalid fixture must have a later generation').toBeLessThan(highestVersion)
+  expect(sourceVersion, key + ': inventoried source generation').toBe(invalid.sourceVersion)
+  expect(createHash('sha256').update(bytes).digest('hex'), key + ': fixture digest').toBe(invalid.sha256)
+  let failure: unknown
+  try {
+    restore()
+  } catch (error) {
+    failure = error
+  }
+  expect(failure, key + ': expected historical validation error').toBeInstanceOf(Error)
+  expect((failure as Error).constructor, key + ': exact validation error class').toBe(Error)
+  expect((failure as Error).message, key + ': exact validation error message').toBe(invalid.reason)
+}
+
+function fixtureFamily(key: string): string {
+  return key.replace(/(?:\.v[1-9]\d*)?\.jsonl$/u, '.jsonl')
+}
+
 const fixtures = ['snapshots', 'packages', 'scripts/snapshots/python-sdk-single-exe']
   .flatMap(root => committedSessionFixtures(join(repoRoot, root)))
   .map(file => ({ file, key: relative(repoRoot, file).split('\\').join('/') }))
@@ -72,8 +100,16 @@ const fixtures = ['snapshots', 'packages', 'scripts/snapshots/python-sdk-single-
 describe('committed Session format corpus', () => {
   it('keeps every exception tied to an existing fixture', () => {
     const keys = new Set(fixtures.map(({ key }) => key))
-    for (const key of [...Object.keys(expectedUnsupported), ...unversionedProtocolFixtures]) {
+    for (const key of [...Object.keys(expectedUnsupported), ...Object.keys(expectedInvalid), ...unversionedProtocolFixtures]) {
       expect(keys.has(key), key).toBe(true)
+    }
+    for (const key of Object.keys(expectedInvalid)) {
+      expect(expectedUnsupported[key], key + ': invalid is not unsupported').toBeUndefined()
+      expect(unversionedProtocolFixtures.has(key), key + ': invalid is not unversioned').toBe(false)
+      const selected = fixtures.filter(fixture => fixtureFamily(fixture.key) === fixtureFamily(key))
+        .sort((a, b) => filenameFormatVersion(b.file) - filenameFormatVersion(a.file))[0]!
+      expect(filenameFormatVersion(selected.file), key + ': selected generation is current').toBe(SESSION_FORMAT_VERSION)
+      expect(() => parseSessionLog(readFileSync(selected.file, 'utf8')), key + ': selected generation restores').not.toThrow()
     }
   })
 
@@ -92,10 +128,49 @@ describe('committed Session format corpus', () => {
         version: number
       }
       expect(header.version, key + ': filename/header Session generation').toBe(filenameFormatVersion(file))
-      assertRestoration(key, header.version, () => parseSessionLog(source), expectedUnsupported[key])
+      const invalid = expectedInvalid[key]
+      if (invalid === undefined) {
+        assertRestoration(key, header.version, () => parseSessionLog(source), expectedUnsupported[key])
+      } else {
+        const highestVersion = Math.max(...fixtures
+          .filter(fixture => fixtureFamily(fixture.key) === fixtureFamily(key))
+          .map(fixture => filenameFormatVersion(fixture.file)))
+        assertInvalidPredecessor(key, header.version, highestVersion, bytes, () => parseSessionLog(source), invalid)
+      }
     } finally {
       expect(readFileSync(file), key + ': source bytes remain unchanged').toEqual(bytes)
     }
+  })
+})
+
+describe('historical invalid predecessor policy', () => {
+  const bytes = Buffer.from('immutable predecessor')
+  const invalid = {
+    sourceVersion: 0,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    reason: 'orphan checkpoint',
+  }
+  const refused = (): never => { throw new Error(invalid.reason) }
+
+  it('accepts only the pinned historical failure with a later generation', () => {
+    expect(() => { assertInvalidPredecessor('historical', 0, 3, bytes, refused, invalid) }).not.toThrow()
+  })
+
+  it.each([
+    ['changed bytes', 0, 3, Buffer.from('changed'), refused, 'fixture digest'],
+    ['current generation', 3, 4, bytes, refused, 'must be historical'],
+    ['highest generation', 0, 0, bytes, refused, 'must have a later generation'],
+    ['wrong source version', 1, 3, bytes, refused, 'inventoried source generation'],
+    ['restored predecessor', 0, 3, bytes, () => [], 'expected historical validation error'],
+    ['different error', 0, 3, bytes, () => { throw new Error('different') }, 'exact validation error message'],
+    ['different class', 0, 3, bytes, () => { throw new TypeError(invalid.reason) }, 'exact validation error class'],
+    ['migration refusal', 0, 3, bytes, () => { throw new SessionFormatUnsupportedMigrationError(invalid.reason) }, 'exact validation error class'],
+  ] as const)('rejects %s', (_name, version, highest, source, restore, reason) => {
+    expect(() => { assertInvalidPredecessor('invalid', version, highest, source, restore, invalid) }).toThrow(reason)
+  })
+
+  it('rejects unlisted corruption through ordinary restoration', () => {
+    expect(() => { assertRestoration('unlisted', 0, refused, undefined) }).toThrow('current-format restoration')
   })
 })
 

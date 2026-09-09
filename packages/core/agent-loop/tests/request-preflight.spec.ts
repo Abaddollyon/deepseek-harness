@@ -83,8 +83,9 @@ describe('agent/request-preflight', () => {
 
     expect(attempts).toEqual([1, 2])
     expect(agent.session.eventAt(agent.session.surface.nodes[0]!)?.type).toBe('system/message')
-    expect(agent.session.snapshotEvents().findLast(event => event.type === 'request/header')?.data)
-      .toMatchObject({ reason: 'series', startsSeries: true })
+    const header = agent.session.snapshotEvents().findLast(event => event.type === 'request/header')
+    expect(header?.data).toMatchObject({ reason: 'series' })
+    expect(header?.data).not.toHaveProperty('startsSeries')
     expect(adapter.requests).toHaveLength(1)
     expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('checkpoint')
     expect(JSON.stringify(adapter.requests[0]!.messages)).not.toContain('original durable input')

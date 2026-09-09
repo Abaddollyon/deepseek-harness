@@ -24,6 +24,10 @@ Host 作用域的连接与 Client 状态在使用权威 manifest 和传输 API �
 
 导入的评审人路由与上游 Cloudflare 预览发布均限定仓库。它们不能从 fork 请求上游评审人或发布上游预览。独立、托管且无需密钥的 fork CI 工作流保持启用。
 
+历史迁移的准入依据是已发布的生产方，而不只是初始清单中的事件。[V0 迁移](../../../../packages/session/session-format-v0-to-v1/README.zh.md)接受已发布的 workflow phase/log 载荷和外层调用 ID，不会将 workflow 序号或调用 ID 当作 Session 序号。不可变前驱数据格式错误并不意味着缺少迁移支持：[回放语料](../../../../packages/test-support/llm-replay/README.zh.md)单独固定其字节和精确校验失败，要求同组最高代际使用当前格式且成功恢复，并继续拒绝未列出的损坏数据。
+
+Linux 启动进程退出与受管范围清理是相互独立的结果。在 bootstrap 消费其请求之前，启动进程的信号结果不能证明目标已执行，而且 systemd scope 可能在没有任务时仍保持活跃。[本地 subprocess 提供方](../../../../packages/subprocess/subprocess-local/README.zh.md)显式停止其拥有的 scope，并独立保留停止失败，不因后续升级信号发送成功而清除；否则，空的活跃 scope 可能使静止状态轮询无限持续。
+
 ## 考虑过的替代方案
 
 **并行保留旧存储和 stream 路径。** 否决，因为两种持久表示会让回放、投递水位和 token 计量依赖于消费方读取哪一种表示。

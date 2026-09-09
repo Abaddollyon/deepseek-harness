@@ -627,7 +627,7 @@ export class ReactLoopAgent implements Agent {
     } else if (baseline === undefined || !headerEquals(baseline, header)) {
       this.session.append('request/header', { header, reason: 'change', ...startsSeries ? { startsSeries: true } : {} })
     } else if (startsSeries) {
-      this.session.append('request/header', { header, reason: 'series', startsSeries: true })
+      this.session.append('request/header', { header, reason: 'series' })
     }
     this.requestSurfaceGeneration = surfaceGeneration
 
@@ -690,7 +690,7 @@ export class ReactLoopAgent implements Agent {
 
     if (session.surface.replaceGeneration !== surfaceGeneration) {
       reconcilePrompt()
-      session.append('request/header', { header, reason: 'series', startsSeries: true })
+      session.append('request/header', { header, reason: 'series' })
       this.requestSurfaceGeneration = session.surface.replaceGeneration
     }
     signal.throwIfAborted()

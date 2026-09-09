@@ -34,6 +34,12 @@ const statFailure = vi.hoisted(() => ({
   error: undefined as Error | undefined,
 }))
 
+const statPause = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  reads: 0,
+  wait: undefined as (() => Promise<void>) | undefined,
+}))
+
 const readdirFailure = vi.hoisted(() => ({
   path: undefined as string | undefined,
   error: undefined as Error | undefined,
@@ -67,6 +73,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     stat: (async (...args: Parameters<typeof actual.stat>) => {
       if (String(args[0]) === statFailure.path && statFailure.error !== undefined) throw statFailure.error
       const identity = await actual.stat(...args)
+      if (String(args[0]) === statPause.path) {
+        statPause.reads += 1
+        if (statPause.reads === 2) await statPause.wait?.()
+      }
       if (String(args[0]) !== statRace.path || !('mtimeNs' in identity)) return identity
       statRace.reads += 1
       if (statRace.mode === 'churn') return { ...identity, mtimeNs: identity.mtimeNs + BigInt(statRace.reads) }
@@ -280,6 +290,9 @@ afterEach(async () => {
   statRace.path = undefined
   statRace.reads = 0
   statRace.mode = 'settle'
+  statPause.path = undefined
+  statPause.reads = 0
+  statPause.wait = undefined
   readTally.bySuffix.clear()
   readTally.enabled = false
   const pausedReadDone = pausedRead.active ? pausedRead.done : undefined
@@ -1900,30 +1913,28 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     const m = meta('vanishing-snapshot')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
+      resolveGenerationInDirectory(dir: string, signal?: AbortSignal): Promise<{ sourcePath: string } | undefined>
     }
-    const listArtifacts = persistence.listArtifacts.bind(persistence)
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementation(async () => {
-      const artifacts = await listArtifacts()
-      await rm(artifacts[0]!.path)
-      return artifacts
+    const resolveGeneration = persistence.resolveGenerationInDirectory.bind(persistence)
+    const discovery = vi.spyOn(persistence, 'resolveGenerationInDirectory').mockImplementation(async (dir, signal) => {
+      const selected = await resolveGeneration(dir, signal)
+      if (selected !== undefined) await rm(selected.sourcePath)
+      return selected
     })
 
     await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
-    discovery.mockRestore()
+    expect(discovery).toHaveBeenCalled()
+    await expect(stat(rawLogPath(root, m.cwd, m.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('surfaces non-ENOENT stat failures during listing', async () => {
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: meta('snapshot-stat-failure'),
-      path: `${root}\0snapshot-stat-failure`,
-    }])
+    const m = meta('snapshot-stat-failure')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const failure = Object.assign(new Error('EACCES: listing stat denied'), { code: 'EACCES' })
+    statFailure.path = rawLogPath(root, m.cwd, m.id)
+    statFailure.error = failure
 
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/null bytes/)
-    discovery.mockRestore()
+    await expect(ctx.sessionPersistence.list()).rejects.toBe(failure)
   })
 
   it('forwards list cancellation and awaits in-flight discovery cleanup', async () => {
@@ -1959,20 +1970,31 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
   it('checks cancellation after an uncancellable list stat settles', async () => {
     const m = meta('snapshot-stat-cancellation')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
+    const started = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    statPause.path = rawLogPath(root, m.cwd, m.id)
+    statPause.wait = async () => {
+      started.resolve(undefined)
+      await release.promise
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: m,
-      path: rawLogPath(root, m.cwd, m.id),
-    }])
     const reason = new Error('JSONL list stat cancelled')
     const controller = new AbortController()
     const pending = ctx.sessionPersistence.list({ signal: controller.signal })
-    queueMicrotask(() => { controller.abort(reason) })
-
-    await expect(pending).rejects.toBe(reason)
-    expect(discovery).toHaveBeenCalledWith(controller.signal)
+    let settled = false
+    void pending.then(() => { settled = true }, () => { settled = true })
+    try {
+      await started.promise
+      expect(statPause.reads).toBe(2)
+      controller.abort(reason)
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      release.resolve(undefined)
+      await expect(pending).rejects.toBe(reason)
+    } finally {
+      release.resolve(undefined)
+      // The assertion owns the cancellation rejection; teardown only joins the operation.
+      await pending.catch(() => {})
+    }
   })
 })
 

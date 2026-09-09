@@ -113,7 +113,7 @@ turn/end
 
 `agent/pre-step` 接纳、改写或拒绝已领取输入；首次领取被拒绝或为空时，关闭不含步骤的持久轮次。enter 决策可声明 `startsRequestSeries`，包装监听器保留该声明。组装与 `step/start` 之后，`agent/request` 和 `prepareCall()` 解析路由；在任一阶段取消都不会提交系统或用户消息。每次尝试使用已准备调用的能力协调保留的提示词、仅接纳一次用户消息、记录 header/context，并在派生和冻结请求之前运行 `agent/request-preflight`。重试既不重复组装，也不重复输入准入。系统提示词仅存在于 `system/message` 历史中；清空、缓存前缀更新和序列归并遵循[系统节点决策](../.agents/notes/implemented/architecture/2026-09-02-system-prompt-as-surface-node.zh.md)。
 
-循环发送不可变请求并保留实时取消能力；[agent-loop](../packages/core/agent-loop/README.zh.md#understand-the-implementation)拥有请求构造、提示词协调与恢复语义。
+循环发送不可变请求并保留实时取消能力；[agent-loop](../packages/core/agent-loop/README.zh.md#understand-the-implementation)拥有请求构造、请求序列 header 表示、提示词协调与恢复语义。
 
 可选的 `AgentOptions.budget` 为一个实时循环限制步骤、输入、输出与重试（[语义](subsystems/core.zh.md)）。预检要求动作声明的 `surface.replaceGeneration` 增加才允许重试，并在八次有效重试后放行，使提供方错误恢复仍然可达。有效替换会归并系统提示词并开始新的请求序列。
 

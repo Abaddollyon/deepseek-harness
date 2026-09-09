@@ -134,6 +134,8 @@ describe('request stability across the loop', () => {
     expectPrefixExtension(adapter.requests[0]!, adapter.requests[1]!)
     expect(agent.session.snapshotEvents().flatMap(event =>
       event.type === 'request/header' ? [event.data.reason] : [])).toEqual(['initial', 'series'])
+    const header = agent.session.snapshotEvents().findLast(event => event.type === 'request/header')
+    expect(header?.data).not.toHaveProperty('startsSeries')
   })
 
   it('retains the explicit series boundary when that request also changes its header', async () => {

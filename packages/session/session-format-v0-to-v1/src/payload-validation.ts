@@ -240,6 +240,16 @@ export function assertReleasedPayloadSemantics(event: SessionFormatEvent, versio
       if (data['phase'] !== undefined) stringValue(data['phase'], `${label} phase`)
       nonEmptyString(data['childId'], `${label} childId`)
       return
+    case 'tool-workflow/phase':
+    case 'tool-workflow/log':
+      nonEmptyString(data['runId'], `${label} runId`)
+      positiveIntegerValue(data['ordinal'], `${label} ordinal`)
+      if (event.type === 'tool-workflow/phase') stringValue(data['title'], `${label} title`)
+      else {
+        stringValue(data['message'], `${label} message`)
+        if (data['truncated'] !== undefined) literalValue(data['truncated'], [true], `${label} truncated`)
+      }
+      return
     case 'tool-workflow/run-end':
       nonEmptyString(data['runId'], `${label} runId`)
       literalValue(data['stopReason'], ['completed', 'cancelled', 'error'], `${label} stopReason`)
@@ -247,6 +257,7 @@ export function assertReleasedPayloadSemantics(event: SessionFormatEvent, versio
     case 'tool-workflow/run-start':
       nonEmptyString(data['runId'], `${label} runId`)
       nonEmptyString(data['name'], `${label} name`)
+      if (data['parentCallId'] !== undefined) nonEmptyString(data['parentCallId'], `${label} parentCallId`)
       return
     case 'tool/call':
       coordinatePair(data, label)

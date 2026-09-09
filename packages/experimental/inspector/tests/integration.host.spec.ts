@@ -373,29 +373,28 @@ describe('experimental Inspector real Worker', () => {
     })
     // The MessagePort can deliver log requests before ingest receives Console subscriptions.
     await client.setIngestPaused(true)
-    await Promise.all([cdp.call('Runtime.enable'), secondCdp.call('Runtime.enable')])
-    const firstContext = await clientContext(cdp)
-    const secondContext = await clientContext(secondCdp)
-    // Client Runtime commands share the source socket with Console enable frames, so these
-    // round-trips establish hook readiness before the fixture logs over its independent port.
-    const [firstReady, secondReady] = await Promise.all([
-      cdp.call('Runtime.evaluate', { expression: 'undefined', contextId: firstContext }),
-      secondCdp.call('Runtime.evaluate', { expression: 'undefined', contextId: secondContext }),
-    ])
-    expect(firstReady.result?.result).toMatchObject({ type: 'undefined' })
-    expect(secondReady.result?.result).toMatchObject({ type: 'undefined' })
+    let firstContext: number
+    let secondContext: number
+    let logged: Promise<void> | undefined
     const value = { owner: 'client-console' }
     const marker = 'client-console-event'
-    const logged = (async () => {
-      // Both subscriptions precede this request on the same ingest WebSocket.
-      // A Client response, unlike Runtime.enable, acknowledges their delivery.
-      expect((await cdp.call('Runtime.evaluate', {
-        contextId: firstContext,
-        expression: 'void 0',
-      })).error).toBeUndefined()
-      await client.log(value, marker)
-    })()
-    await Promise.all([logged, client.setIngestPaused(false)])
+    try {
+      await Promise.all([cdp.call('Runtime.enable'), secondCdp.call('Runtime.enable')])
+      firstContext = await clientContext(cdp)
+      secondContext = await clientContext(secondCdp)
+      logged = (async () => {
+        // Both subscriptions precede this request on the same ingest WebSocket.
+        // A Client response, unlike Runtime.enable, acknowledges their delivery.
+        expect((await cdp.call('Runtime.evaluate', {
+          contextId: firstContext,
+          expression: 'void 0',
+        })).error).toBeUndefined()
+        await client.log(value, marker)
+      })()
+    } finally {
+      await client.setIngestPaused(false)
+      await logged
+    }
     let firstEvent: CdpMessage | undefined
     let secondEvent: CdpMessage | undefined
     await vi.waitFor(() => {

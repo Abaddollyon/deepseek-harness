@@ -94,6 +94,8 @@ const handle = await ctx.agents.create({
 
 ### 请求 header 与适配器默认值
 
+带有 `reason: 'series'` 的 `request/header` 已声明新序列，因此省略 `startsSeries`。变化的 header 使用 `reason: 'change'`，且仅在该变化同时开启序列时携带 `startsSeries: true`；读取方必须识别这两种表示。
+
 `agent/request` 返回后，`ctx.llm.prepareCall()` 会在活跃轮次信号下校验适配器持有的字段，并解析推理强度和输出 token 默认值。循环会在解析、`request/header` 记录与分派期间保留同一个适配器。循环会为首次请求、变化的 envelope（config 或 tools——提示词不属于 header）、显式消息序列起点、surface 替换（原地替换提示词或压缩（compaction））后的请求及恢复写入完整 header；同一序列内内容未变的步骤、重试与普通后续轮次继承最新 header，历史内追加提示词不是替换，因此紧随其后的请求同样继承 header。在 header 之外，循环还会记录 `request/context`——提供方、模型、`contextWindow` 以及来自 `prepareCall()` 的路由 `systemPromptUpdate` 模式——且仅在其中任何一项与最新快照不同时记录。下一次 waterfall 前，循环移除适配器默认字段，使当前路由重新解析它们；显式设置则保留。未处理的路由仍以 `NO_ADAPTER` 失败。
 
 记录确切请求 header 与 context 后，`agent/request-preflight` 在历史派生前接收冻结的 header 和已解析容量。重试必须标识更新的已提交替换 generation；仅日志增长不能触发重试。八次有效重试后准入继续执行，使提供方错误恢复仍可到达。替换会在派生已准入请求前归并当前系统提示词，并记录新的请求序列 header。

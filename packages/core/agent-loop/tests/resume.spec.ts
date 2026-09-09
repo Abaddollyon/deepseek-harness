@@ -195,18 +195,24 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     // The real close still runs (releasing write ownership); the injected
     // failure models a drain that reports a durability error at close.
     const realClose = stored.close.bind(stored)
+    const closeFailure = new Error('close exploded')
     vi.spyOn(stored, 'close').mockImplementation(async () => {
       await realClose()
-      throw new Error('close exploded')
+      throw closeFailure
     })
 
-    await expect(handle.dispose()).rejects.toThrow('close exploded')
-    // Teardown reached quiescence before the rejection: the agent and session
-    // are unregistered, and write ownership is released — the never-flushed
-    // session reports absence, not an ownership conflict.
+    await expect(handle.dispose()).rejects.toBe(closeFailure)
+    // Teardown releases the registries and writer even when the final close rejects.
     expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(ctx.sessions.get(sessionId)).toBeUndefined()
-    await expect(ctx.sessionPersistence.open(sessionId, 'write')).rejects.toThrow('not found')
+    // Disposal's explicit flush preserves the empty session header.
+    const reopened = await ctx.sessionPersistence.open(sessionId, 'write')
+    try {
+      expect(reopened.id).toBe(sessionId)
+      expect((await reopened.read()).events).toEqual([])
+    } finally {
+      await reopened.close()
+    }
     await ctx.fiber.dispose()
   })
 

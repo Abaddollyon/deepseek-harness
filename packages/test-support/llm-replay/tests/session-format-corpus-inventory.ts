@@ -50,6 +50,15 @@ export const expectedUnsupported: Readonly<Partial<Record<string, { sourceVersio
   },
 }
 
+/** Exact historical source-validation failures retained as frozen evidence. */
+export const expectedInvalid: Readonly<Partial<Record<string, { sourceVersion: number; sha256: string; reason: string }>>> = {
+  'snapshots/session/agent-instructions/session.jsonl': {
+    sourceVersion: 0,
+    sha256: '6631f373c436cf1166bfce9193f231cc0a24a58e772fe8ea1dc069740eda4459',
+    reason: 'session snapshot line 19: compaction checkpoint at seq 17 has no matching compaction/start',
+  },
+}
+
 /** Headerless snapshot-harness protocol examples, not released Session artifacts. */
 export const unversionedProtocolFixtures = new Set([
   'packages/test-support/session-snapshot/tests/fixtures/record-suite/rec-child/session.1.jsonl',

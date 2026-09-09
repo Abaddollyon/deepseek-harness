@@ -54,7 +54,7 @@ Normal disposal terminates every running managed range and terminal session and 
 
 ### What can go wrong
 
-An executable that cannot be resolved fails loud with a stable error. `done` rejects when spawn or provider failure prevents a direct outcome, and that rejection does not prove whether target execution began. `waitForExit()` rejects if the selected owner can no longer prove its range empty, and cleanup still attempts termination. A read past the retained tail is `lossy` and points at the spill file when one exists. A fallback process group or observed terminal session can miss a descendant that escapes before observation — see the limitations below.
+An executable that cannot be resolved fails loud with a stable error. `done` rejects when spawn or provider failure prevents a direct outcome, and that rejection does not prove whether target execution began. On Linux, a signal that terminates the scope launcher before bootstrap consumption remains an observed signal outcome, not proof that the target started; the provider stops that owned scope and independently verifies quiescence. `waitForExit()` rejects if the selected owner can no longer prove its range empty, and cleanup still attempts termination. A read past the retained tail is `lossy` and points at the spill file when one exists. A fallback process group or observed terminal session can miss a descendant that escapes before observation — see the limitations below.
 
 -----
 

@@ -24,6 +24,10 @@ Remote uploads check their Host generation after reading the complete response b
 
 Imported reviewer routing and upstream Cloudflare preview publication are repository-scoped. They cannot request upstream reviewers or publish upstream previews from the fork. The independent hosted, keyless fork CI workflow remains enabled.
 
+Historical migration admission follows released producers, not only the events represented in an initial inventory. The [V0 migration](../../../../packages/session/session-format-v0-to-v1/README.md) accepts released workflow phase/log payloads and enclosing call IDs without treating workflow ordinals or call IDs as Session sequences. A malformed immutable predecessor is not evidence of missing migration support: the [replay corpus](../../../../packages/test-support/llm-replay/README.md) pins its bytes and exact validation failure separately, requires a successfully restored current highest sibling, and continues to reject unlisted corruption.
+
+Linux launcher exit and managed-range cleanup are independent outcomes. Before bootstrap consumes its request, a launcher signal cannot establish target execution, and a systemd scope can remain active with no tasks. The [local subprocess provider](../../../../packages/subprocess/subprocess-local/README.md) explicitly stops that owned scope and retains stop failure independently of successful later signal escalation; otherwise an empty active scope can leave quiescence polling unbounded.
+
 ## Alternatives considered
 
 **Retain parallel legacy storage and stream paths.** Rejected because two durable representations make replay, delivery watermarks, and token accounting depend on which consumer reads them.
