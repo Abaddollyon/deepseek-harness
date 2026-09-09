@@ -169,6 +169,38 @@ describe('JsonRpcLineTransport', () => {
     b.close()
   })
 
+  it('reports malformed frames to an opt-in observer without intercepting valid traffic', async () => {
+    const { a, b, aToB } = transportPair()
+    const malformed: string[] = []
+    const notifications: string[] = []
+    b.onMalformed((line) => { malformed.push(line) })
+    b.onNotification((method) => { notifications.push(method) })
+    a.onRequest(async (_method, params) => params)
+    b.onRequest(async (_method, params) => params)
+    a.start()
+    b.start()
+
+    try {
+      const invalid = [
+        'not json',
+        'null',
+        '[]',
+        '{"jsonrpc":"2.0","params":{}}',
+        '{"jsonrpc":"2.0","id":"unknown","result":null}',
+      ]
+      for (const line of invalid) aToB.write(`${line}\n`)
+      a.notify('tick')
+
+      await expect(b.request('echo', { outbound: true })).resolves.toEqual({ outbound: true })
+      await expect(a.request('echo', { inbound: true })).resolves.toEqual({ inbound: true })
+      expect(malformed).toEqual(invalid)
+      expect(notifications).toEqual(['tick'])
+    } finally {
+      a.close()
+      b.close()
+    }
+  })
+
   it('preserves multibyte UTF-8 characters split across Buffer chunks', async () => {
     const input = new PassThrough()
     const output = new PassThrough()

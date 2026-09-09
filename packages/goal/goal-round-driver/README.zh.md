@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-goal-round-driver` 会在同一会话中自动继续 active 的 goal：每当 agent 空闲且存在 active、已启用续行并有剩余容量的 goal 时，驱动器就会启动下一个 Goal Round。每一轮都是朝目标前进的一次模型轮次，由保留的 goal-round 提示词驱动；只有来源为 goal 的 Round 会计入 goal 的 Round 上限，上限耗尽时 goal 会记录一个 blocker。驱动器支持可选的 wake 策略：always 立即继续，event-driven 在后台工作结束或计时器唤醒后继续；事件驱动模式需要 timer 服务。Round 上限属于 goal 定义，面向模型的阻塞阈值属于 `dsh-tool-goal`。当任务应跨多轮自行推进时，与 `dsh-goal` 和 `dsh-tool-goal` 一起挂载它；当每一步都需要人工 steering（中途引导）时，不要挂载。
+当 agent 空闲且仍有 Round 容量时，在同一会话中继续 active、已启用续行的 goal。每个 goal 来源的 Round 消耗一次模型轮次并添加保留提示词；上限耗尽时记录 blocker。可选择立即续行或等待外部进展的事件驱动模式。任务需要跨多轮推进时，将 `dsh-goal-round-driver` 与 `dsh-goal`、`dsh-tool-goal` 一起挂载；每一步都需要人工 steering（中途引导）时，不要挂载。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 组合方式
 
-把驱动器挂载在 goal 服务与 goal 工具旁边。可选的 `wake` 配置默认立即续行；如果运行中的子 agent 或调用方所属 job 应抑制静默轮询，请选择 `event-driven` 并设置有界的 `timeoutMs`。
+把驱动器挂载在 goal 服务与 goal 工具旁边。可选的 `wake` 策略默认为立即续行的 `always`。选择 `event-driven` 并设置有界的 `timeoutMs`，可在子 agent 或调用方所属后台 job 存活时等待外部进展；用户消息、notice、relay 或作为兜底的计时器可唤醒续行。事件驱动模式需要 Cordis timer 服务；job 检查是可选的。
 
 ```yaml
 - id: goal
@@ -50,7 +50,7 @@ kind: "package-reference"
 
 ### 何时停止续行
 
-Round 只在整个 agent 进入 idle 时启动；完成、暂停和阻塞会阻止续行；编辑只会通过修订栅栏使进行中的 Round 失效，驱动器会继续新修订。驱动器也会在以下情况自行停止：轮次因 max tokens 结束、持久性写入失败、agent 被取消、插件卸载，或 Round 上限耗尽——上限耗尽时它会以稳定代码 `round-limit` 记录一个 blocker。取消绝不会自动重启 Round：Round 已在进行或已排入队列的 goal 会在下一次 idle 时被暂停；与 goal 尝试无关的取消只会停用续行。
+Round 只在整个 agent 进入 idle 时启动；完成、暂停和阻塞会阻止续行；宿主发起的暂停还会中止正在运行的轮次，而模型在自己轮次内发起的暂停会正常结束。编辑只会通过修订栅栏使进行中的 Round 失效，驱动器会继续新修订。驱动器也会在以下情况自行停止：轮次因 max tokens 结束、持久性写入失败、agent 被取消、插件卸载，或 Round 上限耗尽——上限耗尽时它会以稳定代码 `round-limit` 记录一个 blocker。取消绝不会自动重启 Round：Round 已在进行或已排入队列的 goal 会在下一次 idle 时被暂停；与 goal 尝试无关的取消只会停用续行。
 
 ### resume、fork 或卸载之后
 
@@ -96,7 +96,6 @@ Round 只在整个 agent 进入 idle 时启动；完成、暂停和阻塞会阻�
 
 - [goal 服务](../goal/README.zh.md)——本驱动器继续推进的 goal 状态与生命周期。
 - [goal 工具](../tool-goal/README.zh.md)——面向模型的工具及其执行时权限检查。
-- [同会话驱动器 Agent Note](../../../.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.zh.md)——竞态与生命周期理由。
 
 -----
 

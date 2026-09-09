@@ -9,6 +9,23 @@ English | [中文](README.zh.md)
 
 ## Summary
 
+Users can switch between local and remote Host Sessions without mixing their drafts, views, sidebar state, or requests. Navigation survives UI remounts, and reconnecting preserves the selected presentation. Integrations can wait for a destination's ready connection and reject results from a superseded Host generation. Browser persistence retains recent presentation state within fixed limits; remote feature requests require registered routes.
+
+## Table of Contents
+
+- [Understand the implementation](#understand-the-implementation)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="understand-the-implementation"></a>
+## Understand the implementation
+
+<details>
+<summary>Implementation internals — click to expand</summary>
+
 This package owns the browser shell's local environment identity, persistent environment navigation, compound Host/Session presentation state, and the lifecycle of independently acquired Host runtimes. Each remote runtime receives a fresh Cordis root, an explicit Connection created from its carrier transport, and a dependency-closed domain roster. The selected runtime's presentation plugins receive runtime-owned services while sharing the one renderer, layout, locale, and Slot registry from the shell.
 
 The runtime request service accepts only registered relative `/api/` routes. It binds every call to one environment and rejects completion after the Connection generation changes or disappears. The active composition snapshot keeps the mounted runtime while reporting `connecting`, `connected`, or `disconnected`, records the last connected time, and retries that same Connection without changing navigation. A registry shares concurrent acquisitions of one environment and disposes its runtime and carrier after the last lease releases.
@@ -19,11 +36,7 @@ See [Web Client architecture](../../../docs/subsystems/web-client.md) for runtim
 
 Shell locations include a Host-qualified blank `new-session` conversation. Explicit workspace actions publish navigation even when the selected Session id is unchanged; `backToSession()` returns to the most recently opened conversation and `canBackToSession()` reports its availability. The shared sidebar query belongs to presentation state. Pin access reads the existing Host workspace view store, with persisted reads for Hosts that have not mounted; it does not serialize another pin set. Pin subscriptions leave with the UI registration, retained presentation sources leave with the shell, and equal Session ids on different Hosts remain independent.
 
-## Table of Contents
-
-- [Model Experience](#model-experience)
-- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
-- [Dev Note](#dev-note)
+</details>
 
 -----
 

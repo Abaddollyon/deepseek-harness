@@ -1,11 +1,12 @@
 import { describe, expect, test, vi } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import { createConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { createEnvironmentRuntime } from '../src/client/runtime.ts'
 
 describe('environment runtime activation', () => {
   test('activates complete service trees in independent root contexts', async () => {
     const seen: string[] = []
-    const activate = vi.fn(async (ctx) => {
+    const activate = vi.fn(async (ctx: Context) => {
       const environment = ctx.environmentRuntime
       ctx.provide('schemaFixture', { environmentId: environment.environmentId })
       ctx.on('fixture/event', (value: string) => { seen.push(`${environment.environmentId}:${value}`) })
@@ -35,7 +36,7 @@ describe('environment runtime activation', () => {
       request: async () => new Response('feature'),
       connectionTransport: {
         fetch: async (_url, init) => {
-          const request = JSON.parse(String(init.body)) as { rpcId: string }
+          const request = JSON.parse(await new Response(init.body).text()) as { rpcId: string }
           return new Response(JSON.stringify({
             type: 'server-response',
             rpcId: request.rpcId,

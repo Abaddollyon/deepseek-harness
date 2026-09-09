@@ -60,7 +60,6 @@ function fakeContext(): FakeContext {
         return true
       })
       const child: SubprocessHandle = {
-        pid: 123,
         stdin: clientOutput,
         stdout: clientInput,
         stderr: undefined,

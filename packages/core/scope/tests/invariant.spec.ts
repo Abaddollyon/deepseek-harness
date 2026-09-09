@@ -58,6 +58,12 @@ describe('scoped-dispatch invariants', () => {
         { agent, turn: 1, step: 1, header: { config }, contextWindow: 128, attempt: 1, maxAttempts: 8, signal },
         () => Promise.resolve(undefined),
       ],
+      'agent/assistant-stream': [{
+        agent,
+        frame: {
+          type: 'start', attemptId: 'attempt-1' as never, revision: 1, turn: 1, step: 1,
+        },
+      }],
       'agent/request-error': [
         {
           agent,

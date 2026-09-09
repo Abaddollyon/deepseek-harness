@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-client-ui-sidebar` is the sidebar shell of the dsh web client: users see the brand row, start new sessions, collapse into the layout-owned 56px rail, and reach Settings from the bottom-pinned seat, while the scroll-aware region seat hosts the Workspace and Session browser. External plugins may register ordered `sidebar.workspace.section` entries above the browser and receive the shell’s wide/rail owner props. The Workspace and Session browser rendered into `sidebar.workspaces` belongs to ui-workspace; this package neither derives its rows nor owns its view preferences. A deployment package can replace the brand mark or name without replacing the New Session control or the rail geometry, and New Session starts the runtime's page-local frontend Session Intent against the explicit, current, or most recently active Workspace. Collapse into the layout-owned 56px rail remains presentation-local.
+Users can browse Workspaces and Sessions, start a New Session, collapse the sidebar into a 56px rail, and reach Settings at the bottom. New Session uses the explicit, current, or most recently active Workspace. Collapse remains presentation-local. Deployment packages can replace the brand mark or name without replacing the New Session control or rail geometry. Feature plugins supply the browser and additional ordered sections above it.
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ Scrollbars in the column are a pointer affordance: the shell rebinds the scrollb
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The shell is pure composition: `SidebarRootComponentProps` composes the layout owner share, the global `useSessions` and `useWorkspaces` hooks, the declared brand, the `sidebar.workspaces` and `sidebar.settings` child slots, and injected `startSession` plus sidebar-toggle callbacks. There is no plugin store.
+The shell is pure composition: `SidebarRootComponentProps` composes the layout owner share, the global `useSessions` and `useWorkspaces` hooks, the declared brand, the `sidebar.workspaces` and `sidebar.settings` child slots, and injected `startSession` plus sidebar-toggle callbacks. There is no plugin store. New Session starts the runtime's page-local frontend Session Intent, and the layout owns the rail geometry. The scroll-aware `sidebar.workspaces` region hosts ui-workspace, which owns its rows and view preferences. External plugins may register ordered `sidebar.workspace.section` entries above that browser and receive the shell's wide/rail owner props.
 
 ### Slot discipline
 

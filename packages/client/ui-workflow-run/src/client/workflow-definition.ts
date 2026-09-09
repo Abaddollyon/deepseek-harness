@@ -40,7 +40,7 @@ export interface WorkflowRunChatData {
 
 declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap {
-    /** Durable top-level workflow run and all members that actually started. */
+    /** Durable workflow run and all members that actually started. */
     'workflow-run': WorkflowRunChatData
   }
 }

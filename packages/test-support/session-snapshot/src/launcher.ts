@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve } from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as yaml from 'js-yaml'
 import {
   client as createAcpClientApp,
@@ -375,11 +375,24 @@ function barePackageName(specifier: string): string | undefined {
   return first.startsWith('@') ? `${first}/${second}` : first
 }
 
-/** Find a bare package's directory from the authored patch's module-resolution anchor. */
+/** Prefer the authored patch's installation, then declared harness dependencies. */
 function packageDirFromPatch(source: string, packageName: string): string | undefined {
-  for (const searchPath of createRequire(pathToFileURL(source)).resolve.paths(packageName) ?? []) {
-    const candidate = join(searchPath, packageName)
-    if (existsSync(join(candidate, 'package.json'))) return realpathSync(candidate)
+  const harnessManifest = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
+    dependencies?: Record<string, unknown>
+    devDependencies?: Record<string, unknown>
+    peerDependencies?: Record<string, unknown>
+  }
+  const declared = new Set([
+    ...Object.keys(harnessManifest.dependencies ?? {}),
+    ...Object.keys(harnessManifest.devDependencies ?? {}),
+    ...Object.keys(harnessManifest.peerDependencies ?? {}),
+  ])
+  const anchors = declared.has(packageName) ? [pathToFileURL(source), import.meta.url] : [pathToFileURL(source)]
+  for (const anchor of anchors) {
+    for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
+      const candidate = join(searchPath, packageName)
+      if (existsSync(join(candidate, 'package.json'))) return realpathSync(candidate)
+    }
   }
   return undefined
 }
@@ -407,6 +420,7 @@ function linkProfilePackage(source: string, cwd: string, packageName: string): v
 
 /**
  * Copy one authored patch into the launch cwd with relative plugin names made absolute.
+ * Bare packages link from the patch's installation first, then only the harness's declared dependencies.
  * @param source - authored profile patch path.
  * @param cwd - isolated process cwd whose profile fallback receives package links.
  * @param targetDir - existing directory that owns the materialized patch.

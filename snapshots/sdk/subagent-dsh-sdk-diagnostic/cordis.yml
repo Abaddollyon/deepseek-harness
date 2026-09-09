@@ -17,6 +17,15 @@
     root: !!js dshHomePath('sessions')
     compression: !!js "process.env.DSH_SNAPSHOT === undefined ? 'zstd' : 'none'"
 
+# The recorded job_output call addresses subagent-1; only identity generation is deterministic.
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+  disabled: true
+
+- insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
+
 - id: session-log-deepseek
   name: '@deepseek-ai/dsh-session-log-deepseek'
   config:

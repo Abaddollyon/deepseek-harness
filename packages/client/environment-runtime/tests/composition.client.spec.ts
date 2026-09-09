@@ -267,10 +267,9 @@ describe('environment composition service', () => {
     shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
     shell.reflect.provide('connectionFactory', { create: createConnectionHandle })
     const nav = navigation({ kind: 'environments', selectedId: 'local' })
-    let connect: (() => void) | undefined
-    let drop: (() => void) | undefined
-    let attempts = 0
+    const attempts: Array<{ signal: AbortSignal; connect(): void; drop(): void }> = []
     let presentations = 0
+    const disposePresentation = vi.fn()
     const activator = {
       deriveRoster: (roots: readonly string[]) => [...roots],
       serviceRequirements: async () => [],
@@ -279,11 +278,12 @@ describe('environment composition service', () => {
         if (ids.includes('domain')) {
           const connection = ctx.get('connection') as ConnectionHandle
           ctx.effect(() => connection.registerGenerationSource(async (signal, ready) => {
-            attempts += 1
-            if (attempts > 1) throw new Error('fixture carrier remains unavailable')
-            await new Promise<void>((resolve) => {
-              connect = () => { ready({ home: '/home/test' }) }
-              drop = resolve
+            await new Promise<void>((resolve, reject) => {
+              attempts.push({ signal, connect: () => { ready({ home: '/home/test' }) }, drop: resolve })
+              if (attempts.length === 2) {
+                reject(new Error('fixture carrier remains unavailable'))
+                return
+              }
               signal.addEventListener('abort', () => { resolve() }, { once: true })
             })
           }))
@@ -293,7 +293,7 @@ describe('environment composition service', () => {
           ctx.effect(() => () => { loop.stop() })
         }
         if (ids.includes('presentation')) presentations += 1
-        return { dispose: async () => { if (ids.includes('presentation')) presentations -= 1 } }
+        return { dispose: async () => { if (ids.includes('presentation')) disposePresentation() } }
       },
     }
     const service = createEnvironmentCompositionService(shell)
@@ -310,38 +310,77 @@ describe('environment composition service', () => {
       runtimeServices: [],
       shellServices: [],
     })
-    nav.open({ kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'chat' })
-    await composition.whenIdle()
-    await vi.waitFor(() => { expect(connect).toBeTypeOf('function') })
-    const mounted = composition.getSnapshot()
-    expect(mounted).toMatchObject({ phase: 'ready', connectionState: 'connecting' })
-
-    connect?.()
-    await vi.waitFor(() => {
-      expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'connected' })
-    })
-    const connected = composition.getSnapshot()
-    expect(connected.phase === 'ready' ? connected.lastConnectedAt : undefined).toBeTypeOf('number')
-
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    drop?.()
-    await vi.waitFor(() => {
-      expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'disconnected' })
-    })
-    expect(presentations).toBe(1)
-    const disconnected = composition.getSnapshot()
-    expect(disconnected.phase === 'ready'
-      && connected.phase === 'ready'
-      && disconnected.runtime === connected.runtime).toBe(true)
-    const selected = nav.getSnapshot()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    try {
+      nav.open({ kind: 'session', ref: { environmentId: 'sigil', sessionId: 'same' }, viewId: 'chat' })
+      await composition.whenIdle()
+      await vi.waitFor(() => { expect(attempts).toHaveLength(1) })
+      const mounted = composition.getSnapshot()
+      expect(mounted).toMatchObject({ phase: 'ready', connectionState: 'connecting' })
+      if (mounted.phase !== 'ready') throw new Error('fixture presentation is not mounted')
+      const runtime = mounted.runtime
+      expect(runtime.generation.getSnapshot()).toBeUndefined()
 
-    composition.retry()
-    expect(nav.getSnapshot()).toEqual(selected)
-    expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'connecting' })
-    expect(presentations).toBe(1)
-    warn.mockRestore()
-    await composition.dispose()
-    await shell.fiber.dispose()
+      attempts[0]!.connect()
+      await vi.waitFor(() => {
+        expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'connected' })
+      })
+      const connected = composition.getSnapshot()
+      const generation = runtime.generation.getSnapshot()
+      expect(generation).toBeDefined()
+      expect(connected.phase === 'ready' ? connected.lastConnectedAt : undefined).toBeTypeOf('number')
+
+      const callback = vi.fn(async () => { await held })
+      const inFlight = service.withPresentation(nav.getSnapshot(), callback).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      await vi.waitFor(() => { expect(callback).toHaveBeenCalledOnce() })
+      attempts[0]!.drop()
+      await vi.waitFor(() => { expect(attempts).toHaveLength(3) })
+      expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'connecting' })
+      expect(runtime.generation.getSnapshot()).toBeUndefined()
+      expect(presentations).toBe(1)
+      expect(disposePresentation).not.toHaveBeenCalled()
+      release()
+      expect(await inFlight).toMatchObject({ message: 'environment composition: destination Host generation changed during callback' })
+
+      const recoveredCallback = vi.fn((context: Context) => context.environmentRuntime.generation.getSnapshot())
+      const recovering = service.withPresentation(nav.getSnapshot(), recoveredCallback)
+      await composition.whenIdle()
+      expect(recoveredCallback).not.toHaveBeenCalled()
+      const selected = nav.getSnapshot()
+
+      composition.retry()
+      expect(nav.getSnapshot()).toBe(selected)
+      await vi.waitFor(() => { expect(attempts).toHaveLength(4) })
+      expect(attempts[2]!.signal.aborted).toBe(true)
+      attempts[2]!.connect()
+      expect(runtime.generation.getSnapshot()).toBeUndefined()
+      expect(composition.getSnapshot()).toMatchObject({ phase: 'ready', connectionState: 'connecting' })
+      expect(recoveredCallback).not.toHaveBeenCalled()
+
+      attempts[3]!.connect()
+      const recoveredGeneration = await recovering
+      expect(recoveredCallback).toHaveBeenCalledOnce()
+      expect(recoveredGeneration).toMatchObject({ environmentId: 'sigil', runtimeId: runtime.runtimeId })
+      expect(recoveredGeneration?.generation).toBeGreaterThan(generation!.generation)
+      const recovered = composition.getSnapshot()
+      expect(recovered).toMatchObject({ phase: 'ready', connectionState: 'connected' })
+      expect(recovered.phase === 'ready' && recovered.runtime === runtime).toBe(true)
+      expect(nav.getSnapshot()).toBe(selected)
+      expect(presentations).toBe(1)
+      expect(disposePresentation).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await composition.dispose()
+      await shell.fiber.dispose()
+      warn.mockRestore()
+    }
+    expect(disposePresentation).toHaveBeenCalledOnce()
+    expect(attempts.every(attempt => attempt.signal.aborted)).toBe(true)
   })
 
   test('withdraws local presentation, opens a Session on its owning runtime, and restores local navigation', async () => {

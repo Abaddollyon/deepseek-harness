@@ -22,6 +22,9 @@ import FilesystemDirectoryBrowser from '@deepseek-ai/dsh-host-directory-browser-
 import type { DirectoryPicker } from '@deepseek-ai/dsh-host-directory-picker'
 import BrowseDirectoryPicker from '@deepseek-ai/dsh-host-directory-picker-browse'
 import NativeDirectoryPicker from '@deepseek-ai/dsh-host-directory-picker-native'
+import {
+  createLaunchEnvironmentSnapshot, DSH_LAUNCH_ENVIRONMENT_KEY, type LaunchEnvironmentSnapshot,
+} from '@deepseek-ai/dsh-launch-environment'
 import * as DirectoryPickerAuto from '../src/index.ts'
 
 const renameControl = vi.hoisted(() => ({
@@ -93,7 +96,7 @@ afterEach(async () => {
 /** Write the webserver, independent browser, and chooser rows, then boot them through the real Loader. */
 async function loadComposition(
   bindHost: '127.0.0.1' | '0.0.0.0',
-  options: { failSurface?: boolean } = {},
+  options: { failSurface?: boolean; launchEnvironment?: LaunchEnvironmentSnapshot } = {},
 ): Promise<{ ctx: Context; configPath: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-directory-picker-auto-'))
   const configPath = join(root, 'cordis.yml')
@@ -108,6 +111,7 @@ async function loadComposition(
   ].join('\n'))
 
   context = new Context()
+  if (options.launchEnvironment !== undefined) context.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.launchEnvironment)
   context.baseUrl = pathToFileURL(root).href + '/'
   await context.plugin(Loader)
   context.loader.builtins.include = Include
@@ -168,6 +172,19 @@ function stubAttendedHost(): void {
 }
 
 describe('real Loader composition', () => {
+  it.each(['project-env', 'user-env'] as const)('keeps the native backend with materialized SSH markers from %s', async (source) => {
+    stubAttendedHost()
+    vi.stubEnv('SSH_CONNECTION', 'stale-connection')
+    vi.stubEnv('SSH_TTY', '/dev/pts/stale')
+    const launchEnvironment = createLaunchEnvironmentSnapshot([
+      { source, values: { SSH_CONNECTION: 'stale-connection', SSH_TTY: '/dev/pts/stale' } },
+    ])
+    const { ctx } = await loadComposition('127.0.0.1', { launchEnvironment })
+    expect(ctx.get('directoryPicker')?.capability().kind).toBe('native')
+    expect(entryNames(ctx)).toContain(NATIVE_SURFACE)
+    expect(entryNames(ctx)).not.toContain(BROWSE_SURFACE)
+  })
+
   // The 60s budget covers this file's static imports (webserver plus both
   // backend node halves through tsx), which dominate on cold caches; the
   // Loader itself resolves nothing here — `loader.internal` is a module map.

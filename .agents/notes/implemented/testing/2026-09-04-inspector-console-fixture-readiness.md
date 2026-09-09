@@ -12,7 +12,7 @@ The complete ten-test Inspector integration file exposed this missing ordering e
 
 ## Decision
 
-The two-session Client Console integration case performs one harmless `Runtime.evaluate` in each announced Client context after both sessions enable Runtime and before it asks the fixture to log. Client Runtime commands and Client Console enable frames use the same authenticated source socket described by the [cross-realm Inspector decision](../architecture/2026-08-23-cross-realm-cdp-inspector.md). Each successful evaluation therefore establishes same-socket ordering behind its session's previously queued Console enable frame. The test asserts both evaluation results before crossing to the independent fixture port.
+The two-session Client Console integration case performs one harmless `Runtime.evaluate` in each announced Client context after both sessions enable Runtime and before it asks the fixture to log. Client Runtime commands and Client Console enable frames use the same authenticated source socket described by the [historical cross-realm Inspector decision](../../archived/architecture/2026-08-23-cross-realm-cdp-inspector.md). Each successful evaluation therefore establishes same-socket ordering behind its session's previously queued Console enable frame. The test asserts both evaluation results before crossing to the independent fixture port.
 
 The fixture still emits one external Console call, and the existing assertions still require both sessions to receive it, retain distinct object ids, reject cross-session lookup, and release one session without invalidating the other. This synchronization is test coordination; it does not redefine `Runtime.enable` as a Client hook-readiness acknowledgement.
 

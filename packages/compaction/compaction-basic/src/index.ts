@@ -306,7 +306,6 @@ export class BasicCompactionEngine extends CompactionEngine {
         model: summaryTarget.model,
         maxTokens: spec.maxTokens,
       },
-      ...header.system === undefined ? {} : { system: header.system },
       ...header.tools === undefined ? {} : { tools: header.tools },
     }
     const summaryMeasurement = meter.measure(agent.session, summaryHeader)

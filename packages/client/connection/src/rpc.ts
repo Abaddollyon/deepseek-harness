@@ -113,7 +113,10 @@ export interface ConnectionRpcChannelOptions {
 export type ConnectionRpcEndpointMatcher = (endpoint: string) => boolean
 
 /** HTTP methods supported by exact Fetch routes on the shared API channel. */
-export type ConnectionFetchMethod = 'GET' | 'HEAD'
+export type ConnectionFetchMethod = 'GET' | 'HEAD' | 'POST'
+
+/** How the node:http bridge presents one request body to its Fetch route. */
+export type ConnectionRequestBodyMode = 'buffered' | 'streaming'
 
 /** One exact, transport-independent Fetch route owned by a Host feature. */
 export interface ConnectionFetchRoute {
@@ -121,6 +124,8 @@ export interface ConnectionFetchRoute {
   readonly path: string
   /** Methods this route owns. Other methods continue through normal shared-channel dispatch. */
   readonly methods: readonly ConnectionFetchMethod[]
+  /** Buffered requests obey the configured JSON cap; streaming requests arrive with backpressure and no aggregate cap. */
+  readonly requestBody: ConnectionRequestBodyMode
   /** Handle one request after the physical carrier has applied its trust and authentication policy. */
   readonly fetch: (request: Request) => Promise<Response>
 }
@@ -204,6 +209,13 @@ export interface HostConnectionHandle {
 
 /** Transport-independent Fetch handler used by HTTP and worker carriers. */
 export interface ConnectionFetchHandler {
+  /**
+   * Resolve body handling before the bridge reads any request bytes.
+   * @param request - request method and URL available from node:http headers.
+   * @returns the registered route's body handling mode.
+   */
+  requestBodyMode(request: { readonly method: string; readonly url: URL }): ConnectionRequestBodyMode
+
   /**
    * Dispatch one already-authenticated request.
    * @param request - Fetch request below the shared channel.

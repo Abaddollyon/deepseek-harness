@@ -106,6 +106,8 @@ export function createEnvironmentRuntimeRegistry(
         if (entries.get(environmentId) === entry) entries.delete(environmentId)
         throw error
       }
+      // Registry disposal can run while this acquisition awaits its factory.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (disposed || entry.disposing !== undefined) {
         entry.leases -= 1
         await disposeEntry(environmentId, entry)

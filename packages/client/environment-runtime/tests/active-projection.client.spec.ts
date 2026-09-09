@@ -209,6 +209,7 @@ describe('active environment runtime projection', () => {
   test('releases the runtime lease when presentation cleanup throws', async () => {
     const selected = selection('sigil')
     const runtime = fakeRuntime('sigil')
+    const disposeRuntime = vi.spyOn(runtime, 'dispose')
     const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => runtime })
     const projection = createActiveEnvironmentRuntimeProjection({
       registry,
@@ -218,12 +219,13 @@ describe('active environment runtime projection', () => {
     await projection.whenIdle()
 
     await expect(projection.dispose()).rejects.toThrow('presentation cleanup failed')
-    expect(runtime.dispose).toHaveBeenCalledOnce()
+    expect(disposeRuntime).toHaveBeenCalledOnce()
   })
 
   test('settles to idle after a selected presentation cleanup failure', async () => {
     const selected = source<string | undefined>('sigil')
     const runtime = fakeRuntime('sigil')
+    const disposeRuntime = vi.spyOn(runtime, 'dispose')
     const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => runtime })
     const projection = createActiveEnvironmentRuntimeProjection({
       registry,
@@ -235,7 +237,7 @@ describe('active environment runtime projection', () => {
     selected.set(undefined)
     await expect(projection.whenIdle()).rejects.toThrow('presentation cleanup failed')
     expect(projection.getSnapshot()).toEqual({ phase: 'idle' })
-    expect(runtime.dispose).toHaveBeenCalledOnce()
+    expect(disposeRuntime).toHaveBeenCalledOnce()
     await expect(projection.dispose()).rejects.toThrow('presentation cleanup failed')
   })
 })

@@ -58,6 +58,23 @@ function fireDrag(row: HTMLElement, kind: 'dragOver' | 'drop', clientY: number):
 }
 
 describe('workspace browser rows', () => {
+  it('reveals an unchanged memoized row after search selects it', () => {
+    const props = {
+      node: { id: sid('found'), title: 'Found', blank: false, running: false,
+        runningSubagentCount: 0, completed: false, updatedAt: 0 },
+      currentId: sid('found'), now: 0, onOpen: vi.fn(), onRename: vi.fn(),
+      onFork: vi.fn(), onArchive: vi.fn(), t,
+    }
+    const view = render(<SessionNodeItem {...props} />)
+    const row = screen.getByRole('treeitem')
+    const scroll = vi.fn()
+    Object.defineProperty(row, 'scrollIntoView', { configurable: true, value: scroll })
+    const onReveal = vi.fn()
+    view.rerender(<SessionNodeItem {...props} onReveal={onReveal} />)
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(onReveal).toHaveBeenCalledOnce()
+  })
+
   it('fails closed for forged pending interaction statuses', () => {
     const node = {
       id: sid('forged'), title: 'Forged', blank: false, running: false,

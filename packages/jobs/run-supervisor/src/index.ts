@@ -10,11 +10,11 @@
  * - **Owner resolution.** Every restored record is grouped by
  *   `ownerSession` and its owner is resolved: a live agent
  *   (`ctx.agents.get`), else a restorable session
- *   (`ctx.sessionPersistence.prepare`), else an orphan.
+ *   (`ctx.sessionPersistence.open`), else an orphan.
  * - **Policy.** `resumeOnBoot`, the `maxResumedRunsPerOwner` per-owner
  *   adoption budget, and the `bootResumeTimeoutMs` pass deadline decide
  *   which pending records may still be adopted and which settle now.
- * - **The model-visible account.** `run/resumed` and `run/abandoned`
+ * - **The durable account.** `run/resumed` and `run/abandoned`
  *   session events are appended to the owner session when it is reachable
  *   (live session append, or a durable offline append through
  *   `sessionPersistence`), and an unreported terminal record produces
@@ -82,9 +82,8 @@ export const DETAIL_RESUME_CAP = 'host restarted before this run settled; the pe
  * (`@deepseek-ai/dsh-jobs-local`), matched to recognize records a boot
  * restore or resumer decline already settled. The fenced public registry
  * surface admits no custom terminal detail, so supervisor-driven settlements
- * carry this detail on the RECORD; the precise reason lives in the
- * `run/abandoned` session event, which the design designates as the
- * model-visible account.
+ * carry this detail on the record; the precise reason lives in the
+ * log-only `run/abandoned` event and the separate model-facing notice.
  */
 export const REGISTRY_NOT_RESUMABLE_DETAIL = 'not resumable after host restart'
 
@@ -187,8 +186,9 @@ function terminalViewOf(snapshot: JobSnapshot, detail: string | undefined): Term
 
 /**
  * Whether one run/* account append durably reached the owner session.
- * `unavailable` names the deterministic no-lane case (the owner is neither
- * live nor reachable through persistence), never a lane failure.
+ * `unavailable` means no durable writer can acknowledge the account: the owner
+ * is unreachable, or a live owner has no Session store or durability listener.
+ * A writer rejection throws instead.
  */
 type RunEventAppendOutcome = 'recorded' | 'already-present' | 'unavailable'
 
@@ -683,8 +683,8 @@ export class RunSupervisor {
     if (persistence === undefined) return
     let listed: Set<SessionId>
     try {
-      const headers = await persistence.list(pass.deadline.signal)
-      listed = new Set(headers.map(header => header.id))
+      const snapshots = await persistence.list({ signal: pass.deadline.signal })
+      listed = new Set(snapshots.map(snapshot => snapshot.header.id))
     } catch (error: unknown) {
       if (!pass.deadline.signal.aborted) {
         this.ctx.logger.warn(`run-supervisor: cannot classify orphan records for retention: ${String(error)}`)
@@ -918,9 +918,8 @@ export class RunSupervisor {
 
   /**
    * Resolve one owner session for this pass: a live agent wins, else the
-   * session must restore through the real resume path
-   * (`sessionPersistence.prepare`, disposed immediately — restorability is
-   * the fact, not the session object). Without a persistence seam the owner
+   * stored session must open and read through a non-owning handle, closed
+   * before returning. Without a persistence seam the owner
    * is unknown rather than orphaned: nothing may be settled or evicted on
    * the absence of evidence.
    */
@@ -930,8 +929,8 @@ export class RunSupervisor {
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return { kind: 'unknown' }
     try {
-      using preparation = await persistence.prepare(session, pass.deadline.signal)
-      void preparation
+      await using handle = await persistence.open(session, 'read', { signal: pass.deadline.signal })
+      await handle.read(undefined, undefined, { signal: pass.deadline.signal })
       return { kind: 'restorable' }
     } catch {
       // A deadline abort is not evidence about the owner; classify it
@@ -1039,23 +1038,28 @@ export class RunSupervisor {
     }
   }
 
-  private appendRunEventLive(
+  /** A live append, including an existing account, is acknowledged only after its writer flushes. */
+  private async appendRunEventLive(
     live: Agent,
     event:
       | { readonly type: 'run/resumed'; readonly data: RunResumedData }
       | { readonly type: 'run/abandoned'; readonly data: RunAbandonedData },
-  ): Exclude<RunEventAppendOutcome, 'unavailable'> {
-    const accounted = hasRunEvent(live.session.snapshotEvents(), event)
-    if (event.type === 'run/resumed') {
-      if (accounted) return 'already-present'
-      live.session.append('run/resumed', event.data)
-      return 'recorded'
-    }
-    const closers = workflowClosers(live.session.snapshotEvents(), event.data.jobId, event.data.kind)
+  ): Promise<RunEventAppendOutcome> {
+    const sessions = this.ctx.get('sessions')
+    if (sessions === undefined) return 'unavailable'
+    const events = live.session.snapshotEvents()
+    const accounted = hasRunEvent(events, event)
+    const closers = event.type === 'run/abandoned'
+      ? workflowClosers(events, event.data.jobId, event.data.kind)
+      : []
     for (const closer of closers) {
       (live.session.append as unknown as (type: string, data: unknown) => void)(closer.type, closer.data)
     }
-    if (!accounted) live.session.append('run/abandoned', event.data)
+    if (!accounted) {
+      if (event.type === 'run/resumed') live.session.append('run/resumed', event.data)
+      else live.session.append('run/abandoned', event.data)
+    }
+    if (!await sessions.flush(live.session)) return 'unavailable'
     return accounted && closers.length === 0 ? 'already-present' : 'recorded'
   }
 
@@ -1069,21 +1073,23 @@ export class RunSupervisor {
     if (live !== undefined) return this.appendRunEventLive(live, event)
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) return 'unavailable'
-    const loaded = await persistence.load(owner)
-    const accounted = hasRunEvent(loaded.events, event)
-    const closers = event.type === 'run/abandoned'
-      ? workflowClosers(loaded.events, event.data.jobId, event.data.kind)
-      : []
-    if (accounted && closers.length === 0) return 'already-present'
-    const batch = [...closers, ...(accounted ? [] : [event])].map((item, index) => ({
-      type: item.type, seq: loaded.events.length + index, time: Date.now(), data: item.data,
-    }) as SessionEvent)
     try {
-      await persistence.append(owner, batch)
+      await using handle = await persistence.open(owner, 'write')
+      const { events } = await handle.read()
+      const accounted = hasRunEvent(events, event)
+      const closers = event.type === 'run/abandoned'
+        ? workflowClosers(events, event.data.jobId, event.data.kind)
+        : []
+      if (accounted && closers.length === 0) return 'already-present'
+      const batch = [...closers, ...(accounted ? [] : [event])].map((item, index) => ({
+        type: item.type, seq: events.length + index, time: Date.now(), data: item.data,
+      }) as SessionEvent)
+      await handle.append(batch)
+      await handle.flush()
       return 'recorded'
     } catch (error: unknown) {
-      // The session may have come live between resolution and append (its
-      // next seq moved); retry through the live lane before giving up.
+      // A session coming live can claim write ownership before this open.
+      // Retry through its live writer rather than competing for ownership.
       const raced = this.ctx.get('agents')?.get(owner)
       if (raced === undefined) throw error
       return this.appendRunEventLive(raced, event)

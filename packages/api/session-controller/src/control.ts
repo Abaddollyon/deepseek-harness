@@ -1,10 +1,11 @@
 /** Live Session queue, jobs, and projection state with reconnect baselines. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import { Deque } from '@deepseek-ai/dsh-deque'
+import type { Agent, InboxState } from '@deepseek-ai/dsh-agent'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
-import type { Session, SessionEvent, SessionEventMap, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import type {
+  Session, SessionId, UserMessage,
+} from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   SessionControlBaseline,
@@ -21,16 +22,21 @@ export class SessionControlController {
 
   /** @param ctx - Host context carrying live Agent, projection, and jobs services. */
   constructor(private readonly ctx: Context) {
-    ctx.on('session/event', (session, event) => { this.onSessionEvent(session, event) })
-    ctx.inject(['sessionProjections'], (projectionCtx) => {
-      projectionCtx.sessionProjections.onChanged((session, key, value, seq) => {
-        this.broadcast({
-          type: 'projection',
-          sessionId: session.id,
-          key,
-          value: value as JsonValue,
-          seq,
-        })
+    ctx.sessionProjections.onChanged((session, key, value, seq) => {
+      this.broadcast({
+        type: 'projection',
+        sessionId: session.id,
+        key,
+        value: value as JsonValue,
+        seq,
+      })
+      if (key !== 'inbox') return
+      const agent = this.ctx.agents.get(session.id)
+      if (agent?.session !== session) return
+      this.broadcast({
+        type: 'queue',
+        sessionId: session.id,
+        items: queueItemsFromInbox(value as InboxState),
       })
     })
     ctx.inject(['jobs'], (jobsCtx) => {
@@ -98,17 +104,6 @@ export class SessionControlController {
     return blocks
   }
 
-  private onSessionEvent(session: Session, event: SessionEvent): void {
-    if (event.type !== 'agent/inbox/spliced') return
-    const agent = this.ctx.agents.get(session.id)
-    if (agent?.session !== session) return
-    this.broadcast({
-      type: 'queue',
-      sessionId: session.id,
-      items: queueItems(agent, event.data),
-    })
-  }
-
   private onJobsChanged(owner: Agent | undefined): void {
     if (owner !== undefined) {
       this.broadcast({ type: 'jobs', sessionId: owner.id, jobs: this.jobsFor(owner) })
@@ -151,7 +146,7 @@ interface SupersedingKey {
  * identity is still queued, a newer frame unlinks it in O(1) — the superseded
  * frame is never delivered and its memory is released immediately, so a
  * stalled consumer's queue stays bounded by one node per identity plus the
- * unkeyed frames, and the drain never scans tombstones. Unlinking touches only
+ * unkeyed frames, and no discarded payload remains in the queue. Unlinking touches only
  * the superseded node, so every other frame keeps its pushed relative order.
  * This is only sound for a frame whose payload is the COMPLETE current state
  * of its identity, so that the newer frame alone reconstructs everything the
@@ -159,14 +154,13 @@ interface SupersedingKey {
  * frame kind.
  */
 export class ControlQueue {
-  private readonly buffer = new Deque<QueueEntry>()
+  private readonly buffer = new Set<QueueEntry>()
   private readonly supersedable = new Map<SessionId, Map<string, QueueEntry>>()
   private wake: (() => void) | undefined
   private done = false
-  private length = 0
 
-  /** Frames still queued for delivery; superseded entries are removed logically. */
-  get size(): number { return this.length }
+  /** Frames still queued for delivery; superseded entries release their payloads immediately. */
+  get size(): number { return this.buffer.size }
 
   /** Queue one frame, superseding an undelivered projection for the same identity.
    * @param frame - frame to queue.
@@ -174,16 +168,15 @@ export class ControlQueue {
   push(frame: SessionControlFrame): void {
     if (this.done) return
     const key = controlSupersedingKey(frame)
-    const entry: QueueEntry = { frame, key, active: true }
+    const entry: QueueEntry = { frame, key }
     if (key !== undefined) {
       const byKey = this.supersedable.get(key.sessionId) ?? new Map<string, QueueEntry>()
       const prior = byKey.get(key.key)
-      if (prior !== undefined) { prior.active = false; this.length -= 1 }
+      if (prior !== undefined) this.buffer.delete(prior)
       byKey.set(key.key, entry)
       this.supersedable.set(key.sessionId, byKey)
     }
-    this.buffer.pushBack(entry)
-    this.length += 1
+    this.buffer.add(entry)
     const wake = this.wake
     this.wake = undefined
     wake?.()
@@ -221,15 +214,13 @@ export class ControlQueue {
       signal.removeEventListener('abort', onAbort)
       this.end()
       this.buffer.clear()
-      this.length = 0
     }
   }
 
   private take(): SessionControlFrame | undefined {
-    while (this.buffer.size > 0) {
-      const entry = this.buffer.popFront() as QueueEntry
-      if (!entry.active) continue
-      this.length -= 1
+    const entry = this.buffer.values().next().value
+    if (entry !== undefined) {
+      this.buffer.delete(entry)
       if (entry.key !== undefined) {
         const byKey = this.supersedable.get(entry.key.sessionId)
         if (byKey?.get(entry.key.key) === entry) {
@@ -246,7 +237,6 @@ export class ControlQueue {
 interface QueueEntry {
   readonly frame: SessionControlFrame
   readonly key: SupersedingKey | undefined
-  active: boolean
 }
 
 /**
@@ -277,24 +267,22 @@ function controlSupersedingKey(frame: SessionControlFrame): SupersedingKey | und
   return frame.type === 'projection' ? { sessionId: frame.sessionId, key: frame.key } : undefined
 }
 
-function queueItems(
-  agent: Agent,
-  splice?: SessionEventMap['agent/inbox/spliced'],
-): SessionQueuedItem[] {
-  const project = (target: 'next-turn' | 'next-step'): readonly UserMessage[] => {
-    const messages = target === 'next-turn' ? agent.inbox.nextTurn : agent.inbox.nextStep
-    return splice?.target === target
-      ? messages.toSpliced(splice.start, splice.removedCount ?? 0, ...splice.inserted)
-      : messages
-  }
+function queueItems(agent: Agent): SessionQueuedItem[] {
+  return queueItemsFromInbox({
+    'next-turn': agent.inbox.nextTurn,
+    'next-step': agent.inbox.nextStep,
+  })
+}
+
+function queueItemsFromInbox(inbox: InboxState): SessionQueuedItem[] {
   return [
-    ...project('next-turn').map(message => ({
+    ...inbox['next-turn'].map(message => ({
       id: message.id,
       placement: 'queued' as const,
       ...promptRpcId(message),
       message: { id: message.id, content: message.content as unknown as JsonValue[] },
     })),
-    ...project('next-step').map(message => ({
+    ...inbox['next-step'].map(message => ({
       id: message.id,
       placement: message.source.kind === 'user' ? 'steering' as const : 'context' as const,
       ...promptRpcId(message),

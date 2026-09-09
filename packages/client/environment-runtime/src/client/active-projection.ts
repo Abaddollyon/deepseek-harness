@@ -116,7 +116,7 @@ export function createActiveEnvironmentRuntimeProjection(
     await runCleanupSteps([
       mount.unsubscribeConnection,
       mount.dispose,
-      mount.lease.release,
+      () => mount.lease.release(),
     ])
   }
 
@@ -196,6 +196,8 @@ export function createActiveEnvironmentRuntimeProjection(
             cleanupError = error
           }
           if (!superseded(ownRevision, abort)) publish({ phase: 'idle' })
+          // Rethrow the cleanup failure unchanged after publishing the idle state.
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
           if (cleanupError !== undefined) throw cleanupError
         } finally {
           releaseTransition?.()
@@ -236,9 +238,10 @@ export function createActiveEnvironmentRuntimeProjection(
           unsubscribeConnection: watchConnection(selected, lease.runtime, ownRevision),
         }
       } catch (error) {
+        const failedLease = lease
         const failure = await failureAfterCleanup(error, [
           ...(disposeActivation === undefined ? [] : [disposeActivation]),
-          ...(lease === undefined ? [] : [lease.release]),
+          ...(failedLease === undefined ? [] : [() => failedLease.release()]),
         ])
         if (!superseded(ownRevision, abort)) {
           publish({ phase: 'error', environmentId: selected, error: failure })

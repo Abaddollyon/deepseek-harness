@@ -29,7 +29,7 @@ const MANIFEST_BIN_ALLOWLIST = new Map<string, ManifestBin>([
   ['packages/experimental/webworker-packer/package.json', { 'dsh-pack-vfs-image': './bin.js' }],
 ])
 
-/** Every executable in a Node application workspace has one explicit role. */
+/** Every JavaScript executable in an application or packaging workspace has one explicit role. */
 const EXECUTABLE_SOURCE_ALLOWLIST = new Map<string, string>([
   ['apps/cli/src/bin.ts', 'supported dsh application launcher'],
   ['packages/context/time-context/tests/fixtures/driver.ts', 'test-only subprocess driver'],
@@ -47,6 +47,7 @@ const EXECUTABLE_SOURCE_ALLOWLIST = new Map<string, string>([
   ['packages/test-support/llm-mock-server/src/bin.ts', 'test-only model server'],
   ['packages/web/web-search-codex/tests/fixtures/app-server.mjs', 'test-only subprocess driver'],
   ['packages/web/web-search-codex/tests/fixtures/app-server-auth.mjs', 'test-only subprocess driver'],
+  ['python/sdk-runtime/runtime-bootstrap.mjs', 'private packaging-only runtime dispatcher'],
 ])
 
 /** Root demos are application wrappers and therefore must visibly select dsh. */
@@ -68,6 +69,7 @@ const SOURCE_PATTERNS = [
   'packages/**/*.js',
   'packages/**/*.mjs',
   'packages/**/*.cjs',
+  'python/sdk-runtime/*.mjs',
 ]
 
 const SOURCE_EXCLUDES = [

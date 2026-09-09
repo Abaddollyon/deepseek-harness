@@ -56,6 +56,8 @@ export async function createEnvironmentPresentationMount(
     projectServices(context, options.shell, options.shellServices, occupied, 'shell')
     const result = await options.activate(context, options.signal)
     activationDispose = result ?? (() => {})
+    // A newer selection can abort this signal while activation is pending.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (options.signal.aborted) throw abortError()
   } catch (error) {
     throw await failureAfterCleanup(error, [
@@ -69,7 +71,7 @@ export async function createEnvironmentPresentationMount(
       if (disposed) return
       disposed = true
       await runCleanupSteps([
-        () => activationDispose?.(),
+        () => activationDispose(),
         () => context.fiber.dispose(),
       ])
     },
@@ -87,7 +89,7 @@ function projectServices(
     if (occupied.has(name)) {
       throw new Error(`environment presentation: service ${JSON.stringify(name)} is projected by both runtime and shell`)
     }
-    const value = source.get(name)
+    const value: unknown = source.get(name)
     if (value === undefined) {
       throw new Error(`environment presentation: ${owner} service ${JSON.stringify(name)} is unavailable`)
     }

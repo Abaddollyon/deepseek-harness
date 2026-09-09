@@ -6,7 +6,7 @@ English | [中文](2026-08-19-workflow-per-agent-reasoning-effort.zh.md)
 
 ## Problem
 
-A workflow script could already point one `agent()` call at any registered provider and any model that provider serves, but not at a reasoning effort. The option was refused by name: `effort` sat in the worker runtime's deferred set beside `isolation` and `agentType`, and the model-facing tool description promised it was "rejected loudly". A draft/verify script therefore had no way to spend a cheap effort on extraction and an expensive one on adversarial review, even though the LLM seam has validated per-call efforts end to end since [adapter-owned reasoning-effort capabilities](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md).
+A workflow script could already point one `agent()` call at any registered provider and any model that provider serves, but not at a reasoning effort. The option was refused by name: `effort` sat in the worker runtime's deferred set beside `isolation` and `agentType`, and the model-facing tool description promised it was "rejected loudly". A draft/verify script therefore had no way to spend a cheap effort on extraction and an expensive one on adversarial review, even though the LLM seam has validated per-call efforts end to end since [the historical adapter-owned reasoning-effort decision](../../archived/architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md).
 
 The refusal was not the only gap. `AgentOptions` — the channel a delegation already uses to carry `provider` and `model` to a child — had no effort field, and the loop seeds request config from `provider`, `model`, and `maxTokens` alone. Accepting an effort in the script without closing that gap would have produced the exact accepted-then-ignored failure this repository bans.
 
@@ -60,4 +60,4 @@ Focused vitest in `packages/workflow` covers the option surface and the validati
 ## Related
 
 - [Dynamic workflows](2026-07-05-dynamic-workflows.md) owns the script contract this extends.
-- [Adapter-owned reasoning-effort capabilities](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md) owns the validation policy this reuses.
+- [Adapter-owned reasoning-effort capabilities](../../archived/architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md) records the validation-policy decision this reuses.

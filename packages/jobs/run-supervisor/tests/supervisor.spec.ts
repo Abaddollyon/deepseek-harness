@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionPreparation, UserMessage } from '@deepseek-ai/dsh-session'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
+import SessionStore, { SESSION_FORMAT_VERSION, Session, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
+import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
+import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { JobHooks, JobOutcome, JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import { JobId, JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
@@ -78,61 +80,80 @@ function storedRecord(overrides: Partial<JobRecord> = {}): JobRecord {
 interface FakePersistence {
   logs: Map<string, SessionEvent[]>
   appended: { id: string; events: readonly SessionEvent[] }[]
-  prepareError?: Error
-  prepareNever?: boolean
+  readOpenError?: Error
+  readOpenNever?: boolean
   appendError?: Error
   onAppend?: () => void
   /** Gate the append's completion, holding the run/* account unconfirmed. */
   appendWait?: () => Promise<void>
   listError?: Error
+  flushWait?: () => Promise<void>
+  flushError?: Error
+  onClose?: (id: SessionId, access: 'read' | 'write') => void
 }
 
-/** SessionPersistence double over in-memory durable logs. */
-function fakePersistence(fake: FakePersistence) {
+/** SessionPersistence double enforcing handle ownership and current read/list results. */
+function fakePersistence(fake: FakePersistence): Pick<SessionPersistence, 'open' | 'list'> {
   const logs = fake.logs
+  const writers = new Set<SessionId>()
+  const header = (id: SessionId): SessionHeader => ({ id, version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false })
   return {
-    supportsRawArtifacts: false,
-    locate: () => undefined,
-    create: () => Promise.resolve(),
-    prepare: (id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> => {
-      if (fake.prepareNever) {
+    open: async (id, access, options): Promise<SessionHandle> => {
+      const signal = options?.signal
+      if (access === 'read' && fake.readOpenNever) {
         return new Promise((_, reject) => {
           signal?.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
         })
       }
-      if (fake.prepareError !== undefined) return Promise.reject(fake.prepareError)
-      if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
-      const preparation = {
-        session: undefined,
-        [Symbol.dispose]: () => {},
-      } as unknown as SessionPreparation
-      return Promise.resolve(preparation)
+      if (access === 'read' && fake.readOpenError !== undefined) throw fake.readOpenError
+      if (!logs.has(id)) throw new Error(`no such session ${id}`)
+      if (access === 'write' && writers.has(id)) throw new Error(`session already owned: ${id}`)
+      if (access === 'write') writers.add(id)
+      let closed = false
+      const assertOpen = (): void => {
+        if (closed) throw new Error('session handle closed')
+      }
+      const close = async (): Promise<void> => {
+        if (closed) return
+        closed = true
+        if (access === 'write') writers.delete(id)
+        fake.onClose?.(id, access)
+      }
+      return {
+        id, access, header: header(id), inheritedEventCount: SessionLogOffset(0),
+        read: async (offset = 0, length) => {
+          assertOpen()
+          const events = logs.get(id) ?? []
+          return { events: structuredClone(events.slice(offset, length === undefined ? undefined : offset + length)), eventState: 'detached' }
+        },
+        append: async (events) => {
+          assertOpen()
+          if (access !== 'write') throw new Error('read-only session handle')
+          fake.onAppend?.()
+          if (fake.appendWait !== undefined) await fake.appendWait()
+          if (fake.appendError !== undefined) throw fake.appendError
+          if (!logs.has(id)) throw new Error(`no such session ${id}`)
+          const log = logs.get(id) as SessionEvent[]
+          const cursor = log.length
+          events.forEach((event, index) => {
+            if (event.seq !== cursor + index) throw new Error(`append seq mismatch: expected ${cursor + index}, got ${event.seq}`)
+          })
+          log.push(...events.map(event => structuredClone(event)))
+          fake.appended.push({ id, events })
+        },
+        flush: async () => {
+          assertOpen()
+          if (access !== 'write') throw new Error('read-only session handle')
+          await fake.flushWait?.()
+          if (fake.flushError !== undefined) throw fake.flushError
+        },
+        close,
+        [Symbol.asyncDispose]: close,
+      }
     },
-    inspect: (id: SessionId) => {
-      if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
-      return Promise.resolve({ meta: { id }, events: logs.get(id) ?? [] })
-    },
-    load: (id: SessionId) => {
-      if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
-      return Promise.resolve({ meta: { id }, events: logs.get(id) ?? [] })
-    },
-    append: async (id: SessionId, events: readonly SessionEvent[]) => {
-      fake.onAppend?.()
-      if (fake.appendWait !== undefined) await fake.appendWait()
-      if (fake.appendError !== undefined) return Promise.reject(fake.appendError)
-      if (!logs.has(id)) return Promise.reject(new Error(`no such session ${id}`))
-      const log = logs.get(id) as SessionEvent[]
-      const cursor = log.length
-      events.forEach((event, index) => {
-        if (event.seq !== cursor + index) throw new Error(`append seq mismatch: expected ${cursor + index}, got ${event.seq}`)
-      })
-      log.push(...events.map(event => structuredClone(event)))
-      fake.appended.push({ id, events })
-      return Promise.resolve()
-    },
-    list: () => {
-      if (fake.listError !== undefined) return Promise.reject(fake.listError)
-      return Promise.resolve([...logs.keys()].map(id => ({ id: SessionId(id) })))
+    list: async () => {
+      if (fake.listError !== undefined) throw fake.listError
+      return [...logs.keys()].map(id => ({ header: header(SessionId(id)), revision: SessionPersistenceRevision('test') }))
     },
   }
 }
@@ -144,13 +165,18 @@ interface StubAgent {
 
 function stubAgent(ctx: Context, rawId: string): StubAgent {
   const id = SessionId(rawId)
-  const session = Session.create(id)
+  const session = ctx.sessions.create(id)
   const injected: UserMessage[] = []
+  const rejectInboxMutation = (): never => { throw new Error('stub agent does not mutate its inbox') }
+  const inbox: Agent['inbox'] = {
+    nextTurn: [], nextStep: [], clear: rejectInboxMutation, append: rejectInboxMutation,
+    prepend: rejectInboxMutation, replace: rejectInboxMutation, remove: rejectInboxMutation, splice: rejectInboxMutation,
+  }
   const agent = {
     id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox,
     status: 'idle' as const,
     ctx,
     send: () => {},
@@ -172,12 +198,15 @@ interface BootOptions {
   persistence?: ReturnType<typeof fakePersistence> | undefined
   liveAgents?: string[]
   liveEvents?: Record<string, SessionEvent[]>
+  sessionFlush?: ((session: Session) => Promise<void> | void) | false
 }
 
 /** Boot a persisting registry over one store, then the supervisor over both. */
 async function boot(options: BootOptions = {}) {
   const ctx = new Context()
   await ctx.plugin(AgentRegistry)
+  await ctx.plugin(SessionStore)
+  if (options.sessionFlush !== false) ctx.on('session/flush', options.sessionFlush ?? (() => {}))
   const { store, state } = options.store ?? fakeStore(new Map((options.records ?? []).map(r => [String(r.id), r])))
   ctx.provide('jobStore', store)
   if (options.persistence !== undefined) {
@@ -328,6 +357,8 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
     // The producer resumer registers before the store adopts, so the restore
@@ -357,6 +388,8 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
     ctx.jobs.registerResumer('bash', () => { throw new Error('resume boom') })
@@ -385,9 +418,8 @@ describe('RunSupervisor boot accounting of restore-settled records', () => {
 describe('RunSupervisor pending-record reconciliation', () => {
   it('honest-settles a pending record whose owner cannot be restored', async () => {
     const logs = new Map<string, SessionEvent[]>([['dan', []]])
-    // prepare fails (the resume path cannot restore dan) while inspect still
-    // exposes the durable log for the offline account.
-    const persistence = fakePersistence({ logs, appended: [], prepareError: new Error('corrupt log') })
+    // Fail only the owner-probe open; the independent account writer remains available.
+    const persistence = fakePersistence({ logs, appended: [], readOpenError: new Error('injected read-open failure') })
     const record = storedRecord({ ownerSession: SessionId('dan'), resumeSpec: { cmd: 'rerun' } })
     const { state } = tracked(await boot({ records: [record], persistence }))
 
@@ -425,13 +457,13 @@ describe('RunSupervisor pending-record reconciliation', () => {
   it('classifies an owner as unknown when the deadline aborts its restoration', async () => {
     vi.useFakeTimers()
     const logs = new Map<string, SessionEvent[]>([['erin', []]])
-    const persistence = fakePersistence({ logs, appended: [], prepareNever: true })
+    const persistence = fakePersistence({ logs, appended: [], readOpenNever: true })
     const record = storedRecord({ ownerSession: SessionId('erin'), resumeSpec: { cmd: 'rerun' } })
     const { state } = tracked(await boot({ records: [record], persistence, config: { bootResumeTimeoutMs: 500 } }))
 
     await vi.advanceTimersByTimeAsync(1_000)
     await flush()
-    // The aborted prepare is not evidence about the owner: the record settles
+    // The aborted read-open is not evidence about the owner: the record settles
     // with the deadline account, never an owner verdict.
     expect(jobView({} as Context, state, record).status).toBe('failed')
     expect(logs.get('erin')).toHaveLength(1)
@@ -488,7 +520,7 @@ describe('RunSupervisor pending-record reconciliation', () => {
   it('stops classifying further owner groups once the deadline aborts the pass', async () => {
     vi.useFakeTimers()
     const logs = new Map<string, SessionEvent[]>([['erin', []], ['mia', []]])
-    const persistence = fakePersistence({ logs, appended: [], prepareNever: true })
+    const persistence = fakePersistence({ logs, appended: [], readOpenNever: true })
     const first = storedRecord({ ownerSession: SessionId('erin'), resumeSpec: { n: 1 } })
     const second = storedRecord({ ownerSession: SessionId('mia'), resumeSpec: { n: 2 } })
     const { state } = tracked(await boot({ records: [first, second], persistence, config: { bootResumeTimeoutMs: 500 } }))
@@ -727,6 +759,8 @@ describe('RunSupervisor durable adoption markers', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
@@ -769,6 +803,8 @@ describe('RunSupervisor durable adoption markers', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
@@ -1036,13 +1072,13 @@ describe('RunSupervisor durable adoption markers', () => {
       resumeSpec: { cmd: 'rerun' }, incarnation: PROCESS_INCARNATION,
       adoptedFromIncarnation: 'prior-incarnation',
     })
-    const abandoned = {
-      type: 'run/abandoned', seq: 0, time: 1,
+    const abandoned: SessionEvent = {
+      type: 'run/abandoned', seq: SessionSeq(0), time: 1,
       data: {
-        jobId: record.id, kind: record.kind, label: record.label,
+        jobId: record.id, kind: record.kind,
         priorIncarnation: 'prior-incarnation', reason: 'resume-failed', detail: '',
       },
-    } as SessionEvent
+    }
     const logs = new Map<string, SessionEvent[]>([['alice', [abandoned]]])
     const { state } = tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
     expect(logs.get('alice')?.filter(event => event.type === 'run/resumed')).toHaveLength(0)
@@ -1066,6 +1102,117 @@ describe('RunSupervisor durable adoption markers', () => {
     expect(cleared.status).toBe('completed')
     expect('adoptedFromIncarnation' in cleared).toBe(false)
     expect(runEvents(alice.agent.session, 'run/resumed')).toHaveLength(1)
+  })
+
+  it('holds live producer adoption until the session account is durable', async () => {
+    const gate = Promise.withResolvers<undefined>()
+    const durable: SessionEvent[] = []
+    const start = vi.fn(() => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' as const }) }))
+    const record = storedRecord({ resumeSpec: { cmd: 'resume' } })
+    const { ctx, state, agents } = tracked(await boot({
+      records: [record], liveAgents: ['alice'],
+      sessionFlush: async (session) => {
+        await gate.promise
+        durable.splice(0, durable.length, ...session.snapshotEvents())
+      },
+    }))
+    ctx.jobs.registerResumer('bash', () => resumePlan(start))
+    await flush()
+    expect(runEvents(agents.get('alice')!.agent.session, 'run/resumed')).toHaveLength(1)
+    expect(durable).toHaveLength(0)
+    expect(start).not.toHaveBeenCalled()
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+    gate.resolve(undefined)
+    await flush()
+    expect(durable.filter(event => event.type === 'run/resumed')).toHaveLength(1)
+    expect(start).toHaveBeenCalledOnce()
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBeUndefined()
+  })
+
+  it('retains a live adoption marker after a failed flush even when the account is already appended', async () => {
+    const record = storedRecord({
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+      status: 'completed', finishedAt: 200, reported: true,
+    })
+    const resumed: SessionEvent = {
+      type: 'run/resumed', seq: SessionSeq(0), time: 1,
+      data: { jobId: record.id, kind: record.kind, priorIncarnation: 'prior-incarnation' },
+    }
+    const sessionFlush = vi.fn(async () => { throw new Error('disk full') })
+    const { state, agents } = tracked(await boot({
+      records: [record], liveAgents: ['alice'], liveEvents: { alice: [resumed] }, sessionFlush,
+    }))
+    expect(sessionFlush).toHaveBeenCalledOnce()
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+    expect(runEvents(agents.get('alice')!.agent.session, 'run/resumed')).toHaveLength(1)
+  })
+
+  it('does not acknowledge a live account without a durability listener', async () => {
+    const start = vi.fn(() => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' as const }) }))
+    const record = storedRecord({ resumeSpec: { cmd: 'resume' } })
+    const { ctx, state } = tracked(await boot({
+      records: [record], liveAgents: ['alice'], sessionFlush: false,
+    }))
+    ctx.jobs.registerResumer('bash', () => resumePlan(start))
+    await flush()
+    expect(start).not.toHaveBeenCalled()
+    expect(state.records.get(record.id)).toMatchObject({
+      status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL,
+      adoptedFromIncarnation: 'prior-incarnation',
+    })
+  })
+
+  it('keeps offline run accounts log-only while restored job output remains readable', async () => {
+    const record = storedRecord({
+      status: 'failed', finishedAt: 200, detail: REGISTRY_NOT_RESUMABLE_DETAIL,
+      output: 'partial output before restart',
+    })
+    const logs = new Map<string, SessionEvent[]>([['alice', []]])
+    const { ctx } = tracked(await boot({ records: [record], persistence: fakePersistence({ logs, appended: [] }) }))
+    const events = logs.get('alice')!
+    expect(events.filter(event => event.type === 'run/abandoned')).toHaveLength(1)
+    const restored = Session.fromRestore(SessionId('alice'), structuredClone(events), {
+      id: SessionId('alice'), version: SESSION_FORMAT_VERSION, createdAt: 0, isSeeded: false,
+    }, SessionLogOffset(0), 'detached')
+    expect(restored.deriveMessages()).toEqual([])
+    const reader = stubAgent(ctx, 'alice')
+    expect(ctx.jobs.get(record.id, reader.agent).status).toBe('failed')
+    expect(ctx.jobs.read(record.id, reader.agent)).toMatchObject({
+      text: 'partial output before restart', snapshot: { reported: true },
+    })
+  })
+
+  it('retains the adoption marker until the offline account flushes and closes its writer', async () => {
+    const gate = Promise.withResolvers<undefined>()
+    const onClose = vi.fn()
+    const record = storedRecord({
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+      status: 'completed', finishedAt: 200, reported: true,
+    })
+    const persistence = fakePersistence({
+      logs: new Map([['alice', []]]), appended: [], flushWait: () => gate.promise, onClose,
+    })
+    const { state } = tracked(await boot({ records: [record], persistence }))
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+    expect(onClose).not.toHaveBeenCalled()
+    gate.resolve(undefined)
+    await flush()
+    expect(onClose).toHaveBeenCalledWith(SessionId('alice'), 'write')
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBeUndefined()
+  })
+
+  it('retains the adoption marker and releases its writer when the offline account flush fails', async () => {
+    const onClose = vi.fn()
+    const record = storedRecord({
+      incarnation: PROCESS_INCARNATION, adoptedFromIncarnation: 'prior-incarnation',
+      status: 'completed', finishedAt: 200, reported: true,
+    })
+    const persistence = fakePersistence({
+      logs: new Map([['alice', []]]), appended: [], flushError: new Error('disk full'), onClose,
+    })
+    const { state } = tracked(await boot({ records: [record], persistence }))
+    expect(state.records.get(record.id)?.adoptedFromIncarnation).toBe('prior-incarnation')
+    expect(onClose).toHaveBeenCalledWith(SessionId('alice'), 'write')
   })
 
   it('clears the marker only after the account append confirms: a blocked append holds it', async () => {
@@ -1109,6 +1256,8 @@ describe('RunSupervisor durable adoption markers', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     const stub = stubAgent(ctx, 'judy')
     ;(stub.agent.session.append as unknown as (type: string, data: unknown) => void)('run/resumed', {
@@ -1163,6 +1312,8 @@ describe('RunSupervisor durable adoption markers', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     ctx.provide('sessionPersistence', fakePersistence({ logs: new Map(), appended: [] }) as unknown as never)
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
@@ -1334,6 +1485,8 @@ describe('RunSupervisor store/registry mismatch', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     const { store } = fakeStore(new Map([[String(record.id), record]]))
     ctx.provide('jobStore', store)
     // persist: false — the registry ignores the durable records entirely.
@@ -1554,6 +1707,8 @@ describe('RunSupervisor pending records with unreachable owners', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     const stub = stubAgent(ctx, 'judy')
     const persistence = fakePersistence({
@@ -1601,6 +1756,8 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', store)
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
@@ -1857,6 +2014,8 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     const exploding = {
       incarnation: PROCESS_INCARNATION,
       list: () => { throw new Error('store exploded') },
@@ -1883,6 +2042,8 @@ describe('RunSupervisor internals (defensive lanes)', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     const stub = stubAgent(ctx, 'heidi')
     const runId = 'raced-workflow'
@@ -1932,6 +2093,8 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     const record = storedRecord({ resumeSpec: null, reported: false })
     const { store, state } = fakeStore(new Map([[String(record.id), record]]))
     void state
@@ -1961,6 +2124,8 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     ctx.provide('jobStore', shared.store)
     await ctx.plugin(LocalJobRegistry, { persist: true, teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
@@ -2011,6 +2176,8 @@ describe('RunSupervisor pre-seeded log idempotence', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SessionStore)
+    ctx.on('session/flush', () => {})
     await ctx.plugin(LocalJobRegistry, { teardownGraceMs: 20 })
     ctx.jobs.attachController('test-controller')
     await ctx.plugin(RunSupervisor, {})

@@ -12,7 +12,8 @@
 import { performance } from 'node:perf_hooks'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -53,7 +54,7 @@ function attachAgent(ctx: Context, session: Session): void {
   ctx.agents.register({
     id: session.id,
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: unsupportedInbox(),
     status: 'idle',
     ctx,
   } as Agent)
@@ -69,14 +70,16 @@ function appendUser(session: Session, turn: number): void {
 
 /** One assistant reply with usage: the event the token-meter units reprice on. */
 function appendAssistant(session: Session, turn: number, step: number): void {
+  const text = `turn ${String(turn)} step ${String(step)} body`
   session.append('assistant/message', {
     turn,
     step,
     message: createMessage({
       role: 'assistant',
-      content: [{ type: 'text', text: `turn ${String(turn)} step ${String(step)} body` }],
+      content: [{ type: 'text', text }],
       source: { kind: 'model', provider: 'p', model: 'm' },
     }),
+    stream: [{ type: 'text-chunks', time0: 1, index: 0, dt: [], texts: [text] }],
     usage: { inputTokens: 1_000 + turn, outputTokens: 100 + step },
   }, { surfaceOp: 'append' })
 }

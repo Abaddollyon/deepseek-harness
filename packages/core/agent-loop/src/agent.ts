@@ -16,10 +16,9 @@ import type {
   RequestErrorAction,
   RequestPreflightAction,
 } from '@deepseek-ai/dsh-agent'
-import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
-  BlockAssembler,
   LlmError,
   createAssistantMessage,
   errorChain,
@@ -28,13 +27,16 @@ import {
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
+import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
+import { AssistantStreamAttempt } from './assistant-stream.ts'
+import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import { AgentBudgetTracker } from './budget.ts'
 
@@ -68,7 +70,7 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
 
 /** Drives one session through turn and step boundaries. */
 export class ReactLoopAgent implements Agent {
-  readonly inbox: Inbox
+  readonly inbox: ReactLoopInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
@@ -81,8 +83,15 @@ export class ReactLoopAgent implements Agent {
 
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
-  private requestSurfaceGeneration: number | undefined
+  /** Surface generation at attachment or the preceding built request. */
+  private requestSurfaceGeneration: number
   private readonly runtimeContext: RuntimeContextProjection
+  /** Process-local revision of assistant frames for this attached Session. */
+  private assistantStreamRevision = 0
+  private assistantAttemptCounter = 0
+  private readonly systemPrompt: SystemPromptProjection
+  /** Identities fully frozen by this loop; weak references do not retain replaced history. */
+  private readonly frozenMessages = new WeakSet<Message>()
   private readonly budget: AgentBudgetTracker | undefined
 
   constructor(
@@ -91,18 +100,16 @@ export class ReactLoopAgent implements Agent {
     public readonly options: AgentOptions,
     public readonly session: Session,
   ) {
+    this.requestSurfaceGeneration = session.surface.replaceGeneration
     this.dispatch = agentEvents(loopCtx, this)
-    this.inbox = new Inbox(session, {
-      inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
-      discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
-      claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
-    })
+    this.scope = createScope(loopCtx, this)
+    this.ctx = this.scope.ctx
+    this.inbox = new ReactLoopInbox(this.ctx.sessionProjections, session, this.dispatch)
     /* v8 ignore next -- the loop registers its own turnBoundary unit, so the key is always present */
     const lastTurn = this.loopCtx.sessionProjections.stateOf(session, 'turnBoundary')?.lastTurn ?? 0
     this.phase = { kind: 'idle', lastTurn }
-    this.scope = createScope(loopCtx, this)
-    this.ctx = this.scope.ctx.extend({ agent: this })
     this.runtimeContext = new RuntimeContextProjection(this.ctx, session)
+    this.systemPrompt = new SystemPromptProjection(session)
     this.budget = options.budget === undefined ? undefined : new AgentBudgetTracker(options.budget)
   }
 
@@ -272,7 +279,7 @@ export class ReactLoopAgent implements Agent {
    * each message ahead of input that arrived after the claim. Messages a
    * listener re-queued or restored itself are skipped, since pending
    * identities must stay unique across both lists.
-   * @param claimed - the batch {@link Inbox.claim} removed for the aborted step.
+   * @param claimed - the batch {@link ReactLoopInbox.claim} removed for the aborted step.
    * @param steeringCount - how many leading entries of `claimed` came from `next-step`.
    */
   private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
@@ -280,11 +287,18 @@ export class ReactLoopAgent implements Agent {
       for (const message of messages.toReversed()) {
         if (this.inbox.nextStep.some(candidate => candidate.id === message.id)
           || this.inbox.nextTurn.some(candidate => candidate.id === message.id)) continue
-        this.inbox.prepend(target, message)
+        this.inbox.splice(target, 0, 0, [message])
       }
     }
     restore(claimed.slice(steeringCount), 'next-turn')
     restore(claimed.slice(0, steeringCount), 'next-step')
+  }
+
+  /** Whether assembled schemas differ from the logged request header. */
+  private toolsChanged(tools: PromptAssembly['tools']): boolean {
+    const baseline = this.session.requestHeader()
+    if (baseline === undefined) return false
+    return !headerEquals(baseline, canonicalHeader({ ...baseline, tools: [...tools] }))
   }
 
   /** Open one turn before claiming its first proposed step. */
@@ -325,12 +339,9 @@ export class ReactLoopAgent implements Agent {
         this.session.append('step/start', { turn, step })
         phase.step = step
         try {
-          for (const message of decision.messages) {
-            this.session.append('user/message', message, { surfaceOp: 'append' })
-          }
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.
-          const stepEnd = await this.step(decision.assembly, decision.startsRequestSeries === true)
+          const stepEnd = await this.step(decision)
           // max-tokens stays sticky: a later completed step must not
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
@@ -375,121 +386,173 @@ export class ReactLoopAgent implements Agent {
     return true
   }
 
-  private async step(assembly: PromptAssembly, startsRequestSeries: boolean): Promise<StepEndReason | null> {
+  private async step(decision: Extract<PreparedStep, { kind: 'enter' }>): Promise<StepEndReason | null> {
     /* v8 ignore next -- private callers establish the running phase before executing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": step outside running phase`)
     const { turn, step, abort: { signal } } = this.phase
     signal.throwIfAborted()
-    const system = renderPrompt(assembly)
 
+    const { assembly } = decision
+    const renderedPrompt = renderPrompt(assembly)
+    let firstAttempt = true
     while (true) {
-      const surfaceGeneration = this.session.surface.replaceGeneration
-      const { request, preparedCall } = await this.buildRequest(
-        turn, step, assembly.tools, system, startsRequestSeries, surfaceGeneration, signal,
-      )
-      startsRequestSeries = false
-      const assembler = new BlockAssembler()
-      const chunkSeqs: SessionSeq[] = []
+      const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
+      const startsRequestSeries = firstAttempt && decision.startsRequestSeries === true
+      const commits = this.systemPrompt.project(renderedPrompt, {
+        inHistory: preparedCall?.systemPromptUpdate === 'in-history',
+        startsSeries: startsRequestSeries
+          || this.requestSurfaceGeneration !== this.session.surface.replaceGeneration
+          || this.toolsChanged(assembly.tools),
+      })
+      for (const { message, intent } of commits) {
+        this.session.append('system/message', { turn, step, message }, intent)
+      }
+      if (firstAttempt) {
+        for (const message of decision.messages) {
+          this.session.append('user/message', message, { surfaceOp: 'append' })
+        }
+      }
+      firstAttempt = false
+      const request = await this.buildRequest(turn, step, config, preparedCall, assembly.tools, renderedPrompt, startsRequestSeries, signal)
       const budgetedRequest = this.budget === undefined
         ? undefined
         : { admittedInput: this.budget.admitRequest(request, preparedCall) }
+      const live = new AssistantStreamAttempt(
+        this.session.id,
+        ++this.assistantAttemptCounter,
+        () => ++this.assistantStreamRevision,
+        turn,
+        step,
+        (frame) => { this.dispatch.emit('agent/assistant-stream', { frame }) },
+      )
+      let started = false
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
+        live.start()
+        started = true
         for await (const chunk of stream) {
           signal.throwIfAborted()
-          chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
-          assembler.push(chunk)
+          live.push(chunk)
         }
         signal.throwIfAborted()
       } catch (error: unknown) {
-        if (signal.aborted) {
-          const content = assembler.interruptedBlocks()
-          if (content.length > 0) {
-            this.session.append('assistant/message', {
-              turn,
-              step,
-              message: createAssistantMessage({
-                content,
-                source: { provider: request.provider, model: request.model },
-              }),
-              interrupted: true,
-              ...assembler.usage === undefined ? {} : { usage: assembler.usage },
-            }, { surfaceOp: 'append', sourceEventSeqs: chunkSeqs })
+        if (!started) throw error
+        try {
+          if (signal.aborted) {
+            const content = live.interruptedBlocks()
+            if (content.length > 0) {
+              live.settle('assistant/message', () => this.session.append('assistant/message', {
+                turn,
+                step,
+                message: createAssistantMessage({
+                  content,
+                  source: {
+                    provider: request.provider,
+                    model: request.model,
+                    ...live.replayState === undefined ? {} : { replayState: live.replayState },
+                  },
+                }),
+                interrupted: true,
+                ...live.usage === undefined ? {} : { usage: live.usage },
+                stream: live.stream,
+              }, { surfaceOp: 'append' }).seq)
+            } else {
+              live.settle(
+                'assistant/attempt',
+                () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+              )
+            }
+          } else {
+            live.settle(
+              'assistant/attempt',
+              () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+            )
           }
+        } catch (settlementError: unknown) {
+          throw new AggregateError(
+            [error, settlementError],
+            'Assistant stream failed and its durable settlement was rejected',
+            { cause: error },
+          )
         }
         if (budgetedRequest !== undefined) {
-          this.budget?.settleRequest(request, budgetedRequest.admittedInput, assembler.usage)
+          this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
         }
         throw error
       }
-      if (budgetedRequest !== undefined) {
-        this.budget?.settleRequest(request, budgetedRequest.admittedInput, assembler.usage)
-      }
-      const finish = assembler.finish
-      if (finish.kind === 'error' || finish.kind === 'aborted') {
-        const action = await this.dispatch.waterfall(
-          'agent/request-error', {
+      try {
+        const finish = live.finish
+        if (finish.kind === 'error' || finish.kind === 'aborted') {
+          live.settle(
+            'assistant/attempt',
+            () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+          )
+          if (budgetedRequest !== undefined) {
+            this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
+          }
+          const action = await this.dispatch.waterfall(
+            'agent/request-error', {
+              turn,
+              step,
+              provider: request.provider,
+              failure: finish.failure,
+              retryPolicy: preparedCall?.retryPolicy,
+              signal,
+            },
+            () => Promise.resolve<RequestErrorAction>(undefined),
+          )
+          signal.throwIfAborted()
+          if (action?.kind !== 'retry') {
+            throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+          }
+          this.budget?.admitRetry()
+          continue
+        }
+
+        const message = createAssistantMessage({
+          content: live.blocks(),
+          source: {
+            provider: request.provider,
+            model: request.model,
+            ...live.replayState !== undefined ? { replayState: live.replayState } : {},
+          },
+        })
+        live.settle(
+          'assistant/message',
+          () => this.session.append('assistant/message', {
             turn,
             step,
-            provider: request.provider,
-            failure: finish.failure,
-            retryPolicy: preparedCall?.retryPolicy,
-            signal,
-          },
-          () => Promise.resolve<RequestErrorAction>(undefined),
+            message,
+            ...live.usage === undefined ? {} : { usage: live.usage },
+            stream: live.stream,
+          }, { surfaceOp: 'append' }).seq,
         )
-        signal.throwIfAborted()
-        if (action?.kind !== 'retry') {
-          throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+        if (budgetedRequest !== undefined) {
+          this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
         }
-        this.budget?.admitRetry()
-        continue
+        if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
+
+        const toolCalls = message.content.filter(block => block.type === 'tool-call')
+        if (toolCalls.length === 0) return { kind: 'completed' }
+        const { concluded } = await executeToolCalls(
+          this.loopCtx, turn, step, toolCalls, signal,
+          context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
+        )
+        return concluded ? { kind: 'completed' } : null
+      } catch (error: unknown) {
+        if (!live.ended) live.abandon()
+        throw error
       }
-
-      const message = createAssistantMessage({
-        content: assembler.blocks(),
-        source: {
-          provider: request.provider,
-          model: request.model,
-          ...assembler.replayState !== undefined ? { replayState: assembler.replayState } : {},
-        },
-      })
-      this.session.append(
-        'assistant/message',
-        {
-          turn,
-          step,
-          message,
-          ...assembler.usage === undefined ? {} : { usage: assembler.usage },
-        },
-        { surfaceOp: 'append', sourceEventSeqs: chunkSeqs },
-      )
-      if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
-
-      const toolCalls = message.content.filter(block => block.type === 'tool-call')
-      if (toolCalls.length === 0) return { kind: 'completed' }
-      const { concluded } = await executeToolCalls(
-        this.loopCtx, turn, step, toolCalls, signal,
-        context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
-      )
-      return concluded ? { kind: 'completed' } : null
     }
   }
 
-  /**
-   * Compose one frozen request and bind it to the adapter registration that
-   * resolved its exact-model defaults.
-   */
-  private async buildRequest(
+  /** Resolve request config and bind its adapter before admitting model-visible input. */
+  private async prepareRequest(
     turn: number,
     step: number,
-    tools: GenerateOptions['tools'] & object,
-    system: string,
-    startsRequestSeries: boolean,
-    surfaceGeneration: number,
     signal: AbortSignal,
-  ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
+  ): Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
     // AgentOptions seeds this loop instance's first proposal and wins over a
@@ -535,11 +598,25 @@ export class ReactLoopAgent implements Agent {
       config = budgetedConfig
     }
     signal.throwIfAborted()
+    return { config, ...preparedCall === undefined ? {} : { preparedCall } }
+  }
 
+  /** Log the resolved envelope and derive a frozen request from the admitted surface. */
+  private async buildRequest(
+    turn: number,
+    step: number,
+    config: LlmCallConfig,
+    preparedCall: PreparedLlmCall | undefined,
+    tools: GenerateOptions['tools'] & object,
+    renderedPrompt: string,
+    startsRequestSeries: boolean,
+    signal: AbortSignal,
+  ): Promise<GenerateOptions> {
+    const { session } = this
+    const surfaceGeneration = session.surface.replaceGeneration
     const header = deepFreeze(structuredClone(canonicalHeader({
       config,
       ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
-      ...system ? { system } : {},
       ...tools.length > 0 ? { tools } : {},
     })))
     const baseline = this.session.requestHeader()
@@ -555,19 +632,30 @@ export class ReactLoopAgent implements Agent {
     this.requestSurfaceGeneration = surfaceGeneration
 
     const contextWindow = preparedCall?.context?.contextWindow
+    const systemPromptUpdate = preparedCall?.systemPromptUpdate
     const requestContext: RequestContext = {
       provider: config.provider,
       model: config.model,
       ...contextWindow === undefined ? {} : { contextWindow },
+      ...systemPromptUpdate === undefined ? {} : { systemPromptUpdate },
     }
     const previousContext = session.requestContext()
     if (previousContext?.provider !== requestContext.provider
       || previousContext.model !== requestContext.model
-      || previousContext.contextWindow !== requestContext.contextWindow) {
+      || previousContext.contextWindow !== requestContext.contextWindow
+      || previousContext.systemPromptUpdate !== requestContext.systemPromptUpdate) {
       session.append('request/context', requestContext)
     }
     signal.throwIfAborted()
 
+    const reconcilePrompt = (): void => {
+      for (const { message, intent } of this.systemPrompt.project(renderedPrompt, {
+        inHistory: preparedCall?.systemPromptUpdate === 'in-history',
+        startsSeries: true,
+      })) {
+        session.append('system/message', { turn, step, message }, intent)
+      }
+    }
     // Only replacement commits justify redispatch. Log-only activity can be
     // unrelated or a failed compaction bracket and must not create a hot loop.
     let preflightGeneration = session.surface.replaceGeneration
@@ -594,20 +682,32 @@ export class ReactLoopAgent implements Agent {
           `agent "${this.id}": agent/request-preflight returned retry without a newer replacement surface`,
         )
       }
-      preflightGeneration = currentGeneration
+      // Reprice the complete prompt on the next admission pass, not an old head
+      // whose latest in-history update the replacement may have shadowed.
+      reconcilePrompt()
+      preflightGeneration = session.surface.replaceGeneration
     }
 
-    // Admission passed: derive the boundary messages only now, so a retrying
-    // listener's durable changes are part of the derived history.
+    if (session.surface.replaceGeneration !== surfaceGeneration) {
+      reconcilePrompt()
+      session.append('request/header', { header, reason: 'series', startsSeries: true })
+      this.requestSurfaceGeneration = session.surface.replaceGeneration
+    }
+    signal.throwIfAborted()
     const boundaryMessages = session.deriveMessages()
-    const request = markAgentLoopRequest(deepFreeze({
+    for (const message of boundaryMessages) {
+      if (this.frozenMessages.has(message)) continue
+      deepFreeze(message)
+      this.frozenMessages.add(message)
+    }
+    Object.freeze(boundaryMessages)
+    const request = markAgentLoopRequest(Object.freeze({
       ...header.config,
       messages: boundaryMessages,
-      ...header.system !== undefined ? { system: header.system } : {},
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,
       signal,
     }))
-    return { request, ...preparedCall === undefined ? {} : { preparedCall } }
+    return request
   }
 }

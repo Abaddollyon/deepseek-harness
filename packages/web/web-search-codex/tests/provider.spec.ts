@@ -67,7 +67,6 @@ function fakeProcess(handler: Handler, diagnostic = ''): FakeProcess {
   })
   const waitForExit = vi.fn(async () => true)
   const child: SubprocessHandle = {
-    pid: 123,
     stdin: output,
     stdout: input,
     stderr: undefined,

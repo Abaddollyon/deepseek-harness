@@ -5,15 +5,14 @@
  * the buffer while host teardown flushes the surviving latest frames.
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Inbox } from '@deepseek-ai/dsh-agent'
+import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { ControlQueue, SessionControlController } from '../src/control.ts'
 import type { SessionControlFrame } from '../src/types.ts'
@@ -61,10 +60,11 @@ const turnUnit = () => ({
   stateVersion: 1,
 }) satisfies ProjectionDefinition<'test/coalesce-turns', number>
 
-/** Yield to the macrotask queue, letting every open stream drain its buffer. */
-function settle(): Promise<void> {
-  return new Promise((resolve) => { setTimeout(resolve, 0) })
-}
+const ownedContexts = new Set<Context>()
+afterEach(async () => {
+  await Promise.all([...ownedContexts].map(ctx => ctx.fiber.dispose()))
+  ownedContexts.clear()
+})
 
 async function harness(): Promise<{
   ctx: Context
@@ -73,18 +73,13 @@ async function harness(): Promise<{
   inbox: Inbox
 }> {
   const ctx = new Context()
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(SessionProjectionRegistry)
-  const session = ctx.sessions.create()
-  const inbox = new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} })
-  ctx.agents.register({ id: session.id, session, inbox, status: 'idle', ctx } as Agent)
+  ownedContexts.add(ctx)
+  await mountAgentLoopTestDependencies(ctx)
+  const loop = await mountAgentLoopTestHarness(ctx)
+  const { session, inbox } = await loop.create(SessionId('control-coalescing'))
   const control = new SessionControlController(ctx)
   ctx.sessionProjections.register(userUnit())
   ctx.sessionProjections.register(turnUnit())
-  // The controller's onChanged subscription lives in an inject child whose
-  // fiber activates asynchronously; yield until it lands before appending.
-  await settle()
   return { ctx, session, control, inbox }
 }
 
@@ -284,10 +279,11 @@ describe('Session control queue coalescing', () => {
     ])
     // The interleaved projection churn still collapsed to the newest value
     // (the inbox splices own the even seqs between the user messages).
-    const users = frames.filter((frame): frame is ProjectionFrame => frame.type === 'projection')
-    expect(users).toEqual([{
-      type: 'projection', sessionId: session.id, key: 'test/coalesce-user', value: { text: 'm1' }, seq: 3,
-    }])
+    const projections = frames.filter((frame): frame is ProjectionFrame => frame.type === 'projection')
+    expect(projections).toEqual([
+      { type: 'projection', sessionId: session.id, key: 'test/coalesce-user', value: { text: 'm1' }, seq: 3 },
+      { type: 'projection', sessionId: session.id, key: 'inbox', value: { 'next-turn': queued, 'next-step': [] }, seq: 4 },
+    ])
   })
 
   it('delivers the newer frame when supersession lands between wake and drain', async () => {

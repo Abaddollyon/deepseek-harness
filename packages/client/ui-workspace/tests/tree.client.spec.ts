@@ -5,7 +5,7 @@ import { ScheduleId } from '@deepseek-ai/dsh-schedule'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { relativeTime } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, workspaceLabel,
+  deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, owningGroupKey, workspaceLabel,
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
@@ -37,6 +37,14 @@ const view = (
 })
 const noArchive: readonly SessionId[] = []
 const archived = (...ids: string[]): readonly SessionId[] => ids.map(sid)
+
+describe('owningGroupKey', () => {
+  it('returns the owning Workspace id or the Ungrouped key', () => {
+    const workspaces = [workspace('first', ['owned'])]
+    expect(owningGroupKey(workspaces, sid('owned'))).toBe('first')
+    expect(owningGroupKey(workspaces, sid('loose'))).toBe(UNGROUPED_KEY)
+  })
+})
 
 describe('deriveGroups', () => {
   it('keeps Host Workspace and sessionIds order without Client recency sorting', () => {

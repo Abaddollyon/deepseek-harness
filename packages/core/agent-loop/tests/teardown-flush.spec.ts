@@ -106,7 +106,9 @@ describe('disposal flushes the settled log', () => {
 
     // The barrier made the closing records durable: a remount reads them back.
     const secondCtx = await mountPersistentHarness(first.root, new MockAdapter([]))
-    const loaded = await secondCtx.sessionPersistence.load(sessionId)
+    const reader = await secondCtx.sessionPersistence.open(sessionId, 'read')
+    const loaded = await reader.read()
+    await reader.close()
     expect(loaded.events.some(event => event.type === 'tool/result')).toBe(true)
     expect(loaded.events.some(event => event.type === 'turn/end')).toBe(true)
     await secondCtx.fiber.dispose()

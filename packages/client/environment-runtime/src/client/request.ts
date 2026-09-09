@@ -64,6 +64,8 @@ export function createEnvironmentRequest(options: EnvironmentRequestOptions): En
       }
       const signal = combineSignals(lifetime.signal, init.signal)
       const response = await options.request(options.environmentId, target, { ...init, signal })
+      // Disposal can abort the lifetime while the carrier request is pending.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (lifetime.signal.aborted) throw new Error('environment request: runtime is disposed')
       if (options.generation !== undefined && options.generation() !== startedGeneration) {
         throw new Error('environment request: Host generation changed before the response arrived')

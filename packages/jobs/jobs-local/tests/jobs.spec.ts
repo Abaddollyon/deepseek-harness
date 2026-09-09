@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
@@ -9,6 +9,7 @@ import { JobId, PROCESS_INCARNATION } from '@deepseek-ai/dsh-jobs'
 import type { JobHooks, JobKind, JobOutcome, JobSnapshot, JobStart } from '@deepseek-ai/dsh-jobs'
 import type { JobRecord, JobStore } from '@deepseek-ai/dsh-jobs-store-domain'
 import LocalJobRegistry, { type Config as JobsConfig } from '@deepseek-ai/dsh-jobs-local'
+import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -36,7 +37,7 @@ function stubAgent(ctx: Context, rawId: string, presetScope?: ScopeKey): Agent {
     options: {},
     hasExecutionBudget: false,
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: unsupportedInbox(),
     status: 'idle' as const,
     ctx: agentCtx,
     send: () => {},
@@ -46,7 +47,7 @@ function stubAgent(ctx: Context, rawId: string, presetScope?: ScopeKey): Agent {
     cancel() {},
     runMaintenance: <T>(job: (signal: AbortSignal) => Promise<T>) => job(new AbortController().signal),
     whenIdle() { return Promise.resolve() },
-  }
+  } satisfies Agent
   agentScopeDisposers.set(agent, async () => { await scopeFiber.dispose() })
   return agent
 }

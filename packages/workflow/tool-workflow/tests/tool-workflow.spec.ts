@@ -643,6 +643,7 @@ describe('dsh-tool-workflow', () => {
     const value = { items: Array.from({ length: 22 }, (_, index) => ({ index, text: 'x'.repeat(2_500) })) }
     const fullJson = JSON.stringify(value, null, 2)
     expect(fullJson.length).toBeGreaterThan(50_000)
+    const save = vi.spyOn(ctx.spillStore, 'saveText')
     const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
     await vi.waitFor(() => { expect(engine.requests.length).toBe(1) })
     engine.settle({ value, stopReason: 'completed', agentsStarted: 1 })
@@ -654,6 +655,10 @@ describe('dsh-tool-workflow', () => {
       truncated: true, originalChars: fullJson.length, spillPath: '<spill>', preview: fullJson.slice(0, 50_000),
     })
     expect(readFileSync(projected.spillPath, 'utf8')).toBe(fullJson)
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      owner: { sessionId: parent.session.id },
+      source: { kind: 'tool', toolName: 'workflow', callId: ToolCallId('call-1'), label: 'result' },
+    }))
     expect(JSON.parse((result.content[0] as { text: string }).text.split('Return value:\n')[1]!)).toEqual(projected)
   })
 

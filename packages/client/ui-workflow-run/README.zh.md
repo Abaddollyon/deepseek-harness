@@ -1,5 +1,5 @@
 ---
-description: "dsh Web 客户端的持久化工作流运行 Conversation Node：把顶层工作流运行重建为带嵌套成员折叠的独立聊天节点。"
+description: "dsh Web 客户端的持久化工作流运行 Conversation Node：把工作流运行重建为带嵌套成员折叠的独立聊天节点。"
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-client-ui-workflow-run` 是浏览器插件，把持久化的顶层工作流运行重建为 dsh Web 客户端中的独立 Chat 节点。它消费由 `dsh-tool-workflow` 拥有的五类 `tool-workflow/*` Session 事件，注册一个 `ConversationNodeDefinition`，并通过 keyed `conversation.chat.node` slot 渲染，不改变现有工作流工具卡。运行与每个阶段都是受控 disclosure：挂载时运行中、失败、已取消与已中断层级默认展开，全部完成的层级默认折叠，用户可以点击整行或按 Enter、Space 切换任一层级。只有当所有实时事实同时成立时，成员才可打开子 Session；节点只显示运行、阶段、成员身份与状态。
+使用 `dsh-client-ui-workflow-run` 可以把持久化工作流运行作为独立 Chat 节点查看。展开运行查看阶段，展开阶段查看成员；运行中、失败、已取消与已中断的层级默认展开，已完成层级保持折叠。只要普通 Session 列表将子 Session 标识为当前 Session 的 child，成员就能打开它，包括结算之后。投影保留阶段标题与持久化叙述，但面板只显示名称、成员数与状态。需要查看进度和导航到子级时选择本包；它不展示脚本、输出、错误、日志、用量、静态拓扑或执行控制。
 
 ## 目录
 
@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-经 `dsh-tool-workflow` 发起的顶层工作流运行会在对话中显示为独立节点：展开运行查看其阶段，展开阶段查看其成员。阶段组只来自开始过的成员；成员结算只改变状态，不删除或重排成员。只要子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'` 且 `parentId` 等于当前 Session，成员即可打开其子 Session。结算不会撤销这一点：完成或已中断的成员在其子行仍存在时保持可打开，因为 `sessions.open(id)` 对已结束的子级同样有效。带下划线的成员文字是唯一可见导航提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，右侧状态仍只显示生命周期词。组件只调用注入的普通 `sessions.open(id)`；普通列表中不存在其子 Session 的行（远程、仅地址化或父级不符）都不可交互。
+经 `dsh-tool-workflow` 记录的工作流运行会在对话中显示为独立节点：展开运行查看其阶段，展开阶段查看其成员。Definition 不排除带 `parentCallId` 的运行。不同的已记录阶段标题按首次出现顺序建立阶段组，包括没有成员的阶段；成员开始事件随后按成员顺序补入缺少的阶段组。未提供的阶段身份与空字符串阶段身份保持区分；成员结算只改变状态，不删除或重排成员。只要子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'` 且 `parentId` 等于当前 Session，成员即可打开其子 Session。结算不会撤销这一点：完成或已中断的成员在其子行仍存在时保持可打开，因为 `sessions.open(id)` 对已结束的子级同样有效。带下划线的成员文字是唯一可见导航提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，右侧状态仍只显示生命周期词。组件只调用注入的普通 `sessions.open(id)`；普通列表中不存在其子 Session 的行（远程、仅地址化或父级不符）都不可交互。
 
 ### 导航节点
 
@@ -43,7 +43,7 @@ kind: "package-reference"
 <details>
 <summary>实现细节——点击展开</summary>
 
-节点是持久化会话事件的确定性回放：`tool-workflow/run-start` 以 `runId` 创建唯一 Context，成员开始、成员结束与运行结束事件按日志顺序更新该 Context。只有 update 的历史尾页会保持 pending，直到更早页面补入唯一 start；此后 prepend、完整回放与实时 append 得到相同状态。
+节点确定性回放六类持久化 `tool-workflow/*` 事件：`run-start` 以 `runId` 创建唯一 Context；`phase`、`log`、`agent-start`、`agent-end` 和 `run-end` 按日志顺序更新它。带 `runId` 的工作流 `run/detached` 也更新该 Context。阶段标题建立阶段组；日志在投影的 `narration` 数组中保留 `message`、`ordinal` 和可选的 `truncated`，未捕获日志的旧记录省略该数组。`WorkflowRunPanel` 不渲染这些叙述。只有 update 的历史尾页会保持 pending，直到更早页面补入唯一 start；此后 prepend、完整回放与实时 append 得到相同状态。
 
 ### 展开选择
 
@@ -62,7 +62,7 @@ kind: "package-reference"
 
 以下页面覆盖工具 seam、对话宿主与工具展示层。
 
-- [tool-workflow](../../workflow/tool-workflow/README.zh.md)——拥有四类 `tool-workflow/*` Session 事件的工具。
+- [tool-workflow](../../workflow/tool-workflow/README.zh.md)——拥有本包折叠的六类 `tool-workflow/*` Session 事件的工具。
 - [ui-conversation](../ui-conversation/README.zh.md)——承载 `conversation.chat.node` slot 的聊天界面。
 - [ui-tool](../ui-tool/README.zh.md)——本节点相邻的工具调用展示层。
 - [Conversation 子系统](../../../docs/subsystems/conversation.zh.md)——业务自有功能如何注册 Conversation node。
@@ -82,12 +82,11 @@ kind: "package-reference"
 
 <a id="known-limitations-and-deferred-work"></a>
 
-
 这些限制定义哪些运行会产生记录、节点暴露什么；它们是当前包约束。
 
-- **只有经 `dsh-tool-workflow` 发起的顶层调用会生成这些记录**：嵌套 Code Mode 调用和直接 `WorkflowEngine` 消费方不会生成。
+- **必须有持久化工作流记录**：Definition 接受已记录的运行，不过滤 `parentCallId`，但无法重建未发出匹配 `tool-workflow/*` 事件的执行；只有 update 时，必须等匹配的 `run-start` 可用后才产生可见节点。
 - **导航跟随普通 Session 列表**：成员结算后只要其子行仍在列表中就保持可打开；但列表不包含其子 Session 的成员（例如远程行）永不从本节点提供打开入口。
-- **节点只显示运行、阶段、成员身份与状态**：脚本、输出、错误、日志、用量、静态拓扑与控制操作都不属于本界面。
+- **面板显示名称、成员数与状态**：持久化叙述保留在节点数据中，但不显示；脚本、输出、错误详情、用量、静态拓扑与执行控制也不属于该面板。
 
 <a id="dev-note"></a>
 ### 开发备注

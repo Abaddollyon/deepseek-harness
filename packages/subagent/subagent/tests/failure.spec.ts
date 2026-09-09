@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { subagentFailureFromLlmFailure } from '../src/index.ts'
+import { settlementSummary, subagentFailureFromLlmFailure } from '../src/index.ts'
 import { subagentFailureFromUnknown } from '../src/failure.ts'
-import { settlementSummary } from '../src/continuation.ts'
 import { terminalDiagnostic } from '../src/lifecycle.ts'
 
 describe('subagentFailureFromLlmFailure', () => {

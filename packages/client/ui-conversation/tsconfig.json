@@ -78,6 +78,9 @@
       "path": "../locale"
     },
     {
+      "path": "../file-upload/tsconfig.client.json"
+    },
+    {
       "path": "../../settings/settings"
     },
     {

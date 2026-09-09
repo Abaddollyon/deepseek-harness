@@ -58,7 +58,6 @@ function harness(plan: HarnessPlan = {}) {
   const childPlan = plan.child ?? {}
   const doneValue = childPlan.done ?? { exitCode: 0, signal: null }
   const child = {
-    pid: 42,
     stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: undefined,

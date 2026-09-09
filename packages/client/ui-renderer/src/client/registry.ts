@@ -636,8 +636,8 @@ export class SlotRegistry extends Service {
     }
     listeners.add(listener)
     return () => {
-      listeners?.delete(listener)
-      if (listeners?.size === 0) this._rendererListeners.delete(key)
+      listeners.delete(listener)
+      if (listeners.size === 0) this._rendererListeners.delete(key)
     }
   }
 
