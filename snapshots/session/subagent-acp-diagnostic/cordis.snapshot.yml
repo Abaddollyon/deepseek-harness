@@ -4,7 +4,13 @@
   name: '@deepseek-ai/dsh-llm-deepseek'
   disabled: true
 
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+  disabled: true
+
 - insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
     - id: acp-diagnostic-release-on-job-output
       name: './release-on-job-output.mjs'
     - id: llm-replay

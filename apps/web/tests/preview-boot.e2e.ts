@@ -407,6 +407,7 @@ async function bootPreview(origin: string, browser: Browser): Promise<void> {
     await subagents.waitFor({ timeout: 15_000 })
     await subagents.hover()
     const catalog = page.getByRole('tree', { name: 'Subagent sessions' })
+    await catalog.getByRole('treeitem', { name: 'Inactive agents (2)', expanded: false }).click()
     await catalog.getByRole('treeitem', { name: /Review preview architecture/ }).waitFor()
     await catalog.getByRole('treeitem', { name: /Continue preview verification/ }).waitFor()
     await catalog.press('Escape')

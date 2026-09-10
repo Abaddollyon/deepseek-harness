@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -241,6 +241,62 @@ describe('ModelSelect reasoning effort', () => {
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth)
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight)
+    }
+  })
+
+  it('focuses only after the portal is visible and preserves navigation focus across placement updates', () => {
+    // eslint-disable-next-line typescript/unbound-method -- called below with the actual element receiver.
+    const nativeFocus = HTMLElement.prototype.focus
+    const focusVisibility: string[] = []
+    // jsdom otherwise permits focus on visibility:hidden measurement nodes, unlike browsers.
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      const visibility = getComputedStyle(this).visibility
+      focusVisibility.push(visibility)
+      if (visibility !== 'hidden') nativeFocus.call(this, options)
+    })
+    try {
+      const directory = createSnapshotStore(state())
+      render(<ModelSelect
+        locked={false}
+        available
+        directory={directory}
+        load={vi.fn()}
+        refresh={vi.fn()}
+        select={vi.fn().mockResolvedValue(true)}
+        t={t}
+      />)
+      const trigger = screen.getByRole('button', { name: /选择模型/ })
+      fireEvent.click(trigger)
+      const modelEntry = screen.getByRole('menuitem', { name: /模型/ })
+      expect(document.activeElement).toBe(modelEntry)
+      expect(focusVisibility).toEqual(['visible'])
+
+      fireEvent.keyDown(modelEntry, { key: 'ArrowDown' })
+      const effortEntry = screen.getByRole('menuitem', { name: /推理等级/ })
+      expect(document.activeElement).toBe(effortEntry)
+      fireEvent.resize(window)
+      fireEvent.scroll(window)
+      act(() => { directory.set(state()) })
+      expect(document.activeElement).toBe(effortEntry)
+      expect(focusVisibility).toHaveLength(2)
+
+      fireEvent.click(effortEntry)
+      expect(document.activeElement).toBe(screen.getAllByRole('menuitemradio')[0])
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+      expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /模型/ }))
+      fireEvent.click(screen.getByRole('menuitem', { name: /模型/ }))
+      const search = screen.getByRole('searchbox', { name: zh['search.aria'] })
+      expect(document.activeElement).toBe(search)
+      fireEvent.change(search, { target: { value: 'flash' } })
+      expect(document.activeElement).toBe(search)
+
+      fireEvent.mouseDown(document.body)
+      expect(screen.queryByRole('menu')).toBeNull()
+      fireEvent.click(trigger)
+      expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /模型/ }))
+      expect(focusVisibility).not.toContain('hidden')
+    } finally {
+      focus.mockRestore()
     }
   })
 

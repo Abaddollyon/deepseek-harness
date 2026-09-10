@@ -282,11 +282,10 @@ describe('web e2e: input card position across view tabs', () => {
     // width. The seat compensates instead, which the next test asserts.
     expect(comparison.trajectory.gutter).toBe('auto')
     expect(comparison.trajectory.band).toBe(0)
-    // Declared as a scroll container on both axes rather than left to compute:
-    // `overflow: hidden` would drop any reservation in WebKit, and a `visible`
-    // horizontal axis computes to `auto` beside a scrolling one.
-    expect(comparison.trajectory.overflowY).toBe('auto')
-    expect(comparison.trajectory.overflowX).toBe('hidden')
+    // Feature views own a bounded viewport and their own scrollers; the outer
+    // transcript container must not carry its retained scroll position into it.
+    expect(comparison.trajectory.overflowY).toBe('clip')
+    expect(comparison.trajectory.overflowX).toBe('clip')
     // Only Chat scrolls this box; the Trajectory view owns its own scrollers.
     expect(comparison.trajectory.scrolls).toBe(false)
     expect(tripwire.pageErrors).toEqual([])

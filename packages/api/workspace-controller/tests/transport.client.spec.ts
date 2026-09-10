@@ -361,7 +361,7 @@ describe('Workspace Controller Client apply', () => {
     }])
     const model = new ClientWorkspaceModel(remote)
     const client = workspaceClient(remote)
-    const open = client.$stream
+    const open = client.$stream.bind(client)
     const closing = Promise.withResolvers<undefined>()
     client.$stream = <Item>(options: RemoteStreamOptions<Item>) => {
       const stream = open(options)

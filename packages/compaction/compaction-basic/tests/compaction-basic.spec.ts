@@ -1871,14 +1871,21 @@ describe('automatic listener and loader composition', () => {
     ])
   })
 
-  it('compacts before request derivation above threshold using the durable routed model and remains idle below it', async () => {
+  it.each([false, true])('compacts above threshold but below capacity and remains idle below threshold (pruner: %s)', async (withPruner) => {
     const ctx = createContext()
+    if (withPruner) void new ToolResultPruner(ctx, {
+      thresholdChars: 100,
+      headChars: 20,
+      tailChars: 10,
+    })
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
       maxTokens: 64,
     })
     const pressured = conversation(4)
+    expect(ctx.tokenMeter.measure(pressured).totalTokens).toBeGreaterThanOrEqual(500)
+    expect(ctx.tokenMeter.measure(pressured).totalTokens).toBeLessThan(1_000)
     await preflight(ctx, agent(pressured, 'unconfigured-agent-fallback'))
     expect(pressured.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(true)
 
@@ -1886,6 +1893,47 @@ describe('automatic listener and loader composition', () => {
     await preflight(ctx, agent(small, MODEL))
     expect(small.snapshotEvents().some(event => event.type === 'compaction/start')).toBe(false)
     expect(compact.calls).toHaveLength(1)
+  })
+
+  it('retries the pruned surface without summarizing once threshold and capacity both fit', async () => {
+    const ctx = createContext()
+    void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.5,
+      retainTokens: 50,
+      maxTokens: 64,
+    })
+    const session = oversizedToolResult()
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeGreaterThanOrEqual(500)
+
+    await expect(preflight(ctx, agent(session, MODEL))).resolves.toMatchObject({ kind: 'retry' })
+
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeLessThan(500)
+    expect(session.surface.replaceGeneration).toBe(1)
+    expect(compact.calls).toHaveLength(0)
+  })
+
+  it('summarizes below threshold when the output reserve still exceeds capacity after pruning', async () => {
+    const ctx = createContext()
+    void new ToolResultPruner(ctx, { thresholdChars: 100, headChars: 20, tailChars: 10 })
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 0.9,
+      retainTokens: 180,
+      maxTokens: 64,
+    })
+    const session = conversation(3)
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL, maxTokens: 600 } },
+      reason: 'change',
+    })
+    const pressure = ctx.tokenMeter.measure(session).totalTokens
+    expect(pressure).toBeLessThan(900)
+    expect(pressure + 600).toBeGreaterThan(1_000)
+
+    await expect(preflight(ctx, agent(session, MODEL))).resolves.toMatchObject({ kind: 'retry' })
+
+    expect(compact.calls).toHaveLength(1)
+    expect(session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(true)
   })
 
   it('declines without mutation when the summarizer replay budget cannot fit', async () => {

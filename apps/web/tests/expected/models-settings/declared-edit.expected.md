@@ -33,7 +33,9 @@
       - textbox "API 密钥":
         - /placeholder: 输入 API 密钥，或留空使用环境认证
       - group:
-        - text: 自定义设置 显示名称
+        - text: 自定义设置
+        - checkbox "自动发现模型"
+        - text: 自动发现模型 在后台刷新此提供方的可选模型。显式模型设置保持不变。 显示名称
         - textbox "显示名称":
           - /placeholder: acme-gateway
           - text: Acme Gateway

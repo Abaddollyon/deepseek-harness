@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   assertFixtureInventory,
   captureStableAria,
@@ -55,6 +56,9 @@ const SKILLS: readonly SeedSkill[] = [
 ]
 
 async function seedSkills(workspaceCwd: string): Promise<void> {
+  // Discovery uses the nearest project root, not the enclosing scaffold root.
+  await mkdir(join(workspaceCwd, 'workspace'), { recursive: true })
+  await isolateWorkspaceProjectRoot(join(workspaceCwd, 'workspace'))
   for (const skill of SKILLS) {
     const directory = join(workspaceCwd, 'workspace', '.agents', 'skills', skill.name)
     await mkdir(directory, { recursive: true })

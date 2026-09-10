@@ -1,6 +1,12 @@
 # Keyless twin of subagent-result-diagnostic.cordis.yml: keep the same test
 # provider/tool and replace only the external model adapter.
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+  disabled: true
+
 - insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
     - id: llm-replay
       name: '@deepseek-ai/dsh-llm-replay'
       config:

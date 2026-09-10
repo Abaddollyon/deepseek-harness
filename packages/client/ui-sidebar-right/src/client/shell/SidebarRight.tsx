@@ -405,9 +405,8 @@ export function RightbarSeat({
     () => bindService({ sessionId, actions, surfaces, canSplitPane: paneId => room.current.get(paneId)?.row !== false }),
     [bindService, sessionId, actions, surfaces],
   )
-  // The Tab domain is not synced here: the controller adopted this session's
-  // store as the runtime minted it and reconciles on the store's own commits,
-  // on screen or not.
+  // Slot injection adopts the store under the native Session id before this
+  // seat renders. The store's commits reconcile the Tab domain, on screen or not.
 
   if (surface === undefined) return null
   const panel: PanelProps = {

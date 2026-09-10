@@ -23,7 +23,7 @@ import {
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
 import {
-  connectFreshWorkspace, newEnglishPage, saveFailureShot, writeComposerDraft, ZH_BROWSER_LOCALE,
+  connectFreshWorkspace, newEnglishPage, openSelectedSession, saveFailureShot, writeComposerDraft, ZH_BROWSER_LOCALE,
 } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/lifecycle-chrome', import.meta.url))
@@ -111,6 +111,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
     try {
       await zhPage.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
       await zhPage.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+      await zhPage.getByRole('button', { name: '新建会话', exact: true }).last().click()
       const launcher = zhPage.getByRole('button', { name: '指令' })
       await launcher.click()
       const menu = zhPage.getByRole('listbox', { name: '触发候选建议' })
@@ -275,6 +276,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    await openSelectedSession(page)
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     // Selection persisted (dsh.sessions.current) and history replayed: the
     // recorded turn re-renders from a Session Controller page with zero model calls —
@@ -416,7 +418,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
       rejectConnections = false
       await recoveryPage.clock.fastForward(10_000)
       await expect.poll(() => sockets.length).toBe(10)
-      const automaticRecovery = recoveryPage.getByRole('status')
+      const automaticRecovery = recoveryPage.locator('[class*="footArea"]').getByRole('status')
       await automaticRecovery.waitFor({ timeout: 10_000 })
       expect(await automaticRecovery.innerText()).toBe('Connected')
       await recoveryPage.clock.fastForward(2_000)
@@ -439,7 +441,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
       await recoveryPage.mouse.up()
 
       await expect.poll(() => sockets.length).toBe(12)
-      const recovered = recoveryPage.getByRole('status')
+      const recovered = recoveryPage.locator('[class*="footArea"]').getByRole('status')
       await recovered.waitFor({ timeout: 10_000 })
       expect(await recovered.innerText()).toBe('Connected')
       expect(await connectionIndicatorGeometry(recovered)).toEqual(connectingGeometry)

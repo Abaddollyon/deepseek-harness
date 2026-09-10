@@ -377,6 +377,45 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
   })
 
+  it.each([
+    { establishedCount: 5, blankFirst: true },
+    { establishedCount: 5, blankFirst: false },
+    { establishedCount: 7, blankFirst: true },
+    { establishedCount: 7, blankFirst: false },
+  ])('keeps a provisional row outside the established quota ($establishedCount established, blank first: $blankFirst)', ({ establishedCount, blankFirst }) => {
+    const established = Array.from({ length: establishedCount }, (_, index) => summary(`session-${index + 1}`, establishedCount - index))
+    const blank = summary('provisional', 10, { blank: true })
+    const items = blankFirst ? [blank, ...established] : [...established, blank]
+    const b = mount({
+      useSessions: hook(sessionState(items, { current: blank.id })),
+      useWorkspaces: hook(workspaceState([workspace('alpha', items.map(item => item.id))])),
+    })
+    const assertFolded = () => {
+      expect(screen.getAllByRole('treeitem')).toHaveLength(7)
+      expect(screen.getByText('新会话')).toBeTruthy()
+      for (const item of established.slice(0, 5)) expect(screen.getByText(item.displayTitle)).toBeTruthy()
+      expect(screen.queryByText('session-6')).toBeNull()
+      if (establishedCount === 5) expect(screen.queryByRole('button', { name: /展开其余/ })).toBeNull()
+      else expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
+    }
+    assertFolded()
+    if (establishedCount > 5) {
+      fireEvent.click(screen.getByRole('button', { name: '展开其余 2 个会话' }))
+      expect(screen.getAllByRole('treeitem')).toHaveLength(establishedCount + 2)
+      fireEvent.click(screen.getByRole('button', { name: '收起' }))
+      assertFolded()
+    }
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByText('alpha'))
+    assertFolded()
+
+    const prompted = items.map(item => item.id === blank.id ? { ...item, blank: false } : item)
+    rerender(b, { useSessions: hook(sessionState(prompted, { current: blank.id })) })
+    expect(screen.getAllByRole('treeitem')).toHaveLength(6)
+    expect(screen.queryByText('新会话')).toBeNull()
+    expect(screen.getByRole('button', { name: `展开其余 ${establishedCount - 4} 个会话` })).toBeTruthy()
+  })
+
   it('keeps running sessions reachable through a collapse without inflating the overflow count', () => {
     // 8 members: 2 running. Folded shows the 2 live rows; expanded shows 5 plus
     // the overflow control for the remaining 3.

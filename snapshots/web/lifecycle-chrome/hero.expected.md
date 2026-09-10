@@ -4,6 +4,9 @@
 - button "New session":
   - img
   - text: New Session
+- group "Sidebar mode":
+  - button "Workspaces" [pressed]
+  - button "Activity"
 - text: Workspaces
 - button "Search sessions":
   - img
@@ -17,6 +20,7 @@
     - img
     - text: workspace
   - treeitem "New Session" [selected]
+- button "Environments"
 - button "Settings":
   - img
   - text: Settings

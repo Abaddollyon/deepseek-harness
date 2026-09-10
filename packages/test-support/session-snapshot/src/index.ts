@@ -74,6 +74,7 @@ export {
 export {
   assertPersistedSessionVersion,
   assertSessionFixtureVersion,
+  assertSnapshotWriterOracles,
   latestPersistedSessionPaths,
   parsePersistedSessionFilename,
   parseSessionFixtureName,

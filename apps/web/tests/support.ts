@@ -61,6 +61,16 @@ export async function expandOwningTurnProcess(page: Page, target: Locator): Prom
   if (await control.getAttribute('aria-expanded') !== 'true') await control.click()
 }
 
+/**
+ * Open the restored Session selection through its sidebar row. Browser reload
+ * restores the Session Controller independently of the shell's Environments
+ * location; transcript scenarios must explicitly enter the conversation.
+ * @param page - page with one restored selected Session row.
+ */
+export async function openSelectedSession(page: Page): Promise<void> {
+  await page.getByRole('treeitem', { selected: true }).click()
+}
+
 /** Fail loud on a stale checkout instead of testing yesterday's bundle. */
 export function requireDist(): void {
   if (!existsSync(DIST_INDEX)) {
@@ -85,10 +95,9 @@ export function probeFreePort(): Promise<number> {
 }
 
 /**
- * Drive the hero's workspace picker through the composed directory dialog
- * until the live composer unlocks. A fresh world has no Workspace, so the boot
- * lands in the Workspace-trigger view state (startup auto-selection has nothing to
- * select); every scenario that types into the composer must connect one
+ * Enter New Session from the Environments overview, then drive the hero's
+ * workspace picker until the live composer unlocks. A fresh world has no
+ * Workspace; every scenario that types into the composer must connect one
  * first. With nothing to list, activating the composer surface raises the dialog directly —
  * adding a workspace is the picker's only entry. The directory is staged here
  * and adopted through the path editor, which is idempotent across the repeated
@@ -103,6 +112,7 @@ export function probeFreePort(): Promise<number> {
  */
 export async function connectFreshWorkspace(page: Page, root: string, name = 'workspace'): Promise<void> {
   mkdirSync(join(root, name), { recursive: true })
+  await page.getByRole('button', { name: 'New session', exact: true }).last().click()
   await page.getByRole('textbox', { name: 'Choose workspace' }).click()
   const dialog = page.getByRole('dialog', { name: 'Select Workspace Directory' })
   await dialog.waitFor({ timeout: 10_000 })
@@ -128,6 +138,7 @@ export async function connectFreshWorkspace(page: Page, root: string, name = 'wo
  */
 export async function connectFreshWorkspaceZh(page: Page, root: string, name = 'workspace'): Promise<void> {
   mkdirSync(join(root, name), { recursive: true })
+  await page.getByRole('button', { name: '新建会话', exact: true }).last().click()
   await page.getByRole('textbox', { name: '选择工作区' }).click()
   const dialog = page.getByRole('dialog', { name: '选择工作区目录' })
   await dialog.waitFor({ timeout: 10_000 })

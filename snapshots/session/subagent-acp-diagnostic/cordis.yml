@@ -1,7 +1,13 @@
 # Add the real ACP provider behind a one-shot delegation tool. The denied
 # execute permission returns `cancelled` and exercises diagnostic-bearing
 # remote-abort parity.
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+  disabled: true
+
 - insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
     - id: acp-diagnostic-release-on-job-output
       name: './release-on-job-output.mjs'
     - id: subagent-acp-diagnostic

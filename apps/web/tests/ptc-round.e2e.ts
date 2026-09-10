@@ -11,7 +11,7 @@ import {
   acknowledgeReloadConnectionLoss, captureExpandedTurnProcessAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, recordFixture, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
-import { connectFreshWorkspace, expandOwningTurnProcess, newEnglishPage, saveFailureShot } from './support.ts'
+import { connectFreshWorkspace, expandOwningTurnProcess, newEnglishPage, openSelectedSession, saveFailureShot } from './support.ts'
 
 const FIXTURE = fileURLToPath(new URL('../../../snapshots/web/ptc-round/session.v3.jsonl', import.meta.url))
 const UI_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/ptc-round/ui.expected.md', import.meta.url))
@@ -114,6 +114,7 @@ describe('web e2e: PTC mode round renders nested sub-calls', () => {
       if (reloaded) {
         const warningStart = tripwire.warnings.length
         await page.reload({ waitUntil: 'load' })
+        await openSelectedSession(page)
         acknowledgeReloadConnectionLoss(tripwire, warningStart)
         await page.getByText('DONE', { exact: true }).waitFor({ timeout: 15_000 })
       }

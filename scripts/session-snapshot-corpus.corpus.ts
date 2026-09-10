@@ -6,6 +6,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { expect, it } from 'vitest'
 import {
   assertSessionFixtureVersion,
+  assertSnapshotWriterOracles,
   captureExpectedWorkspaceSnapshot,
   EMPTY_WORKSPACE_MARKER,
   parseSnapshotManifest,
@@ -120,6 +121,21 @@ it('keeps every recorded session owned, pinned, redacted, and header-scrubbed', 
 
     const localEntries = await readdir(dir)
     const localSessionNames = localEntries.filter(name => parseSessionFixtureName(name) !== undefined)
+    const writerNames = localEntries.filter(name => name.startsWith('writer') && name.endsWith('.jsonl'))
+    const writerOracles = await Promise.all(writerNames.map(async name => ({
+      name, content: await readFile(join(dir, name), 'utf8'),
+    })))
+    assertSnapshotWriterOracles(key, manifest,
+      manifest.session === undefined ? sessionFixtureNames(localEntries).length : 0, writerOracles)
+    const writerContents = writerOracles.sort((left, right) => {
+      const ordinal = (name: string): number => name === 'writer.expected.jsonl' ? 0 : Number(name.split('.')[1])
+      return ordinal(left.name) - ordinal(right.name)
+    }).map(oracle => oracle.content)
+    expect(redactSessionSnapshotIds(writerContents), `${key}: writer typed identity fixed point`).toEqual(writerContents)
+    for (const content of writerContents) {
+      expect(scrubSystemPrompts(content), `${key}: writer system prompt must be a sidecar`).toBe(content)
+      expect(scrubToolSchemas(content), `${key}: writer tool schemas must be a sidecar`).toBe(content)
+    }
     if (manifest.session === undefined) {
       expect(localSessionNames.length, `${key}: owner Session fixture`).toBeGreaterThan(0)
     } else {

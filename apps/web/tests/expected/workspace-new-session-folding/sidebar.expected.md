@@ -7,9 +7,9 @@
     - button "New session in {{workspace}}":
       - img
   - treeitem "New Session" [selected]
-  - treeitem "{{workspace}} 1min"
-  - treeitem "{{workspace}} 1min"
-  - treeitem "{{workspace}} 1min"
-  - treeitem "{{workspace}} 1min"
-  - treeitem "{{workspace}} 1min"
+  - treeitem "New Session · 2026-8-11 {{clock}} (1) 1min"
+  - treeitem "New Session · 2026-8-11 {{clock}} (2) 1min"
+  - treeitem "New Session · 2026-8-11 {{clock}} (3) 1min"
+  - treeitem "New Session · 2026-8-11 {{clock}} (4) 1min"
+  - treeitem "New Session · 2026-8-11 {{clock}} (5) 1min"
   - button "Show 1 more sessions"

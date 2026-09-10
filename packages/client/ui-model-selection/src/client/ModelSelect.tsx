@@ -10,6 +10,8 @@
  * from the Host rather than a client-owned vocabulary. A rejected selection
  * announces through the shared transient Toast anchored to the composer
  * card; the in-menu strip with Retry remains the catalog-load surface.
+ * Initial pane focus waits for visible portal placement; later placement
+ * updates preserve the user's navigation focus.
  */
 import {
   useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
@@ -134,12 +136,14 @@ export function ModelSelect(
     return () => { document.removeEventListener('mousedown', closeOutside) }
   }, [open])
 
+  // Hidden measurement nodes cannot take focus; later repositioning must not reset navigation.
+  const menuPlaced = menuPos !== null
   useEffect(() => {
-    if (!open) return
+    if (!open || !menuPlaced) return
     if (pane === 'root') itemRefs.current[0]?.focus()
     else if (pane === 'model') searchRef.current?.focus()
     else itemRefs.current[0]?.focus()
-  }, [open, pane])
+  }, [open, pane, menuPlaced])
   // Portaled placement (the Menu primitive's portal rules: fixed from the
   // anchor rect, measured before paint, clamped inside the viewport): above
   // the trigger, right edges aligned. Depends on pane and directory state

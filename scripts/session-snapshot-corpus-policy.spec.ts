@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { assertSnapshotWriterOracles } from '@deepseek-ai/dsh-session-snapshot'
 import { assertSnapshotCorpusPolicy } from './session-snapshot-corpus-policy.ts'
 
 const completeV0 = {
@@ -17,6 +18,50 @@ const adjacent = Array.from({ length: SESSION_FORMAT_VERSION - 1 }, (_, index) =
   retained: { version: index + 1, coverage: ['adjacent-migration'] as const },
 }))
 const current = { key: 'session/current', selectedVersions: Array<number>(8).fill(SESSION_FORMAT_VERSION) }
+
+describe('writer oracle inventory', () => {
+  const header = JSON.stringify({ type: 'session', version: SESSION_FORMAT_VERSION })
+  const manifest = { version: 1, profile: 'headless', writerOracle: 'separate' } as const
+  const parent = { name: 'writer.expected.jsonl', content: header }
+  const child = { name: 'writer.1.expected.jsonl', content: header }
+
+  it('requires exactly one current writer oracle per retained replay role', () => {
+    expect(() => { assertSnapshotWriterOracles('case', manifest, 2, [child, parent]) }).not.toThrow()
+    expect(() => { assertSnapshotWriterOracles('case', { version: 1, profile: 'headless' }, 1, []) }).not.toThrow()
+    expect(() => {
+      assertSnapshotWriterOracles('case', {
+        version: 1, profile: 'headless', sessionFormat: completeV0.retained,
+      }, 1, [parent])
+    }).not.toThrow()
+    expect(() => {
+      assertSnapshotWriterOracles('case', {
+        version: 1, profile: 'web', sessionFormat: { version: 2, coverage: ['adjacent-migration'] },
+      }, 1, [])
+    }).not.toThrow()
+  })
+
+  it.each([
+    [],
+    [parent],
+    [parent, child, { name: 'writer.2.expected.jsonl', content: header }],
+    [parent, { name: 'writer.0.expected.jsonl', content: header }],
+    [parent, { name: 'writer.01.expected.jsonl', content: header }],
+  ].map(entries => ({ entries })))('rejects missing, extra, and noncanonical writer roles', ({ entries }) => {
+    expect(() => { assertSnapshotWriterOracles('case', manifest, 2, entries) }).toThrow('writer oracle inventory')
+  })
+
+  it('rejects undeclared writer output and noncurrent headers', () => {
+    expect(() => { assertSnapshotWriterOracles('case', { version: 1, profile: 'headless' }, 1, [parent]) })
+      .toThrow('writer oracle inventory')
+    for (const version of [0, SESSION_FORMAT_VERSION + 1]) {
+      expect(() => {
+        assertSnapshotWriterOracles('case', manifest, 1, [{
+          name: parent.name, content: JSON.stringify({ type: 'session', version }),
+        }])
+      }).toThrow('writer oracle must use current Session format')
+    }
+  })
+})
 
 describe('recorded-session corpus policy', () => {
   it('accepts a current majority and complete bounded migration coverage', () => {

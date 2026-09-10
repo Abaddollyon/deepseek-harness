@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vit
 import {
   acknowledgeReloadConnectionLoss, launchWebScaffold, watchConsole, type WebScaffold,
 } from './scaffold.ts'
-import { connectFreshWorkspace, newEnglishPage, saveFailureShot } from './support.ts'
+import { connectFreshWorkspace, newEnglishPage, openSelectedSession, saveFailureShot } from './support.ts'
 
 /**
  * The conversation root's own phase attribute. `div` disambiguates it from the
@@ -40,6 +40,7 @@ describe('web e2e: startup auto-selection', () => {
 
   it('keeps the resident Hero and composer nodes when the first Workspace session appears', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-first-workspace-stable-tree'))
+    await page.getByRole('button', { name: 'New session', exact: true }).last().click()
     await page.locator(`${ROOT_PHASE}[data-phase="hero"]`).waitFor({ timeout: 15_000 })
     const headline = page.getByText('Into the Unknown', { exact: true })
     // The headline text sits in its own span inside the title group; the fish
@@ -101,6 +102,11 @@ describe('web e2e: startup auto-selection', () => {
       }, 8)
     })
 
+    const selectedSession = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('dsh.sessions.current.local')!) as { sessionId: string })
+    expect(selectedSession.sessionId).toBe(scaffold.ctx.agents.roots()[0]?.id)
+    let openingReturned = false
+    let openingSignal: AbortSignal | undefined
     let releaseOpening = (): void => {}
     const openingHeld = new Promise<void>((resolve) => { releaseOpening = resolve })
     let openingRequested = (): void => {}
@@ -111,10 +117,14 @@ describe('web e2e: startup auto-selection', () => {
     const observe = vi.spyOn(scaffold.ctx.sessionQuery, 'observeSession')
       .mockImplementation(async (sessionId, options) => {
         const observation = await readObservation(sessionId, options)
-        if (gated) return observation
+        // Commands and skills also observe this Session; only history opening
+        // requests its projected tail with the follow's cancellation signal.
+        if (gated || options?.historyTail !== true) return observation
         gated = true
+        openingSignal = options.signal
         openingRequested()
         await openingHeld
+        openingReturned = true
         return observation
       })
 
@@ -122,6 +132,14 @@ describe('web e2e: startup auto-selection', () => {
     try {
       await page.reload({ waitUntil: 'commit' })
       await openingInFlight
+      await openSelectedSession(page)
+      expect(observe.mock.calls.filter(([, options]) => options?.historyTail === true).map(([id]) => id))
+        .toEqual([selectedSession.sessionId])
+      expect(openingSignal?.aborted).toBe(false)
+      expect(openingReturned).toBe(false)
+      expect(await page.evaluate(() =>
+        JSON.parse(localStorage.getItem('dsh.sessions.current.local')!) as { sessionId: string }))
+        .toEqual(selectedSession)
 
       // The frame a user sees while the session is still opening: hero phase, the
       // hero title, and a composer that is actually painted (`settling` hides the
@@ -134,6 +152,13 @@ describe('web e2e: startup auto-selection', () => {
       releaseOpening()
       await page.locator('[data-composer-input][contenteditable="true"][data-placeholder="Describe what you want to build, / commands, @ files or sessions"]')
         .waitFor({ timeout: 15_000 })
+      await expect.poll(() => openingReturned).toBe(true)
+      expect(observe.mock.calls.filter(([, options]) => options?.historyTail === true).map(([id]) => id))
+        .toEqual([selectedSession.sessionId])
+      expect(openingSignal?.aborted).toBe(false)
+      expect(await page.evaluate(() =>
+        JSON.parse(localStorage.getItem('dsh.sessions.current.local')!) as { sessionId: string }))
+        .toEqual(selectedSession)
       acknowledgeReloadConnectionLoss(tripwire, warningsBefore)
 
       // Settling is not merely absent from the frame sampled above: the root

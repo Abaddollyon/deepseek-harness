@@ -2,6 +2,37 @@
 
 import { basename, dirname } from 'node:path'
 import { parseSessionFormatLogFilename, sessionFormatLogFilename } from '@deepseek-ai/dsh-session-format'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import type { SnapshotManifest } from './manifest.ts'
+
+/**
+ * Require declared writer output to cover exactly the selected replay roles in the current format.
+ * @param key - Corpus-relative scenario name.
+ * @param manifest - Replay input ownership and writer output declaration.
+ * @param roleCount - Number of selected parent and contiguous child roles.
+ * @param oracles - All writer-prefixed JSONL files in the scenario directory.
+ */
+export function assertSnapshotWriterOracles(
+  key: string,
+  manifest: SnapshotManifest,
+  roleCount: number,
+  oracles: readonly { name: string; content: string }[],
+): void {
+  // Web migration fixtures assert storage successors, not fresh native writer output.
+  const expected = manifest.sessionFormat !== undefined && manifest.profile !== 'web'
+    || manifest.writerOracle === 'separate'
+    ? Array.from({ length: roleCount }, (_, index) => writerSnapshotName(index)).sort()
+    : []
+  const names = oracles.map(oracle => oracle.name).sort()
+  if (JSON.stringify(names) !== JSON.stringify(expected)) {
+    throw new Error(`${key}: writer oracle inventory must equal ${JSON.stringify(expected)}; found ${JSON.stringify(names)}`)
+  }
+  for (const oracle of oracles) {
+    if (sessionHeaderVersion(oracle.content, oracle.name) !== SESSION_FORMAT_VERSION) {
+      throw new Error(`${key}/${oracle.name}: writer oracle must use current Session format v${SESSION_FORMAT_VERSION}`)
+    }
+  }
+}
 
 /** One canonical recorded-session fixture filename. */
 export interface SessionFixtureFile {
@@ -47,7 +78,7 @@ export function sessionFixtureName(index: number, version: number): string {
 }
 
 /**
- * Name the native-writer oracle for a retained historical replay role.
+ * Name the native-writer oracle for an immutable replay role.
  * This expected output never participates in replay generation selection.
  * @param index - Parent `0` or a positive child/ordinal slot.
  * @returns The expected-output JSONL basename.

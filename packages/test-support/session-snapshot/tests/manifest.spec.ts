@@ -51,6 +51,27 @@ describe('snapshot manifest', () => {
     expect(writesCurrentSessionFixtures(retained, 'refresh')).toBe(false)
   })
 
+  it.each(['headless', 'acp'])('keeps %s replay generations immutable with a separate writer oracle', (profile) => {
+    const manifest = parseSnapshotManifest(`version: 1\nprofile: ${profile}\nwriterOracle: separate\n`)
+    expect(manifest).toEqual({ version: 1, profile, writerOracle: 'separate' })
+    for (const mode of ['replay', 'record', 'refresh'] as const) {
+      expect(writesCurrentSessionFixtures(manifest, mode)).toBe(false)
+    }
+  })
+
+  it.each([
+    ['writerOracle: true', 'manifest.writerOracle must equal separate'],
+    ['writerOracle: separate\nsession:\n  source: ../owner/session.v3.jsonl', 'manifest.writerOracle requires owned current-format Session fixtures'],
+    ['writerOracle: separate\nsessionFormat:\n  version: 0\n  coverage: [multi-hop]', 'manifest.writerOracle requires owned current-format Session fixtures'],
+  ])('rejects invalid writer oracle metadata', (fields, message) => {
+    expect(() => parseSnapshotManifest(`version: 1\nprofile: headless\n${fields}\n`)).toThrow(message)
+  })
+
+  it.each(['sdk', 'web'])('rejects separate writer output without a %s adapter', (profile) => {
+    expect(() => parseSnapshotManifest(`version: 1\nprofile: ${profile}\nwriterOracle: separate\n`))
+      .toThrow('manifest.writerOracle requires a headless or acp adapter')
+  })
+
   it('parses a read-only session reference', () => {
     expect(parseSnapshotManifest([
       'version: 1',

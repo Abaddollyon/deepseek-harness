@@ -14,7 +14,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply, inject } from '../src/client/index.ts'
 import type { GuideInjected, SidebarRightInjected } from '../src/client/index.ts'
 import { apply as hostApply } from '../src/index.ts'
-import { SidebarRightController } from '../src/client/service.ts'
+import { SidebarRightController, type SurfaceActions } from '../src/client/service.ts'
 import { SidebarRightTabRegistry } from '../src/client/tab-registry.ts'
 import type { createSidebarRightStore } from '../src/client/stores.ts'
 import { RightbarSeat } from '../src/client/shell/SidebarRight.tsx'
@@ -31,7 +31,7 @@ interface Recorded {
   locale: string
   store?: unknown
   children?: unknown
-  inject?: (sessionId: SessionId) => unknown
+  inject?: (sessionId: SessionId, actions?: SurfaceActions) => unknown
   component: unknown
 }
 
@@ -68,9 +68,9 @@ async function boot() {
     if (entry === undefined) throw new Error(`expected a registration into ${name}`)
     return entry
   }
-  const injectedOf = (entry: Recorded): unknown => {
+  const injectedOf = (entry: Recorded, actions?: SurfaceActions, sessionId = SESSION): unknown => {
     if (entry.inject === undefined) throw new Error(`expected ${entry.name} to inject`)
-    return entry.inject(SESSION)
+    return entry.inject(sessionId, actions)
   }
   return { ctx, registered, dictionaries, layout, resources, fiber, seat, injectedOf }
 }
@@ -109,7 +109,9 @@ describe('ui-sidebar-right apply', () => {
 
   it('hands the panel seat the frame report, the service binding, the opens, the observable registry, and the Tab domain', async () => {
     const { ctx, layout, resources, seat, injectedOf } = await boot()
-    const injected = injectedOf(seat('rightbar')) as SidebarRightInjected
+    const handle = seat('rightbar').store as ReturnType<typeof createSidebarRightStore>
+    const instance = handle.create()
+    const injected = injectedOf(seat('rightbar'), instance.actions) as SidebarRightInjected
     // The frame learns the composition of expanded and presentation, nothing else.
     injected.syncPresentation({ shown: true, track: true, fullscreen: false })
     expect(layout.openRightbar).toHaveBeenLastCalledWith(true, false)
@@ -126,29 +128,25 @@ describe('ui-sidebar-right apply', () => {
     ctx.sidebarRightTabs.register({ id: 'spec/text', kind: 'text', patterns: ['dsh-resource://file/**'], title: () => 'text' })
     expect(seen).toHaveBeenCalledOnce()
     unsubscribe()
-    // The binding makes the service act on this seat's session; the seat's
-    // store instance is minted here from the handle the registration declared.
-    const handle = seat('rightbar').store as ReturnType<typeof createSidebarRightStore>
-    const instance = handle.create()
+    // The binding makes the service act on this seat's session.
     const release = injected.bindService({ sessionId: SESSION, actions: instance.actions, surfaces: {}, canSplitPane: () => true })
     injected.openTab('guide', { revealIfOpened: false })
     const surface = instance.getSnapshot().bySession[SESSION]
     expect(surface?.layout.expanded).toBe(true)
     expect(Object.values(surface?.layout.tabs ?? {}).map(tab => tab.kind)).toEqual(['guide'])
-    // Holding a record pins its address through the resource model.
-    if (surface === undefined) throw new Error('expected a surface')
-    ctx.sidebarRight.tabDomain.sync(SESSION, surface.layout)
+    // The committed record pins its address through the resource model.
     expect(resources.pin).toHaveBeenCalledWith('sidebar://guide', expect.any(AbortSignal))
     release()
     expect(() => { ctx.sidebarRight.toggleExpanded() }).toThrow('no session surface is mounted')
   })
 
-  it('adopts each session\'s store instance as the runtime mints it, so a tab\'s own actions land with no seat bound', async () => {
-    const { ctx, resources, seat } = await boot()
+  it('adopts the native injected session rather than the opaque store key before the first commit', async () => {
+    const { ctx, resources, seat, injectedOf } = await boot()
     const handle = seat('rightbar').store as ReturnType<typeof createSidebarRightStore>
-    // Both seats declare the same wrapped handle, so either minting adopts.
     expect(seat('conversation.session.header.corner').store).toBe(handle)
-    const instance = handle.create(SESSION)
+    const instance = handle.create('["host-a","s-test"]')
+    injectedOf(seat('rightbar'), instance.actions)
+    expect(resources.pin).not.toHaveBeenCalled()
     instance.actions.open(SESSION)
     const guide = Object.values(instance.getSnapshot().bySession[SESSION]?.layout.tabs ?? {})[0]
     if (guide === undefined) throw new Error('expected the seeded guide')
@@ -157,6 +155,24 @@ describe('ui-sidebar-right apply', () => {
     expect(resources.pin).toHaveBeenCalledWith('sidebar://guide', occurrence.signal)
     occurrence.tabActions.close()
     expect(instance.getSnapshot().bySession[SESSION]?.layout.tabs[guide.id]).toBeUndefined()
+    expect(occurrence.signal.aborted).toBe(true)
+  })
+
+  it('adopts from the header before the panel and retains the same committed occurrence on reinjection', async () => {
+    const { ctx, resources, seat, injectedOf } = await boot()
+    const handle = seat('conversation.session.header.corner').store as ReturnType<typeof createSidebarRightStore>
+    const instance = handle.create('opaque-header-store')
+    injectedOf(seat('conversation.session.header.corner'), instance.actions)
+    instance.actions.open(SESSION)
+    const guide = Object.values(instance.getSnapshot().bySession[SESSION]!.layout.tabs)[0]!
+    const occurrence = ctx.sidebarRight.tabDomain.occurrence(SESSION, guide)
+
+    const injected = injectedOf(seat('rightbar'), instance.actions) as SidebarRightInjected
+    expect(injected.occurrence(guide)).toBe(occurrence)
+    expect(injected.keyedHooks.tabNavigation(guide.id)).toBe(occurrence.navigation)
+    instance.actions.open(SESSION)
+    expect(resources.pin).toHaveBeenCalledOnce()
+    occurrence.tabActions.close()
     expect(occurrence.signal.aborted).toBe(true)
   })
 
@@ -178,10 +194,11 @@ describe('ui-sidebar-right apply', () => {
 
   it('takes every registration and both faces back when disposed, aborting the open records, so a reload registers again', async () => {
     const { ctx, registered, dictionaries, fiber, seat, injectedOf } = await boot()
-    const injected = injectedOf(seat('rightbar')) as SidebarRightInjected
     const handle = seat('rightbar').store as ReturnType<typeof createSidebarRightStore>
-    // Minted under the session key, so the instance is adopted and the teardown releases it.
-    const instance = handle.create(SESSION)
+    const instance = handle.create('["host-a","s-test"]')
+    const injected = injectedOf(seat('rightbar'), instance.actions) as SidebarRightInjected
+    // A materialized but uninjected store has no subscription to release.
+    handle.create('unrendered')
     injected.bindService({ sessionId: SESSION, actions: instance.actions, surfaces: {}, canSplitPane: () => true })
     injected.openTab('guide')
     const surface = instance.getSnapshot().bySession[SESSION]

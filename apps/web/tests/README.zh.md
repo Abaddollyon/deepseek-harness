@@ -7,6 +7,14 @@
 [`scaffold.ts`](scaffold.ts) 和
 [浏览器 e2e Agent Note](../../../.agents/notes/implemented/testing/2026-07-24-web-gui-browser-e2e-lane.zh.md)中。
 
+首次连接工作区的场景使用 [`support.ts`](support.ts) 中对应语言的辅助函数，从环境概览进入新会话，再打开 Hero 工作区选择器。概览下方已挂载的输入框不代表可交互的会话。
+
+重新加载时，所选 Session 的恢复与 shell 当前页面相互独立。根 Session 的 transcript（文本记录）场景通过 `openSelectedSession` 点击侧边栏行，进入恢复后的所选会话。子 Session 没有侧边栏行；断言恢复后的选择后，进入父会话，再通过其 subagent 目录打开子会话。
+
+嵌套工作区中的 skill（技能）fixture 先创建工作区目录并调用 `isolateWorkspaceProjectRoot`，再写入 `.agents/skills`。发现逻辑采用最近的 `.git` 项目根目录；外层 scaffold 的标记不会使嵌套工作区成为项目根目录。工作区与标记都应放在 scaffold 的私有临时目录内，以便 scaffold 清理时一并删除。
+
+[`workflow-run.e2e.ts`](workflow-run.e2e.ts) 在私有临时 `replayOverride` 中，将录制的 workflow 工具调用、子会话响应和最终响应与一条由 fixture 编写的等待响应组合起来。这在不更改规范 Session 录制的前提下，验证已发布 supervisor 的父会话首次结算以及完成事件触发的下一轮。它是基于 fixture 的验收，不是新录制或真实模型轮次的证据。
+
 ## 这些是 Host 面的测试
 
 它们在根 `tsconfig.host.json` 中做类型检查，而不在 Client aggregate 中，因为它们直接读取

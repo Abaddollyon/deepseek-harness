@@ -38,9 +38,9 @@ const SEARCH_DEBOUNCE_MS = 250
 /** `session.search` wire bound, measured in JavaScript UTF-16 code units. */
 const SEARCH_QUERY_MAX_CODE_UNITS = 500
 /**
- * Session rows visible per Workspace before the local overflow control. It
- * bounds the expanded list only: `GroupNode.sessions` is empty while a group is
- * folded, so both the slice and the overflow count exclude pinned live rows.
+ * Non-blank Session rows visible per Workspace before the local overflow
+ * control; the selected provisional row does not consume this quota.
+ * `GroupNode.sessions` is empty while folded, excluding pinned live rows.
  */
 const COLLAPSED_SESSION_LIMIT = 5
 
@@ -502,6 +502,9 @@ function SessionTree({
           <div className={css.empty}>{t('empty.none')}</div>
         )}
         {groups.map((group) => {
+          let establishedCount = 0
+          const limitedSessions = group.sessions.filter(node => node.blank || establishedCount++ < COLLAPSED_SESSION_LIMIT)
+          const hiddenSessionCount = group.sessions.length - limitedSessions.length
           const workspaceId = group.workspaceId
           const workspaceMarker = workspaceId !== undefined && workspaceDrag?.over?.id === workspaceId
             ? workspaceDrag.over.half
@@ -609,7 +612,7 @@ function SessionTree({
               )}
               {(expandedSessionGroups.includes(group.key)
                 ? group.sessions
-                : group.sessions.slice(0, COLLAPSED_SESSION_LIMIT)
+                : limitedSessions
               ).map((node) => {
               // Session drag never leaves its group. Ungrouped writes only the
               // browser-local account; real Workspaces may also write Host order.
@@ -652,7 +655,7 @@ function SessionTree({
                   />
                 )
               })}
-              {group.sessions.length > COLLAPSED_SESSION_LIMIT && (
+              {hiddenSessionCount > 0 && (
                 <button
                   type="button"
                   className={css.sessionOverflowButton}
@@ -661,7 +664,7 @@ function SessionTree({
                 >
                   {expandedSessionGroups.includes(group.key)
                     ? t('sessions.collapse')
-                    : t('sessions.expand', { n: group.sessions.length - COLLAPSED_SESSION_LIMIT })}
+                    : t('sessions.expand', { n: hiddenSessionCount })}
                 </button>
               )}
             </div>

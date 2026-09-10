@@ -58,6 +58,7 @@ const scenarios: Scenario[] = controllerCases.map((controller) => {
     ...controller,
     recorded: manifest.recording === 'live',
     ...(manifest.sessionFormat === undefined ? {} : { sessionFormat: manifest.sessionFormat }),
+    ...(manifest.writerOracle === undefined ? {} : { writerOracle: manifest.writerOracle }),
     ...(manifest.replay?.override === true ? { overridden: true } : {}),
     ...(manifest.header.pin === true ? { pinsHeader: true } : {}),
     ...(manifest.header.changes === undefined ? {} : { expectedHeaderChanges: manifest.header.changes }),

@@ -26,7 +26,7 @@ import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { launchWebScaffold, watchConsole, type WebScaffold } from './scaffold.ts'
 import {
-  connectFreshWorkspace, newEnglishPage, saveFailureShot, ZH_BROWSER_LOCALE,
+  connectFreshWorkspace, newEnglishPage, openSelectedSession, saveFailureShot, ZH_BROWSER_LOCALE,
 } from './support.ts'
 
 /** The produced file the seeded turn writes, and what the preview should show. */
@@ -129,6 +129,7 @@ async function ensureExpanded(page: Page, column: Locator): Promise<void> {
 /** Reload the session's transient sidebar state before an independent gesture case. */
 async function resetSidebar(page: Page): Promise<Locator> {
   await page.reload({ waitUntil: 'load' })
+  await openSelectedSession(page)
   const column = page.locator('[data-rightbar-col]')
   await expandOf(page).waitFor({ timeout: 15_000 })
   await ensureExpanded(page, column)
@@ -886,6 +887,7 @@ describe('web e2e: shipped right Sidebar', () => {
       onTestFailed(() => saveFailureShot(page, 'web-e2e-sidebar-right-reload'))
       await page.reload({ waitUntil: 'load' })
       await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+      await openSelectedSession(page)
       const frame = page.locator('[class*="frame"]').first()
       const column = page.locator('[data-rightbar-col]')
       await column.waitFor({ state: 'attached', timeout: 15_000 })

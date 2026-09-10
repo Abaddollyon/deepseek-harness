@@ -251,7 +251,9 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(2)
       expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/prune'))
         .toHaveLength(1)
-      expect(agent.session.surface.replaceGeneration).toBe(1)
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/summary'))
+        .toHaveLength(1)
+      expect(agent.session.surface.replaceGeneration).toBe(2)
       expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },

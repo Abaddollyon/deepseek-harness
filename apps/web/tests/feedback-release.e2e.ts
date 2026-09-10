@@ -15,7 +15,7 @@ import {
   compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, readPersistedEvents, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
-import { connectFreshWorkspace, newEnglishPage, saveFailureShot } from './support.ts'
+import { connectFreshWorkspace, newEnglishPage, openSelectedSession, saveFailureShot } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/feedback-release', import.meta.url))
 // Both routes borrow the same settled turn; this manifest references its owner.
@@ -201,6 +201,7 @@ describe.each(MODE === 'record' ? ['deepseek-official'] : ['deepseek-official', 
     await selectModel('DeepSeek-V4-Flash')
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
+    await openSelectedSession(page)
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     await page.getByText('LIGHTHOUSE', { exact: true }).waitFor({ timeout: 15_000 })
     expect(captured()).toHaveLength(releasedCount)

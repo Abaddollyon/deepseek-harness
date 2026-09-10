@@ -1,4 +1,4 @@
-/** Deterministic job identities for the SDK diagnostic scenario; execution stays with the real registry. */
+/** Deterministic job identities for recorded scenarios; execution stays with the real registry. */
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 
 /** Assign instance-local fallback hints without replacing admission, storage, or execution. */

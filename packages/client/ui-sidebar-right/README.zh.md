@@ -87,7 +87,7 @@ tab 类型分两阶段注册，随包发布的引导类型走的正是别的包�
 <a id="the-tab-domain"></a>
 ## Tab 域
 
-Tab域按（Session，Tab id）保留导航、中止信号与绑定动作；私有装配回调收养各会话的store，并在每次提交时对齐记录。记录消失或插件卸载才中止signal，收起和切会话不销毁记录；undo恢复的是新occurrence。`useTabInfo()` 组合框架绑定的store与导航hook，不在组件中手写订阅或在渲染时创建记录。`tab.actions` 始终作用于自己的会话；`tab.visible` 区分正文与标题，浮窗不受整栏收起影响。`adopt` 不在公开控制器上。
+Tab域按（Session，Tab id）保留导航、中止信号与绑定动作。两个带store的席位均在注入时，以原生Session id收养对应的精确store实例，早于席位提交任何动作。渲染器的Host/Session复合存储键保持不透明；即使Host共享原生id，每个环境所属的控制器仍独立保留occurrence。两个席位共享收养关系，在store提交时对齐记录，包括离屏动作。记录消失或插件卸载才中止signal，收起和切会话不销毁记录；undo恢复的是新occurrence。`useTabInfo()` 组合框架绑定的store与导航hook，不在组件中手写订阅或在渲染时创建记录。`tab.actions` 始终作用于自己的会话；`tab.visible` 区分正文与标题，浮窗不受整栏收起影响。`adopt` 不在公开控制器上。
 
 <a id="the-guide"></a>
 ## 引导页

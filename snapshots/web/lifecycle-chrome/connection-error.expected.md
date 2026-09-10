@@ -1,3 +1,4 @@
+- button "Environments"
 - button "Settings":
   - img
   - text: Settings

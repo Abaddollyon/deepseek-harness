@@ -187,6 +187,81 @@ afterEach(async () => {
 })
 
 describe('SessionProjectionCache write policy', () => {
+  it('keeps the newer threshold cut when the creation flush finishes last', async () => {
+    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
+    const release = Promise.withResolvers<undefined>()
+    let flushes = 0
+    ctx.on('session/flush', () => {
+      flushes += 1
+      return flushes === 1 ? release.promise : Promise.resolve(undefined)
+    })
+    const write = vi.spyOn(cache, 'write')
+    const flush = vi.spyOn(ctx.sessions, 'flush')
+    const session = ctx.sessions.create(SessionId('blocked-create'))
+    try {
+      mark(session, ['newer'])
+      expect(flushes).toBe(2)
+      expect(write).toHaveBeenCalledTimes(2)
+      await flush.mock.results[1]?.value
+    } finally {
+      release.resolve(undefined)
+      await Promise.all(write.mock.results.map(async (result) => { await result.value }))
+    }
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['newer'] })
+  })
+
+  it('keeps later writes behind a pending creation even when an intervening flush fails', async () => {
+    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
+    const release = Promise.withResolvers<undefined>()
+    const failure = new Error('intervening flush failed')
+    let flushes = 0
+    ctx.on('session/flush', () => {
+      flushes += 1
+      if (flushes === 1) return release.promise
+      if (flushes === 2) return Promise.reject(failure)
+      return Promise.resolve(undefined)
+    })
+    const write = vi.spyOn(cache, 'write')
+    const flush = vi.spyOn(ctx.sessions, 'flush')
+    const session = ctx.sessions.create(SessionId('queued-failure'))
+    try {
+      mark(session, ['failed'])
+      await expect(flush.mock.results[1]?.value).rejects.toBe(failure)
+      mark(session, ['newest'])
+      expect(flushes).toBe(3)
+      await flush.mock.results[2]?.value
+    } finally {
+      release.resolve(undefined)
+      const results = await Promise.allSettled(write.mock.results.map(async (result) => { await result.value }))
+      expect(results).toEqual([
+        { status: 'fulfilled', value: undefined },
+        { status: 'rejected', reason: failure },
+        { status: 'fulfilled', value: undefined },
+      ])
+    }
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['newest'] })
+  })
+
+  it('keeps the durable cut when a Session flush fails and writes the next cut', async () => {
+    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
+    const write = vi.spyOn(cache, 'write')
+    const session = ctx.sessions.create(SessionId('flush-failure'))
+    expect(write).toHaveBeenCalledExactlyOnceWith(session)
+    await write.mock.results[0]?.value
+    const failure = new Error('session log flush failed')
+    const stopFailing = ctx.on('session/flush', () => Promise.reject(failure))
+    mark(session, ['unflushed'])
+    expect(write).toHaveBeenCalledTimes(2)
+    await expect(write.mock.results[1]?.value).rejects.toBe(failure)
+    expect((await storedRows(root, session.id))?.['cache-test/marks'])
+      .toEqual({ ver: 1, seq: -1, val: null })
+    stopFailing()
+    mark(session, ['recovered'])
+    expect(write).toHaveBeenCalledTimes(3)
+    await write.mock.results[2]?.value
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['recovered'] })
+  })
+
   it('writes a durable checkpoint at turn/end (mandatory point)', async () => {
     const { ctx, root } = await harness()
     const session = ctx.sessions.create(SessionId('turn-end'))
@@ -217,35 +292,44 @@ describe('SessionProjectionCache write policy', () => {
     }, { timeout: 5_000 })
   })
 
-  it('writes at session disposal (detach, the live-to-cold moment)', async () => {
-    const { ctx, root } = await harness()
+  it('writes the detached cut even when the creation flush is still pending', async () => {
+    const { ctx, root, cache } = await harness()
+    const release = Promise.withResolvers<undefined>()
+    ctx.on('session/flush', () => release.promise)
+    const write = vi.spyOn(cache, 'write')
     // Sessions dispose with their owning fiber: create in a child plugin.
     let session: Session | undefined
     const owner = await ctx.plugin(Object.assign((inner: Context) => {
       session = inner.sessions.create(SessionId('detach'))
     }, { inject: ['sessions'] }))
     if (session === undefined) throw new Error('session was not created')
-    mark(session, ['live'])
-    await owner.dispose()
-    const detached = session
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, detached.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
-    }, { timeout: 5_000 })
+    try {
+      mark(session, ['live'])
+      await owner.dispose()
+      expect(write).toHaveBeenCalledTimes(2)
+      expect(write).toHaveBeenNthCalledWith(2, session)
+    } finally {
+      release.resolve(undefined)
+      await Promise.all(write.mock.results.map(async (result) => { await result.value }))
+    }
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
   })
 
   it('flushes when the in-turn event count reaches the configured threshold', async () => {
-    const { ctx, root } = await harness({ config: { writeEveryEvents: 3, writeIntervalMs: 60_000 } })
+    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 3, writeIntervalMs: 60_000 } })
+    const write = vi.spyOn(cache, 'write')
     const session = ctx.sessions.create(SessionId('count'))
     mark(session, ['1'])
     mark(session, ['2'])
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks'])
-        .toEqual({ ver: 1, seq: -1, val: null }) // still the creation cut
-    }, { timeout: 5_000 })
+    expect(write).toHaveBeenCalledExactlyOnceWith(session)
+    await write.mock.results[0]?.value
+    expect((await storedRows(root, session.id))?.['cache-test/marks'])
+      .toEqual({ ver: 1, seq: -1, val: null }) // still the creation cut
     mark(session, ['3'])
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
-    }, { timeout: 5_000 })
+    expect(write).toHaveBeenCalledTimes(2)
+    expect(write).toHaveBeenNthCalledWith(2, session)
+    await write.mock.results[1]?.value
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {

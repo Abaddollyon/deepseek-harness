@@ -12,6 +12,7 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { ReplayOverrideDoc } from '@deepseek-ai/dsh-llm-replay'
+import { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   assertFixtureInventory,
   captureExpandedTurnProcessAria,
@@ -34,6 +35,9 @@ const ARGS_TEXT = 'and confirm the fixture wiring'
 const REPLY = 'USER_INVOKE_REPLY acknowledged; following the injected skill.'
 
 async function seedUserOnlySkill(workspaceCwd: string): Promise<void> {
+  // Discovery uses the nearest project root, not the enclosing scaffold root.
+  await mkdir(join(workspaceCwd, 'workspace'), { recursive: true })
+  await isolateWorkspaceProjectRoot(join(workspaceCwd, 'workspace'))
   const directory = join(workspaceCwd, 'workspace', '.agents', 'skills', SKILL_NAME)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, 'SKILL.md'), [

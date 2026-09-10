@@ -17,7 +17,7 @@ import {
   launchWebScaffold, readPersistedEvents, selectedSessionFixture, watchConsole,
   webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
-import { connectFreshWorkspace, newEnglishPage, saveFailureShot } from './support.ts'
+import { connectFreshWorkspace, newEnglishPage, openSelectedSession, saveFailureShot } from './support.ts'
 
 const BASE_FIXTURE = fileURLToPath(new URL('../../../snapshots/web/live-interactions/session.v3.jsonl', import.meta.url))
 const AVAILABLE_CHILD_EXPECTED = fileURLToPath(new URL('../../../snapshots/web/subagent-conversation/ui.expected.md', import.meta.url))
@@ -274,6 +274,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    await openSelectedSession(page)
     const catalogButton = page.getByRole('button', { name: '3 subagents', exact: true })
     await catalogButton.waitFor({ timeout: 15_000 })
     await catalogButton.hover()
@@ -327,6 +328,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
       await page.reload({ waitUntil: 'load' })
       await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
       await expect.poll(() => emptyDelivered, { timeout: 15_000 }).toBe(true)
+      await openSelectedSession(page)
       await page.getByRole('button', { name: '3 subagents' }).waitFor({ timeout: 15_000 })
       acknowledgeReloadConnectionLoss(tripwire, warningStart)
 
@@ -437,6 +439,15 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
       await input.waitFor({ timeout: 15_000 })
       await expect.poll(() => input.isEnabled(), { timeout: 15_000 }).toBe(true)
       acknowledgeReloadConnectionLoss(tripwire, warningStart)
+      // The restored child is not a sidebar row. Enter its parent first, then
+      // reopen the addressed conversation through the ordinary catalog action.
+      await page.getByRole('tree', { name: 'Sessions' })
+        .getByRole('treeitem', { name: 'Ask a research subagent to now', exact: true }).click()
+      await page.getByRole('button', { name: '3 subagents' }).hover()
+      await page.getByRole('treeitem', { name: 'Inactive agents (2)', expanded: false }).click()
+      await page.getByRole('button', { name: `Open ${LABEL} conversation` }).click()
+      await page.getByRole('navigation', { name: 'Session hierarchy' })
+        .getByRole('button', { name: `Switch subagent: ${LABEL}` }).waitFor()
     } finally {
       releaseCatalog()
       await page.unroute(pattern)

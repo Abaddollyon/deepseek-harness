@@ -1,6 +1,7 @@
 version: 1
 scenario: advanced-toolchain-runtime
 profile: headless
+writerOracle: separate
 composition: advanced
 recording: authored
 header:

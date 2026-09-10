@@ -32,7 +32,7 @@ import type {} from './contract/slots.ts'
 import { GuideBody, type GuideInjected } from './tabs/guide/GuideBody.tsx'
 import { ExpandButton } from './shell/ExpandButton.tsx'
 import { RightbarSeat, type SidebarRightInjected } from './shell/SidebarRight.tsx'
-import { createSidebarRightController, type SidebarRightController } from './service.ts'
+import { createSidebarRightController, type SidebarRightController, type SidebarRightSurfaceStore, type SurfaceActions } from './service.ts'
 import { SidebarRightTabRegistry } from './tab-registry.ts'
 import { createSidebarRightStore } from './stores.ts'
 import { en, zh } from './locales.ts'
@@ -118,18 +118,23 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(() => {
     const handle = createSidebarRightStore(() => t('tab.guide.title'))
-    // The runtime mints one instance of this handle per session (the scope key
-    // is the session id) and caches it per key. Each is adopted as it is minted,
-    // so a tab's own action reaches its session's store while another session
-    // is on screen, and that store's commits sync the Tab domain themselves.
-    const adoptions: Array<() => void> = []
+    // Factory keys belong to the renderer's Host/session namespace. Native
+    // Session ids arrive through injection, paired with this exact action set.
+    type SurfaceInstance = { store: SidebarRightSurfaceStore; release?: () => void }
+    const instances = new Map<SurfaceActions, SurfaceInstance>()
     const store: typeof handle = {
       ...handle,
       create: (scopeKey) => {
         const instance = handle.create(scopeKey)
-        if (scopeKey !== undefined) adoptions.push(adopt(scopeKey as SessionId, instance))
+        instances.set(instance.actions, { store: instance })
         return instance
       },
+    }
+    const adoptSession = (sessionId: SessionId, actions: SurfaceActions): object => {
+      // Store-backed injection receives actions from this handle's create().
+      const instance = instances.get(actions) as SurfaceInstance
+      instance.release ??= adopt(sessionId, instance.store)
+      return {}
     }
     const layout: ILayout = ctx.layout
     const injected: Omit<SidebarRightInjected, 'keyedHooks' | 'occurrence'> = {
@@ -152,11 +157,14 @@ export function apply(ctx: ClientContext): void {
         'sidebar.right.tab.menu.item': { kind: 'list', scope: 'session' },
       },
       store,
-      inject: (sessionId): SidebarRightInjected => ({
-        ...injected,
-        keyedHooks: { tabNavigation: key => controller.tabDomain.occurrence(sessionId, { id: key as TabId }).navigation },
-        occurrence: tab => controller.tabDomain.occurrence(sessionId, tab),
-      }),
+      inject: (sessionId, actions): SidebarRightInjected => {
+        adoptSession(sessionId, actions)
+        return {
+          ...injected,
+          keyedHooks: { tabNavigation: key => controller.tabDomain.occurrence(sessionId, { id: key as TabId }).navigation },
+          occurrence: tab => controller.tabDomain.occurrence(sessionId, tab),
+        }
+      },
     }, RightbarSeat))
     // The expand button shares the panel's store: it only needs to know whether
     // the panel is expanded, and to ask for it to be. The header's corner seat
@@ -166,6 +174,7 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.session.header.corner',
       locale: NS,
       store,
+      inject: adoptSession,
     }, ExpandButton))
     // Stage two for the guide: it declares the chain child it hosts and reads
     // the registry's entry boxes, which an ordinary type has no reason to do.
@@ -188,7 +197,8 @@ export function apply(ctx: ClientContext): void {
       disposeExpand()
       disposeSeat()
       for (const dispose of disposeTypes.reverse()) dispose()
-      for (const release of adoptions) release()
+      for (const instance of instances.values()) instance.release?.()
+      instances.clear()
     }
   }, 'ui-sidebar-right: seats and shipped tab type')
 }

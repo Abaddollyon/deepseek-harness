@@ -29,5 +29,10 @@
 
 - id: jobs
   name: '@deepseek-ai/dsh-jobs-local'
-  config:
-    maxConcurrentJobsPerOwner: 1
+  disabled: true
+
+- insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
+      config:
+        maxConcurrentJobsPerOwner: 1

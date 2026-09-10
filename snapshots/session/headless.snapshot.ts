@@ -15,6 +15,7 @@ import { assertWorkspaceOutsideTemp, outsideTempWorkspaceParent } from '../../sc
 import {
   assertPersistedSessionVersion,
   assertSessionFixtureVersion,
+  assertSnapshotWriterOracles,
   captureExpectedWorkspaceSnapshot,
   captureWorkspaceSnapshot,
   fixtureContext,
@@ -27,6 +28,7 @@ import {
   normalizedSystemPrompts,
   normalizedToolSchemas,
   parseSnapshotManifest,
+  parseSessionFixtureName,
   parseToolSchemasSnapshot,
   redactSessionSnapshotIds,
   refreshFixtureReplacements,
@@ -208,9 +210,10 @@ async function writeSessionFixtures(
   existing: readonly string[],
   ctx: NormalizeContext,
 ): Promise<string[]> {
-  const names = actualLogs.map((log, index) => scenario.manifest.sessionFormat === undefined
-    ? sessionFixtureName(index, sessionHeaderVersion(log.content, `harvested Session ${index}`))
-    : writerSnapshotName(index))
+  const separate = scenario.manifest.sessionFormat !== undefined || scenario.manifest.writerOracle === 'separate'
+  const names = actualLogs.map((log, index) => separate
+    ? writerSnapshotName(index)
+    : sessionFixtureName(index, sessionHeaderVersion(log.content, `harvested Session ${index}`)))
   const prior = names.map((_, index) => existing[index] ?? '')
   const replacements = mode === 'refresh'
     ? refreshFixtureReplacements(actualLogs.map(harvested), prior)
@@ -222,7 +225,9 @@ async function writeSessionFixtures(
     return scrubSessionSnapshot(prepareSessionSnapshotFixtureForComparison(stable))
   })
   const output = redactSessionSnapshotIds(stabilizeFixtureMessageIds(fresh, prior))
-  await Promise.all(output.map((content, index) => writeFile(join(scenario.dir, names[index] as string), content)))
+  await Promise.all(output.map((content, index) => writeFile(
+    join(scenario.dir, names[index] as string), content, { flag: separate ? 'w' : 'wx' },
+  )))
   return output
 }
 
@@ -835,14 +840,55 @@ describe('headless recorded-session snapshots', () => {
     }
   })
 
+  it('writes complete separate writer output without touching retained generations', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-headless-writer-'))
+    try {
+      const original = await readFile(join(snapshotsRoot, 'workflow-run/session.v3.jsonl'), 'utf8')
+      const predecessor = await readFile(join(snapshotsRoot, 'workflow-run/session.v2.jsonl'), 'utf8')
+      await writeFile(join(directory, 'session.v3.jsonl'), original)
+      await writeFile(join(directory, 'session.v2.jsonl'), predecessor)
+      const scenario: HeadlessScenario = {
+        name: 'writer', dir: directory,
+        manifest: { version: 1, profile: 'headless', composition: 'default', recording: 'authored',
+          header: { class: 'default' }, writerOracle: 'separate' },
+      }
+      const phase = { type: 'tool-workflow/phase', data: { runId: '{{workflow:1}}', ordinal: 1, title: 'Run' } }
+      const fresh = `${original.trimEnd()}\n${JSON.stringify(phase)}\n`
+      await writeSessionFixtures(scenario, [{ content: fresh, header: headerOf(fresh) }], [original], contextOf([fresh]))
+      const expected = await readFile(join(directory, 'writer.expected.jsonl'), 'utf8')
+      expect(records(expected)).toContainEqual(phase)
+      expect(records(expected)).toHaveLength(records(original).length + 1)
+      expect(await readFile(join(directory, 'session.v3.jsonl'), 'utf8')).toBe(original)
+      expect(await readFile(join(directory, 'session.v2.jsonl'), 'utf8')).toBe(predecessor)
+      expect(sessionFixtureNames(await readdir(directory))).toEqual(['session.v3.jsonl'])
+      delete scenario.manifest.writerOracle
+      await expect(writeSessionFixtures(scenario, [{ content: fresh, header: headerOf(fresh) }], [original], contextOf([fresh])))
+        .rejects.toMatchObject({ code: 'EEXIST' })
+      expect(await readFile(join(directory, 'session.v3.jsonl'), 'utf8')).toBe(original)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   for (const scenario of scenarios) {
     const skipped = scenario.manifest.platform === 'posix' && process.platform === 'win32'
       || scenario.manifest.platform === 'pwsh' && !hasPwsh
       || mode === 'record' && scenario.manifest.recording === 'authored'
-      || mode === 'record' && scenario.manifest.sessionFormat !== undefined
+      || mode === 'record' && (scenario.manifest.sessionFormat !== undefined || scenario.manifest.writerOracle === 'separate')
     const scenarioTest = skipped ? it.skip : mode === 'replay' ? it.concurrent : it
     scenarioTest(`${mode}s ${scenario.name} through dsh --profile headless`, async () => {
       let fixtures = await fixtureSessions(scenario)
+      const separate = scenario.manifest.sessionFormat !== undefined || scenario.manifest.writerOracle === 'separate'
+      const retainedNames = separate
+        ? (await readdir(scenario.dir)).filter(name => parseSessionFixtureName(name) !== undefined).sort()
+        : []
+      const retainedBytes = await Promise.all(retainedNames.map(name => readFile(join(scenario.dir, name))))
+      if (scenario.manifest.writerOracle === 'separate') {
+        for (const fixture of fixtures) {
+          expect(sessionHeaderVersion(fixture, scenario.name), 'separate writer replay input uses current format')
+            .toBe(SESSION_FORMAT_VERSION)
+        }
+      }
       const primaryFixture = fixtures[0]
       if (primaryFixture === undefined) throw new Error(`${scenario.name}: missing primary session fixture`)
       const task = taskFromSession(primaryFixture) ?? scenario.manifest.input?.task
@@ -962,19 +1008,19 @@ describe('headless recorded-session snapshots', () => {
       expect(result.stdout).toBe(`${finalTextFromSession(fixtures[0] as string)}\n`)
       expect(result.stderr).toBe(expectedStderr)
       expect(actualLogs, `${scenario.name}: persisted session count`).toHaveLength(fixtures.length)
-      const writerFiles = (await readdir(scenario.dir)).filter(name => /^writer(?:\.[1-9]\d*)?\.expected\.jsonl$/u.test(name)).sort()
-      if (mode === 'replay') {
-        expect(writerFiles, 'native writer oracle inventory').toEqual(scenario.manifest.sessionFormat === undefined
-          ? [] : fixtures.map((_, index) => writerSnapshotName(index)).sort())
-      }
+      if (separate && mode === 'refresh') await writeSessionFixtures(scenario, actualLogs, fixtures, actualContext)
+      const writerFiles = (await readdir(scenario.dir)).filter(name => name.startsWith('writer') && name.endsWith('.jsonl'))
+      const oracles = await Promise.all(writerFiles.map(async name => ({
+        name, content: await readFile(join(scenario.dir, name), 'utf8'),
+      })))
+      assertSnapshotWriterOracles(scenario.name, scenario.manifest, fixtures.length, oracles)
       let expected = fixtures
-      if (scenario.manifest.sessionFormat !== undefined) {
-        if (mode === 'refresh') await writeSessionFixtures(scenario, actualLogs, fixtures, actualContext)
-        expected = await Promise.all(fixtures.map((_, index) => readFile(join(scenario.dir, writerSnapshotName(index)), 'utf8')))
-        for (const [index, content] of expected.entries()) {
-          expect(sessionHeaderVersion(content, writerSnapshotName(index))).toBe(SESSION_FORMAT_VERSION)
-        }
-        expect(await fixtureSessions(scenario), 'historical replay input remains unchanged').toEqual(fixtures)
+      if (separate) {
+        expected = fixtures.map((_, index) => oracles.find(oracle => oracle.name === writerSnapshotName(index))!.content)
+        expect((await readdir(scenario.dir)).filter(name => parseSessionFixtureName(name) !== undefined).sort(),
+          'retained generation inventory remains unchanged').toEqual(retainedNames)
+        expect(await Promise.all(retainedNames.map(name => readFile(join(scenario.dir, name)))),
+          'all retained generation bytes remain unchanged').toEqual(retainedBytes)
       }
       const actualSnapshots = normalizeSessionSnapshots(actualLogs.map(log => log.content), actualContext)
       const expectedSnapshots = normalizeSessionSnapshots(expected, contextOf(expected))

@@ -21,6 +21,10 @@ class RetrySnapshotAdapter extends LlmAdapter {
   }
 
   async * stream(options) {
+    if (options.purpose === 'session-title') {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     const messages = JSON.stringify(options.messages)
     this.requests++
     if (this.requests === 1) {

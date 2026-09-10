@@ -20,6 +20,7 @@ import {
 } from '@deepseek-ai/dsh-session'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   captureStableAria, compareOrRefreshGolden, launchWebScaffold, seedSession, watchConsole,
   webSnapshotMode, type WebScaffold,
@@ -66,6 +67,9 @@ async function seedRefusingPreset(root: string): Promise<void> {
  * @param workspaceCwd - the scaffold's temp project parent.
  */
 async function seedWorkspaceSkill(workspaceCwd: string): Promise<void> {
+  // Discovery uses the nearest project root, not the enclosing scaffold root.
+  await mkdir(join(workspaceCwd, 'workspace'), { recursive: true })
+  await isolateWorkspaceProjectRoot(join(workspaceCwd, 'workspace'))
   const directory = join(workspaceCwd, 'workspace', '.agents', 'skills', SKILL_NAME)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, 'SKILL.md'), [

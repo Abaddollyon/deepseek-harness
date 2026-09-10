@@ -607,7 +607,12 @@ describe('dsh web keyless CLI smoke', () => {
       request.setEncoding('utf8')
       request.on('data', (chunk: string) => { body += chunk })
       request.on('end', () => {
-        resolveProviderRequest(JSON.parse(body) as PtcModeProviderRequest)
+        const parsed = JSON.parse(body) as PtcModeProviderRequest
+        // Auxiliary title requests carry the title provider's system instruction,
+        // not the main agent prompt whose tool advertisement this case asserts.
+        const titleRequest = parsed.messages?.some(message => message.role === 'system'
+          && message.content?.startsWith('Create a concise title for an AI coding-assistant session from the supplied human messages.'))
+        if (titleRequest !== true) resolveProviderRequest(parsed)
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         response.end([
           'data: {"choices":[{"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}',

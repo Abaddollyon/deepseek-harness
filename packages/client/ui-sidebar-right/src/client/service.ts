@@ -7,14 +7,14 @@
  * session id, bound actions, its surface — for exactly as long as it is mounted,
  * and every command on the public face goes through that binding; a command
  * arriving with no seat mounted has no session to act on and fails loudly rather
- * than writing into a surface nobody is drawing. And the plugin adopts each
- * session's store instance as the runtime mints it, so the controller reaches
- * any session's store by id and syncs the Tab domain from that store's commits.
+ * than writing into a surface nobody is drawing. The first native injection
+ * into either store-backed seat adopts that instance under its Session id;
+ * the controller then syncs the Tab domain from that store's commits.
  *
  * A tab's own actions (`tabActions`) aim at the session the tab is in, not at
  * the mounted one: they run through that session's adopted store, so a callback
  * fired after the user switched sessions still lands where its tab is, and they
- * do nothing for a session whose store was never minted.
+ * do nothing when that session has no adopted store.
  *
  * `openResource` and `openTab` are the navigation controller, and every way
  * into the column is a call to one of them: the conversation's file links, a
@@ -56,7 +56,9 @@ interface Adoption {
 
 /**
  * Create the public controller and the plugin-private store adoption callback.
- * Adoption subscribes without reconciling; the first store commit creates occurrences.
+ * Adoption pairs the injected native Session id with its exact store instance,
+ * never with the renderer's opaque storage key. It subscribes without reconciling;
+ * the first store commit creates occurrences.
  * @param tabs - registered tab types.
  * @param pin - resource retention for an occurrence's lifetime.
  * @returns the controller and a callback releasing exactly its own adoption.

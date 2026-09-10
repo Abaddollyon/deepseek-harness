@@ -8,6 +8,14 @@ the deliberate composition divergences from `dsh web` — are documented in
 [`scaffold.ts`](scaffold.ts) and the
 [browser e2e Agent Note](../../../.agents/notes/implemented/testing/2026-07-24-web-gui-browser-e2e-lane.md).
 
+Fresh-workspace scenarios use the localized helpers in [`support.ts`](support.ts) to enter New Session from the Environments overview before opening the Hero workspace picker. A mounted composer beneath the overview is not an interactive conversation.
+
+Reload restores the selected Session independently of the shell location. Root-Session transcript scenarios use `openSelectedSession` to enter the restored selection through its sidebar row. Child Sessions have no sidebar row; enter the parent and open the child through its subagent catalog after asserting the restored selection.
+
+Skill fixtures in a nested workspace create that directory and call `isolateWorkspaceProjectRoot` before seeding `.agents/skills`. Discovery uses the nearest `.git` project root; the enclosing scaffold's marker does not make the nested workspace a project root. Keep the workspace and marker beneath the scaffold's private temporary directory so scaffold cleanup removes both.
+
+[`workflow-run.e2e.ts`](workflow-run.e2e.ts) combines recorded model responses for the workflow call, child, and final answer with one fixture-authored waiting response in a private temporary `replayOverride`. This exercises the shipped supervisor's initial parent settlement and completion-triggered turn without changing canonical Session recordings. It is fixture-backed acceptance, not evidence of a new recording or a live model round.
+
 ## These are Host-face tests
 
 They type-check in the root `tsconfig.host.json`, not in the Client aggregate,

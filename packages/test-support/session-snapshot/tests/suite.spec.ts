@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -136,13 +136,61 @@ if (!BOOTSTRAP) {
   rmSync(join(recordDir, 'rec-pin', 'session.jsonl'))
   rmSync(join(recordDir, 'rec-pin', 'session.v3.jsonl'))
   writeFileSync(join(recordDir, 'rec-child', 'session.2.v3.jsonl'), retiredChildFixture)
+  rmSync(join(recordDir, 'rec-child', 'session.v3.jsonl'))
+  rmSync(join(recordDir, 'rec-child', 'session.1.v3.jsonl'))
 }
+/** Refresh publishes a missing successor rather than replacing an existing generation. */
+function removeCurrentGenerations(dir: string, scenarios: readonly Scenario[]): void {
+  for (const scenario of scenarios) {
+    if (scenario.writerOracle === 'separate') continue
+    const scenarioDir = join(dir, scenario.name)
+    for (const name of readdirSync(scenarioDir)) {
+      if (parseSessionFixtureName(name)?.version === 3) rmSync(join(scenarioDir, name))
+    }
+  }
+}
+
 const refreshDir = mkdtempSync(join(tmpdir(), 'acp-snap-refresh-suite-'))
 cpSync(REPLAY_DIR, refreshDir, { recursive: true })
+removeCurrentGenerations(refreshDir, REPLAY_SCENARIOS)
 staleRefreshFixtures(refreshDir)
+const writerReplayDir = mkdtempSync(join(tmpdir(), 'acp-snap-writer-replay-'))
+const writerRefreshDir = mkdtempSync(join(tmpdir(), 'acp-snap-writer-refresh-'))
+const writerScenarios = REPLAY_SCENARIOS.map(scenario => ['pin-turn', 'plain-turn'].includes(scenario.name)
+  ? { ...scenario, writerOracle: 'separate' as const, comparesLog: false }
+  : scenario)
+const immutableWriterInputs = new Map<string, string>()
+const immutableWriterInventories = new Map<string, string[]>()
+for (const dir of [writerReplayDir, writerRefreshDir]) {
+  cpSync(REPLAY_DIR, dir, { recursive: true })
+  for (const name of ['pin-turn', 'plain-turn']) {
+    const scenarioDir = join(dir, name)
+    const manifestPath = join(scenarioDir, 'snapshot.yml')
+    writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8') + 'writerOracle: separate\n')
+    for (const index of name === 'plain-turn' ? [0, 1] : [0]) {
+      const file = join(scenarioDir, sessionFixtureName(index, 3))
+      const current = readFileSync(file, 'utf8')
+      const immutable = current.replace('"texts":["hi"]', '"texts":["immutable reader input"]')
+      writeFileSync(file, immutable)
+      if (dir === writerRefreshDir && index === 1) continue
+      writeFileSync(join(scenarioDir, writerSnapshotName(index)), dir === writerRefreshDir
+        ? current.replace('"texts":["hi"]', '"texts":["stale writer output"]')
+        : current)
+    }
+    const generations = readdirSync(scenarioDir).filter(file => parseSessionFixtureName(file) !== undefined).sort()
+    immutableWriterInventories.set(scenarioDir, generations)
+    for (const generation of generations) {
+      const file = join(scenarioDir, generation)
+      immutableWriterInputs.set(file, readFileSync(file, 'utf8'))
+    }
+  }
+  if (dir === writerRefreshDir) removeCurrentGenerations(dir, writerScenarios)
+}
 afterAll(async () => {
   if (!BOOTSTRAP) await rm(recordDir, { recursive: true, force: true })
   await rm(refreshDir, { recursive: true, force: true })
+  await rm(writerReplayDir, { recursive: true, force: true })
+  await rm(writerRefreshDir, { recursive: true, force: true })
 })
 
 function staleRefreshFixtures(dir: string): void {
@@ -181,6 +229,38 @@ describe('defineAcpSnapshotSuite: record mode', () => {
 
 describe('defineAcpSnapshotSuite: refresh mode', () => {
   defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: refreshDir, scenarios: REPLAY_SCENARIOS, mode: 'refresh' })
+})
+
+describe('defineAcpSnapshotSuite: separate writer replay', () => {
+  defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: writerReplayDir, scenarios: writerScenarios, mode: 'replay' })
+})
+
+describe('defineAcpSnapshotSuite: separate writer refresh', () => {
+  defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: writerRefreshDir, scenarios: writerScenarios, mode: 'refresh' })
+})
+
+describe('defineAcpSnapshotSuite: immutable replay generations', () => {
+  it('compares dedicated writer output even when comparesLog is false and refreshes missing child oracles without changing inputs', () => {
+    for (const [dir, generations] of immutableWriterInventories) {
+      expect(readdirSync(dir).filter(file => parseSessionFixtureName(file) !== undefined).sort()).toEqual(generations)
+      expect(generations).toContain('session.jsonl')
+      expect(generations).toContain('session.v2.jsonl')
+      expect(generations).toContain('session.v3.jsonl')
+    }
+    for (const [file, immutable] of immutableWriterInputs) {
+      expect(readFileSync(file, 'utf8')).toBe(immutable)
+    }
+    for (const dir of [writerReplayDir, writerRefreshDir]) {
+      const scenarioDir = join(dir, 'plain-turn')
+      const input = readFileSync(join(scenarioDir, 'session.v3.jsonl'), 'utf8')
+      const output = readFileSync(join(scenarioDir, writerSnapshotName(0)), 'utf8')
+      expect(input).toContain('immutable reader input')
+      expect(output).not.toContain('immutable reader input')
+      expect(output).not.toContain('stale writer output')
+      expect(output).toContain('"texts":["hi"]')
+      expect(readFileSync(join(scenarioDir, writerSnapshotName(1)), 'utf8')).toContain('"version":3')
+    }
+  })
 })
 
 describe('defineAcpSnapshotSuite: refresh write-back', () => {

@@ -1775,8 +1775,8 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async write(session: Session): Promise<void>',
-        description: 'Durably checkpoint one live session NOW (all mandatory points call this; tests and carriers may too). The registry cut is snapshotted at this boundary (states are live references), then the session\'s record is replaced on the domain\'s write chain. NOT fail-soft — callers on the fail-soft paths contain it.',
-        parameters: [{ name: 'session', description: 'the live session to checkpoint.' }],
+        description: 'Durably checkpoint one Session (all mandatory points call this; tests and carriers may too). The registry returns detached rows at invocation. Writes enter the per-session queue before waiting for log durability, preserving snapshot order even when flushes finish out of order. NOT fail-soft — callers on the fail-soft paths contain it.',
+        parameters: [{ name: 'session', description: 'the live or just-detached Session to checkpoint.' }],
         returns: 'resolution after durability and event emission.',
       },
       {
