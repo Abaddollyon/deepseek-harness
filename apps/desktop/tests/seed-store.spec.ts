@@ -104,24 +104,29 @@ describe('desktop seed store merge', () => {
 })
 
 describe('desktop seed store archives', () => {
-  it('extracts package bytes and executable modes without retaining loose seed files', () => {
+  it.each([0o755, 0o711])('extracts package bytes and executable mode %i without retaining loose seed files', (mode) => {
     const root = temporaryRoot()
     const seed = join(root, 'seed')
     const store = join(seed, 'store')
     const executable = join(store, 'v10', 'files', 'native-addon')
     mkdirSync(join(store, 'v10', 'files'), { recursive: true })
     writeFileSync(executable, 'native')
-    chmodSync(executable, 0o755)
+    chmodSync(executable, mode)
     writeFileSync(join(store, 'v10', 'files', 'package-data'), 'package')
 
     archivePnpmStore(seed, store)
     const destination = join(root, 'extracted')
-    extractPnpmStoreArchives(seed, destination)
+    const previousUmask = process.umask(0o077)
+    try {
+      extractPnpmStoreArchives(seed, destination)
+    } finally {
+      process.umask(previousUmask)
+    }
 
     expect(existsSync(store)).toBe(false)
     expect(readFileSync(join(destination, 'v10', 'files', 'package-data'), 'utf8')).toBe('package')
     if (process.platform !== 'win32') {
-      expect(statSync(join(destination, 'v10', 'files', 'native-addon')).mode & 0o111).toBe(0o111)
+      expect(statSync(join(destination, 'v10', 'files', 'native-addon')).mode & 0o777).toBe(mode)
     }
   })
 
@@ -144,6 +149,26 @@ describe('desktop seed store archives', () => {
     const second = archiveBytes(seeds[1] as string)
     expect(second.map(entry => entry.path)).toEqual(first.map(entry => entry.path))
     expect(second.map(entry => entry.body)).toEqual(first.map(entry => entry.body))
+  })
+
+  it('rejects a file entry without an archived permission mode', () => {
+    const root = temporaryRoot()
+    const seed = join(root, 'seed')
+    const store = join(seed, 'store')
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, 'package-data'), 'package')
+    archivePnpmStore(seed, store)
+    const [file] = readdirSync(join(seed, SEED_STORE_ARCHIVE_DIR))
+    if (file === undefined) throw new Error('test seed has no archive')
+    const path = join(seed, SEED_STORE_ARCHIVE_DIR, file)
+    const archive = readFileSync(path)
+    archive.fill(0x20, 100, 108)
+    archive.fill(0x20, 148, 156)
+    const checksum = archive.subarray(0, 512).reduce((sum, byte) => sum + byte, 0)
+    archive.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii')
+    writeFileSync(path, archive)
+
+    expect(() => { extractPnpmStoreArchives(seed, join(root, 'extracted')) }).toThrow(/no file mode/u)
   })
 
   it('rejects an archive whose entry count differs from the manifest', () => {

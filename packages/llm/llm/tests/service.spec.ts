@@ -271,6 +271,7 @@ describe('LlmRuntime', () => {
       expect(projected, fixture.name).toMatchObject({ type: 'text' })
       if (projected?.type !== 'text') throw new Error(`expected projected text for ${fixture.name}`)
       expect(projected.text, fixture.name).toContain(fixture.expected)
+      expect(ctx.llm.fileRequestText(attachment), fixture.name).toBe(projected.text)
       if (fixture.fs !== undefined) {
         expect(projected.text, fixture.name).toContain('include this saved path in the delegation prompt')
       }
@@ -1030,6 +1031,17 @@ describe('LlmRuntime', () => {
     expect(dispatched).toBeUndefined()
     await collect(prepared.stream({ ...prepared.config, messages: [] }))
     expect(dispatched).toBe('first')
+  })
+
+  it('declines exact token accounting for an adapter without a provider counter', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(LlmRuntime)
+      ctx.llm.registerAdapter(['route'], new ScriptedAdapter(SCRIPT))
+      const prepared = await ctx.llm.prepareCall({ provider: 'route', model: 'model' })
+      expect(prepared.countInputTokens({ ...prepared.config, messages: [] })).toBeUndefined()
+      expect(await collect(prepared.stream({ ...prepared.config, messages: [] }))).toEqual(SCRIPT)
+    } finally { await ctx.fiber.dispose() }
   })
 
   it.each([undefined, 0, 17, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(

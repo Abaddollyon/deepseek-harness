@@ -205,7 +205,7 @@ interface BootOptions {
 async function boot(options: BootOptions = {}) {
   const ctx = new Context()
   await ctx.plugin(AgentRegistry)
-  await ctx.plugin(SessionStore)
+  const sessionsFiber = await ctx.plugin(SessionStore)
   if (options.sessionFlush !== false) ctx.on('session/flush', options.sessionFlush ?? (() => {}))
   const { store, state } = options.store ?? fakeStore(new Map((options.records ?? []).map(r => [String(r.id), r])))
   ctx.provide('jobStore', store)
@@ -228,7 +228,7 @@ async function boot(options: BootOptions = {}) {
   }
   await ctx.plugin(RunSupervisor, options.config ?? {})
   await flush()
-  return { ctx, store, state, agents }
+  return { ctx, store, state, agents, sessionsFiber }
 }
 
 const contexts: Context[] = []
@@ -1160,6 +1160,28 @@ describe('RunSupervisor durable adoption markers', () => {
       status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL,
       adoptedFromIncarnation: 'prior-incarnation',
     })
+  })
+
+  it('refuses producer adoption when the session service is disposed before accounting', async () => {
+    const start = vi.fn(() => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' as const }) }))
+    const record = storedRecord({ resumeSpec: { cmd: 'resume' } })
+    const { ctx, state, agents, sessionsFiber } = tracked(await boot({
+      records: [record], liveAgents: ['alice'],
+    }))
+    const alice = agents.get('alice')!.agent
+    await sessionsFiber.dispose()
+    expect(ctx.get('sessions')).toBeUndefined()
+    expect(ctx.agents.get(alice.id)).toBe(alice)
+    ctx.jobs.registerResumer('bash', () => resumePlan(start))
+    await vi.waitFor(() => {
+      expect(state.records.get(record.id)).toMatchObject({
+        status: 'failed', detail: JOB_ADOPTION_ACCOUNT_REJECTED_DETAIL,
+        adoptedFromIncarnation: 'prior-incarnation',
+      })
+    })
+    expect(start).not.toHaveBeenCalled()
+    expect(runEvents(alice.session, 'run/resumed')).toEqual([])
+    expect(runEvents(alice.session, 'run/abandoned')).toEqual([])
   })
 
   it('keeps offline run accounts log-only while restored job output remains readable', async () => {

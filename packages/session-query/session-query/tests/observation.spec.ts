@@ -1,5 +1,10 @@
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { mountObservationCache } from '../../../session/session-projection-cache/tests/observation-fixture.ts'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import SessionStore, { SessionLogOffset, SessionSeq, SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
 import SessionPersistence, {
@@ -25,7 +30,7 @@ function header(id: string): SessionHeader {
   return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt: 1, isSeeded: false, cwd: '/workspace' }
 }
 
-function messageEvent(seq: number, text: string): SessionEvent {
+function messageEvent(seq: number, text: string): SessionEvent<'user/message'> {
   return {
     type: 'user/message',
     seq: SessionSeq(seq),
@@ -58,6 +63,8 @@ interface StubCounters {
 }
 
 interface StubHooks {
+  /** Persistence providers may share immutable event objects with readers. */
+  eventState?: 'detached' | 'shared-frozen'
   /** Runs inside `stat` before it resolves. */
   onStat?: () => void
   /** Runs inside `read` before it resolves. */
@@ -117,8 +124,9 @@ function stubPersistence(
           return Promise.reject(hooks.readFailure)
         }
         const events = structuredClone(entry.events)
+        if (hooks.eventState === 'shared-frozen') for (const event of events) deepFreeze(event)
         hooks.onReadResult?.(events)
-        return Promise.resolve({ eventState: 'detached', events })
+        return Promise.resolve({ eventState: hooks.eventState ?? 'detached', events })
       },
       append: () => Promise.reject(new SessionReadOnlyError(id, 'append')),
       flush: () => Promise.reject(new SessionReadOnlyError(id, 'flush')),
@@ -739,6 +747,18 @@ describe('SessionObservationReader cold path', () => {
 })
 
 describe('SessionObservationReader cold projections', () => {
+  it('declines a history-tail request when no projection cache is mounted', async () => {
+    const ctx = await readerContext()
+    const meta = header('uncached-tail')
+    const events = [messageEvent(0, 'complete history')]
+    ctx.provide('sessionPersistence', stubPersistence(new Map([[meta.id, { header: meta, events, revision: 'r1' }]]), { stat: 0, open: 0, read: 0 }))
+    try {
+      using observed = await new SessionObservationReader(ctx).read(meta.id, { historyTail: true })
+      expect(observed.source).toBe('prepared')
+      expect(observed.events).toEqual(events)
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('hydrates prepared projections through the registry when no projection cache is mounted', async () => {
     const ctx = await readerContext()
     await ctx.plugin(SessionProjectionRegistry)
@@ -929,5 +949,182 @@ describe('SessionObservationReader: handle-backed cold history', () => {
       expect(() => observation.retain()).toThrow(/disposed/)
       expect(retained.cursor).toBe(39)
     } finally { await ctx.fiber.dispose() }
+  })
+})
+
+describe('SessionObservationReader with durable projection checkpoints', () => {
+  async function fixture(options: { count?: number; register?: boolean; seeded?: boolean } = {}) {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-observation-checkpoint-'))
+    const ctx = await readerContext()
+    try {
+      await mountObservationCache(ctx, root, options.register !== false)
+      const meta = { ...header('real-checkpoint'), isSeeded: options.seeded ?? false }
+      const events = Array.from({ length: options.count ?? 6 }, (_, seq) => messageEvent(seq, `message-${seq}`))
+      const entry: StoredEntry = { header: meta, events, revision: 'r1' }
+      const store = new Map([[meta.id, entry]])
+      const counters = { stat: 0, open: 0, read: 0 }
+      const hooks: StubHooks = {}
+      const persistence = stubPersistence(store, counters, hooks)
+      ctx.provide('sessionPersistence', persistence)
+      return {
+        ctx, meta, entry, store, hooks, persistence, counters,
+        reader: new SessionObservationReader(ctx),
+        async dispose() { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) },
+      }
+    } catch (error) {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  it('folds an uncached empty log and retains independent cold leases', async () => {
+    const value = await fixture({ count: 0 })
+    try {
+      const observed = await value.reader.read(value.meta.id, { historyTail: true })
+      const retained = observed.retain()
+      using third = retained.retain()
+      observed[Symbol.dispose]()
+      retained[Symbol.dispose]()
+      expect(() => retained.retain()).toThrow('is disposed')
+      expect(third.source).toBe('cold')
+      expect(third.cursor).toBe(-1)
+      expect(third.events).toEqual([])
+      expect(third.projections).toEqual({ asOfSeq: -1, values: { 'observation-test/count': 0 } })
+      expect(value.ctx.sessionProjectionCache.checkpointFor(value.meta, SessionLogOffset(0)))
+        .toEqual({ 'observation-test/count': { ver: 1, seq: -1, val: 0 } })
+    } finally { await value.dispose() }
+  })
+
+  it('does not restore another lifecycle checkpoint when storage changes after the initial stat', async () => {
+    const value = await fixture()
+    try {
+      await value.ctx.sessionProjectionCache.writeBack(value.meta, SessionLogOffset(0), {
+        'observation-test/count': { ver: 1, seq: SessionSeq(3), val: 4 },
+      }, {})
+      const open = value.persistence.open.bind(value.persistence)
+      vi.spyOn(value.persistence, 'open').mockImplementationOnce((id, access) => {
+        value.entry.header = { ...value.meta, createdAt: 2 }
+        value.entry.events = [messageEvent(0, 'replacement')]
+        value.entry.revision = 'r2'
+        return open(id, access)
+      })
+      const restore = vi.spyOn(value.ctx.sessionProjections, 'restore')
+
+      using observed = await value.reader.read(value.meta.id, { historyTail: true, maxMessages: 1 })
+
+      expect(restore.mock.calls[0]?.[0]).toEqual({})
+      expect(observed.header.createdAt).toBe(2)
+      expect(observed.events).toEqual(value.entry.events)
+      expect(observed.revision).toBe('r2')
+      expect(observed.projections).toEqual({ asOfSeq: 0, values: { 'observation-test/count': 1 } })
+    } finally { await value.dispose() }
+  })
+
+  it('adopts provider-frozen events and carries cancellation through both revision checks', async () => {
+    const value = await fixture()
+    const controller = new AbortController()
+    const stat = vi.spyOn(value.persistence, 'stat')
+    let shared: SessionEvent[] | undefined
+    value.hooks.eventState = 'shared-frozen'
+    value.hooks.onReadResult = (events) => { shared = events }
+    try {
+      using observed = await value.reader.read(value.meta.id, { historyTail: true, signal: controller.signal })
+      expect(observed.source).toBe('cold')
+      expect(observed.events[0]).toBe(shared?.[0])
+      expect(Object.isFrozen(observed.events[0]?.data)).toBe(true)
+      expect(stat.mock.calls).toEqual([
+        [value.meta.id, { signal: controller.signal }],
+        [value.meta.id, { signal: controller.signal }],
+      ])
+    } finally { await value.dispose() }
+  })
+
+  it('falls back to preparation when the registry has no projection units', async () => {
+    const value = await fixture({ register: false })
+    try {
+      using observed = await value.reader.read(value.meta.id, { historyTail: true })
+      expect(observed.source).toBe('prepared')
+      expect(observed.events).toEqual(value.entry.events)
+      expect(observed.projections).toEqual({ asOfSeq: 5, values: {} })
+    } finally { await value.dispose() }
+  })
+
+  it('uses complete preparation for a seeded stored session', async () => {
+    const value = await fixture({ seeded: true })
+    try {
+      using observed = await value.reader.read(value.meta.id, { historyTail: true })
+      expect(observed.source).toBe('prepared')
+      expect(observed.header.isSeeded).toBe(true)
+      expect(observed.events).toEqual(value.entry.events)
+      expect(value.counters.read).toBe(1)
+    } finally { await value.dispose() }
+  })
+
+  it('reports absence after declining a cold tail for a missing session', async () => {
+    const value = await fixture()
+    try {
+      value.store.clear()
+      await expect(value.reader.read(value.meta.id, { historyTail: true }))
+        .rejects.toMatchObject({ code: 'SESSION_QUERY_SESSION_NOT_FOUND' })
+      expect(value.counters.open).toBe(0)
+    } finally { await value.dispose() }
+  })
+
+  it('prefers a live session that attaches during the final revision check', async () => {
+    const value = await fixture()
+    try {
+      value.hooks.onStat = () => {
+        if (value.counters.stat === 2) value.ctx.sessions.create(value.meta.id, { meta: value.meta })
+      }
+      using observed = await value.reader.read(value.meta.id, { historyTail: true })
+      expect(observed.source).toBe('live')
+      expect(observed.events).toEqual([])
+      expect(observed.cursor).toBe(-1)
+    } finally { await value.dispose() }
+  })
+
+  it('bounds repeatedly moving cold revisions before falling back to complete preparation', async () => {
+    const value = await fixture()
+    try {
+      value.hooks.onStat = () => { value.entry.revision = `r${value.counters.stat}` }
+      using observed = await value.reader.read(value.meta.id, { historyTail: true })
+      expect(observed.source).toBe('prepared')
+      expect(observed.revision).toBe('r7')
+      expect(value.counters).toEqual({ stat: 7, open: 4, read: 4 })
+      expect(observed.projections).toEqual({ asOfSeq: 5, values: { 'observation-test/count': 6 } })
+    } finally { await value.dispose() }
+  })
+
+  it('refuses malformed stored projection state even after widening to the complete log', async () => {
+    const value = await fixture()
+    try {
+      const malformed = { 'observation-test/count': { ver: 1, seq: SessionSeq(3), val: 'not a count' } }
+      await value.ctx.sessionProjectionCache.writeBack(value.meta, SessionLogOffset(0), malformed, {})
+      const restore = vi.spyOn(value.ctx.sessionProjections, 'restore')
+      await expect(value.reader.read(value.meta.id, { historyTail: true, maxMessages: 1 })).rejects.toThrow()
+      expect(restore.mock.calls.map(call => call[2])).toEqual([3, 0])
+      expect(value.ctx.sessionProjectionCache.checkpointFor(value.meta, SessionLogOffset(0))).toEqual(malformed)
+    } finally { await value.dispose() }
+  })
+
+  it('widens history to include every cited source and does not count system messages as page messages', async () => {
+    const value = await fixture()
+    try {
+      value.entry.events[4] = {
+        ...messageEvent(4, 'derived input'), sourceEventSeqs: [SessionSeq(0), SessionSeq(1)],
+      }
+      value.entry.events[5] = {
+        type: 'system/message', seq: SessionSeq(5), time: 6, surfaceOp: 'append',
+        data: { turn: 1, step: 1, message: createSystemMessage('system context', 'observation-fixture') },
+      }
+      await value.ctx.sessionProjectionCache.writeBack(value.meta, SessionLogOffset(0), {
+        'observation-test/count': { ver: 1, seq: SessionSeq(3), val: 4 },
+      }, {})
+      using observed = await value.reader.read(value.meta.id, { historyTail: true, maxMessages: 1 })
+      expect(observed.events).toEqual(value.entry.events)
+      expect(observed.projections).toEqual({ asOfSeq: 5, values: { 'observation-test/count': 6 } })
+      expect(value.counters.read).toBe(1)
+    } finally { await value.dispose() }
   })
 })

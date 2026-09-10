@@ -779,6 +779,25 @@ describe('SessionProjectionCache cold write-back', () => {
     await owner.dispose()
   })
 
+  it.each([
+    ['projection key', { 'cache-test/secondary-marks': { ver: 1, seq: SessionSeq(4), val: { marks: ['observed'] } } }],
+    ['state version', { 'cache-test/marks': { ver: 2, seq: SessionSeq(4), val: { marks: ['observed'] } } }],
+    ['watermark', { 'cache-test/marks': { ver: 1, seq: SessionSeq(3), val: { marks: ['observed'] } } }],
+  ] satisfies [string, CheckpointRecord['rows']][])('preserves a checkpoint when an equal-sized observed cut differs by %s', async (_label, observed) => {
+    const { cache, root } = await harness()
+    const meta = headerOf(SessionId('writeback-changed-cut'), 0)
+    const committed = rows(4, ['committed'])
+    await cache.writeBack(meta, SessionLogOffset(0), committed, {})
+
+    await cache.writeBack(meta, SessionLogOffset(0), rows(5, ['stale-refold']), observed)
+
+    expect(await storedRows(root, meta.id)).toEqual(committed)
+    expect(cache.checkpointFor(meta, SessionLogOffset(0))).toEqual(committed)
+    expect(cache.cachedSnapshot(meta, SessionLogOffset(0))).toEqual({
+      asOfSeq: 4, values: { 'cache-test/marks': { marks: ['committed'] } },
+    })
+  })
+
   it('admits only the first of two concurrent write-backs for one session', async () => {
     const { cache, root } = await harness()
     const meta = headerOf(SessionId('writeback-concurrent'), 0)

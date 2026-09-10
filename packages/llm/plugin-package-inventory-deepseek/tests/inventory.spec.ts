@@ -182,6 +182,20 @@ describe('DeepSeek plugin package inventory', () => {
     expect(prepared.fields.dsh_plugin_packages?.packages).toEqual([{ name: 'source-only', version: '4.0.0' }])
   })
 
+  it.each(['remote', 'loose-file', 'detached'] as const)('refuses active bare-package attribution without a manifest (%s)', async (mode) => {
+    const { ctx, root } = await harness()
+    const url = mode === 'remote' ? 'https://plugins.example/remote.mjs' : pathToFileURL(join(root, 'loose.mjs')).href
+    ctx.loader.internal = {
+      version: 'v2',
+      import: async () => ({ default: () => {} }),
+      resolveSync: () => ({ format: 'module', url }),
+    } as unknown as NonNullable<typeof ctx.loader.internal>
+    await ctx.loader.create({ name: 'unattributed-package' })
+    if (mode === 'detached') ctx.loader.internal = undefined
+    await expect(ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL }))
+      .rejects.toThrow(/cannot resolve active package/)
+  })
+
   it('fails when a Loader-resolved bare entry has no package manifest', async () => {
     const { ctx } = await harness()
     ctx.loader.internal = {

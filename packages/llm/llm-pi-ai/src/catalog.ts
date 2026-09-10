@@ -887,12 +887,10 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
   for (const entry of entries) {
     assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
   }
-  const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
+  // The effective map has one entry per model ID.
   const models = entries.map((entry) => {
     if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
-    if (seen.has(entry.id)) invalid(provider, `lists model "${entry.id}" more than once`)
-    seen.add(entry.id)
     const base = defaults.get(entry.id)
     const api = request.api ?? base?.api ?? routeApi
     if (api === undefined) {

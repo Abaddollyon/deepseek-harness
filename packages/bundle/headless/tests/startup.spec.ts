@@ -164,6 +164,17 @@ describe('headless command-line provider', () => {
     expect(observed.exits).toEqual([1])
   })
 
+  it('rejects a negative retry budget before mounting the runner', async () => {
+    const { task, observed } = await bootStartup([
+      '--max-turns', '1', '--max-input-tokens', '10', '--max-output-tokens', '10',
+      '--max-retries', '-1', 'run',
+    ])
+    expect(observed.out).toContain('nonnegative safe integer')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
   it.each([{ args: [] }, { args: ['   '] }])('rejects an invocation with no non-whitespace task ($args)', async ({ args }) => {
     const { task, observed } = await bootStartup(args)
     expect(observed.out).toContain('a task is required')

@@ -63,9 +63,9 @@ None; environment selection, presentation state, and transport generations do no
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-Keep runtime-owned services below each environment root and keep shell-owned renderer, layout, locale, and navigation services above those roots. A Host switch must retire the old presentation before exposing services from its replacement.
+Keep runtime-owned services below each environment root and keep shell-owned renderer, layout, locale, and navigation services above those roots. A Host switch must retire the old presentation before exposing services from its replacement. The [lifecycle coverage decision](../../../.agents/notes/implemented/testing/2026-09-10-environment-runtime-lifecycle-coverage.md) records the private ownership invariants and behavioral verification. Local entry requires an idle projection after navigation subscribers finish, rejecting synchronous redirects to a remote destination. An idle projection has retired remote mounts; activation errors are published only after failed mounts are removed; and disconnect preserves the mounted presentation while the callback fence rejects stale work.
 
-Keep `withPresentation` callbacks short-lived and pass their supplied signal into destination requests. Caller cancellation or deadline, navigation supersession, and composition disposal abort that signal. An operation that ignores it may finish internally, but its result cannot pass the coordinator's final acknowledgement fence.
+Keep `withPresentation` callbacks short-lived and pass their supplied signal into destination requests. Caller cancellation or deadline, navigation supersession, and composition disposal abort that signal. An operation that ignores it may finish internally, but its result cannot pass the coordinator's final acknowledgement fence. A retry may replace the presentation without changing navigation or Host generation; completion also requires the same presentation to remain ready.
 
 </details>
 

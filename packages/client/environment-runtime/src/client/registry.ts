@@ -77,7 +77,7 @@ export function createEnvironmentRuntimeRegistry(
 
   const disposeEntry = async (environmentId: EnvironmentId, entry: RuntimeEntry): Promise<void> => {
     if (entry.disposing !== undefined) return entry.disposing
-    if (entries.get(environmentId) === entry) entries.delete(environmentId)
+    entries.delete(environmentId)
     entry.disposing = entry.promise.then(async (runtime) => {
       entry.runtime = runtime
       await runtime.dispose()

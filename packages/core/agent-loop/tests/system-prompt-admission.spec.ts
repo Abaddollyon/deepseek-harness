@@ -129,6 +129,40 @@ describe('prepared-route prompt admission', () => {
     if (reason === 'tools') expect(header?.data.startsSeries).toBe(true)
   })
 
+  it('consolidates in-history prompt updates after a preflight replacement starts a new series', async () => {
+    const h = await harness()
+    await send(h.agent, 'first')
+    h.setPrompt('prompt two')
+    const attempts: number[] = []
+    h.ctx.on('agent/request-preflight', async ({ agent, attempt }, next) => {
+      attempts.push(attempt)
+      if (attempt !== 1) return next()
+      const firstUser = agent.session.surface.nodes.find(seq => agent.session.eventAt(seq)?.type === 'user/message')!
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'checkpoint' }],
+        source: { kind: 'plugin', plugin: 'test-compaction' },
+      }), {
+        surfaceOp: { op: 'replace', startSeq: firstUser, endSeq: firstUser },
+        sourceEventSeqs: [firstUser],
+      })
+      return { kind: 'retry', surfaceGeneration: agent.session.surface.replaceGeneration }
+    })
+    await send(h.agent, 'second')
+
+    expect(attempts).toEqual([1, 2])
+    expect(h.capable.requests).toHaveLength(2)
+    expectPlain(h.capable.requests[1]!, 'prompt two')
+    expect(JSON.stringify(h.capable.requests[1]!.messages)).toContain('checkpoint')
+    const promptEvents = h.agent.session.snapshotEvents()
+      .filter(event => event.type === 'system/message').filter(event => event.data.turn === 2)
+    expect(promptEvents.map(event => event.data.message.content)).toEqual([
+      [{ type: 'text', text: 'prompt two' }], [], [{ type: 'text', text: 'prompt two' }],
+    ])
+    expect(h.agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end', data: { reason: { kind: 'completed' } },
+    })
+  })
+
   it.each([false, true])('reconciles compaction retries without replaying admission, older tail survives=%s', async (retainOlder) => {
     const overflow = () => { throw new LlmError('context window exceeded', 'CONTEXT_LENGTH') }
     const adapter = new MockAdapter([textResponse('one'), textResponse('two'), overflow, overflow, textResponse('done')])

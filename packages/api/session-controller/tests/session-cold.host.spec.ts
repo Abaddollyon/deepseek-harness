@@ -850,6 +850,53 @@ describe('sessions.prompt synchronous rejection', () => {
 })
 
 describe('cold list title warmup', () => {
+  it('keeps a warmed title bounded by the older cached projection watermark', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    installSessionReadTestServices(ctx)
+    const source = header('partial-title-watermark', 1)
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
+    ctx.provide('sessionProjectionCache', {
+      cachedSnapshot: () => ({ asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1 } } }),
+    } as never)
+    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([{
+      status: 'fulfilled', sessionId: source.id,
+      value: { session: source, title: { title: 'warmed', eventSeq: SessionSeq(3), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } },
+    }])
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      await list.list()
+      await expect(list.list()).resolves.toEqual([expect.objectContaining({
+        projections: { asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1 }, title: 'warmed' } },
+      })])
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('discards a pending cold title when the Session is attached before publication', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    installSessionReadTestServices(ctx)
+    const source = header('title-attachment-race', 1)
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof ctx.sessionQuery.readTitleSnapshots>>>()
+    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockReturnValueOnce(pending.promise).mockResolvedValue([])
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      await list.list()
+      const live = ctx.sessions.prepare(source.id, { meta: source })
+      const detach = ctx.sessions.enter(live)
+      pending.resolve([{
+        status: 'fulfilled', sessionId: source.id,
+        value: { session: source, title: { title: 'stale cold title', eventSeq: SessionSeq(3), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } },
+      }])
+      await new Promise<void>(resolve => setImmediate(resolve))
+      detach()
+      const after = await list.list()
+      expect(after[0]?.projections?.values.title).toBeUndefined()
+      expect(readTitles).toHaveBeenCalledTimes(2)
+    } finally { pending.resolve([]); await ctx.fiber.dispose() }
+  })
+
   it('retries isolated rejected titles through public polls', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

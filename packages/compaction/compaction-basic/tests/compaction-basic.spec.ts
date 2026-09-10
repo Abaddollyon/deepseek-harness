@@ -901,6 +901,14 @@ describe('pressure measurement and retention', () => {
     }, Number.MAX_SAFE_INTEGER)).toThrow(/is not on the current surface/)
   })
 
+  it('rejects replay-budget capping on an empty surface before reading its head', () => {
+    const ctx = createContext()
+    const session = Session.create(SessionId('empty-replay-cap'))
+    expect(() => capRangeForReplayBudget(session, ctx.tokenMeter.measure(session), {
+      start: SessionSeq(0), end: SessionSeq(0),
+    }, 100)).toThrow(/is not on the current surface/)
+  })
+
   it('includes the retained system head in exact summarizer replay limits', () => {
     const ctx = createContext()
     const session = conversation(2, 'small', 'system '.repeat(100))

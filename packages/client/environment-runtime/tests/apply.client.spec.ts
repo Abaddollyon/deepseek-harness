@@ -117,6 +117,32 @@ describe('local environment runtime plugin', () => {
     expect(setItem).toHaveBeenCalledTimes(1)
   })
 
+  test('follows local generation and persists the selected Session view', async () => {
+    const ctx = await runtimeContext()
+    try {
+      expect(ctx.environmentRuntime.generation.getSnapshot()).toBeUndefined()
+      const off = ctx.environmentRuntime.generation.subscribe(vi.fn())
+      off()
+      const ref = { environmentId: 'local', sessionId: 'one' }
+      ctx.environmentNavigation.open({ kind: 'session', ref, viewId: 'activity' })
+      expect(ctx.environmentNavigation.presentation.get(ref).viewId).toBe('activity')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  test('does not write a restored sidebar inventory exceeding the storage cap', async () => {
+    vi.useFakeTimers()
+    const sidebar = Object.fromEntries(Array.from({ length: 10_000 }, (_, index) => [`host-${index}-${'x'.repeat(100)}`, 'activity']))
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: () => JSON.stringify({ sessions: {}, sidebar }), setItem })
+    const ctx = await runtimeContext()
+    try {
+      ctx.environmentNavigation.presentation.setSidebarQuery('changed')
+      await vi.advanceTimersByTimeAsync(250)
+      expect(ctx.environmentNavigation.presentation.serialize().length).toBeGreaterThan(1_000_000)
+      expect(setItem).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
   test('provides the exact feature service used by client plugins', async () => {
     const ctx = new Context()
     const fetch = vi.fn(async () => new Response('local'))

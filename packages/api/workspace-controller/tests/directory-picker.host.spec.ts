@@ -189,6 +189,7 @@ describe('directoryPicker browse Remotes', () => {
 describe('directoryBrowser Remotes', () => {
   it('serves bounded browsing independently while the interactive picker stays native', async () => {
     StubPicker.capabilityStub = NATIVE_STUB
+    StubDirectoryBrowser.capabilityStub = BROWSE_STUB
     const ctx = new Context()
     roots.push(ctx)
     await ctx.plugin(StubPicker).await()
@@ -200,5 +201,39 @@ describe('directoryBrowser Remotes', () => {
     expect(await browser.list('/home/user', new AbortController().signal))
       .toMatchObject({ path: '/home/user' })
     expect(await browser.createDirectory('/home/user', 'fresh')).toBe('/home/user/fresh')
+  })
+
+  it('maps browser cancellation, typed failures, invalid names, and unknown errors', async () => {
+    StubPicker.capabilityStub = BROWSE_STUB
+    StubDirectoryBrowser.capabilityStub = BROWSE_STUB
+    const ctx = new Context()
+    roots.push(ctx)
+    await ctx.plugin(StubPicker).await()
+    await ctx.plugin(StubDirectoryBrowser).await()
+    const browser = new DirectoryBrowserController(ctx)
+
+    expect(await refused(browser.list('/denied', new AbortController().signal)))
+      .toMatchObject({ code: 'directory-picker/unreadable', details: { path: '/denied' } })
+    expect((await refused(browser.createDirectory('/home/user', 'taken'))).code).toBe('directory-picker/exists')
+    expect((await refused(browser.createDirectory('/home/user', 'unwritable'))).code).toBe('gateway/internal')
+    expect(await refused(browser.createDirectory('/home/user', 'gone')))
+      .toMatchObject({ code: 'gateway/internal', message: 'the volume vanished' })
+
+    for (const name of ['', ' ', '.', '..', 'a/b', 'a\\b']) {
+      expect(await refused(browser.createDirectory('/home/user', name)))
+        .toMatchObject({ code: 'gateway/bad-request' })
+    }
+
+    StubDirectoryBrowser.capabilityStub = {
+      kind: 'browse',
+      list: (_path, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { reject(new Error('scan aborted')) }, { once: true })
+      }),
+      createDirectory: async () => '/never',
+    }
+    const abort = new AbortController()
+    const pending = refused(browser.list('/home/user', abort.signal))
+    abort.abort()
+    expect((await pending).code).toBe('gateway/cancelled')
   })
 })

@@ -389,7 +389,8 @@ export class SessionObservationReader {
     deepFreeze(loaded.header)
     const frozenFrom = loaded.eventState === 'shared-frozen' ? loaded.persistedEventCount : 0
     for (const event of loaded.events.slice(frozenFrom)) deepFreeze(event)
-    let rows: ProjectionCheckpoint = cache.checkpointFor(loaded.header, loaded.inheritedEventCount) ?? {}
+    // Bind checkpoint identity to the loaded generation, not the earlier stat result.
+    const rows: ProjectionCheckpoint = cache.checkpointFor(loaded.header, loaded.inheritedEventCount) ?? {}
     const restoreFloor = registry.restoreFloor(rows)
     if (restoreFloor === undefined) return undefined
 
@@ -407,14 +408,6 @@ export class SessionObservationReader {
         events: Object.freeze(loaded.events.slice(base)),
       }
       throwIfObservationAborted(signal)
-      // Cached rows are bound to ONE stored lifecycle, and the registry's
-      // restore only checks version and watermark — never identity. Revalidate
-      // the rows against the header this suffix actually came from, so an
-      // artifact replaced between the point snapshot and this read cannot seed
-      // projections from the previous lifecycle's rows.
-      rows = cache.checkpointFor(suffix.meta, suffix.inheritedEventCount) ?? {}
-      const safeFloor = registry.restoreFloor(rows) ?? SessionLogOffset(0)
-      if (base > safeFloor) { base = safeFloor; continue }
       // A row claiming events this read does not contain is stale-by-shrink or
       // future. Only the complete log can discard one, so go there in a single
       // step instead of halving the anchor across repeated whole-file reads.

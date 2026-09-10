@@ -46,10 +46,27 @@ const AVAILABLE_CONNECTION = {
 function workspaceClient(
   remote: WorkspaceRemote,
   connection: Pick<ConnectionHandle, 'generation'> = AVAILABLE_CONNECTION,
+  beforeDelivery?: () => void,
 ): ClientRemote {
   return {
     workspace: remote,
-    $stream: <Item>(options: RemoteStreamOptions<Item>) => new RemoteStream(connection, options),
+    $stream: <Item>(options: RemoteStreamOptions<Item>) => {
+      const stream = new RemoteStream(connection, options)
+      if (beforeDelivery !== undefined) {
+        const iterate = stream[Symbol.asyncIterator].bind(stream)
+        vi.spyOn(stream, Symbol.asyncIterator).mockImplementation(() => {
+          const iterator = iterate()
+          const next = iterator.next.bind(iterator)
+          vi.spyOn(iterator, 'next').mockImplementation(async (...args) => {
+            const item = await next(...args)
+            beforeDelivery()
+            return item
+          })
+          return iterator
+        })
+      }
+      return stream
+    },
   } as unknown as ClientRemote
 }
 
@@ -214,6 +231,202 @@ function provideClientServices(ctx: Context, remote: WorkspaceRemote): void {
 }
 
 describe('Workspace Controller Client apply', () => {
+  it('applies live Workspace increments through the retained feed model', async () => {
+    const remote = new ScriptedWorkspaceRemote([{
+      frames: [
+        baseline('removed'),
+        { type: 'upsert', workspace: workspace('first') },
+        { type: 'upsert', workspace: workspace('second') },
+        { type: 'remove', workspaceId: wid('removed') },
+        { type: 'order', workspaceIds: [wid('second'), wid('first')] },
+        { type: 'archived', archivedSessionIds: [sid('archived')] },
+      ],
+      hold: true,
+    }])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    try {
+      feed.retry()
+      await waitFor(() => {
+        expect(model.getSnapshot()).toMatchObject({
+          phase: 'ready', state: 'idle',
+          items: [{ workspaceId: 'second' }, { workspaceId: 'first' }],
+          archivedSessionIds: [sid('archived')],
+        })
+      })
+      expect(feed.snapshot.getSnapshot()).toMatchObject({ state: 'ready', hasBaseline: true })
+    } finally {
+      await feed.dispose()
+    }
+    expect(remote.signals[0]?.aborted).toBe(true)
+  })
+
+  it.each([
+    baseline('late'),
+    { type: 'upsert', workspace: workspace('late') },
+    { type: 'remove', workspaceId: wid('retained') },
+    { type: 'order', workspaceIds: [] },
+    { type: 'archived', archivedSessionIds: [sid('late')] },
+  ] satisfies WorkspaceFollowFrame[])('ignores an admitted $type frame after disposal', async (frame) => {
+    const frames = frame.type === 'baseline' ? [frame] : [baseline('retained'), frame]
+    const remote = new ScriptedWorkspaceRemote([{ frames, hold: true }])
+    const model = new ClientWorkspaceModel(remote)
+    let delivered = 0
+    let closing: Promise<void> | undefined
+    const client = workspaceClient(remote, AVAILABLE_CONNECTION, () => {
+      // Disposal can win after Gateway admits a frame and before its consumer resumes.
+      if (++delivered === frames.length) closing = feed.dispose()
+    })
+    const feed = new WorkspaceFeedRecovery(client, model, [])
+    try {
+      feed.retry()
+      await waitFor(() => { expect(closing).toBeDefined() })
+      await closing
+      expect(model.getSnapshot().items.map(item => item.workspaceId)).toEqual(frame.type === 'baseline' ? [] : [wid('retained')])
+      expect(model.getSnapshot().archivedSessionIds).toEqual([])
+    } finally {
+      await feed.dispose()
+    }
+  })
+
+  it.each([false, true])('contains a projection callback failure after disposal=%s', async (disposed) => {
+    const remote = new ScriptedWorkspaceRemote([{ frames: [baseline('unused')], hold: true }])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    let closing: Promise<void> | undefined
+    vi.spyOn(model, 'replaceBaseline').mockImplementationOnce(() => {
+      if (disposed) closing = feed.dispose()
+      throw new Error('Projection callback failed')
+    })
+    try {
+      feed.retry()
+      await waitFor(() => {
+        if (disposed) expect(closing).toBeDefined()
+        else expect(feed.snapshot.getSnapshot()).toMatchObject({ state: 'error', failure: 'terminal', canRetry: false })
+      })
+      await closing
+      if (disposed) expect(feed.snapshot.getSnapshot().failure).toBeNull()
+      expect(model.getSnapshot().items).toEqual([])
+    } finally {
+      await feed.dispose()
+    }
+  })
+
+  it('ignores carrier loss admitted before disposal', async () => {
+    const remote = new ScriptedWorkspaceRemote([])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    let closing: Promise<void> | undefined
+    vi.spyOn(remote, 'follow').mockImplementationOnce(async function* () {
+      queueMicrotask(() => { closing = feed.dispose() })
+      throw new RemoteStreamCarrierError('Previous owner disconnected')
+    })
+    try {
+      feed.retry()
+      await waitFor(() => { expect(closing).toBeDefined() })
+      await closing
+      expect(feed.snapshot.getSnapshot().failure).toBeNull()
+    } finally {
+      await feed.dispose()
+    }
+  })
+
+  it('ignores a terminal rejection queued between Gateway and its snapshot consumer', async () => {
+    const remote = new ScriptedWorkspaceRemote([])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    const failed = vi.spyOn(model, 'handleStreamFailure')
+    let closing: Promise<void> | undefined
+    vi.spyOn(remote, 'follow').mockImplementationOnce(async function* () {
+      // Gateway observes the rejection first; disposal precedes its snapshot consumer's continuation.
+      queueMicrotask(() => { queueMicrotask(() => { closing = feed.dispose() }) })
+      throw new RemoteError('gateway/internal', 'Follow failed', {})
+    })
+    try {
+      feed.retry()
+      await waitFor(() => { expect(closing).toBeDefined() })
+      await closing
+      expect(failed).not.toHaveBeenCalled()
+      expect(feed.snapshot.getSnapshot().failure).toBeNull()
+    } finally {
+      await feed.dispose()
+    }
+  })
+
+  it.each([false, true])('contains failed stream teardown after disposal=%s', async (disposed) => {
+    vi.useFakeTimers()
+    const remote = new ScriptedWorkspaceRemote([{
+      frames: [baseline('retained')],
+      error: new RemoteError('gateway/service-unavailable', 'Starting', { endpoint: 'workspace/follow' }),
+    }])
+    const model = new ClientWorkspaceModel(remote)
+    const client = workspaceClient(remote)
+    const open = client.$stream
+    const closing = Promise.withResolvers<undefined>()
+    client.$stream = <Item>(options: RemoteStreamOptions<Item>) => {
+      const stream = open(options)
+      const dispose = stream.dispose.bind(stream)
+      vi.spyOn(stream, 'dispose').mockImplementation(async () => {
+        await dispose()
+        await closing.promise
+        throw new Error('Carrier close failed')
+      })
+      return stream
+    }
+    const feed = new WorkspaceFeedRecovery(client, model, [10])
+    try {
+      feed.retry()
+      await waitFor(() => { expect(feed.snapshot.getSnapshot().state).toBe('retrying') })
+      const before = feed.snapshot.getSnapshot()
+      const done = disposed ? feed.dispose() : Promise.resolve()
+      closing.resolve(undefined)
+      await done
+      await waitFor(() => {
+        if (disposed) expect(feed.snapshot.getSnapshot()).toBe(before)
+        else expect(feed.snapshot.getSnapshot()).toMatchObject({ state: 'error', failure: 'teardown', canRetry: false })
+      })
+      feed.retry()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(remote.calls).toBe(1)
+      expect(model.getSnapshot().items).toMatchObject([{ workspaceId: 'retained' }])
+    } finally {
+      closing.resolve(undefined)
+      await feed.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not acquire a stream after a loading subscriber disposes its owner', async () => {
+    const remote = new ScriptedWorkspaceRemote([{ frames: [baseline('unused')] }])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    let closing: Promise<void> | undefined
+    const unsubscribe = feed.snapshot.subscribe(() => {
+      if (feed.snapshot.getSnapshot().state === 'loading') closing = feed.dispose()
+    })
+    try {
+      feed.retry()
+      await waitFor(() => { expect(closing).toBeDefined() })
+      await closing
+      expect(remote.calls).toBe(0)
+      expect(model.getSnapshot().items).toEqual([])
+    } finally {
+      unsubscribe()
+      await feed.dispose()
+    }
+  })
+
+  it('does not open a stream if disposed before its scheduled start', async () => {
+    const remote = new ScriptedWorkspaceRemote([{ frames: [baseline('unused')], hold: true }])
+    const model = new ClientWorkspaceModel(remote)
+    const feed = new WorkspaceFeedRecovery(workspaceClient(remote), model, [])
+    feed.retry()
+    await feed.dispose()
+    feed.retry()
+    expect(remote.calls).toBe(0)
+    expect(model.getSnapshot().items).toEqual([])
+  })
+
   it('provides the Workspace service and stops its follow generation with the plugin fiber', async () => {
     const ctx = new Context()
     const remote = new ScriptedWorkspaceRemote([{ frames: [baseline('mounted')], hold: true }])

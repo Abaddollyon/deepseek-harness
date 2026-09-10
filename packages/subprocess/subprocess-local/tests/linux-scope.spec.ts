@@ -242,14 +242,20 @@ describe('Linux scope establishment and quiescence', () => {
     expect(existsSync(launched.requestPath)).toBe(false)
   })
 
-  it('preserves range cleanup failure separately from a signalled bootstrap outcome', async () => {
+  it.each([
+    ['stop denied', 'stop denied'],
+    ['', 'exit 1'],
+  ])('preserves scope stop failure %j separately from a signalled bootstrap outcome', async (stderr, diagnostic) => {
     const launched = launch(async () => activeUnit(), {
-      spawnSync: vi.fn(() => ({ status: 1, stdout: '', stderr: 'stop denied' })) as never,
+      spawnSync: vi.fn(() => ({ status: 1, stdout: '', stderr })) as never,
     })
-    launched.child.exit(null, 'SIGTERM')
-    await expect(launched.result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
-    await expect(launched.result.owner.waitForExit()).rejects.toThrow('stop denied')
-    launched.result.owner.cleanup?.()
+    try {
+      launched.child.exit(null, 'SIGTERM')
+      await expect(launched.result.direct).resolves.toEqual({ exitCode: null, signal: 'SIGTERM' })
+      await expect(launched.result.owner.waitForExit()).rejects.toThrow(diagnostic)
+    } finally {
+      launched.result.owner.cleanup?.()
+    }
   })
 
   it('retains failed scope stop across successful escalation while a query is pending', async () => {

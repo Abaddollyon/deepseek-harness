@@ -181,10 +181,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       this.navigate()
       return
     }
-    void this.connectWorkspace(target).then(
-      (sessionId) => { if (!this.disposed && intent === this.intent) this.openSession(sessionId) },
-      (_reason: unknown) => { if (!this.disposed && intent === this.intent) this.navigationError.set('create-failed') },
-    )
+    this.completeSessionCreation(intent, this.connectWorkspace(target))
   }
 
   createLooseSession(): void {
@@ -194,7 +191,11 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       this.navigationError.set('not-ready')
       return
     }
-    void this.sessions.create({}).then(
+    this.completeSessionCreation(intent, this.sessions.create({}))
+  }
+
+  private completeSessionCreation(intent: number, creation: Promise<SessionId>): void {
+    void creation.then(
       (sessionId) => { if (!this.disposed && intent === this.intent) this.openSession(sessionId) },
       (_reason: unknown) => { if (!this.disposed && intent === this.intent) this.navigationError.set('create-failed') },
     )

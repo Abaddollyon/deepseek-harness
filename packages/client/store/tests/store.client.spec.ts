@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createSnapshotStore, defineStore, shallowEqual } from '../src/index.ts'
+import { createSnapshotStore, defineStore, migrateLocalStorageKey, shallowEqual } from '../src/index.ts'
 
 interface State {
   a: { n: number }
@@ -311,5 +311,91 @@ describe('shallowEqual', () => {
     expect(shallowEqual({ x: 1, y: { deep: 1 } }, { x: 1, y: { deep: 1 } })).toBe(false)
     expect(shallowEqual([1, 2], [1, 2])).toBe(true)
     expect(shallowEqual([1, 2], [2, 1])).toBe(false)
+  })
+})
+
+describe('compound-scope persistence', () => {
+  const declare = () => defineStore({ init: () => 'initial', persist: 'scope', actions: {} })
+
+  it('works without browser storage for a compound scope', () => {
+    vi.stubGlobal('localStorage', undefined)
+    expect(declare().create('["local","s1"]').getSnapshot()).toBe('initial')
+  })
+
+  it.each(['null', '[]', '["remote","s1"]', '["local",1]'])('does not migrate unrelated or malformed scope %s', (scope) => {
+    const values = new Map([['scope.s1', '"legacy"']])
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem, removeItem: vi.fn() })
+    expect(declare().create(scope).getSnapshot()).toBe('initial')
+    expect(setItem).not.toHaveBeenCalled()
+  })
+
+  it('retains the destination when both compound and legacy keys exist', () => {
+    const scope = '["local","s1"]'
+    const values = new Map([['scope.s1', '"legacy"'], [`scope.${scope}`, '"current"']])
+    const removeItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: vi.fn(), removeItem })
+    expect(declare().create(scope).getSnapshot()).toBe('current')
+    expect(removeItem).not.toHaveBeenCalled()
+  })
+
+  it('starts empty when no legacy value exists', () => {
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem, removeItem: vi.fn() })
+    expect(declare().create('["local","s1"]').getSnapshot()).toBe('initial')
+    expect(setItem).not.toHaveBeenCalled()
+  })
+})
+
+describe('subscriber failure isolation', () => {
+  it('reports a throwing subscriber while notifying later subscribers', () => {
+    const error = new Error('observer failed')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const store = createSnapshotStore(0)
+    store.subscribe(() => { throw error })
+    const next = vi.fn()
+    store.subscribe(next)
+    store.set(1)
+    expect(next).toHaveBeenCalledOnce()
+    expect(report).toHaveBeenCalledWith('[client-store] subscriber failed:', error)
+  })
+})
+
+describe('migrateLocalStorageKey', () => {
+  it('moves a legacy value only when the destination is absent', () => {
+    const values = new Map<string, string>([['legacy', 'value']])
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+      removeItem: (key: string) => { values.delete(key) },
+    })
+    migrateLocalStorageKey('legacy', 'next')
+    expect(values.get('next')).toBe('value')
+    expect(values.has('legacy')).toBe(false)
+    values.set('legacy', 'newer')
+    migrateLocalStorageKey('legacy', 'next')
+    expect(values.get('next')).toBe('value')
+    expect(values.get('legacy')).toBe('newer')
+  })
+
+  it('ignores unavailable browser storage', () => {
+    vi.stubGlobal('localStorage', undefined)
+    expect(() => { migrateLocalStorageKey('legacy', 'next') }).not.toThrow()
+  })
+
+  it('treats storage failures as best-effort', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => { throw new Error('denied') },
+      setItem: () => {},
+      removeItem: () => {},
+    })
+    expect(() => { migrateLocalStorageKey('legacy', 'next') }).not.toThrow()
+  })
+
+  it('does nothing when the legacy key is absent', () => {
+    const getItem = vi.fn(() => null)
+    vi.stubGlobal('localStorage', { getItem, setItem: vi.fn(), removeItem: vi.fn() })
+    migrateLocalStorageKey('legacy', 'next')
+    expect(getItem).toHaveBeenCalledWith('next')
   })
 })

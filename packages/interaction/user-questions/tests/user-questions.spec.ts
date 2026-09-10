@@ -124,6 +124,68 @@ describe('UserQuestionService', () => {
     })
   })
 
+  it('clears the pending lifecycle when an answerer throws before returning a promise', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(PendingInteractionRegistry)
+      await ctx.plugin(UserQuestionService)
+      const failure = new Error('answer transport is closed')
+      registerAnswerer(ctx, { ask: () => { throw failure } })
+      await expect(ctx.userQuestions.ask({
+        questions: [{ id: 'confirm', question: 'Proceed?' }],
+      })).rejects.toBe(failure)
+      expect(ctx.pendingInteractions.snapshot()).toMatchObject({ revision: 2, pending: [] })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('normalizes a provider failure when cancellation occurs before it returns', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(UserQuestionService)
+      const controller = new AbortController()
+      const failure = new Error('answer transport closed')
+      registerAnswerer(ctx, {
+        ask: () => {
+          controller.abort()
+          return Promise.reject(failure)
+        },
+      })
+      await expect(ctx.userQuestions.ask({
+        questions: [{ id: 'confirm', question: 'Proceed?' }],
+        signal: controller.signal,
+      })).rejects.toMatchObject({ code: 'ASK_ABORTED', cause: failure })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('tracks a live root question until its provider answers', async () => {
+    const ctx = new Context()
+    const answer = Promise.withResolvers<AskUserQuestionAnswer>()
+    try {
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(PendingInteractionRegistry)
+      await ctx.plugin(UserQuestionService)
+      const agent = stubAgent('question-owner')
+      ctx.agents.enter(agent, undefined)
+      registerAnswerer(ctx, { ask: () => answer.promise })
+      const pending = ctx.userQuestions.ask({
+        agent, questions: [{ id: 'confirm', question: 'Proceed?' }],
+      })
+      expect(ctx.pendingInteractions.snapshot().pending).toMatchObject([{
+        kind: 'question', agentId: agent.id, sessionId: agent.session.id,
+      }])
+      answer.resolve({ answers: [{ id: 'confirm', selected: ['yes'] }] })
+      await expect(pending).resolves.toEqual({ answers: [{ id: 'confirm', selected: ['yes'] }] })
+      expect(ctx.pendingInteractions.snapshot().pending).toEqual([])
+    } finally {
+      answer.resolve({ answers: [] })
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('preserves a domain rejection when its provider also aborts the signal', async () => {
     const ctx = new Context()
     await ctx.plugin(UserQuestionService)

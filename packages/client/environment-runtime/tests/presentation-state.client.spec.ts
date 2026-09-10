@@ -30,6 +30,59 @@ describe('environment presentation state', () => {
     expect(serialized).not.toContain('credential')
   })
 
+  test('evicts the least recently updated Session after 200 entries', () => {
+    const store = createEnvironmentPresentationStore()
+    const ref = (index: number) => ({ environmentId: 'local', sessionId: String(index) })
+    for (let index = 0; index < 200; index++) store.update(ref(index), { draft: `draft-${index}` })
+    store.update(ref(0), { draft: 'recent' })
+    store.update(ref(200), { draft: 'newest' })
+    expect(store.get(ref(1)).draft).toBe('')
+    expect(store.get(ref(0)).draft).toBe('recent')
+    expect(store.get(ref(200)).draft).toBe('newest')
+    expect(Object.keys((JSON.parse(store.serialize()) as { sessions: object }).sessions)).toHaveLength(200)
+  })
+
+  test('ignores broken JSON and invalid persisted rows while retaining valid entries', () => {
+    expect(createEnvironmentPresentationStore('{').getSidebarMode('local')).toBe('workspaces')
+    const store = createEnvironmentPresentationStore(JSON.stringify({
+      sessions: {
+        null: null, draft: { draft: 3, viewId: 'chat' }, view: { draft: '', viewId: 3 },
+        detail: { draft: '', viewId: 'chat', detailId: false },
+        scroll: { draft: '', viewId: 'chat', scrollAnchor: {} },
+        valid: { draft: 'keep', viewId: 'chat' },
+      }, sidebar: { local: 'activity', remote: 'workspaces', invalid: 'unknown' },
+    }))
+    const value = JSON.parse(store.serialize()) as { sessions: object; sidebar: object }
+    expect(value.sessions).toEqual({ valid: { draft: 'keep', viewId: 'chat' } })
+    expect(value.sidebar).toEqual({ local: 'activity', remote: 'workspaces' })
+  })
+
+  test('replacing pin subscriptions preserves the new source when an old owner releases', () => {
+    const store = createEnvironmentPresentationStore()
+    let changes = 0
+    const stop = store.subscribe(() => { changes++ })
+    store.setSidebarMode('local', 'activity')
+    store.setSidebarMode('local', 'activity')
+    store.setSidebarQuery('needle')
+    store.setSidebarQuery('needle')
+    expect(changes).toBe(2)
+    const old = createSnapshotStore<readonly string[]>(['old'])
+    const current = createSnapshotStore<readonly string[]>(['current'])
+    const releaseOld = store.registerWorkspacePins('local', old)
+    const releaseCurrent = store.registerWorkspacePins('local', current)
+    releaseOld()
+    changes = 0
+    old.set(['ignored'])
+    current.set(['live'])
+    expect(changes).toBe(1)
+    expect(store.getPinnedSessionIds('local')).toEqual(['live'])
+    releaseCurrent()
+    current.set(['retained'])
+    expect(changes).toBe(1)
+    stop()
+    store.dispose()
+  })
+
   test('ignores malformed persisted state', () => {
     const store = createEnvironmentPresentationStore('{"sessions":{"bad":null}}')
     expect(store.get({ environmentId: 'local', sessionId: 'one' })).toEqual({

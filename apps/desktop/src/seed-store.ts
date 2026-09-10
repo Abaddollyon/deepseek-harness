@@ -207,7 +207,7 @@ export function archivePnpmStore(
 }
 
 /**
- * Validate and extract a packaged pnpm store archive set into an empty directory.
+ * Validate and extract a packaged pnpm store archive set, restoring file permissions independently of umask.
  * @param seedRoot - verified packaged seed directory.
  * @param destination - empty Desktop-owned temporary extraction directory.
  */
@@ -228,7 +228,7 @@ export function extractPnpmStoreArchives(seedRoot: string, destination: string):
     throw new Error(`desktop seed: pnpm store extraction directory is not empty: ${destination}`)
   }
   mkdirSync(destination, { recursive: true, mode: 0o700 })
-  const paths = new Set<string>()
+  const modes = new Map<string, number>()
   for (const archive of manifest.archives) {
     const archivePath = join(archiveRoot, archive.file)
     const archiveShard = Number.parseInt(archive.file.slice('store-'.length, -'.tar'.length), 16)
@@ -243,10 +243,13 @@ export function extractPnpmStoreArchives(seedRoot: string, destination: string):
         if (shardFor(entry.path, manifest.shardCount) !== archiveShard) {
           throw new Error(`desktop seed: pnpm store path is assigned to the wrong archive shard: ${entry.path}`)
         }
-        if (paths.has(entry.path)) {
+        if (modes.has(entry.path)) {
           throw new Error(`desktop seed: duplicate pnpm store archive path ${entry.path}`)
         }
-        paths.add(entry.path)
+        if (entry.mode === undefined) {
+          throw new Error(`desktop seed: pnpm store archive entry has no file mode: ${entry.path}`)
+        }
+        modes.set(entry.path, entry.mode & 0o777)
         entries += 1
       },
       strict: true,
@@ -268,4 +271,5 @@ export function extractPnpmStoreArchives(seedRoot: string, destination: string):
       sync: true,
     })
   }
+  for (const [path, mode] of modes) chmodSync(join(destination, path), mode)
 }

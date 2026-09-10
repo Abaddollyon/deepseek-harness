@@ -112,7 +112,7 @@ function resolvePathname(path: string): string {
   if (!path.startsWith('/') || path.startsWith('//') || /^[A-Za-z][A-Za-z\d+.-]*:/.test(path)) {
     throw new Error(`environment request: expected a relative absolute path, received ${JSON.stringify(path)}`)
   }
-  const rawPathname = path.split(/[?#]/u, 1)[0] ?? ''
+  const rawPathname = path.replace(/[?#].*$/su, '')
   let decoded: string
   try {
     decoded = decodeURIComponent(rawPathname)

@@ -184,7 +184,9 @@ export function capRangeForReplayBudget(
     )
   }
 
-  const head = nodes[0] === undefined ? undefined : systemHead(session, nodes[0])
+  // The range endpoints above belong to this surface, so it has a head node.
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const head = systemHead(session, nodes[0]!)
   // The validated range is nonempty and measurement nodes match the surface.
   // oxlint-disable-next-line typescript/no-non-null-assertion
   let regionTokens = head !== undefined && startIdx > 0 ? measurement.nodes[0]!.tokens : 0

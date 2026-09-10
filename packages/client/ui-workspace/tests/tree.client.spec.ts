@@ -8,7 +8,7 @@ import {
   deriveFlat, deriveGroups, derivePinnedSessions, deriveSearchResults, owningGroupKey, workspaceLabel,
   UNGROUPED_KEY, UNGROUPED_LABEL,
 } from '../src/client/tree.ts'
-import { createWorkspaceViewStore } from '../src/client/stores.ts'
+import { createPersistedWorkspacePinReader, createWorkspaceViewStore } from '../src/client/stores.ts'
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
@@ -575,6 +575,60 @@ describe('user-pinned threads', () => {
     expect(group.pinned.map(node => node.id)).toEqual([sid('free-live')])
     expect(group.sessionCount).toBe(2)
     expect(derivePinnedSessions(sessions, noArchive, pins).map(node => node.id)).toEqual([sid('pinned-live')])
+  })
+})
+
+describe('persisted Workspace pins', () => {
+  it('keeps per-Host snapshots stable, prefers scoped pins, and follows persisted changes', () => {
+    const values = new Map<string, string>([
+      ['dsh.workspace.view.v6', JSON.stringify({ pinnedSessionIds: ['legacy'] })],
+      ['dsh.workspace.view.v6.remote%2Fhost', JSON.stringify({ pinnedSessionIds: ['remote', 7] })],
+    ])
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null })
+    try {
+      const read = createPersistedWorkspacePinReader()
+      const legacy = read('local')
+      expect(legacy).toEqual(['legacy'])
+      expect(read('local')).toBe(legacy)
+      expect(read('remote/host')).toEqual(['remote'])
+      expect(read('missing')).toEqual([])
+      values.set('dsh.workspace.view.v6.local', JSON.stringify({ pinnedSessionIds: ['scoped'] }))
+      const scoped = read('local')
+      expect(scoped).toEqual(['scoped'])
+      expect(scoped).not.toBe(legacy)
+      expect(read('local')).toBe(scoped)
+      values.delete('dsh.workspace.view.v6.remote%2Fhost')
+      expect(read('remote/host')).toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it.each(['broken json', 'null', '42', '{}', '{"pinnedSessionIds":{}}'])(
+    'treats unavailable persisted pin data %s as empty', (raw) => {
+      vi.stubGlobal('localStorage', { getItem: () => raw })
+      try {
+        const read = createPersistedWorkspacePinReader()
+        const empty = read('local')
+        expect(empty).toEqual([])
+        expect(read('local')).toBe(empty)
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    },
+  )
+
+  it('works without browser storage and when browser policy denies reading it', () => {
+    vi.stubGlobal('localStorage', undefined)
+    try {
+      const read = createPersistedWorkspacePinReader()
+      const empty = read('local')
+      expect(empty).toEqual([])
+      vi.stubGlobal('localStorage', { getItem: () => { throw new Error('Storage denied') } })
+      expect(read('local')).toBe(empty)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

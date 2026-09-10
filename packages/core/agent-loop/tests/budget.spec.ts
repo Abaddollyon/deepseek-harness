@@ -7,6 +7,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import { AgentBudgetTracker } from '../src/budget.ts'
 
 function response(chunks: StreamChunk[], usage = { inputTokens: 4, outputTokens: 2 }): StreamChunk[] {
   return [...chunks, { type: 'usage', usage }, { type: 'finish', reason: { kind: chunks.some(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call') ? 'tool-calls' : 'stop' } }]
@@ -142,6 +143,73 @@ describe('native agent budgets', () => {
     await agent.whenIdle()
     expect(adapter.requests.map(request => request.maxTokens)).toEqual([5, 3])
     expect(finalReason(agent)).toMatchObject({ kind: 'completed' })
+  })
+
+  it('stops before dispatch when a tool response exactly exhausts the output allowance', async () => {
+    const adapter = new BudgetAdapter([tool('one'), text('unused')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('output-exhausted'), {
+      provider: 'budget', model: 'model', budget: budget({ maxOutputTokens: 2 }),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests.map(request => request.maxTokens)).toEqual([2])
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 2' },
+    })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(1)
+  })
+
+  it('charges the requested output cap when usage is absent but exact input was reserved', async () => {
+    const adapter = new BudgetAdapter([
+      tool('one').filter(chunk => chunk.type !== 'usage'), text('unused'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('exact-input-without-usage'), {
+      provider: 'budget', model: 'model', budget: budget(),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 8' },
+    })
+  })
+
+  it('charges reported usage when stream middleware fails before the terminal chunk', async () => {
+    const adapter = new BudgetAdapter([text('interrupted', { inputTokens: 4, outputTokens: 8 }), text('unused')])
+    const ctx = await harness(adapter)
+    const failure = new Error('stream consumer failed')
+    ctx.on('llm/stream', async function* (_request, next) {
+      for await (const chunk of next()) {
+        yield chunk
+        if (chunk.type === 'usage') throw failure
+      }
+    })
+    const agent = await ctx.agentLoop.create(SessionId('failed-stream-budget'), {
+      provider: 'budget', model: 'model', budget: budget(),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(finalReason(agent)).toMatchObject({ kind: 'error', error: { message: failure.message } })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/attempt')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(0)
+
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 8' },
+    })
+  })
+
+  it('refuses input admission after a dispatched unpriced request settles without usage', () => {
+    const tracker = new AgentBudgetTracker(budget())
+    const request: GenerateOptions = { provider: 'budget', model: 'model', messages: [] }
+    const admitted = tracker.admitRequest(request, undefined)
+    expect(admitted).toBeUndefined()
+    tracker.settleRequest(request, admitted, undefined)
+    expect(() => tracker.admitRequest(request, undefined)).toThrow(/previous response reported no usage/)
   })
 
   it('uses authoritative response usage and stops before the next request at the input threshold', async () => {

@@ -34,7 +34,7 @@ The packaged seed is an installation kit, not a ready-to-run `node_modules` tree
 | Seed content | Writable destination or use |
 |---|---|
 | `integrity.json` and `desktop-packages.json` | Verify every inventoried seed file, local tarball hash, and the bound dsh and Desktop Host versions before package state changes. |
-| `store-archives.json` and `store-archives/*.tar` | Validate the deterministic uncompressed shards, extract them into a unique Desktop staging directory, replace matching immutable store files, and transactionally merge pnpm's versioned SQLite package index into `$DSH_HOME/desktop/pnpm/store` without removing packages already downloaded for Desktop plugins. |
+| `store-archives.json` and `store-archives/*.tar` | Validate the deterministic uncompressed shards, extract them into a unique private Desktop staging directory and restore archived file permissions regardless of umask, replace matching immutable store files, and transactionally merge pnpm's versioned SQLite package index into `$DSH_HOME/desktop/pnpm/store` without removing packages already downloaded for Desktop plugins. |
 | Project metadata and `desktop-packages/` | Copy into a unique `$DSH_HOME/desktop/staging/<transaction-id>/profile` project. |
 | Lockfile and local package mappings | Drive the bundled pnpm installation without resolving a packaged core name from npm. |
 

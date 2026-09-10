@@ -1,3 +1,4 @@
+import { basename } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type {
   SubprocessHandle,
@@ -114,7 +115,7 @@ function fakeRuntime(process: FakeProcess = successfulProcess()): FakeRuntime {
     command: string,
     _env?: Readonly<Record<string, string>>,
     _signal?: AbortSignal,
-  ) => `/resolved/${command.split('/').at(-1)}`)
+  ) => `/resolved/${basename(command)}`)
   const spawn = vi.fn((spec: SubprocessSpawnSpec) => {
     specs.push(spec)
     return process.child

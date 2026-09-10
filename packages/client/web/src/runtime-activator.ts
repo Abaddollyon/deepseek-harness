@@ -130,14 +130,7 @@ export function createClientRuntimeActivator(
         assertActive(ctx, loader.entries())
       } catch (error) {
         const cleanupErrors: unknown[] = []
-        for (const id of created.reverse()) {
-          if (![...loader.entries()].some(entry => entry.id === id)) continue
-          try {
-            await loader.remove(id)
-          } catch (cleanupError) {
-            cleanupErrors.push(cleanupError)
-          }
-        }
+        await removeCreatedEntries(created, loader, cleanupErrors)
         throwWithCleanup(error, cleanupErrors)
       }
       let disposed = false
@@ -146,14 +139,7 @@ export function createClientRuntimeActivator(
           if (disposed) return
           disposed = true
           const errors: unknown[] = []
-          for (const id of created.reverse()) {
-            if (![...loader.entries()].some(entry => entry.id === id)) continue
-            try {
-              await loader.remove(id)
-            } catch (error) {
-              errors.push(error)
-            }
-          }
+          await removeCreatedEntries(created, loader, errors)
           throwCleanupErrors(errors)
         },
       }
@@ -214,19 +200,27 @@ export function createClientRuntimeActivator(
             resumed = true
           } catch (error) {
             const cleanupErrors: unknown[] = []
-            for (const id of created.reverse()) {
-              if (![...loader.entries()].some(entry => entry.id === id)) continue
-              try {
-                await loader.remove(id)
-              } catch (cleanupError) {
-                cleanupErrors.push(cleanupError)
-              }
-            }
+            await removeCreatedEntries(created, loader, cleanupErrors)
             throwWithCleanup(error, cleanupErrors)
           }
         },
       }
     },
+  }
+}
+
+async function removeCreatedEntries(
+  created: string[],
+  loader: { entries(): Iterable<{ id: string }>; remove(id: string): Promise<void> },
+  errors: unknown[],
+): Promise<void> {
+  for (const id of created.reverse()) {
+    if (![...loader.entries()].some(entry => entry.id === id)) continue
+    try {
+      await loader.remove(id)
+    } catch (error) {
+      errors.push(error)
+    }
   }
 }
 

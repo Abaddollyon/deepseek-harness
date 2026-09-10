@@ -17,6 +17,39 @@ afterEach(() => {
 })
 
 describe('environment-owned uploads', () => {
+  it('rejects a receipt when the Host changes while its response body is streaming', async () => {
+    vi.stubGlobal('location', { origin: 'http://local.test', search: '' })
+    let generation = 1
+    const reading = Promise.withResolvers<undefined>()
+    const body = Promise.withResolvers<string>()
+    const response = new Response()
+    vi.spyOn(response, 'text').mockImplementation(() => {
+      reading.resolve(undefined)
+      return body.promise
+    })
+    const release = vi.fn()
+    const ctx = new Context()
+    ctx.provide('environmentRuntime', {
+      environmentId: 'remote-host', runtimeId: 'remote-runtime',
+      generation: { getSnapshot: () => ({ generation }), subscribe: () => () => {} },
+      request: vi.fn(async () => response), registerFeatureRoute: () => release,
+    } as never)
+    const fiber = ctx.plugin(FileUploadRuntime)
+    try {
+      await fiber.await()
+      const upload = ctx.fileUpload.upload('session' as SessionId, new Blob(['data']))
+      const rejected = expect(upload).rejects.toThrow('Host generation changed before the response body completed')
+      await reading.promise
+      generation = 2
+      body.resolve(JSON.stringify({ ok: true, value: { receiptId: 'old-host-receipt' } }))
+      await rejected
+    } finally {
+      body.resolve('')
+      await fiber.dispose()
+    }
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it.each(['blob', 'stream'] as const)('keeps %s uploads on the remote Host and releases its route', async (kind) => {
     vi.stubGlobal('location', { origin: 'http://local.test', search: '?fixture' })
     const localFetch = vi.fn(() => { throw new Error('local upload carrier must not run') })

@@ -76,6 +76,28 @@ describe('fixture helpers', () => {
 })
 
 describe('Session fixture lifecycle', () => {
+  it('records feed retries without changing fixture-owned readiness and invokes workspace retry stubs', async () => {
+    const runtime = await SlotTestRuntime.create()
+    try {
+      const sessionFeed = runtime.sessions.feed.getSnapshot()
+      const workspaceFeed = runtime.workspaces.feed.getSnapshot()
+      runtime.sessions.retryFeed()
+      runtime.workspaces.retryFeed()
+      const retry = vi.fn(() => {
+        expect(runtime.workspaces.calls.at(-1)).toEqual({ method: 'retryFeed', args: [] })
+      })
+      runtime.workspaces.stub('retryFeed', retry)
+      runtime.workspaces.retryFeed()
+      expect(retry).toHaveBeenCalledOnce()
+      expect(runtime.sessions.calls).toContainEqual({ method: 'retryFeed', args: [] })
+      expect(runtime.workspaces.calls.filter(call => call.method === 'retryFeed')).toHaveLength(2)
+      expect(runtime.sessions.feed.getSnapshot()).toBe(sessionFeed)
+      expect(runtime.workspaces.feed.getSnapshot()).toBe(workspaceFeed)
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
   it('initializes and drives complete event windows through replace, prepend, and append', async () => {
     const runtime = await SlotTestRuntime.create()
     const first = entry(1)

@@ -3,12 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { BlockAssembler, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as LlmPiAi from '../src/index.ts'
 import { resolveProfiles } from '../src/config.ts'
+import { LiveCatalog } from '../src/live-catalog.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 const contexts: Context[] = []
@@ -17,6 +18,7 @@ afterEach(async () => {
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
   for (const path of homes.splice(0)) await rm(path, { recursive: true, force: true })
   await closeMockServers()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
   vi.useRealTimers()
@@ -206,6 +208,58 @@ describe('automatic model discovery', () => {
     vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'draft-model' }] }))
     await ctx.llm.discoverModels('llm-pi-ai', { provider: 'kimi-coding', baseURL: 'https://draft.example/v1', apiKey: 'draft-key' })
     expect((await ctx.llm.listModels('kimi-coding')).map(model => model.id)).not.toContain('draft-model')
+  })
+
+  it.each([
+    { baseURL: 'https://active.example/v1', api: 'openai-completions' as const, active: true },
+    { baseURL: 'https://draft.example/v1', active: false },
+    { api: 'anthropic-messages' as const, active: false },
+  ])('publishes only probes matching the configured endpoint and API ($active)', async ({ active, ...draft }) => {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'initial' }] }))
+    const ctx = await boot(undefined, { baseURL: 'https://active.example/v1', api: 'openai-completions' })
+    await ctx.llm.discoverModels('llm-pi-ai', { provider: 'kimi-coding' })
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'candidate' }] }))
+    await ctx.llm.discoverModels('llm-pi-ai', { provider: 'kimi-coding', ...draft })
+    expect((await ctx.llm.listModels('kimi-coding')).some(model => model.id === 'candidate')).toBe(active)
+  })
+
+  it('ignores credential records owned by another adapter namespace', async () => {
+    const fetch = vi.fn(async () => Response.json({ data: [{ id: 'initial' }] }))
+    vi.stubGlobal('fetch', fetch)
+    const ctx = await boot()
+    await ctx.llm.discoverModels('llm-pi-ai', { provider: 'kimi-coding' })
+    const requests = fetch.mock.calls.length
+    await ctx.credentials.modifyRecord(credentialKey('another-adapter', 'kimi-coding'), async () => ({
+      kind: 'grant', payload: { type: 'api_key', key: 'foreign-key' },
+    }))
+    expect(fetch).toHaveBeenCalledTimes(requests)
+    expect((await ctx.llm.listModels('kimi-coding')).map(model => model.id)).toContain('initial')
+  })
+
+  it('refuses a discovery result when settings remove its route between refresh and result capture', async () => {
+    vi.stubGlobal('fetch', async () => Response.json({ data: [{ id: 'initial' }] }))
+    const ctx = await boot(undefined, { modelDiscovery: { enabled: false } })
+    await ctx.settings.update('llm-pi-ai', { providers: { openai: {
+      apiKeyEnv: 'KIMI_DISCOVERY_TEST_KEY', modelDiscovery: { enabled: true },
+    } } })
+    await ctx.llm.discoverModels('llm-pi-ai', { provider: 'openai' })
+    // oxlint-disable-next-line typescript/unbound-method -- The wrapper below preserves the receiver with apply.
+    const original = LiveCatalog.prototype.refresh
+    vi.spyOn(LiveCatalog.prototype, 'refresh').mockImplementationOnce(async function (this: LiveCatalog, ...args) {
+      await original.apply(this, args)
+      await ctx.settings.replace('llm-pi-ai', {})
+    })
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'openai' }))
+      .rejects.toMatchObject({ code: 'DISCOVERY_FAILED' })
+    expect(ctx.llm.listProviders().map(provider => provider.id)).not.toContain('openai')
+  })
+
+  it('inherits discovered modalities when an explicit model leaves input unspecified', () => {
+    const resolved = resolveProfiles({ openai: {
+      models: [{ id: 'new-model' }], modelDiscovery: { enabled: true },
+    } }, new Map([['openai', [{ id: 'new-model', input: ['text', 'image'] }]]]))
+    expect(resolved.get('openai')?.piProvider.getModels().find(model => model.id === 'new-model')?.input)
+      .toEqual(['text', 'image'])
   })
 
   it('notifies existing catalog consumers only after a successful publication', async () => {

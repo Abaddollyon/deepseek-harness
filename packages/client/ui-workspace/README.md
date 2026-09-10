@@ -27,7 +27,7 @@ This package lets users browse grouped or flat Session lists, choose a Workspace
 
 Use the sidebar to browse Workspaces and their Sessions, reorder them, and start new ones; use the picker in the Session Intent hero to choose a Workspace for a new session. An open Workspace shows five non-blank Sessions by default and keeps the selected blank **New Session** as one provisional extra row until its first prompt. **Show more** reveals the hidden remainder; closing and reopening the Workspace restores this folded projection.
 
-The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces.
+The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Workspace-bound and loose creation share completion handling: a superseded navigation intent or disposed owner cannot open a Session or publish a late failure. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces.
 
 ### Reordering and view options
 

@@ -6,6 +6,7 @@
     "tsBuildInfoFile": "lib/tsconfig.client.tsbuildinfo"
   },
   "files": [
+    "src/client/feed-lifecycle.ts",
     "src/client/index.ts",
     "src/client/journal-stream.ts",
     "src/client/remote-events.ts",

@@ -558,6 +558,41 @@ describe('environment composition service', () => {
     await shell.fiber.dispose()
   })
 
+  test('rejects an already-cancelled presentation before opening navigation', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    shell.reflect.provide('environmentNavigation', nav)
+    const service = createEnvironmentCompositionService(shell)
+    const abort = new AbortController()
+    abort.abort(new DOMException('deadline elapsed', 'TimeoutError'))
+
+    await expect(service.withPresentation(
+      { kind: 'session', ref: { environmentId: 'local', sessionId: 'same' }, viewId: 'tasks' },
+      vi.fn(),
+      { signal: abort.signal },
+    )).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(nav.getSnapshot()).toEqual({ kind: 'environments', selectedId: 'local' })
+    await shell.fiber.dispose()
+  })
+
+  test('keeps a presentation callback current across redundant navigation notifications', async () => {
+    const shell = new Context()
+    shell.reflect.provide('environmentRuntime', { environmentId: 'local' })
+    const nav = navigation({ kind: 'environments', selectedId: 'local' })
+    shell.reflect.provide('environmentNavigation', nav)
+    const service = createEnvironmentCompositionService(shell)
+    try {
+      await expect(service.withPresentation(nav.getSnapshot(), (_context, signal) => {
+        nav.open(nav.getSnapshot())
+        expect(signal.aborted).toBe(false)
+        return 'current'
+      })).resolves.toBe('current')
+    } finally {
+      await shell.fiber.dispose()
+    }
+  })
+
   test('cancels local presentation work through the caller signal', async () => {
     const shell = new Context()
     shell.reflect.provide('environmentRuntime', { environmentId: 'local' })

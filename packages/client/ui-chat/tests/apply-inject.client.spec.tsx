@@ -58,8 +58,8 @@ async function bench(options: { environmentId?: string } = {}) {
   }
   if (options.environmentId !== undefined) {
     runtime.ctx.provide('environmentRuntime', { environmentId: options.environmentId } as never)
-    runtime.ctx.provide('environmentNavigation', { presentation } as never)
   }
+  runtime.ctx.provide('environmentNavigation', { presentation } as never)
   runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   const layout = { closeRightbar: vi.fn(), openRightbar: vi.fn() }
   runtime.ctx.provide('layout', layout as never)
@@ -192,6 +192,13 @@ describe('Chat inject API', () => {
     expect(injected.fileMentions(owner)).toBe(mentions)
     expect(forClosing).toHaveBeenCalledWith(owner)
 
+    const node = injected.keyedHooks.chatNode('not-yet-loaded')
+    const process = injected.keyedHooks.chatNodeProcess('not-yet-loaded')
+    expect(node.getSnapshot()).toBeUndefined()
+    expect(process.getSnapshot()).toBeUndefined()
+    expect(injected.keyedHooks.chatNode('not-yet-loaded')).toBe(node)
+    expect(injected.keyedHooks.chatNodeProcess('not-yet-loaded')).toBe(process)
+
     expect(injected.chatScroll.read()).toBeNull()
     const position = { anchorKey: 'node-1', anchorTop: 4, scrollTop: 12 }
     injected.chatScroll.save(position)
@@ -204,6 +211,44 @@ describe('Chat inject API', () => {
     expect(b.session.readAttachment).toHaveBeenCalledWith(ATTACHMENT.attachmentId)
     expect(injected.loadImage.peek?.(ATTACHMENT)).toBe(loaded)
     await b.runtime.dispose()
+  })
+
+  it('falls back to bottom-follow for malformed persisted scroll anchors', async () => {
+    const b = await bench()
+    try {
+      const scroll = b.chatViewApi(ROOT).injected.chatScroll
+      for (const scrollAnchor of [
+        'broken json', 'null', '42', '{}',
+        '{"anchorKey":"row","anchorTop":"4","scrollTop":12}',
+        '{"anchorKey":"row","anchorTop":1e400,"scrollTop":12}',
+        '{"anchorKey":"row","anchorTop":4,"scrollTop":"12"}',
+        '{"anchorKey":"row","anchorTop":4,"scrollTop":1e400}',
+      ]) {
+        b.presentation.update({ environmentId: 'local', sessionId: ROOT }, { scrollAnchor })
+        expect(scroll.read()).toBeNull()
+      }
+      scroll.save(null)
+      expect(b.presentation.get({ environmentId: 'local', sessionId: ROOT }).scrollAnchor).toBe('')
+      expect(scroll.read()).toBeNull()
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
+  it('retains raw scroll geometry when an oversized row key cannot be persisted', async () => {
+    const b = await bench()
+    try {
+      const position = { anchorKey: 'row'.repeat(400), anchorTop: 14, scrollTop: 900 }
+      b.chatViewApi(ROOT).injected.chatScroll.save(position)
+      expect(b.chatViewApi(ROOT).injected.chatScroll.read()).toEqual(position)
+      expect(JSON.parse(b.presentation.get({ environmentId: 'local', sessionId: ROOT }).scrollAnchor!))
+        .toEqual({ anchorKey: '', anchorTop: 0, scrollTop: 900 })
+      await b.chatFeature.dispose()
+      await b.runtime.mount({ inject: [...injectChat], apply: applyChat })
+      expect(b.chatViewApi(ROOT).injected.chatScroll.read()).toEqual({ anchorKey: '', anchorTop: 0, scrollTop: 900 })
+    } finally {
+      await b.runtime.dispose()
+    }
   })
 
   it('restores compound Chat scroll after its Host presentation is retired and recreated', async () => {

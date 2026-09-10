@@ -15,6 +15,23 @@ import type {
   ActionsDecl, BakedActions, ObservableSnapshot, StoreHandle, StoreInstance, StoreSpec,
 } from './contract.ts'
 
+/** Move a browser-local persisted value once when its namespaced key is introduced.
+ * @param legacyKey - unscoped persisted key.
+ * @param nextKey - environment-scoped replacement key.
+ */
+export function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    if (localStorage.getItem(nextKey) !== null) return
+    const legacy = localStorage.getItem(legacyKey)
+    if (legacy === null) return
+    localStorage.setItem(nextKey, legacy)
+    localStorage.removeItem(legacyKey)
+  } catch {
+    // Persistence remains best-effort for denied or unavailable browser storage.
+  }
+}
+
 // Store contract types are ui-slots authority; re-exported beside the engine
 // so store consumers get one import path.
 export type {

@@ -582,7 +582,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
   it('runs the headless profile through its app-owned task positional', async () => {
     const apiKey = 'built-dsh-headless-key'
     const server = await startMockLlmServer({
-      sequence: ['reasoning_success'],
+      // The shipped profile requests both a session title and the agent response.
+      sequence: ['reasoning_success', 'reasoning_success'],
       apiKey,
       reasoningText: 'Inspecting the published entry.',
       successText: 'published headless profile reached the mock',
@@ -598,9 +599,19 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       expect(result.code, result.stderr).toBe(0)
       expect(result.stdout).toBe('published headless profile reached the mock')
       expect(result.stderr).toBe('dsh: reasoning:\nInspecting the published entry.')
-      expect(server.requests.length).toBeGreaterThan(0)
+      expect(server.requests).toHaveLength(2)
       expect(server.requests.every(request => request.path === '/chat/completions')).toBe(true)
-      expect(JSON.stringify(server.requests.map(request => request.body))).toContain('answer from the published entry')
+      expect(server.requests.every(request => request.behavior === 'reasoning_success')).toBe(true)
+      const bodies = server.requests.map(request => request.body as { tools?: unknown[]; messages: unknown; max_tokens?: number })
+      const titleRequests = bodies.filter(body => (body.tools?.length ?? 0) === 0)
+      const agentRequests = bodies.filter(body => (body.tools?.length ?? 0) > 0)
+      expect(titleRequests).toHaveLength(1)
+      expect(agentRequests).toHaveLength(1)
+      expect(titleRequests[0]).toMatchObject({ max_tokens: 64 })
+      expect(JSON.stringify(titleRequests[0]?.messages)).toContain('Create a concise title')
+      for (const body of bodies) {
+        expect(JSON.stringify(body.messages)).toContain('answer from the published entry')
+      }
     } finally {
       await server.close()
       rmSync(home, { recursive: true, force: true })

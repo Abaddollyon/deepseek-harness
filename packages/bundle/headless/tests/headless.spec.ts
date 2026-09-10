@@ -471,6 +471,53 @@ describe('headless runner', () => {
     expect(() => { apply(ctx, { task: 't' }) }).toThrow('must provide ctx.appExit')
   })
 
+  it.each([
+    { label: 'array', budget: [] },
+    { label: 'number', budget: 10 },
+    { label: 'zero steps', budget: { maxTurns: 0, maxInputTokens: 10, maxOutputTokens: 10, maxRetries: 0 } },
+    { label: 'negative retries', budget: { maxTurns: 1, maxInputTokens: 10, maxOutputTokens: 10, maxRetries: -1 } },
+  ])('rejects $label at configuration parsing before runner activation', async ({ budget }) => {
+    const parsed = await Config['~standard'].validate({ task: 'run', budget })
+    expect(parsed.issues).toBeDefined()
+  })
+
+  it.each([
+    { json: '{"task":"run","budget":null}', error: 'headless budget must be an object' },
+    {
+      json: '{"task":"run","budget":{"maxTurns":1,"maxInputTokens":10,"maxOutputTokens":10,"maxRetries":0,"maxRequests":2}}',
+      error: 'headless budget has unknown key "maxRequests"',
+    },
+  ])('rejects malformed budgets retained by configuration parsing: $error', async ({ json, error }) => {
+    const raw: unknown = JSON.parse(json)
+    const parsed = await Config['~standard'].validate(raw)
+    if (parsed.issues !== undefined) throw new Error('fixture must reach runner budget validation')
+    const ctx = new Context()
+    try {
+      expect(() => { apply(ctx, parsed.value as Config) }).toThrow(error)
+      expect(ctx.get('agents')).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each([
+    { label: 'non-object', budget: 10, message: 'must be an object' },
+    {
+      label: 'positive limits',
+      budget: { maxTurns: 0, maxInputTokens: 10, maxOutputTokens: 10, maxRetries: 0 },
+      message: 'budget.maxTurns must be a positive safe integer',
+    },
+    {
+      label: 'nonnegative retry limit',
+      budget: { maxTurns: 1, maxInputTokens: 10, maxOutputTokens: 10, maxRetries: -1 },
+      message: 'budget.maxRetries must be a nonnegative safe integer',
+    },
+  ])('validates $label in the runner entry before service lookup', ({ budget, message }) => {
+    const ctx = new Context()
+    ctx.provide('appExit', () => {})
+    expect(() => { apply(ctx, { task: 'run', budget: budget as never }) }).toThrow(message)
+  })
+
   it('validates config: the task is required', () => {
     expect(() => new Config({} as never)).toThrow()
     expect(new Config({ task: 'x' })).toEqual({ task: 'x' })

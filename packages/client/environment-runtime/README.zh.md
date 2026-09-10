@@ -63,9 +63,9 @@ Shell location 包含带 Host 身份的空白 `new-session` 会话。显式工�
 <details>
 <summary>维护者工作上下文——点击展开</summary>
 
-将 runtime-owned service 置于各 environment root 之下，并将 shell-owned renderer、layout、locale 与 navigation service 保持在这些 root 之上。Host 切换必须先退役旧 presentation，再公开替代 runtime 的 service。
+将 runtime-owned service 置于各 environment root 之下，并将 shell-owned renderer、layout、locale 与 navigation service 保持在这些 root 之上。Host 切换必须先退役旧 presentation，再公开替代 runtime 的 service。[生命周期覆盖率决策](../../../.agents/notes/implemented/testing/2026-09-10-environment-runtime-lifecycle-coverage.zh.md) 记录了私有所有权不变量与行为验证。本地进入要求导航订阅者完成后 projection 为 idle，以拒绝同步重定向到远端目标的请求。idle projection 已退役远端挂载；activation error 只会在失败挂载移除后发布；断开会保留已挂载的 presentation，同时由 callback fence 拒绝过期工作。
 
-`withPresentation` callback 应保持短生命周期，并把其收到的 signal 传入目标请求。调用方取消或 deadline、导航被替代以及 composition 销毁都会中止该 signal。忽略 signal 的操作可能在内部完成，但其结果无法通过 coordinator 的最终确认 fence。
+`withPresentation` callback 应保持短生命周期，并把其收到的 signal 传入目标请求。调用方取消或 deadline、导航被替代以及 composition 销毁都会中止该 signal。忽略 signal 的操作可能在内部完成，但其结果无法通过 coordinator 的最终确认 fence。retry 可以在不改变 navigation 或 Host generation 的情况下替换 presentation；完成还要求同一个 presentation 保持 ready。
 
 </details>
 

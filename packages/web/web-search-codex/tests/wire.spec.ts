@@ -184,6 +184,23 @@ describe('CodexSearchWire replay protocol', () => {
     value.wire.close()
   })
 
+  it('preserves the structured authentication marker from turn completion', async () => {
+    const value = standard()
+    try {
+      const signal = await initialized(value)
+      const pending = value.wire.runTurn('q', signal)
+      complete(value, 'login required')
+      await expect(pending).rejects.toMatchObject({
+        code: 'CODEX_LOGIN_REQUIRED',
+        message: 'Codex app-server reported login required',
+      })
+    } finally {
+      value.wire.close()
+      value.peer.close()
+      value.input.destroy()
+    }
+  })
+
   it.each(['failed', 'interrupted', 'incomplete'])('rejects terminal status %s', async (status) => {
     const value = standard()
     const signal = await initialized(value)
