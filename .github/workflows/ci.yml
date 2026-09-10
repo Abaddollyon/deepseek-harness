@@ -11,34 +11,23 @@ env:
   # into apps/cli/cordis.yml (AppCLIEntry disables the row when set).
   DSH_TELEMETRY_DISABLED: '1'
 
-# Cancel a superseded pull-request run on a new push so a fresh head does not
-# queue a second full 9-job run behind a stale one (paid enterprise runners
-# would otherwise stack with no auto-cancellation).
+# A new PR head supersedes the complete run for the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
 
-  # Public pull requests use standard hosted runners for the independent
-  # static, coverage, consumer, and Windows jobs. The private Proxmox pools
-  # remain available only to trusted repository-owned jobs below.
+  # PR merge refs carry contributor-controlled workflows. Private runner groups
+  # must exclude public repositories; these jobs use only standard hosted labels.
+  # Decision: .agents/notes/implemented/process/2026-09-10-public-hosted-ci.md.
   node-24:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # vm-backup pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     name: node 24 / static
     env:
-      DSH_GATE_CONCURRENCY: '8'
-      # Stop the aggregate at the first blocking gate failure so a red run
-      # does not keep burning enterprise runner time on the remaining gates.
+      DSH_GATE_CONCURRENCY: '2'
+      # Stop the aggregate at the first blocking gate failure.
       DSH_GATE_FAIL_FAST: '1'
     steps:
       # Runner cleanup owns tool caches and fixtures, including cancelled runs.
@@ -74,11 +63,9 @@ jobs:
           store_path=$(PNPM_CONFIG_STORE_DIR="$store_root" pnpm store path --silent)
           echo "path=$store_path" >> "$GITHUB_OUTPUT"
 
-      # Pull requests consume the default-branch cache but do not put cache
-      # compression and upload on the paid latency-critical path. Skipped
-      # under failover — see the coverage lane's identical rationale.
+      # Restore available caches without compression and upload on the required path.
       - uses: actions/cache/restore@v4
-        if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
+        if: runner.environment == 'github-hosted'
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
@@ -95,22 +82,13 @@ jobs:
 
   node-24-coverage:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # vm-backup pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     name: node 24 / coverage
     env:
-      # Partitioning replaces the instrumented share; this budget gives the
-      # exempt-heavy gate two workers on both hosted and failover runners.
-      DSH_COVERAGE_MAX_WORKERS: '6'
-      DSH_COVERAGE_PARTITIONS: '4'
-      DSH_GATE_CONCURRENCY: '3'
+      # Two instrumented processes run beside one exempt-heavy worker.
+      DSH_COVERAGE_MAX_WORKERS: '3'
+      DSH_COVERAGE_PARTITIONS: '2'
+      DSH_GATE_CONCURRENCY: '2'
       # A gate failure aborts the sibling gate instead of waiting out its
       # multi-minute instrumented run.
       DSH_GATE_FAIL_FAST: '1'
@@ -146,10 +124,9 @@ jobs:
           store_path=$(PNPM_CONFIG_STORE_DIR="$store_root" pnpm store path --silent)
           echo "path=$store_path" >> "$GITHUB_OUTPUT"
 
-      # Self-hosted runners reuse the shared persistent pnpm store.
       # Hosted runners restore the remote cache into their ephemeral store.
       - uses: actions/cache/restore@v4
-        if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
+        if: runner.environment == 'github-hosted'
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
@@ -220,28 +197,19 @@ jobs:
 
   node-24-consumers:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # vm-backup pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     name: node 24 / snapshots and artifacts
     env:
-      DSH_GATE_CONCURRENCY: '10'
+      DSH_GATE_CONCURRENCY: '2'
       DSH_NODE_COMPAT_SKIP_TYPECHECK: '1'
-      DSH_OXLINT_THREADS: '8'
-      DSH_PUBLINT_CONCURRENCY: '8'
-      DSH_WEB_SNAPSHOT_WORKERS: '6'
+      DSH_OXLINT_THREADS: '2'
+      DSH_PUBLINT_CONCURRENCY: '2'
+      DSH_WEB_SNAPSHOT_WORKERS: '2'
       # A failing gate aborts its running siblings: a failing build stops the
       # independent Node compatibility smoke, and a failing reader (e.g.
       # publint) stops the remaining artifact consumers.
       DSH_GATE_FAIL_FAST: '1'
-      # Failover halves snapshot concurrency for the shared 64-core VM.
-      DSH_SNAPSHOT_MAX_CONCURRENCY: ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]' && '12' || '32' }}
+      DSH_SNAPSHOT_MAX_CONCURRENCY: '2'
     steps:
       # Runner cleanup owns tool caches and fixtures, including cancelled runs.
       - name: Use runner-owned temporary storage
@@ -278,19 +246,17 @@ jobs:
       # Pull requests restore the pnpm store and Playwright caches without paying
       # compression and upload on the required path. No master job saves these
       # hosted cache keys, so each restore-keys fallback hits the matching archived
-      # entry until it evicts, after which the store is cold. Self-hosted runners
-      # reuse the shared persistent store instead of restoring the remote archive.
+      # entry until it evicts, after which the store is cold.
       - uses: actions/cache/restore@v4
-        if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
+        if: runner.environment == 'github-hosted'
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-
 
-      # Self-hosted runners retain their own browser cache between jobs.
       - uses: actions/cache/restore@v4
-        if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
+        if: runner.environment == 'github-hosted'
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
@@ -311,14 +277,8 @@ jobs:
           exit "$sandbox_status"
 
       - name: Install Playwright Chromium and hosted dependencies
-        if: vars.DSH_CI_FAILOVER_LINUX != 'selfhosted' || github.event.pull_request.user.login == 'dependabot[bot]'
+        if: runner.environment == 'github-hosted'
         run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install --with-deps chromium
-
-      # The persistent VM image owns Playwright's Linux system packages; do
-      # not mutate the shared host with apt on every failover run.
-      - name: Install Playwright Chromium on the failover VM
-        if: vars.DSH_CI_FAILOVER_LINUX == 'selfhosted' && github.event.pull_request.user.login != 'dependabot[bot]'
-        run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install chromium
 
       - name: Run compatibility, snapshot, and artifact gates
         run: pnpm run check:ci:consumers
@@ -326,14 +286,7 @@ jobs:
 
   node-compat:
     if: github.event_name == 'pull_request'
-    # This job admits only repository-owned PR code to the persistent shared VM.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
-          || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     name: ${{ matrix.name }}
     env:
       DSH_GATE_CONCURRENCY: ${{ matrix.gate_concurrency }}
@@ -365,36 +318,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # Shared hosts keep version installs and generated caches inside runner temp.
-      - name: Isolate compatibility caches
-        if: runner.environment == 'self-hosted'
-        run: |
-          echo "NODE_COMPILE_CACHE=$RUNNER_TEMP/node-compile-cache" >> "$GITHUB_ENV"
-          echo "npm_config_devdir=$RUNNER_TEMP/node-gyp" >> "$GITHUB_ENV"
-          echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
-
       - uses: pnpm/action-setup@v4
         with:
           dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/setup-node@v6
-        env:
-          # The runner overwrites RUNNER_* step env before starting JavaScript actions.
-          NODE_OPTIONS: ${{ runner.environment == 'self-hosted' && '--import=./scripts/ci-compatible-toolcache.mjs' || '' }}
         with:
           node-version: ${{ matrix.node }}
-          cache: ${{ runner.environment == 'github-hosted' && 'pnpm' || '' }}
+          cache: pnpm
           package-manager-cache: false
-
-      - name: Verify isolated Node installation
-        if: runner.environment == 'self-hosted'
-        run: |
-          node_path=$(node -p process.execPath)
-          echo "Node executable: $node_path"
-          case "$node_path" in
-            "$RUNNER_TEMP/node-compat-toolcache/"*) ;;
-            *) echo "::error::Node compatibility installation is outside runner temp"; exit 1 ;;
-          esac
 
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
@@ -445,22 +377,13 @@ jobs:
   # monolithic windows-native job is split into smaller jobs so one slow
   # coverage gate does not hold up build/static results, while the total
   # per-job process count stays lower. Observational checks are non-blocking.
-  # Dependabot PRs are excluded from the self-hosted pool and stay queued for
-  # the hosted runner.
   windows-build:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # Windows pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'windows-latest' }}
+    runs-on: windows-latest
     name: windows node 24 / build
     timeout-minutes: 60
     env:
+      DSH_GATE_CONCURRENCY: '2'
       # A failing build or site aborts the sibling gate on the same runner.
       DSH_GATE_FAIL_FAST: '1'
     steps:
@@ -497,22 +420,14 @@ jobs:
 
   windows-coverage:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # Windows pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'windows-latest' }}
+    runs-on: windows-latest
     name: windows node 24 / coverage
     timeout-minutes: 120
     env:
-      DSH_COVERAGE_MAX_WORKERS: '6'
-      DSH_COVERAGE_PARTITIONS: '4'
+      DSH_COVERAGE_MAX_WORKERS: '3'
+      DSH_COVERAGE_PARTITIONS: '2'
       DSH_COVERAGE_TEST_TIMEOUT_MS: '90000'
-      DSH_GATE_CONCURRENCY: '3'
+      DSH_GATE_CONCURRENCY: '2'
       # A gate failure aborts the sibling gate instead of waiting out its
       # multi-minute instrumented run.
       DSH_GATE_FAIL_FAST: '1'
@@ -577,15 +492,7 @@ jobs:
 
   windows-native-tests:
     if: github.event_name == 'pull_request'
-    # Public fork pull requests use standard hosted runners. The private
-    # Windows pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'windows-latest' }}
+    runs-on: windows-latest
     name: windows node 24 / native tests
     timeout-minutes: 60
     steps:
@@ -630,19 +537,12 @@ jobs:
   windows-observational:
     if: github.event_name == 'pull_request'
     continue-on-error: true
-    # Public fork pull requests use standard hosted runners. The private
-    # Windows pool is reserved for trusted repository-owned jobs.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.head.repo.fork == false
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'windows-latest' }}
+    runs-on: windows-latest
     name: windows node 24 / observational
     timeout-minutes: 60
     env:
-      DSH_PUBLINT_CONCURRENCY: '8'
+      DSH_GATE_CONCURRENCY: '2'
+      DSH_PUBLINT_CONCURRENCY: '2'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -687,17 +587,7 @@ jobs:
   # 'cancelled' and 'skipped'.
   all-checks-passed:
     name: all checks passed
-    # This bookkeeping-only verdict must not depend on custom-pool
-    # provisioning — and under Linux failover it follows the same selector as
-    # the worker jobs it aggregates, so a standard-hosted outage cannot strand
-    # the branch-protection verdict either. It retargets with the Linux switch
-    # (DSH_CI_FAILOVER_LINUX), not the Windows one, because it aggregates the
-    # required Linux workers and runs on the vm-backup pool.
-    runs-on: >-
-      ${{ vars.DSH_CI_FAILOVER_LINUX == 'selfhosted'
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
-          || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: [node-24, node-24-coverage, node-24-bench, node-24-consumers, node-compat, python-sdk, python-runtime, windows-build, windows-native-tests]
     if: always() && github.event_name == 'pull_request'
     steps:

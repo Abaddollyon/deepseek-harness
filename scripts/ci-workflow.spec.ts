@@ -104,7 +104,94 @@ describe('CI workflow', () => {
     }
   })
 
-  it('keeps split native Windows PR jobs with failover, plus a master-only standby', () => {
+  it('admits only standard hosted labels for every PR job and compatibility matrix entry', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    if (!isRecord(workflow.jobs)) throw new TypeError('CI must define jobs')
+    const hosted = new Set(['ubuntu-latest', 'ubuntu-24.04', 'windows-latest'])
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (!isRecord(job)) throw new TypeError(`${name} must define a job`)
+      if (job.uses !== undefined) {
+        expect(name).toBe('python-runtime')
+        expect(job.uses).toBe('./.github/workflows/build-exe-for-python-sdk.yml')
+        continue
+      }
+      if (job['runs-on'] === '${{ matrix.runner }}') {
+        if (!isRecord(job.strategy) || !isRecord(job.strategy.matrix) || !Array.isArray(job.strategy.matrix.include)) {
+          throw new TypeError(`${name} must define a runner matrix`)
+        }
+        expect(job.strategy.matrix.include.length).toBeGreaterThan(0)
+        for (const entry of job.strategy.matrix.include) {
+          if (!isRecord(entry)) throw new TypeError('Runner matrix entries must be records')
+          expect(hosted.has(String(entry.runner)), `${name}: ${String(entry.runner)}`).toBe(true)
+        }
+      } else {
+        expect(hosted.has(String(job['runs-on'])), `${name}: ${String(job['runs-on'])}`).toBe(true)
+      }
+    }
+    expect(JSON.stringify(workflow)).not.toContain('DSH_CI_FAILOVER')
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    expect(workflowJob(workflow, 'all-checks-passed')).toMatchObject({
+      'runs-on': 'ubuntu-latest',
+      if: "always() && github.event_name == 'pull_request'",
+      needs: ['node-24', 'node-24-coverage', 'node-24-bench', 'node-24-consumers', 'node-compat', 'python-sdk', 'python-runtime', 'windows-build', 'windows-native-tests'],
+    })
+  })
+
+  it('provisions hosted caches and browser dependencies independently of failover variables', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    for (const name of ['node-24', 'node-24-coverage', 'node-24-consumers']) {
+      const job = workflowJob(workflow, name)
+      if (!Array.isArray(job.steps)) throw new TypeError(`${name} must define steps`)
+      const caches = job.steps.filter(isRecord).filter(step => step.uses === 'actions/cache/restore@v4')
+      expect(caches).toHaveLength(name === 'node-24-consumers' ? 2 : 1)
+      const browser = job.steps.filter(isRecord).filter(step => typeof step.run === 'string' && step.run.includes('playwright install'))
+      expect(browser).toHaveLength(name === 'node-24-consumers' ? 1 : 0)
+      if (name === 'node-24-consumers') expect(browser[0]?.run).toContain('install --with-deps chromium')
+      for (const step of [...caches, ...browser]) {
+        expect(step.if).toBe("runner.environment == 'github-hosted'")
+        for (const environment of ['github-hosted', 'self-hosted']) {
+          for (const failover of ['', 'selfhosted']) {
+            const context = {
+              runner: { environment },
+              vars: { DSH_CI_FAILOVER_LINUX: failover },
+              github: { event: { pull_request: { user: { login: 'human' } } } },
+            }
+            expect(runInNewContext(String(step.if), context, { timeout: 100 })).toBe(environment === 'github-hosted')
+          }
+        }
+      }
+    }
+  })
+
+  it('runs private standbys only for opted-in private master pushes', () => {
+    const workflow = loadWorkflow('.github/workflows/ci-master.yml')
+    const cases = [
+      { event: 'push', ref: 'refs/heads/master', private: true, owner: 'owner/repo', allowed: true },
+      { event: 'push', ref: 'refs/heads/master', private: true, owner: '', allowed: false },
+      { event: 'push', ref: 'refs/heads/master', private: true, owner: 'other/repo', allowed: false },
+      { event: 'push', ref: 'refs/heads/master', private: false, owner: 'owner/repo', allowed: false },
+      { event: 'pull_request', ref: 'refs/heads/master', private: true, owner: 'owner/repo', allowed: false },
+      { event: 'workflow_dispatch', ref: 'refs/heads/master', private: true, owner: 'owner/repo', allowed: false },
+      { event: 'push', ref: 'refs/heads/feature', private: true, owner: 'owner/repo', allowed: false },
+    ]
+    for (const name of ['serial-linux-selfhosted', 'serial-windows']) {
+      const job = workflowJob(workflow, name)
+      if (typeof job.if !== 'string') throw new TypeError(`${name} must define an opt-in guard`)
+      for (const scenario of cases) {
+        const context = {
+          github: { repository: 'owner/repo', event_name: scenario.event, ref: scenario.ref, event: { repository: { private: scenario.private } } },
+          vars: { DSH_CI_PRIVATE_RUNNER_REPOSITORY: scenario.owner },
+        }
+        expect(runInNewContext(job.if, context, { timeout: 100 }), `${name}: ${JSON.stringify(scenario)}`).toBe(scenario.allowed)
+      }
+      if (!Array.isArray(job.steps)) throw new TypeError(`${name} must define steps`)
+      expect(job.steps.filter(isRecord).map(step => step.run)).toContain(name === 'serial-windows'
+        ? 'pnpm run check:ci:windows-complete'
+        : 'pnpm run check:ci:linux-primary')
+    }
+  })
+
+  it('keeps public PR jobs hosted and master standbys explicitly opted in', () => {
     const workflow = loadWorkflow('.github/workflows/ci.yml')
     const masterWorkflow = loadWorkflow('.github/workflows/ci-master.yml')
     if (!isRecord(workflow.jobs)
@@ -140,11 +227,7 @@ describe('CI workflow', () => {
     // The split native jobs all resolve their pool through the Windows switch.
     for (const [jobName, job] of [['windows-build', windowsBuild], ['windows-coverage', windowsCoverage], ['windows-native-tests', windowsNativeTests], ['windows-observational', windowsObservational]] as const) {
       expect(typeof job['runs-on']).toBe('string')
-      expect(job['runs-on'], `${jobName} runs-on must use the Windows failover switch`).toContain('DSH_CI_FAILOVER_WINDOWS')
-      expect(job['runs-on'], `${jobName} runs-on must not use the Linux failover switch`).not.toContain('DSH_CI_FAILOVER_LINUX')
-      expect(job['runs-on']).toContain('self-hosted')
-      expect(job['runs-on']).toContain('dsh-win-ci')
-      expect(job['runs-on']).toContain('windows-latest')
+      expect(job['runs-on'], `${jobName} must use standard hosted Windows`).toBe('windows-latest')
       expect(job.if).toBe("github.event_name == 'pull_request'")
     }
 
@@ -185,9 +268,8 @@ describe('CI workflow', () => {
       expect(install!.run).not.toContain('$cloneFlag')
     }
 
-    // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '4' })
+    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '2', DSH_COVERAGE_MAX_WORKERS: '3', DSH_GATE_CONCURRENCY: '2' })
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -219,7 +301,9 @@ describe('CI workflow', () => {
     expect(windowsObservational['continue-on-error']).toBe(true)
 
     // serial-windows: master-only standby, self-hosted, non-blocking, lives in ci-master.
-    expect(serialWindows.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+    expect(serialWindows.if).toContain("github.event_name == 'push'")
+    expect(serialWindows.if).toContain('github.event.repository.private == true')
+    expect(serialWindows.if).toContain('vars.DSH_CI_PRIVATE_RUNNER_REPOSITORY == github.repository')
     expect(serialWindows['runs-on']).toEqual(['self-hosted', 'dsh-win-ci', 'windows'])
     expect(serialWindows.name).toBe('serial / windows (self-hosted standby)')
     // Its store must share the ReFS workspace volume for clone; the install
@@ -275,18 +359,10 @@ describe('CI workflow', () => {
     expect(aggregate.needs).not.toContain('windows-observational')
     expect(aggregate.needs).not.toContain('serial-windows')
 
-    // Linux failover is a separate switch: the three enterprise Linux workers
-    // and the verdict job resolve their pool through DSH_CI_FAILOVER_LINUX,
-    // never the Windows switch.
-    for (const [jobName, job] of [['node-24', node24], ['node-24-coverage', node24Coverage], ['node-24-consumers', node24Consumers]] as const) {
-      expect(typeof job['runs-on']).toBe('string')
-      expect(job['runs-on'], `${jobName} runs-on must use the Linux failover switch`).toContain('DSH_CI_FAILOVER_LINUX')
-      expect(job['runs-on'], `${jobName} runs-on must not use the Windows failover switch`).not.toContain('DSH_CI_FAILOVER_WINDOWS')
-      expect(job['runs-on']).toContain('vm-backup')
+    for (const [jobName, job] of [['node-24', node24], ['node-24-coverage', node24Coverage], ['node-24-consumers', node24Consumers], ['all-checks-passed', aggregate]] as const) {
+      expect(job['runs-on'], `${jobName} must remain on a standard hosted runner`).toBe('ubuntu-latest')
+      expect(JSON.stringify(job)).not.toContain('DSH_CI_FAILOVER')
     }
-    expect(aggregate['runs-on']).toContain('DSH_CI_FAILOVER_LINUX')
-    expect(aggregate['runs-on']).not.toContain('DSH_CI_FAILOVER_WINDOWS')
-    expect(aggregate['runs-on']).toContain('vm-backup')
 
     // The run-gates aggregate lanes stop at the first blocking gate failure so
     // a red aggregate does not keep burning runner time on the remaining
@@ -295,6 +371,10 @@ describe('CI workflow', () => {
     for (const [jobName, job] of [['node-24', node24], ['node-24-coverage', node24Coverage], ['node-24-consumers', node24Consumers], ['node-compat', nodeCompat]] as const) {
       expect(job.env, `${jobName} must enable fail-fast`).toMatchObject({ DSH_GATE_FAIL_FAST: '1' })
     }
+
+    expect(node24.env).toMatchObject({ DSH_GATE_CONCURRENCY: '2' })
+    expect(node24Coverage.env).toMatchObject({ DSH_COVERAGE_MAX_WORKERS: '3', DSH_COVERAGE_PARTITIONS: '2', DSH_GATE_CONCURRENCY: '2' })
+    expect(node24Consumers.env).toMatchObject({ DSH_GATE_CONCURRENCY: '2', DSH_OXLINT_THREADS: '2', DSH_PUBLINT_CONCURRENCY: '2', DSH_WEB_SNAPSHOT_WORKERS: '2', DSH_SNAPSHOT_MAX_CONCURRENCY: '2' })
 
     // The native Windows lanes with run-gates aggregates fail fast for the
     // same reason: a failing gate aborts the sibling gate instead of waiting
@@ -486,7 +566,9 @@ describe('CI workflow', () => {
       if (!isRecord(job)) throw new TypeError(`${name} must be defined`)
       expect(job.concurrency).toBeUndefined()
       // Both stay master-push-only; that is what makes the push carve-out safe.
-      expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+      expect(job.if).toContain("github.event_name == 'push'")
+      expect(job.if).toContain('github.event.repository.private == true')
+      expect(job.if).toContain('vars.DSH_CI_PRIVATE_RUNNER_REPOSITORY == github.repository')
     }
 
     // Pin the post-merge runtime, Wine, and standby inventory.
