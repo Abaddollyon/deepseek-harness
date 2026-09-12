@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package provides model selection in the Web GUI: the `/model` popup command and the composer's model seat, both over one per-session directory of provider-grouped models. Choosing a model submits the complete selection — provider, model, and reasoning effort — which the Host snapshots at the next prompt-assembly boundary, so the following request uses it while a running step keeps its assembled selection. The composer seat shows a two-level Model/Effort menu: models stay provider-grouped, and the selected exact model supplies its adapter-owned effort names and default. When the Host reports that no adapter serves the session's route, the composer input goes inert until a route becomes available.
+The Web GUI lets users switch the model and reasoning effort for an existing session through either the `/model` popup or the composer's model control. Both surfaces present the same provider-grouped choices, and the selected model determines the available effort names and default. A complete selection applies to the next request; a running step keeps the model and effort it started with. If no adapter can serve the session's route, the composer remains disabled until routing becomes available.
 
 ## Table of Contents
 
@@ -26,6 +26,8 @@ This package provides model selection in the Web GUI: the `/model` popup command
 ## Use this package
 
 Mount this plugin alongside `ui-conversation` and the commands package; the composer then shows the model seat next to the pending indicator, and `/model` opens the same directory as a popup. Both surfaces show the host-reported current selection when the exact provider/model pair remains in the advertised groups; a missing catalog row leaves the routable selection intact while the trigger prompts `Select model`. Search matches provider and model names and ids. Opening either picker revalidates a stale shared catalog, while the composer's quiet **Refresh models** action discovers each enabled pi-ai route independently; partial failures keep the last-good rows available.
+
+The composer menu focuses its Model row after the portaled card becomes visible. Opening the model pane focuses search; opening the effort pane focuses its first choice. Repositioning and catalog refreshes preserve the user's current focus.
 
 ### Model and effort
 

@@ -4,11 +4,27 @@ import {
   createAssistantMessage,
   createToolResultMessage,
   createUserMessage,
+  createSystemMessage,
+  boundContextSummary,
   freezeMessage,
   MessageId,
+  LlmAttemptId,
 } from '@deepseek-ai/dsh-llm'
 
 describe('message construction', () => {
+  it('brands attempt ids and bounds context summaries at the durable limit', () => {
+    expect(LlmAttemptId('attempt-1')).toBe('attempt-1')
+    expect(boundContextSummary('short')).toBe('short')
+    const long = 'x'.repeat(121)
+    expect(boundContextSummary(long)).toBe(`${'x'.repeat(119)}…`)
+  })
+
+  it('creates empty and non-empty system messages with plugin provenance', () => {
+    expect(createSystemMessage('', 'prompt').content).toEqual([])
+    expect(createSystemMessage('system text', 'prompt')).toMatchObject({
+      role: 'system', content: [{ type: 'text', text: 'system text' }], source: { kind: 'plugin', plugin: 'prompt' },
+    })
+  })
   it('assigns identity immediately and returns a detached deep-frozen message', () => {
     const input = {
       content: [{ type: 'text' as const, text: 'original' }],

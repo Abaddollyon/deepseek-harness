@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-05-passive-interactions-and-client-surfaces.md
-2026-09-05-passive-interactions-and-client-surfaces.md: bcdc9c46bba75d7cdaa41e64349317d14787defc
-2026-09-05-passive-interactions-and-client-surfaces.zh.md: 94ae707b1395e1f24da1255f706812befd2d2736
+2026-09-05-passive-interactions-and-client-surfaces.md: d1c353eb16950647eef1e92f9f99c6a14ed36e8a
+2026-09-05-passive-interactions-and-client-surfaces.zh.md: b35e13d76a9676acb2ffbcabfa4cec9fbccf054b

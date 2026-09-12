@@ -9,17 +9,30 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This browser UI plugin renders the Environments overview seat, labeled Workspaces and Activity controls above the existing browsing region, Activity content in the existing browser body, and the bottom server action. It consumes the persistent `ctx.environmentNavigation` service from `environment-runtime`; disposing this plugin removes only its Slot registrations and subscriptions, so the selected location and compound presentation state survive Host switches and UI remounts.
-
-The overview renders inside `active.content`, preserving the shared sidebar and renderer. Product packages fill `environment.overview.content` and `sidebar.activity` with environment inventory and activity rows. Sidebar mode is stored independently for each Host. Expanded controls show both names; the rail exposes separate labeled icons and an explicit selected state. Activity hides workspace-only controls while the shared search query applies to its own rows.
-
-See [Web Client architecture](../../../docs/subsystems/web-client.md) for environment runtime projection and [Web Client Slots](../../../docs/subsystems/slots.md) for registration rules.
+Users can open the Environments overview from the bottom server action and switch between Workspaces and Activity in the existing sidebar. Each Host retains its own sidebar mode. Expanded controls show both names; the rail provides labeled icons and an explicit selected state. Activity hides workspace-only controls and applies the shared search query to its rows. Selected locations and presentation state survive Host switches and UI remounts. Product plugins supply the environment inventory and Activity rows.
 
 ## Table of Contents
 
+- [Understand the implementation](#understand-the-implementation)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
 - [Dev Note](#dev-note)
+
+-----
+
+<a id="understand-the-implementation"></a>
+## Understand the implementation
+
+<details>
+<summary>Implementation internals — click to expand</summary>
+
+The plugin consumes the persistent `ctx.environmentNavigation` service from `environment-runtime`. Disposal removes only its Slot registrations and subscriptions, preserving the selected location and compound presentation state. Workspaces and Activity controls sit above the existing browsing region, and Activity uses the existing browser body.
+
+The overview renders inside `active.content`, preserving the shared sidebar and renderer. Product packages fill `environment.overview.content` and `sidebar.activity` with environment inventory and activity rows.
+
+See [Web Client architecture](../../../docs/subsystems/web-client.md) for environment runtime projection and [Web Client Slots](../../../docs/subsystems/slots.md) for registration rules.
+
+</details>
 
 -----
 

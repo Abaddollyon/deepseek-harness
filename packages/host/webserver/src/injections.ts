@@ -39,10 +39,6 @@ function escapeHtmlAttribute(value: string): string {
     .replaceAll('>', '&gt;')
 }
 
-function assertNever(row: never): never {
-  throw new Error(`webserver: unknown index injection row ${JSON.stringify(row)}`)
-}
-
 /** Render one row to markup with its placement. */
 function renderRow(row: IndexInjection): { placement: IndexInjectionPlacement; markup: string } {
   switch (row.kind) {
@@ -65,8 +61,6 @@ function renderRow(row: IndexInjection): { placement: IndexInjectionPlacement; m
       return { placement: 'head', markup: `<style>${row.text}</style>` }
     case 'html':
       return { placement: row.placement, markup: row.html }
-    default:
-      return assertNever(row)
   }
 }
 
@@ -109,11 +103,9 @@ export function renderIndexInjections(html: string, rows: readonly IndexInjectio
     // of every document script.
     out = open === null ? `${head}${out}` : splice(out, open.index + open[0].length, head)
   }
-  if (body !== '') {
-    const open = /<body(?:\s[^>]*)?>/i.exec(out)
-    // Body-less fragments receive the rows at the end, where the HTML parser
-    // has already synthesized a body.
-    out = open === null ? `${out}${body}` : splice(out, open.index + open[0].length, body)
-  }
+  const open = /<body(?:\s[^>]*)?>/i.exec(out)
+  // Body-less fragments receive the rows at the end, where the HTML parser
+  // has already synthesized a body.
+  out = open === null ? `${out}${body}` : splice(out, open.index + open[0].length, body)
   return out
 }

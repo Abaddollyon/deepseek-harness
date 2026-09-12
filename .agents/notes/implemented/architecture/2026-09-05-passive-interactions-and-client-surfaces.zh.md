@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-交互层以 `ctx.pendingInteractions` 提供进程本地观察 registry。Approval 与 question 服务只在实际分派 answerer 的区间调用 `begin()` 及其幂等结束能力；snapshot 与排队 delta 公开不透明 identity、kind、可选 agent/session identity、epoch、revision 与时间戳，不公开请求内容或回答方法。Observer 失败、延迟、dispose 与迟到订阅都不能影响 [approval seam](../feature/2026-07-06-approval-seam.zh.md) 与 [Web permission and approval](../feature/2026-07-23-web-permission-and-approval.zh.md) 描述的权威 waterfall。
+交互层以 `ctx.pendingInteractions` 提供进程本地观察 registry。Approval 与 question 服务只在实际分派 answerer 的区间调用 `begin()` 及其幂等结束能力；snapshot 与排队 delta 公开不透明 identity、kind、可选 agent/session identity、epoch、revision 与时间戳，不公开请求内容或回答方法。Observer 失败、延迟、dispose 与迟到订阅都不能影响 [approval seam](../feature/2026-07-06-approval-seam.zh.md) 与 [Web permission and approval 历史决策](../../archived/feature/2026-07-23-web-permission-and-approval.md) 描述的权威 waterfall。
 
 分发闭包遵循同一所有权边界。交付 approval 或 question 服务的 assembly 也交付 `dsh-pending-interactions`；Python SDK runtime 直接声明该 registry，而不依赖自动安装 peer。通过生成 client map 暴露的公共 discriminator property 带有显式 literal type，使 reflection 与 declaration 生成看到的合同和 TypeScript 消费方一致。
 

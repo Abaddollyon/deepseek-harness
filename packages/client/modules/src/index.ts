@@ -33,6 +33,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
+import type { DshClientManifest } from '@deepseek-ai/dsh-package-manifest'
 import { optionalStringArray, stripClientSuffix } from './client/manifest.ts'
 import type { WebBootBatch, WebBootBatchPhase, WebBootEntry, WebBootGraph } from './client/manifest.ts'
 
@@ -48,24 +49,6 @@ declare module '@deepseek-ai/cordis' {
     /** Registered dependency-closed browser entry surfaces. */
     clientSurfaces: ClientSurfaceRegistry
   }
-}
-
-/** package.json `dsh.client` declaration fields, validated one by one after reading the file. */
-interface DshClientDeclaration {
-  inject?: string[]
-  platform: string
-  /** Boot phase-one registration barrier; absent rows still ride the shared application batch. */
-  immediately?: boolean
-  /**
-   * Exact module-table requests beyond the implicit client baseline. Any
-   * specifier is valid, including subpaths such as `<pkg>/client`; each
-   * importing package declares its own exceptional requests. A type-only
-   * import is not a request because the transform erases it before resolution.
-   * Absent means the package uses only the baseline externals.
-   */
-  external?: string[]
-  /** Whether the package participates in the ordinary root graph. */
-  defaultRoot?: boolean
 }
 
 /** The declared fields a graph row carries, normalized (absent array declarations become empty). */
@@ -204,7 +187,7 @@ function exactPackageSpecifier(specifier: string): string | undefined {
 }
 
 /** Narrow an unknown parsed JSON value to the `dsh.client` declaration, throwing on malformed fields. */
-function parseDshClient(pkgName: string, value: unknown): DshClientDeclaration | undefined {
+function parseDshClient(pkgName: string, value: unknown): DshClientManifest | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'object' || value === null) {
     throw new Error(`client-modules: ${pkgName} has a non-object dsh.client declaration`)
@@ -662,7 +645,7 @@ function validateSurfaceDefinition(definition: ClientSurfaceDefinition): ClientS
  * boot activation audit reports it).
  */
 export class ClientModuleRegistry extends Service {
-  static inject = ['webServer', 'loader']
+  static inject = ['loader']
 
   private readonly table = new Map<string, WebPluginRecord>()
   private readonly sources = new Map<string, ClientPackageSource>()
@@ -684,7 +667,7 @@ export class ClientModuleRegistry extends Service {
 
   /**
    * Build the service: subscribe, seed, and run the activation flush.
-   * @param ctx - plugin context carrying webServer and loader.
+   * @param ctx - plugin context carrying Loader and an optional Web carrier.
    */
   constructor(ctx: Context) {
     super(ctx, 'clientModules')
@@ -715,10 +698,14 @@ export class ClientModuleRegistry extends Service {
       throw new ClientPackageCompositionError(failures)
     }
 
-    ctx.effect(
-      () => ctx.webServer.register({ kind: 'prefix', path: '/plugins', handler: this.serveBundle }),
-      'client-modules: bundle route',
-    )
+    const registerWebCarrier = (webCtx: Context): void => {
+      webCtx.effect(
+        () => webCtx.webServer.register({ kind: 'prefix', path: '/plugins', handler: this.serveBundle }),
+        'client-modules: bundle route',
+      )
+    }
+    if (ctx.get('webServer') === undefined) ctx.inject(['webServer'], registerWebCarrier)
+    else registerWebCarrier(ctx)
     ctx.on('webserver/index-inject', (table, context) => {
       const graph = context?.variant === undefined ? this.composed : this.surfaceRegistry.graph(context.variant)
       table.push(...bootInjections(graph))
@@ -740,6 +727,22 @@ export class ClientModuleRegistry extends Service {
    */
   clientPath(id: string): string | undefined {
     return this.table.get(id)?.meta.clientPath
+  }
+
+  /**
+   * Serve an advertised revisioned bundle or source map without a Web server.
+   * Unknown URLs return 404, unsupported methods return 405, and `HEAD`
+   * returns the same immutable headers without a body.
+   * @param request - shell-carrier request for a `/plugins` resource.
+   * @returns the exact response also exposed by the optional Web route.
+   */
+  fetchBundle(request: Request): Response {
+    const resource = this.bundleResource(request.method, request.url)
+    const body = resource.body === undefined ? null : Uint8Array.from(resource.body)
+    return new Response(body, {
+      status: resource.status,
+      ...(resource.headers === undefined ? {} : { headers: resource.headers }),
+    })
   }
 
   /**
@@ -1189,28 +1192,32 @@ export class ClientModuleRegistry extends Service {
     this.notifyGraphChanged()
   }
 
-  private readonly serveBundle = (req: IncomingMessage, res: ServerResponse): void => {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405)
-      res.end()
-      return
-    }
-    /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server requests. */
-    const requestUrl = new URL(req.url ?? '/', 'http://x')
+  private bundleResource(method: string | undefined, url: string): {
+    status: number
+    headers?: Record<string, string>
+    body?: Buffer
+  } {
+    if (method !== 'GET' && method !== 'HEAD') return { status: 405 }
+    const requestUrl = new URL(url, 'http://x')
     const resourceUrl = `${requestUrl.pathname}${requestUrl.search}`
     const response = this.responses.get(resourceUrl) ?? this.previousBatchResponses.get(resourceUrl)
     if (response !== undefined) {
-      res.writeHead(200, {
-        'content-type': response.contentType,
-        'cache-control': IMMUTABLE_CACHE,
-      })
-      res.end(req.method === 'HEAD' ? undefined : response.body)
-      return
+      return {
+        status: 200,
+        headers: { 'content-type': response.contentType, 'cache-control': IMMUTABLE_CACHE },
+        ...(method === 'HEAD' ? {} : { body: response.body }),
+      }
     }
     // Anything else under /plugins (including unadvertised combinations and
     // /plugins/events when the HMR row is absent) is an unknown resource.
-    res.writeHead(404)
-    res.end()
+    return { status: 404 }
+  }
+
+  private readonly serveBundle = (req: IncomingMessage, res: ServerResponse): void => {
+    /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server requests. */
+    const response = this.bundleResource(req.method, req.url ?? '/')
+    res.writeHead(response.status, response.headers)
+    res.end(response.body)
   }
 }
 

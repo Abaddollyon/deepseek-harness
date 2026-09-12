@@ -58,6 +58,23 @@ function fireDrag(row: HTMLElement, kind: 'dragOver' | 'drop', clientY: number):
 }
 
 describe('workspace browser rows', () => {
+  it('reveals an unchanged memoized row after search selects it', () => {
+    const props = {
+      node: { id: sid('found'), title: 'Found', blank: false, running: false,
+        runningSubagentCount: 0, completed: false, updatedAt: 0 },
+      currentId: sid('found'), now: 0, onOpen: vi.fn(), onRename: vi.fn(),
+      onFork: vi.fn(), onArchive: vi.fn(), t,
+    }
+    const view = render(<SessionNodeItem {...props} />)
+    const row = screen.getByRole('treeitem')
+    const scroll = vi.fn()
+    Object.defineProperty(row, 'scrollIntoView', { configurable: true, value: scroll })
+    const onReveal = vi.fn()
+    view.rerender(<SessionNodeItem {...props} onReveal={onReveal} />)
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(onReveal).toHaveBeenCalledOnce()
+  })
+
   it('fails closed for forged pending interaction statuses', () => {
     const node = {
       id: sid('forged'), title: 'Forged', blank: false, running: false,
@@ -568,6 +585,20 @@ describe('workspace browser rows', () => {
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
+
+  it('closes the pin menu without navigating when its optional pin action is absent', () => {
+    const onOpen = vi.fn()
+    render(<SessionNodeItem node={{
+      id: sid('read-only-pins'), title: 'Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0,
+    }} currentId={undefined} now={0} onOpen={onOpen}
+    onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: '会话“Session”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '置顶会话' }))
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(screen.getByRole('treeitem').getAttribute('aria-selected')).toBe('false')
+  })
 
   it('offers Pin on an ordinary row and Unpin on a user-pinned row, dispatching the toggle', () => {
     const onTogglePinned = vi.fn()

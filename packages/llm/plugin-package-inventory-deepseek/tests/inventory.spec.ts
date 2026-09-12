@@ -158,15 +158,84 @@ describe('DeepSeek plugin package inventory', () => {
     ])
   })
 
+  it.each(['v1', 'v2'] as const)('attributes a source-only bare entry through the %s Loader resolver', async (version) => {
+    const { ctx, root } = await harness()
+    const plugin = await packagePlugin(root, 'source-only', { name: 'source-only', version: '4.0.0' })
+    const url = new URL(plugin, ctx.baseUrl).href
+    const internal = ctx.loader.internal!
+    const importSource = () => internal.import(url, ctx.baseUrl!, {})
+    const resolveSource = (specifier: string, parentUrl: string) => {
+      expect(specifier).toBe('source-only')
+      expect(parentUrl).toBe(ctx.baseUrl)
+      return { format: 'module', url }
+    }
+    ctx.loader.internal = {
+      version,
+      import: importSource,
+      resolveSync: version === 'v1'
+        ? resolveSource
+        : (parentUrl: string, request: { specifier: string }) => resolveSource(request.specifier, parentUrl),
+    } as unknown as NonNullable<typeof ctx.loader.internal>
+    await ctx.loader.create({ name: 'source-only' })
+
+    const prepared = await ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL })
+    expect(prepared.fields.dsh_plugin_packages?.packages).toEqual([{ name: 'source-only', version: '4.0.0' }])
+  })
+
+  it.each(['remote', 'loose-file', 'detached'] as const)('refuses active bare-package attribution without a manifest (%s)', async (mode) => {
+    const { ctx, root } = await harness()
+    const url = mode === 'remote' ? 'https://plugins.example/remote.mjs' : pathToFileURL(join(root, 'loose.mjs')).href
+    ctx.loader.internal = {
+      version: 'v2',
+      import: async () => ({ default: () => {} }),
+      resolveSync: () => ({ format: 'module', url }),
+    } as unknown as NonNullable<typeof ctx.loader.internal>
+    await ctx.loader.create({ name: 'unattributed-package' })
+    if (mode === 'detached') ctx.loader.internal = undefined
+    await expect(ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL }))
+      .rejects.toThrow(/cannot resolve active package/)
+  })
+
   it('fails when a Loader-resolved bare entry has no package manifest', async () => {
     const { ctx } = await harness()
     ctx.loader.internal = {
       version: 'v2',
       import: async () => ({ default: () => {} }),
     } as unknown as NonNullable<typeof ctx.loader.internal>
+    ctx.loader.internal.resolveSync = () => {
+      throw Object.assign(new Error('missing package'), { code: 'ERR_MODULE_NOT_FOUND' })
+    }
     await ctx.loader.create({ name: 'missing-package' })
     await expect(ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL }))
       .rejects.toThrow(/cannot resolve active package/)
+  })
+
+  it('rejects malformed identities reached through Loader source resolution', async () => {
+    const { ctx, root } = await harness()
+    const plugin = await packagePlugin(root, 'invalid-source', { name: 'invalid-source' })
+    const url = new URL(plugin, ctx.baseUrl).href
+    const internal = ctx.loader.internal!
+    ctx.loader.internal = {
+      version: 'v2',
+      import: () => internal.import(url, ctx.baseUrl!, {}),
+      resolveSync: () => ({ format: 'module', url }),
+    } as unknown as NonNullable<typeof ctx.loader.internal>
+    await ctx.loader.create({ name: 'invalid-source' })
+    await expect(ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL }))
+      .rejects.toThrow(/must declare non-empty name and version/)
+  })
+
+  it('preserves Loader resolution failures other than a missing module', async () => {
+    const { ctx } = await harness()
+    const failure = Object.assign(new Error('source resolver failed'), { code: 'ERR_INVALID_MODULE_SPECIFIER' })
+    ctx.loader.internal = {
+      version: 'v2',
+      import: async () => ({ default: () => {} }),
+      resolveSync: () => { throw failure },
+    } as unknown as NonNullable<typeof ctx.loader.internal>
+    await ctx.loader.create({ name: 'invalid-source' })
+    await expect(ctx.deepseekLlmApiExtensions.prepare({ body: { messages: [] }, signal: SIGNAL }))
+      .rejects.toBe(failure)
   })
 
   it('supports a direct embedding whose context has no base URL', async () => {

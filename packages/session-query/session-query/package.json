@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-session-query",
   "description": "Combined session query service contract with concrete reads, traces, and filters",
-  "version": "0.1.2-alpha.5",
+  "version": "0.1.5-alpha.1",
   "publishConfig": {
     "access": "public"
   },
@@ -26,6 +26,9 @@
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-util-values": "workspace:^"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-brand": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",

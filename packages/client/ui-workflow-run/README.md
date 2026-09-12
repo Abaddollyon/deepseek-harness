@@ -1,5 +1,5 @@
 ---
-description: "Durable workflow-run Conversation Node for the dsh web client: reconstructs top-level workflow runs as independent chat nodes with nested member disclosure."
+description: "Durable workflow-run Conversation Node for the dsh web client: reconstructs workflow runs as independent chat nodes with nested member disclosure."
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-client-ui-workflow-run` is the browser plugin that reconstructs durable top-level workflow runs as independent Chat nodes in the dsh web client. It consumes the five `tool-workflow/*` Session events owned by `dsh-tool-workflow`, registers one `ConversationNodeDefinition`, and renders through the keyed `conversation.chat.node` slot without changing the existing workflow tool card. The run and each phase are controlled disclosures: a mount opens running, failed, cancelled, and interrupted levels and closes fully completed levels, and users can toggle either level with the full row, Enter, or Space. A member opens a child Session only while every current fact agrees, and the node shows run, phase, member identity, and status only.
+Use `dsh-client-ui-workflow-run` to inspect durable workflow runs as independent Chat nodes. Expand runs for phases and phases for members; running, failed, cancelled, and interrupted levels open by default, while completed levels remain closed. Members can open child Sessions while the ordinary Session list identifies them as children of the current Session, including after settlement. The projection retains phase titles and durable narration, but the panel displays only names, member counts, and statuses. Choose it for progress and child navigation, not scripts, outputs, errors, logs, usage, static topology, or execution controls.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-A top-level workflow run through `dsh-tool-workflow` appears in the conversation as its own node: expand the run to see its phases, and expand a phase to see its members. Phase groups come only from members that started, and settlement changes status without removing or reordering members. A member opens its child Session whenever the child id is in the ordinary Session list with `origin: 'subagent'` and `parentId` equal to the current Session. Settlement does not revoke this: completed and interrupted members stay openable while their child row exists, because `sessions.open(id)` works on a finished child. Underlined member text is the only visible navigation affordance; keyboard focus draws a two-pixel business-primary ring around the name area, while the status copy remains the lifecycle word. The component calls only the injected ordinary `sessions.open(id)` action; rows whose child Session is absent from the ordinary list — remote, addressed-only, or wrong-parent — remain non-interactive.
+A workflow run recorded through `dsh-tool-workflow` appears in the conversation as its own node: expand the run to see its phases, and expand a phase to see its members. The Definition does not exclude runs with a `parentCallId`. Distinct recorded phase titles seed groups in first-seen order, including phases with no members; member starts then add any missing phase groups in member order. Omitted and empty phase identities stay distinct, and settlement changes status without removing or reordering members. A member opens its child Session whenever the child id is in the ordinary Session list with `origin: 'subagent'` and `parentId` equal to the current Session. Settlement does not revoke this: completed and interrupted members stay openable while their child row exists, because `sessions.open(id)` works on a finished child. Underlined member text is the only visible navigation affordance; keyboard focus draws a two-pixel business-primary ring around the name area, while the status copy remains the lifecycle word. The component calls only the injected ordinary `sessions.open(id)` action; rows whose child Session is absent from the ordinary list — remote, addressed-only, or wrong-parent — remain non-interactive.
 
 ### Navigating the node
 
@@ -43,7 +43,7 @@ Completion updates the visible status immediately but delays its automatic close
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The node is a deterministic replay of durable session events: `tool-workflow/run-start` creates one Context keyed by `runId`, and member starts, member endings, and the run ending update that Context in log order. A history tail containing only updates remains pending until an older page supplies the unique start, after which prepend, complete replay, and live append produce the same state.
+The node is a deterministic replay of six durable `tool-workflow/*` event types: `run-start` creates one Context keyed by `runId`; `phase`, `log`, `agent-start`, `agent-end`, and `run-end` update it in log order. A workflow `run/detached` with a `runId` also updates that Context. Phase titles seed groups; logs retain `message`, `ordinal`, and optional `truncated` in the projected `narration` array, which is omitted for older records without captured logs. `WorkflowRunPanel` does not render that narration. A history tail containing only updates remains pending until an older page supplies the unique start, after which prepend, complete replay, and live append produce the same state.
 
 ### Disclosure choices
 
@@ -62,7 +62,7 @@ The package registers its Definition, locale dictionary, and `workflow-run` rend
 
 These pages cover the tool seam, the conversation host, and the tool presentation layer.
 
-- [tool-workflow](../../workflow/tool-workflow/README.md) — the tool that owns the four `tool-workflow/*` Session events.
+- [tool-workflow](../../workflow/tool-workflow/README.md) — the tool that owns the six `tool-workflow/*` Session event types folded here.
 - [ui-conversation](../ui-conversation/README.md) — the chat surface hosting the `conversation.chat.node` slot.
 - [ui-tool](../ui-tool/README.md) — the tool-call presentation layer this node sits beside.
 - [Conversation subsystem](../../../docs/subsystems/conversation.md) — how a business-owned feature registers a Conversation node.
@@ -84,9 +84,9 @@ None; this package neither assembles nor sends a provider request.
 
 These limits define which runs produce records and what the node exposes; they are current package constraints.
 
-- **Only top-level calls through `dsh-tool-workflow` produce these records** — nested Code Mode calls and direct `WorkflowEngine` consumers do not.
+- **Durable workflow records are required** — the Definition accepts recorded runs without filtering `parentCallId`, but cannot reconstruct executions that emit no matching `tool-workflow/*` events; updates alone produce no visible node until the matching `run-start` is available.
 - **Navigation follows the ordinary Session list** — a member stays openable after settlement while its child row is listed, but a member whose child Session the list does not contain (for example a remote row) never exposes an opener from this node.
-- **The node shows run, phase, member identity, and status only** — scripts, outputs, errors, logs, usage, static topology, and controls remain outside this surface.
+- **The panel shows names, member counts, and statuses** — durable narration is retained in the node payload but not displayed; scripts, outputs, error details, usage, static topology, and execution controls also remain outside the panel.
 
 <a id="dev-note"></a>
 ### Dev Note

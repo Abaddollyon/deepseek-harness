@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -170,7 +170,8 @@ describe('layer ladder', () => {
   it.skipIf(process.platform === 'win32')('refuses a document other OS users can read', async () => {
     const dir = await tempDir()
     const path = join(dir, '.credentials.yaml')
-    await writeFile(path, 'version: 1\nrefs:\n  DSH_CRED_TEST: leaked\n', { mode: 0o644 })
+    await writeFile(path, 'version: 1\nrefs:\n  DSH_CRED_TEST: leaked\n', { mode: 0o600 })
+    await chmod(path, 0o644)
     const ctx = new Context()
     // Before the contents are read at all: serving secrets out of a
     // world-readable file would make the 0600 the provider writes meaningless.

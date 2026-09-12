@@ -21,6 +21,7 @@ interface RouteState {
   restored: boolean
   references: Set<string>
   identified: boolean
+  /** Metadata and exclusions are published and cleared together. */
   metadata?: readonly PiAiModelProfile[]
   excludedIds?: readonly string[]
   cacheKey?: string
@@ -201,7 +202,7 @@ export class LiveCatalog {
     const signal = AbortSignal.any([caller, state.controller.signal, timeout.signal])
     try {
       const sequence = await this.persist(state, JSON.stringify({
-        version: 2, models: state.metadata, excludedIds: state.excludedIds ?? [], clientVersion: state.clientVersion,
+        version: 2, models: state.metadata, excludedIds: state.excludedIds, clientVersion: state.clientVersion,
       }), signal)
       if (this.valid(provider, state) && state.writeSequence === sequence && state.cacheKey === key) state.persistedKey = key
     } finally {
@@ -225,7 +226,6 @@ export class LiveCatalog {
             : credential?.type === 'api_key' ? { credential } : {},
         }))
       signal.throwIfAborted()
-      if (!this.valid(provider, state)) return
       state.cacheKey = this.identity(state, key, credential, auth)
       state.identified = true
       const filename = this.filename(state)
@@ -244,7 +244,6 @@ export class LiveCatalog {
       if (new Set([...models.map(model => model.id), ...exclusions]).size > 2000) return
       resolveProfiles(this.raw?.providers, new Map([[provider, models]]), new Map([[provider, exclusions]]))
       signal.throwIfAborted()
-      if (!this.valid(provider, state)) return
       state.metadata = models
       state.excludedIds = exclusions
       state.persistedKey = state.cacheKey
@@ -260,8 +259,8 @@ export class LiveCatalog {
     }
   }
 
+  /** Restore and persist callers have already assigned or checked the credential cache key. */
   private filename(state: RouteState): string {
-    if (state.cacheKey === undefined) throw new Error('model metadata credential has not resolved')
     return join(this.options.home, 'cache', 'llm-pi-ai', `${state.cacheKey}.json`)
   }
 
@@ -457,6 +456,7 @@ export class LiveCatalog {
     for (const provider of [...this.states.keys()]) this.invalidate(provider)
   }
 
+  /** Every state retirement aborts this controller before removal, so restore's signal checks fence publication. */
   private stop(state: RouteState): void {
     state.controller.abort()
     if (state.timer !== undefined) clearTimeout(state.timer)

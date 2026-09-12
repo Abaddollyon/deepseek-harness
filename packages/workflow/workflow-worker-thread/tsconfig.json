@@ -40,6 +40,9 @@
     },
     {
       "path": "../../util/timeout"
+    },
+    {
+      "path": "../../util/http-proxy"
     }
   ]
 }

@@ -12,6 +12,7 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import type { ReplayOverrideDoc } from '@deepseek-ai/dsh-llm-replay'
+import { isolateWorkspaceProjectRoot } from '@deepseek-ai/dsh-loader-smoke'
 import {
   assertFixtureInventory,
   captureExpandedTurnProcessAria,
@@ -34,6 +35,9 @@ const ARGS_TEXT = 'and confirm the fixture wiring'
 const REPLY = 'USER_INVOKE_REPLY acknowledged; following the injected skill.'
 
 async function seedUserOnlySkill(workspaceCwd: string): Promise<void> {
+  // Discovery uses the nearest project root, not the enclosing scaffold root.
+  await mkdir(join(workspaceCwd, 'workspace'), { recursive: true })
+  await isolateWorkspaceProjectRoot(join(workspaceCwd, 'workspace'))
   const directory = join(workspaceCwd, 'workspace', '.agents', 'skills', SKILL_NAME)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, 'SKILL.md'), [
@@ -130,6 +134,10 @@ describe.skipIf(MODE === 'record')('web e2e: user-explicit skill invocation thro
     await settled
     const process = page.getByRole('button', { name: 'Thought for a while', exact: true })
     await process.waitFor({ state: 'visible', timeout: 10_000 })
+    // The chip derives from the step's logged injection, so it must survive
+    // every later Node rebuild of the Turn (process publication, turn close).
+    expect(await bubble.count()).toBe(1)
+    expect(await bubble.textContent()).toBe(`/${SKILL_NAME}`)
     await expandOwningTurnProcess(page, injectionFlow)
     const injectionRow = page.getByRole('button', { name: `Context injection ${SKILL_NAME}` })
     await injectionRow.click()

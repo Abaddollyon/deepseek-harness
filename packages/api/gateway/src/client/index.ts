@@ -41,6 +41,7 @@ export type {
   RemoteStreamFactory,
 } from './journal-stream.ts'
 export { RemoteStream } from './remote-stream.ts'
+export { RemoteFeedLifecycle } from './feed-lifecycle.ts'
 export type { RemoteStreamItem, RemoteStreamOptions } from './remote-stream.ts'
 export { RemoteSnapshotStream } from './snapshot-stream.ts'
 export type { RemoteSnapshotStreamOptions } from './snapshot-stream.ts'

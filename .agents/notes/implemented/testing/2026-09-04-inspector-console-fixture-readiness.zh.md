@@ -12,7 +12,7 @@ Inspector 集成 fixture 通过 DevTools 连接启用 Runtime，并通过 Worker
 
 ## 决策
 
-双 session Client Console 集成测试在两个 session 启用 Runtime 后、且要求 fixture 记录日志前，分别在两个已宣布的 Client context 中执行一次无副作用的 `Runtime.evaluate`。[跨 realm Inspector 决策](../architecture/2026-08-23-cross-realm-cdp-inspector.zh.md)所述的 Client Runtime 命令与 Client Console enable 帧使用同一条已认证 source socket。因此，每次成功求值都会在同一 socket 上排在该 session 先前已排队的 Console enable 帧之后。测试在跨到独立 fixture port 前断言两次求值结果。
+双 session Client Console 集成测试在两个 session 启用 Runtime 后、且要求 fixture 记录日志前，分别在两个已宣布的 Client context 中执行一次无副作用的 `Runtime.evaluate`。[历史跨 realm Inspector 决策](../../archived/architecture/2026-08-23-cross-realm-cdp-inspector.md)所述的 Client Runtime 命令与 Client Console enable 帧使用同一条已认证 source socket。因此，每次成功求值都会在同一 socket 上排在该 session 先前已排队的 Console enable 帧之后。测试在跨到独立 fixture port 前断言两次求值结果。
 
 Fixture 仍只发出一次外部 Console 调用，现有断言仍要求两个 session 都收到该事件、保留不同的 object id、拒绝跨 session 查找，并在释放其中一个 session 时不使另一个失效。这项同步属于测试协调；它不会把 `Runtime.enable` 重新定义为 Client hook 就绪确认。
 

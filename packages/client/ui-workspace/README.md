@@ -9,9 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-client-ui-workspace` is the shared Workspace browser and picker of the dsh web client: users browse grouped or flat Session rows in the sidebar, pick a Workspace for a new session from the Session Intent hero, and manage Workspaces and Sessions with add, rename, reorder, search, fork, and archive actions; the same Workspace menu and add flow serve both surfaces. Pending user interactions surface as amber warning dots, active Schedule projections surface as non-interactive alarm markers in ordinary and search rows, and the shared sidebar projection hides subagent-origin sessions. Distinct canonical paths remain separate id-keyed Workspaces, and adding a folder goes through a directory-flow child hole that a composed picker package's client half fills.
-
-The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces. The existing Host-qualified persisted view store remains the sole pin owner and exposes its source to shell Activity providers.
+This package lets users browse grouped or flat Session lists, choose a Workspace for a new Session, and manage Workspaces and Sessions through add, rename, reorder, search, fork, archive, and Workspace deletion. Pending interactions appear as warning dots, active scheduled tasks as alarm markers, and subagent-origin Sessions remain hidden. Canonically distinct folder paths remain separate Workspaces. Adding a Workspace requires a composed directory picker; without one, the add action is unavailable.
 
 ## Table of Contents
 
@@ -27,7 +25,9 @@ The browser distinguishes Session feed loading, failure, stale retained rows, an
 <a id="use-this-package"></a>
 ## Use this package
 
-Use the sidebar to browse Workspaces and their Sessions, reorder them, and start new ones; use the picker in the Session Intent hero to choose a Workspace for a new session. An open Workspace shows five non-blank Sessions by default and keeps the selected blank **New Session** as one provisional extra row until its first prompt. **Show more** reveals the hidden remainder; closing and reopening the Workspace restores this folded projection.
+Use the sidebar to browse Workspaces and their Sessions, reorder them, and start new ones; use the picker in the Session Intent hero to choose a Workspace for a new session. An open Workspace shows five non-blank Sessions by default and keeps the selected blank **New Session** as one provisional extra row until its first prompt. The provisional row retains its ordered position without reducing that quota or inflating the hidden count. **Show more** reveals the hidden remainder; closing and reopening the Workspace restores this folded projection.
+
+The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Workspace-bound and loose creation share completion handling: a superseded navigation intent or disposed owner cannot open a Session or publish a late failure. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces.
 
 ### Reordering and view options
 
@@ -35,11 +35,13 @@ View options combine grouping with one browser-persisted Session order per accou
 
 ### Search
 
-Collapsed search is one header action beside the view and add actions: activating it expands the field across the header. A non-blank query replaces either browsing mode with one flat result list — case-insensitive title and Workspace substring matches appear immediately, while a 250 ms debounced Host request adds ranked current-conversation content matches and snippets. Each new query aborts the preceding request; a failed content search leaves metadata matches visible with a warning. The list is capped at 20 and opens the selected Session without clearing the query.
+Collapsed search is one header action beside the view and add actions: activating it expands the field across the header. A non-blank query replaces either browsing mode with one flat result list — case-insensitive title and Workspace substring matches appear immediately, while a 250 ms debounced Host request adds ranked current-conversation content matches and snippets. Each new query aborts the preceding request; a failed content search leaves metadata matches visible with a warning. The list is capped at 20. Choosing a result clears and collapses search, opens the Session, and scrolls its row into view in the configured browsing mode; grouped browsing also expands its Workspace and the full Session list when required.
 
 ### Managing sessions
 
 The Session row's Rename action opens a dialog prefilled with the row's display title; confirming an unchanged title is deliberately allowed — it pins the current automatic title against regeneration. Archive commits without a confirmation dialog and the row disappears from every grouping surface when the archive-set echo lands. Fork forks at the source's last completed turn, increments the inherited persisted title on the client, and then opens the child. Workspace Delete opens a confirmation that states the retention boundary; success removes the group while its Sessions remain under Ungrouped.
+
+**Pin** and **Unpin** keep chosen Sessions in a browser-persisted Pinned section, excluded from ordinary grouped and flat rows. Search reveals pinned results in that section. Folded Workspaces independently retain running ordinary rows and rows with running subagents; these automatic holdouts are not user pins. Untitled rows show dated New Session labels, numbered when several share one minute.
 
 ### Pending interactions
 
@@ -68,6 +70,8 @@ Each registration declares a **directory-flow child hole** (`single` kind: `conv
 The browser also declares `sidebar.workspaces.header.action` for compact controls beside the existing heading and `sidebar.workspaces.content.overlay` for an alternate body inside the same region. These seats let Activity reuse the established Workspace geometry instead of adding a second sidebar section.
 
 ### View state
+
+The existing Host-qualified persisted view store remains the sole pin owner and exposes its source to shell Activity providers.
 
 Once the Workspace list baseline is ready, browser-persisted expansion and Session-order records retain only current Workspace ids plus Ungrouped and the flat-list account. Real Workspaces initialize from `WorkspaceView.sessionIds`, while Ungrouped and the cross-Workspace flat list initialize from recency. The shared sidebar projection hides rows whose durable Session summary has `origin: 'subagent'`, and each visible ordinary row inherits the blue activity indicator while any descendant reached through uninterrupted subagent-origin lineage is running. The same pure derivation reads the Schedule key from list projection values for grouped, flat, and search nodes; the package uses only the type-only `@deepseek-ai/dsh-schedule/client` dependency and does not import the Schedule runtime or `ui-schedule`.
 

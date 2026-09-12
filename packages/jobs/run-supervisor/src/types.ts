@@ -2,8 +2,8 @@
  * Durable session events owned by the run supervisor. All three are log-only
  * (none is a `SurfaceEventType`) and none carries `ignorable: true`: a
  * reader that does not know a run's fate must refuse the log rather than skip
- * it, because these events are the model-visible account of what boot
- * reconciliation did to work that outlived its host process.
+ * it. These events record boot reconciliation durably; model context receives
+ * separate completion notices and job-tool results, not these log-only events.
  *
  * @module @deepseek-ai/dsh-run-supervisor/types
  */

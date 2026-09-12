@@ -1,6 +1,7 @@
 version: 1
 scenario: ralph-loop
 profile: headless
+writerOracle: separate
 composition: default
 recording: authored
 header:

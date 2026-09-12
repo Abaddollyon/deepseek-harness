@@ -3,6 +3,7 @@ scenario: image-compaction
 profile: acp
 composition: image-compaction
 recording: authored
+writerOracle: separate
 header:
   class: image-compaction
   pin: true

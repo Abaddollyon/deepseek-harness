@@ -462,6 +462,54 @@ describe('UiWorkspaceService', () => {
 })
 
 describe('explicit shell navigation', () => {
+  it('does not cancel creation for unrelated presentation changes', async () => {
+    const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
+    const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState(), navigation })
+    const pending = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValueOnce(pending.promise)
+    try {
+      b.uiWorkspace.createLooseSession()
+      navigation.presentation.setSidebarMode('another-host', 'activity')
+      pending.resolve(sid('created'))
+      await vi.waitFor(() => { expect(b.sessions.open).toHaveBeenCalledWith(sid('created')) })
+      expect(navigation.getSnapshot()).toEqual({ kind: 'session', ref: { environmentId: 'local', sessionId: 'created' }, viewId: 'chat' })
+    } finally {
+      pending.resolve(sid('created'))
+      await b.ctx.fiber.dispose()
+    }
+  })
+
+  it('can start an explicit Workspace before the Session list baseline arrives', async () => {
+    const b = bench({ sessions: sessionState([], undefined, 'pending'), workspaces: workspaceState([workspace('target')]) })
+    try {
+      b.uiWorkspace.startSession(wid('target'))
+      await vi.waitFor(() => { expect(b.sessions.open).toHaveBeenCalledWith(sid('created-target')) })
+      expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({ workspaceId: wid('target') })
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['navigation', 'dispose'] as const)('ignores late creation failure after %s', async (action) => {
+    const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
+    const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState(), navigation })
+    const pending = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValueOnce(pending.promise)
+    try {
+      b.uiWorkspace.createLooseSession()
+      if (action === 'dispose') await b.ctx.fiber.dispose()
+      else b.uiWorkspace.openSession(sid('chosen'))
+      const retained = navigation.getSnapshot()
+      pending.reject(new Error('Late creation failure'))
+      await flush()
+      expect(b.uiWorkspace.navigationError.getSnapshot()).toBeNull()
+      expect(navigation.getSnapshot()).toBe(retained)
+    } finally {
+      pending.resolve(sid('unused'))
+      await b.ctx.fiber.dispose()
+    }
+  })
+
   it('reopens the selected Session from Environments and navigates an untargeted New Session to a blank conversation', async () => {
     const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState() })
     const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
@@ -485,6 +533,9 @@ describe('explicit shell navigation', () => {
     b.ctx.provide('environmentNavigation', navigation)
     b.sessions.feed.set({ state: 'error', error: null, attempt: 0 })
     b.uiWorkspace.startSession()
+    expect(b.uiWorkspace.navigationError.getSnapshot()).toBe('not-ready')
+    b.uiWorkspace.createLooseSession()
+    expect(b.sessions.create).not.toHaveBeenCalled()
     expect(b.uiWorkspace.navigationError.getSnapshot()).toBe('not-ready')
     expect(b.sessions.clear).not.toHaveBeenCalled()
     b.sessions.feed.set({ state: 'ready', error: null, attempt: 0 })

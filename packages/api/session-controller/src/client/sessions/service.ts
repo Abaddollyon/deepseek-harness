@@ -23,7 +23,7 @@ import { SESSION_SEARCH_RESULT_LIMIT } from '../../types.ts'
 import type { SessionJob as JobView } from '../../types.ts'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import {
-  createSnapshotStore, type SnapshotStore,
+  createSnapshotStore, migrateLocalStorageKey, type SnapshotStore,
 } from '@deepseek-ai/dsh-client-store'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionEventSource } from '../contract/events.ts'
@@ -738,18 +738,5 @@ export class ClientSessions implements ISessions {
         this.startScopeDrop(id, record)
       }
     }
-  }
-}
-
-function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    if (localStorage.getItem(nextKey) !== null) return
-    const legacy = localStorage.getItem(legacyKey)
-    if (legacy === null) return
-    localStorage.setItem(nextKey, legacy)
-    localStorage.removeItem(legacyKey)
-  } catch {
-    // Persistence remains best-effort, matching the store engine contract.
   }
 }

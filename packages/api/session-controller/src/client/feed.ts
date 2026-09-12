@@ -2,6 +2,7 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { RemoteError, remoteErrorOf, type RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import { createSessionControlStream, type SessionControlStream } from './transport.ts'
+import { RemoteFeedLifecycle } from '@deepseek-ai/dsh-api-gateway/client'
 import type { SessionRemotes } from './sessions/remotes.ts'
 import type { SessionControlFrame } from '../types.ts'
 
@@ -15,16 +16,11 @@ export interface SessionFeedSnapshot {
 }
 
 /** Lifecycle owner for control readiness; only typed temporary service absence retries. */
-export class SessionFeedRecovery {
+export class SessionFeedRecovery extends RemoteFeedLifecycle<SessionControlStream> {
   /** Observable status retained independently of Session rows. */
   readonly snapshot = createSnapshotStore<SessionFeedSnapshot>({ state: 'loading', error: null, attempt: 0 })
-  private epoch = 0
-  private disposed = false
   private accepted = false
   private attempt = 0
-  private stream: SessionControlStream | undefined
-  private timer: ReturnType<typeof setTimeout> | undefined
-  private closing: Promise<void> = Promise.resolve()
 
   /**
    * @param remote - Host session transport.
@@ -37,32 +33,13 @@ export class SessionFeedRecovery {
     private readonly delays: readonly number[],
     private readonly accept: (frame: SessionControlFrame) => void,
     private readonly refresh: () => Promise<RemoteFailure | null>,
-  ) {}
+  ) { super() }
 
   /** Start or manually retry with a fresh automatic retry budget. */
   retry(): void {
     if (this.disposed) return
     this.attempt = 0
     this.replace()
-  }
-
-  /**
-   * Stop retries, fence pending callbacks, and await stream teardown.
-   * @returns when no control iterator can publish another frame.
-   */
-  async dispose(): Promise<void> {
-    this.disposed = true
-    this.epoch++
-    this.close()
-    await this.closing
-  }
-
-  private close(): void {
-    clearTimeout(this.timer)
-    this.timer = undefined
-    const stream = this.stream
-    this.stream = undefined
-    if (stream !== undefined) this.closing = this.closing.then(async () => { await stream.dispose() })
   }
 
   private replace(): void {

@@ -26,7 +26,7 @@
 - id: system-prompt
   name: '@deepseek-ai/dsh-system-prompt'
   config:
-    persona: |
+    personaPrefix: |
       You are a coding assistant powered by the {{model}} model. Your working directory is {{cwd}}. Your bash tool runs under a file sandbox — a `[sandbox: file access denied …]` result is policy, not a command bug.
 
       Verify your work by running the code or tests. Keep answers brief and factual.
@@ -54,11 +54,14 @@
 - id: attachment-local
   name: '@deepseek-ai/dsh-attachment-local'
 
-# Tight automatic compaction budget sized to the route-priced visual tokens of
-# the scenario's inline images: the text-only history stays under the
-# threshold, so a triggered compaction proves the routed model's image pricing
-# drove the pressure decision.
+# Routed pressure on turn two is 10314 tokens; text-only pressure is 7992,
+# below the 9280-token threshold. The 128-token retained tail keeps the images
+# on turn one (106 context tokens), but permits their replacement on turn two
+# (106 context + 20 acknowledgement + 19 instruction tokens). A 256-token
+# summary budget admits the 3872-token system-plus-image replay after tools
+# and the summarizer instruction consume another 6756 tokens.
 - id: compaction-basic
   name: '@deepseek-ai/dsh-compaction-basic'
   config:
-    retainTokens: 100
+    retainTokens: 128
+    maxTokens: 256

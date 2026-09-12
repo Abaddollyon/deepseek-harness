@@ -267,7 +267,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Compact one over-capacity canonical request without dispatching it first.
+   * Compact a canonical request above its pressure threshold or output-reserved
+   * capacity without dispatching it first.
    * @param agent - owner of the measured session surface.
    * @param header - exact canonical request envelope being admitted.
    * @param spec - already-resolved pressure and retention budget for that request.
@@ -285,7 +286,8 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (prune !== undefined) {
       prune.pruneSession(agent.session)
       measurement = meter.measure(agent.session)
-      if (measurement.totalTokens + (header.config.maxTokens ?? 0) <= spec.contextWindow) return null
+      if (measurement.totalTokens < spec.thresholdTokens
+        && measurement.totalTokens + (header.config.maxTokens ?? 0) <= spec.contextWindow) return null
     }
 
     const selected = selectCompactableRange(agent.session, measurement, spec.retainTokens)
@@ -306,7 +308,6 @@ export class BasicCompactionEngine extends CompactionEngine {
         model: summaryTarget.model,
         maxTokens: spec.maxTokens,
       },
-      ...header.system === undefined ? {} : { system: header.system },
       ...header.tools === undefined ? {} : { tools: header.tools },
     }
     const summaryMeasurement = meter.measure(agent.session, summaryHeader)

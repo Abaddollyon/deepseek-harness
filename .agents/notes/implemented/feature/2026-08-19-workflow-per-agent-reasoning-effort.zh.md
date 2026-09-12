@@ -6,7 +6,7 @@ Status: implemented
 
 ## Problem
 
-工作流脚本此前已能把某次 `agent()` 调用指向任意已注册提供方及该提供方服务的任意模型，却无法指向某个推理等级。该选项被按名拒绝：`effort` 与 `isolation`、`agentType` 一同位于 worker 运行时的延迟集合中，面向模型的工具描述也承诺它会「被明确拒绝」。因此，即便自[适配器拥有的推理等级能力](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.zh.md)起 LLM seam 就已端到端校验按调用的推理等级，起草／校验型脚本仍无法在抽取阶段花费廉价等级、在对抗性复核阶段花费昂贵等级。
+工作流脚本此前已能把某次 `agent()` 调用指向任意已注册提供方及该提供方服务的任意模型，却无法指向某个推理等级。该选项被按名拒绝：`effort` 与 `isolation`、`agentType` 一同位于 worker 运行时的延迟集合中，面向模型的工具描述也承诺它会「被明确拒绝」。因此，即便自[适配器拥有的推理等级能力历史决策](../../archived/architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md)起 LLM seam 就已端到端校验按调用的推理等级，起草／校验型脚本仍无法在抽取阶段花费廉价等级、在对抗性复核阶段花费昂贵等级。
 
 被拒绝并不是唯一的缺口。委派已用来把 `provider` 和 `model` 送达子 agent 的通道 `AgentOptions` 没有推理等级字段，而 loop 只从 `provider`、`model` 和 `maxTokens` 播种请求配置。在不填补该缺口的情况下于脚本侧接受推理等级，会正好制造出本仓库禁止的「被接受后被忽略」失败模式。
 
@@ -60,4 +60,4 @@ seam 通过模块增强声明 `AgentOptions.reasoningEffort?: ReasoningEffortId`
 ## Related
 
 - [动态工作流](2026-07-05-dynamic-workflows.zh.md) 拥有本次扩展所基于的脚本约定。
-- [适配器拥有的推理等级能力](../architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.zh.md) 拥有本次复用的校验策略。
+- [适配器拥有的推理等级能力历史决策](../../archived/architecture/2026-07-24-adapter-owned-reasoning-effort-capabilities.md) 记录本次复用的校验策略决策。

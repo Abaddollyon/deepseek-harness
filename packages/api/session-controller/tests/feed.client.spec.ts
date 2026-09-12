@@ -153,6 +153,43 @@ describe('Session feed recovery', () => {
     expect(bench.feed.snapshot.getSnapshot()).toBe(observed)
   })
 
+  it.each([new Error('List unavailable'), 'List unavailable'])(
+    'publishes an untyped list rejection as a terminal feed failure: %s', async (failure) => {
+      const bench = fixture(vi.fn<() => Promise<RemoteFailure | null>>().mockRejectedValue(failure))
+      bench.feed.retry()
+      await flush()
+      expect(bench.feed.snapshot.getSnapshot()).toMatchObject({
+        state: 'error', attempt: 0,
+        error: { code: 'gateway/internal', message: 'List unavailable' },
+      })
+      expect(bench.open).toHaveBeenCalledOnce()
+    },
+  )
+
+  it('ignores a rejected list after its owner has disposed', async () => {
+    const pending = deferred<RemoteFailure | null>()
+    const bench = fixture(vi.fn(() => pending.promise))
+    bench.feed.retry()
+    await flush()
+    await bench.feed.dispose()
+    const observed = bench.feed.snapshot.getSnapshot()
+    pending.reject(new Error('Late list failure'))
+    await flush()
+    expect(bench.feed.snapshot.getSnapshot()).toBe(observed)
+  })
+
+  it('accepts control increments without repeating the authoritative list read', async () => {
+    const bench = fixture()
+    bench.feed.retry()
+    await flush()
+    const update = { type: 'queue' as const, sessionId: 'control-increment' as never, items: [] }
+    bench.api.pushControl(update)
+    await flush()
+    expect(bench.accept).toHaveBeenLastCalledWith(update)
+    expect(bench.refresh).toHaveBeenCalledOnce()
+    expect(bench.feed.snapshot.getSnapshot().state).toBe('ready')
+  })
+
   it('ignores a list completing after disposal', async () => {
     const pending = deferred<RemoteFailure | null>()
     const bench = fixture(vi.fn(() => pending.promise))
@@ -163,6 +200,18 @@ describe('Session feed recovery', () => {
     pending.resolve(null)
     await flush()
     expect(bench.feed.snapshot.getSnapshot()).toBe(observed)
+  })
+
+  it('ignores carrier loss admitted before its owner is replaced', async () => {
+    const bench = fixture()
+    bench.open.mockImplementationOnce(async function* () {
+      queueMicrotask(() => { bench.feed.retry() })
+      throw new RemoteStreamCarrierError('Previous owner disconnected')
+    })
+    bench.feed.retry()
+    await flush()
+    expect(bench.open).toHaveBeenCalledTimes(2)
+    expect(bench.feed.snapshot.getSnapshot()).toEqual({ state: 'ready', error: null, attempt: 0 })
   })
 
   it('coalesces replacement requests while the previous iterator closes', async () => {

@@ -9,9 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-client-ui-workspace` 是 dsh Web 客户端的共享 Workspace 浏览器与选择器：用户在侧边栏浏览分组或扁平的 Session 行，在 Session Intent 主视觉区为新会话选择 Workspace，并可用添加、重命名、重排序、搜索、fork 与归档操作管理 Workspace 与 Session；两个界面共用同一套 Workspace 菜单与添加流程。待处理的用户交互以琥珀色警告点呈现，活动 Schedule projection 会在普通行与搜索结果中显示不可交互的闹钟，共享侧边栏投影还会隐藏 subagent 来源的会话。不同的规范化路径仍作为由 id 区分的独立 Workspace；添加文件夹走目录流子 slot，由组合的选择器包 client half 填充。
-
-浏览器分别呈现会话 feed 的加载、失败、保留旧行和成功空结果；只有工作区也已就绪，才显示空状态文案。显式新建会话的失败会保留在侧边栏中。每次显式打开操作都使用共享 shell 导航，包括从 Environments 返回当前会话以及进入空白新会话。查询与 Activity 共享，分组、排序和添加工作区控件只适用于 Workspaces。现有按 Host 隔离的持久化视图 store 是固定会话的唯一所有者，并向 shell 的 Activity provider 提供数据源。
+本包让用户浏览分组或扁平的 Session 列表、为新 Session 选择 Workspace，并通过添加、重命名、重排序、搜索、fork、归档和删除 Workspace 来管理 Workspace 与 Session。待处理交互显示为警告点，活动定时任务显示为闹钟标识，subagent 来源的 Session 则保持隐藏。规范化后仍有差异的文件夹路径会保留为独立 Workspace。添加 Workspace 需要组合目录选择器；没有目录选择器时，添加操作不可用。
 
 ## 目录
 
@@ -27,7 +25,9 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-用侧边栏浏览 Workspace 及其 Session、重排它们并新建会话；在 Session Intent 主视觉区用选择器为新会话选择 Workspace。打开的 Workspace 默认显示五条非空白 Session，并在首条提示词落地前把当前选中的空白**新会话**作为一条临时额外行。**展开其余**会显示隐藏条目；关闭再打开 Workspace 会恢复该折叠投影。
+用侧边栏浏览 Workspace 及其 Session、重排它们并新建会话；在 Session Intent 主视觉区用选择器为新会话选择 Workspace。打开的 Workspace 默认显示五条非空白 Session，并在首条提示词落地前把当前选中的空白**新会话**作为一条临时额外行。临时行保留其排序位置，不占用这五条配额，也不计入隐藏数量。**展开其余**会显示隐藏条目；关闭再打开 Workspace 会恢复该折叠投影。
+
+浏览器分别呈现会话 feed 的加载、失败、保留旧行和成功空结果；只有工作区也已就绪，才显示空状态文案。显式新建会话的失败会保留在侧边栏中。工作区内与无工作区的创建流程共用完成处理：已被替换的导航意图或已 dispose 的所有者不能打开 Session，也不能发布迟到的失败。每次显式打开操作都使用共享 shell 导航，包括从 Environments 返回当前会话以及进入空白新会话。查询与 Activity 共享，分组、排序和添加工作区控件只适用于 Workspaces。
 
 ### 重排序与视图选项
 
@@ -35,11 +35,13 @@ kind: "package-reference"
 
 ### 搜索
 
-折叠搜索是视图和添加操作旁的一枚区头按钮：激活后输入框会扩展并占据区头。非空白查询会以单一扁平结果列表替代任一浏览模式——不区分大小写的标题和 Workspace 子串匹配项会立即显示，经 250 ms 防抖的 Host 请求则会加入经过排序的当前对话内容匹配项及其摘要片段。每次新查询都会中止前一个请求；内容搜索失败时，元数据匹配项仍会显示，同时给出警告。列表最多显示 20 条结果，打开所选 Session 时不会清除查询。
+折叠搜索是视图和添加操作旁的一枚区头按钮：激活后输入框会扩展并占据区头。非空白查询会以单一扁平结果列表替代任一浏览模式——不区分大小写的标题和 Workspace 子串匹配项会立即显示，经 250 ms 防抖的 Host 请求则会加入经过排序的当前对话内容匹配项及其摘要片段。每次新查询都会中止前一个请求；内容搜索失败时，元数据匹配项仍会显示，同时给出警告。列表最多显示 20 条结果。选择结果会清空并收起搜索、打开 Session，并在当前浏览模式中将其行滚动到可见区域；分组浏览还会按需展开所属 Workspace 和完整 Session 列表。
 
 ### 管理会话
 
 Session 行内的 Rename 操作打开一个以该行显示标题预填的对话框；确认未修改的标题是有意允许的——这正是把当前自动标题钉住、不再被重新生成覆盖的手势。Archive 不经确认对话框直接提交，归档集合回声落地后，该行从所有分组视图中消失。Fork 在源会话最后一个已完成轮次处 fork，在客户端递增继承的持久化标题后再打开子会话。Workspace 行内的 Delete 操作会打开确认框，说明保留边界；成功后该分组被移除，其 Session 则留在 Ungrouped 下。
+
+**置顶**与**取消置顶**把所选 Session 保存在浏览器持久化的置顶区，并从普通分组和平铺行中排除。搜索会在置顶区揭示已置顶的结果。折叠的 Workspace 独立保留正在运行的普通行及含运行中子代理的行；这些自动保留行不是用户置顶。无标题行显示带日期的新会话标签，多行共享同一分钟时附加序号。
 
 ### 待处理交互
 
@@ -68,6 +70,8 @@ Session 行渲染运行时的实时 `pendingInteraction` 分类：审批显示**
 浏览器还声明 `sidebar.workspaces.header.action`，用于在现有标题旁放置紧凑控件，并声明 `sidebar.workspaces.content.overlay`，用于在同一区域内显示替代内容。Activity 因此可以复用既有 Workspace 几何布局，而无需增加第二个 sidebar section。
 
 ### 视图状态
+
+现有按 Host 隔离的持久化视图 store 是固定会话的唯一所有者，并向 shell 的 Activity provider 提供数据源。
 
 Workspace 列表基线就绪后，浏览器持久化的展开状态与 Session 顺序记录只保留当前 Workspace id、Ungrouped 与单列表记账。真实 Workspace 从 `WorkspaceView.sessionIds` 初始化，Ungrouped 与跨 Workspace 单列表从最近更新时间顺序初始化。共享侧边栏投影会隐藏持久化 Session 摘要中带有 `origin: 'subagent'` 的行；每个可见普通行都会在经不间断的 subagent 谱系可达的任一后代运行时继承蓝色活动指示器。同一份纯派生还会为分组、平铺与搜索节点读取列表 projection value 中的 Schedule key；本包只使用纯类型依赖 `@deepseek-ai/dsh-schedule/client`，不会导入 Schedule runtime 或 `ui-schedule`。
 

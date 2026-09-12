@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-jobs-store-domain",
   "description": "Durable job-store seam (ctx.jobStore) for the DeepSeek Harness background job registry, backed by the storage domain data form",
-  "version": "0.1.2-alpha.5",
+  "version": "0.1.5-alpha.1",
   "publishConfig": {
     "access": "public"
   },

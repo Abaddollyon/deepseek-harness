@@ -787,6 +787,11 @@ describe('SubagentModelSelectionCardController', () => {
     const face = controller.inject()
     await vi.waitFor(() => { expect(face.hooks.subagentModelSelectionCard.getSnapshot().catalogStatus).toBe('ready') })
 
+    now = 1_000
+    face.openCatalog()
+    expect(models).toHaveBeenCalledTimes(1)
+    expect(face.hooks.subagentModelSelectionCard.getSnapshot().catalogStatus).toBe('ready')
+
     now = 1_001
     face.openCatalog()
     face.openCatalog()

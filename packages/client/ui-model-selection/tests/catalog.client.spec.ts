@@ -144,6 +144,27 @@ describe('ModelCatalogDirectory', () => {
     expect(models).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps explicit provider refresh ownership and shares an in-flight reload', async () => {
+    const pending = Promise.withResolvers<unknown>()
+    const models = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: catalog('old') })
+      .mockReturnValueOnce(pending.promise)
+    const subject = directory(models)
+    await subject.load()
+
+    subject.beginRefresh()
+    subject.refresh()
+    expect(models).toHaveBeenCalledTimes(1)
+    expect(subject.store.getSnapshot()).toEqual({ value: catalog('old'), status: 'loading', error: null })
+
+    const reloaded = subject.reload()
+    expect(subject.reload()).toBe(reloaded)
+    pending.resolve({ ok: true, value: catalog('new') })
+    await expect(reloaded).resolves.toEqual(catalog('new'))
+    expect(models).toHaveBeenCalledTimes(2)
+    expect(subject.store.getSnapshot()).toEqual({ value: catalog('new'), status: 'ready', error: null })
+  })
+
   it('returns the last good catalog when stale revalidation fails', async () => {
     let now = 0
     const models = vi.fn()

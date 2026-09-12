@@ -102,7 +102,7 @@ describe('pre-step abort restores the claimed batch', () => {
   it('restores a claimed waking message when cancellation aborts its pre-step', async () => {
     const adapter = new MockAdapter([textResponse('A reply'), textResponse('B reply')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('restore-claimed-wake'), { provider: 'mock', model: 'mock' })
+    const agent = await ctx.agentLoop.create(SessionId('restore-claimed-wake'), { provider: 'mock', model: 'mock' })
     const blocked = blockNextPreStep(ctx, agent)
 
     send(agent, 'A')
@@ -130,7 +130,7 @@ describe('pre-step abort restores the claimed batch', () => {
   it('does not duplicate a claimed message a listener already re-queued during the abort', async () => {
     const adapter = new MockAdapter([textResponse('A reply'), textResponse('B reply')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('restore-claimed-dedupe'), { provider: 'mock', model: 'mock' })
+    const agent = await ctx.agentLoop.create(SessionId('restore-claimed-dedupe'), { provider: 'mock', model: 'mock' })
     const blocked = Promise.withResolvers<undefined>()
     let armed = true
     ctx.on('agent/pre-step', async ({ agent: subject, messages, signal }, next) => {
@@ -165,7 +165,7 @@ describe('pre-step abort restores the claimed batch', () => {
   it('restores claimed steering when cancellation aborts a continuation pre-step', async () => {
     const adapter = new MockAdapter([textResponse('first reply'), textResponse('after steering')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('restore-claimed-steering'), { provider: 'mock', model: 'mock' })
+    const agent = await ctx.agentLoop.create(SessionId('restore-claimed-steering'), { provider: 'mock', model: 'mock' })
     let preSteps = 0
     const blocked = Promise.withResolvers<undefined>()
     ctx.on('agent/pre-step', async ({ agent: subject, signal }, next) => {
@@ -208,7 +208,7 @@ describe('pre-step abort restores the claimed batch', () => {
 
   it('rejects overlapping maintenance while the agent is active', async () => {
     const ctx = await harness(new MockAdapter([]))
-    const agent = ctx.agentLoop.create(SessionId('maintenance-overlap'), { provider: 'mock', model: 'mock' })
+    const agent = await ctx.agentLoop.create(SessionId('maintenance-overlap'), { provider: 'mock', model: 'mock' })
     const release = Promise.withResolvers<undefined>()
     const running = agent.runMaintenance(async () => release.promise)
     expect(() => agent.runMaintenance(async () => undefined)).toThrow(/already has active work/)

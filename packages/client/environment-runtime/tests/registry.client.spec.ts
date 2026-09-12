@@ -34,14 +34,16 @@ describe('environment runtime registry', () => {
     const localA = await registry.acquire('local')
     const localB = await registry.acquire('local')
     const remote = await registry.acquire('sigil')
+    const disposeLocal = vi.spyOn(localA.runtime, 'dispose')
+    const disposeRemote = vi.spyOn(remote.runtime, 'dispose')
 
     expect(localA.runtime).toBe(localB.runtime)
     expect(localA.runtime.context).not.toBe(remote.runtime.context)
     await localA.release()
-    expect(localA.runtime.dispose).not.toHaveBeenCalled()
+    expect(disposeLocal).not.toHaveBeenCalled()
     await localB.release()
-    expect(localA.runtime.dispose).toHaveBeenCalledOnce()
-    expect(remote.runtime.dispose).not.toHaveBeenCalled()
+    expect(disposeLocal).toHaveBeenCalledOnce()
+    expect(disposeRemote).not.toHaveBeenCalled()
     await remote.release()
   })
 
@@ -55,13 +57,14 @@ describe('environment runtime registry', () => {
     const second = registry.acquire('sigil')
     const disposing = registry.dispose()
     const value = runtime('sigil')
+    const disposeRuntime = vi.spyOn(value, 'dispose')
     resolve(value)
 
     await expect(first).rejects.toThrow('disposed')
     await expect(second).rejects.toThrow('disposed')
     await disposing
     expect(createRuntime).toHaveBeenCalledOnce()
-    expect(value.dispose).toHaveBeenCalledOnce()
+    expect(disposeRuntime).toHaveBeenCalledOnce()
   })
 
   test('reacquires a fresh runtime while the prior zero-reference runtime is disposing', async () => {

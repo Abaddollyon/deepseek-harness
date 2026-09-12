@@ -24,6 +24,6 @@ Status: implemented
 
 ## 影响
 
-只要原生作用域 store 仍然存活，滚动位置就可以跨视图重新挂载保留；这些位置不是跨页面重新加载的持久化偏好。Chat 继续拥有自身的锚点恢复和跟随底部策略。[粘性 composer 决策](2026-07-29-sticky-composer-conversation-scroll.zh.md) 和 [composer 滚动条留白决策](2026-08-04-composer-tab-gutter-reservation.zh.md) 仍适用于 Chat 和 composer 定位；功能裁剪针对外层滚动行为作出限定，并未取代这些决策。
+只要原生作用域 store 仍然存活，滚动位置就可以跨视图重新挂载保留；这些位置不是跨页面重新加载的持久化偏好。Chat 继续拥有自身的锚点恢复和跟随底部策略。历史[粘性 composer 决策](../../archived/bug-fix/2026-07-29-sticky-composer-conversation-scroll.md) 和 [composer 滚动条留白决策](../../archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md) 解释 Chat 和 composer 定位的理由；功能裁剪针对外层滚动行为作出限定，并未取代这些决策。
 
 聚焦的 DOM 测试覆盖功能与作用域隔离、嵌套滚动容器、已卸载事件和延迟内容。DOM 测试环境不执行布局，因此长列表、响应式宽度、composer 位置以及标签往返仍需要浏览器几何验证。

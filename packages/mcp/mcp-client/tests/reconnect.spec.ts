@@ -532,6 +532,111 @@ describe('connection source (host-connection)', () => {
     return startConnection(ctx, hostConfig(reconnect), resolveReconnectPolicy(reconnect, 'reconnect'), source)
   }
 
+  it('rejects host-managed configuration without its connection authority', async () => {
+    try {
+      expect(() => startConnection(ctx, hostConfig(), resolveReconnectPolicy(undefined, 'reconnect')))
+        .toThrow('requires a connection source')
+      expect(mockConnect).not.toHaveBeenCalled()
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('retries transport resolution failures without exposing remote error payloads', async () => {
+    vi.useFakeTimers()
+    const { source } = fakeSource()
+    const { warns } = captureLogs(ctx)
+    source.connect.mockRejectedValueOnce('secret server payload')
+      .mockRejectedValueOnce(Object.assign(new Error('another secret'), { code: 'AUTH_REFRESH' }))
+      .mockResolvedValue({})
+    const handle = start(source, { initialDelayMs: 5, maxDelayMs: 10, maxAttempts: 3 })
+    try {
+      const outcome = await handle.ready
+      expect(outcome.error).toEqual(new Error('mcp-client(srv): host connection transport resolution failed (unknown-error)'))
+      await vi.advanceTimersByTimeAsync(5)
+      expect(source.connect).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(source.connect).toHaveBeenCalledTimes(3)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      expect(warns.join('\n')).toContain('(AUTH_REFRESH)')
+      expect(warns.join('\n')).not.toContain('secret')
+      expect((await handle.ready).error).toBe(outcome.error)
+    } finally {
+      await handle.dispose()
+      await ctx.fiber.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it('an authority change cancels an armed outage retry before reconnecting immediately', async () => {
+    vi.useFakeTimers()
+    const { source, fire } = fakeSource()
+    const handle = start(source, { initialDelayMs: 100, maxDelayMs: 100, maxAttempts: 3 })
+    try {
+      await handle.ready
+      instances[0]!.onclose?.()
+      expect(source.connect).toHaveBeenCalledOnce()
+      fire('reauthorized')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(source.connect).toHaveBeenCalledTimes(2)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(source.connect).toHaveBeenCalledTimes(2)
+    } finally {
+      await handle.dispose()
+      await ctx.fiber.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['resolve', 'reject'] as const)('ignores a late transport %s after disposal and a previously queued authority callback', async (outcome) => {
+    const gate = Promise.withResolvers<Transport | undefined>()
+    const { source } = fakeSource()
+    const subscribe = vi.spyOn(source, 'onInvalidate')
+    source.connect.mockReturnValue(gate.promise)
+    const { warns } = captureLogs(ctx)
+    const handle = start(source)
+    const callback = subscribe.mock.calls[0]![0]
+    const disposing = handle.dispose()
+    try {
+      callback('reauthorized')
+      expect((source.connect.mock.calls[0]![0] as AbortSignal).aborted).toBe(true)
+      if (outcome === 'resolve') gate.resolve({} as Transport)
+      else gate.reject(new Error('cancelled source operation'))
+      await disposing
+      await handle.ready
+      expect(source.connect).toHaveBeenCalledOnce()
+      expect(mockConnect).not.toHaveBeenCalled()
+      expect(warns).toEqual([])
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    } finally {
+      gate.resolve(undefined)
+      await disposing
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['resolve', 'reject'] as const)('fences a superseded source %s while the replacement authority holds', async (outcome) => {
+    const gate = Promise.withResolvers<Transport | undefined>()
+    const { source, fire } = fakeSource()
+    source.connect.mockReturnValueOnce(gate.promise).mockResolvedValue(undefined)
+    const { warns } = captureLogs(ctx)
+    const handle = start(source)
+    try {
+      fire('revoked')
+      expect((source.connect.mock.calls[0]![0] as AbortSignal).aborted).toBe(true)
+      if (outcome === 'resolve') gate.resolve({} as Transport)
+      else gate.reject(new Error('superseded source operation'))
+      await handle.ready
+      await vi.waitFor(() => { expect(source.connect).toHaveBeenCalledTimes(2) })
+      expect(mockConnect).not.toHaveBeenCalled()
+      expect(warns).toEqual([])
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    } finally {
+      gate.resolve(undefined)
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('holds without connecting while the authority yields no transport', async () => {
     const { infos } = captureLogs(ctx)
     const { source } = fakeSource()
@@ -573,6 +678,31 @@ describe('connection source (host-connection)', () => {
     await handle.dispose()
   })
 
+  it('continues queued invalidations after the SDK rejects notification setup for a replacement', async () => {
+    const { source, fire } = fakeSource()
+    const handle = start(source)
+    try {
+      await handle.ready
+      expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+      mockSetNotificationHandler.mockImplementationOnce(() => {
+        throw new Error('fixture SDK notification setup failed')
+      })
+      mockListTools.mockResolvedValue(listing('revived'))
+
+      fire('config-changed')
+      fire('reauthorized')
+
+      await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__revived')).toBeDefined() })
+      expect(instances).toHaveLength(3)
+      expect(mockConnect).toHaveBeenCalledTimes(2)
+      expect(mockClose).toHaveBeenCalledTimes(2)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    } finally {
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('withdraws tools promptly and holds when revocation finds the authority down', async () => {
     const { source, fire } = fakeSource()
     const handle = start(source)
@@ -587,6 +717,31 @@ describe('connection source (host-connection)', () => {
     expect(instances).toHaveLength(1)
     expect(mockConnect).toHaveBeenCalledTimes(1)
     await handle.dispose()
+  })
+
+  it('does not retry a failed generation whose close overlaps authority withdrawal', async () => {
+    const closing: PromiseWithResolvers<void> = Promise.withResolvers()
+    const { source, fire } = fakeSource()
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('fixture connect failed'))
+    mockClose.mockImplementationOnce(() => closing.promise)
+    const handle = start(source)
+    try {
+      await vi.waitFor(() => { expect(mockClose).toHaveBeenCalledOnce() })
+      source.connect.mockResolvedValue(undefined)
+      fire('revoked')
+      closing.resolve()
+
+      expect((await handle.ready).error).toBeDefined()
+      await vi.waitFor(() => { expect(source.connect).toHaveBeenCalledTimes(2) })
+      expect(instances).toHaveLength(1)
+      expect(warns.some(line => line.includes('retrying in'))).toBe(false)
+      expect(ctx.tools.get('mcp__srv__remote')).toBeUndefined()
+    } finally {
+      closing.resolve()
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    }
   })
 
   it('revocation during an in-flight connect fences the attempt with no resurrection', async () => {

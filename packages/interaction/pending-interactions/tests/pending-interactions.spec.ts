@@ -100,12 +100,40 @@ describe('PendingInteractionRegistry', () => {
     expect(ctx.get('pendingInteractions')).toBeUndefined()
   })
 
+  it('makes retained producer and observer capabilities inert after disposal', async () => {
+    const ctx = new Context()
+    try {
+      const fiber = await ctx.plugin(PendingInteractionRegistry)
+      const registry = ctx.pendingInteractions
+      const changes = vi.fn()
+      registry.onChange(changes)
+      const end = registry.begin({ kind: 'question' })
+      await Promise.resolve()
+      expect(changes).toHaveBeenCalledTimes(1)
+
+      await fiber.dispose()
+      const disposed = registry.snapshot()
+      expect(disposed.pending).toEqual([])
+      expect(disposed.revision).toBe(2)
+      end()
+      registry.begin({ kind: 'approval' })()
+      registry.onChange(changes)()
+      await Promise.resolve()
+
+      expect(registry.snapshot()).toEqual(disposed)
+      expect(changes).toHaveBeenCalledTimes(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('unsubscribes before queued delivery and does not replay history', async () => {
     const ctx = new Context()
     await ctx.plugin(PendingInteractionRegistry)
     const seen: string[] = []
     const unsubscribe = ctx.pendingInteractions.onChange((change) => { seen.push(change.type) })
     ctx.pendingInteractions.begin({ kind: 'question' })
+    unsubscribe()
     unsubscribe()
     await Promise.resolve()
     expect(seen).toEqual([])

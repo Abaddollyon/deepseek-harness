@@ -34,4 +34,4 @@ Pinning moves a thread's row between its group or flat list and the Pinned secti
 
 ## Related
 
-- [Workspace sidebar order and folding](2026-08-11-workspace-sidebar-order-and-folding.md) — owns the folded-group live holdout this feature must not be confused with.
+- [Workspace sidebar order and folding](../../archived/feature/2026-08-11-workspace-sidebar-order-and-folding.md) — historical rationale for the folded-group live holdout this feature must not be confused with.

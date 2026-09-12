@@ -4,7 +4,7 @@
  * the consumer pending.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -24,8 +24,12 @@ interface Observed {
 
 const disposers: (() => Promise<void>)[] = []
 
+/** Fixture tree roots, removed after their booted tree has been disposed. */
+const tempDirs: string[] = []
+
 afterEach(async () => {
   for (const dispose of disposers.splice(0)) await dispose()
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   internals.stdout = process.stdout
   internals.stderr = process.stderr
 })
@@ -37,6 +41,7 @@ afterEach(async () => {
  */
 async function bootStartup(args: string[]): Promise<{ task: HeadlessStartupValues | undefined; observed: Observed }> {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-headless-startup-'))
+  tempDirs.push(dir)
   const observed: Observed = { exits: [], out: '' }
   writeFileSync(join(dir, 'row.mjs'), 'export function apply(_ctx, config) { globalThis.__headlessStartupObserved.runnerConfig = config }\n')
   // Loader imports through Node's resolver, so this fixture delegates to the
@@ -154,6 +159,17 @@ describe('headless command-line provider', () => {
       'run',
     ])
     expect(observed.out).toContain('positive safe integer')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('rejects a negative retry budget before mounting the runner', async () => {
+    const { task, observed } = await bootStartup([
+      '--max-turns', '1', '--max-input-tokens', '10', '--max-output-tokens', '10',
+      '--max-retries', '-1', 'run',
+    ])
+    expect(observed.out).toContain('nonnegative safe integer')
     expect(task).toBeUndefined()
     expect(observed.runnerConfig).toBeUndefined()
     expect(observed.exits).toEqual([1])

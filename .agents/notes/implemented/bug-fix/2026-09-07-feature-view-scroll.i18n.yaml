@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-07-feature-view-scroll.md
-2026-09-07-feature-view-scroll.md: fe7199681b2f1cc1e9640f0aa25be324b62ef1fc
-2026-09-07-feature-view-scroll.zh.md: cb498a67e692fa7069a4a7c51644b5e40fd70bfd
+2026-09-07-feature-view-scroll.md: 337e8949939728717e8269819b6ba93ebab3c975
+2026-09-07-feature-view-scroll.zh.md: 5f9ed50095f4f4f8269c8565c35fa1fc8d43e9b2

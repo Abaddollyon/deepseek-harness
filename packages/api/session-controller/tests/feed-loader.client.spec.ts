@@ -8,7 +8,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, expect, it } from 'vitest'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+import { RemoteStream, type RemoteStreamOptions } from '@deepseek-ai/dsh-api-gateway/client'
+import { afterEach, expect, it, vi } from 'vitest'
 import * as SessionClient from '../src/client/index.ts'
 import { FakeApiClient, fakeRemote, ok } from './fake-api.client.ts'
 
@@ -16,8 +18,12 @@ let root: string | undefined
 let ctx: Context | undefined
 
 afterEach(async () => {
-  await ctx?.fiber.dispose()
-  if (root !== undefined) await rm(root, { recursive: true, force: true })
+  try {
+    await ctx?.fiber.dispose()
+  } finally {
+    vi.useRealTimers()
+    if (root !== undefined) await rm(root, { recursive: true, force: true })
+  }
 })
 
 it('loads the client before Host session readiness and recovers retained sessions through the configured budget', async () => {
@@ -54,8 +60,24 @@ it('loads the client before Host session readiness and recovers retained session
     ['session-client', SessionClient],
     ['typert', TypertRegistry],
     ['fixture-remote', { apply(context: Context) {
+      const generation = { id: 1, host: { home: '/fixture' } }
+      const connection: ConnectionHandle = {
+        isLoopback: true,
+        generation: { getSnapshot: () => generation, subscribe: () => () => {} },
+        state: { getSnapshot: () => 'connected', subscribe: () => () => {} },
+        rpc: { call: () => Promise.reject(new Error('unexpected generic RPC call')) },
+        reconnect: () => {},
+        registerGenerationSource: () => () => {},
+        start: () => ({ stop: () => {} }),
+      }
+      context.reflect.provide('connection', connection)
+      context.reflect.provide('fileUpload', {
+        available: true,
+        post: () => Promise.reject(new Error('unexpected file upload')),
+      })
       context.reflect.provide('remote', {
         ...remote,
+        $stream: <Item>(options: RemoteStreamOptions<Item>) => new RemoteStream(connection, options),
         $host: { home: '/fixture', isLoopback: true },
         $on: () => () => {},
       })
@@ -71,21 +93,25 @@ it('loads the client before Host session readiness and recovers retained session
       return modules.get(specifier)
     },
   } as unknown as NonNullable<typeof ctx.loader.internal>
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   await ctx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
   await ctx.loader.await()
   const sessions = ctx.sessions
-  await expect.poll(() => sessions.feed.getSnapshot().state).toBe('retrying')
+  expect(sessions !== undefined).toBe(true)
+  await vi.waitFor(() => { expect(sessions.feed.getSnapshot().state).toBe('retrying') }, { interval: 1 })
   expect(sessions.list.getSnapshot().ids).toContain(SessionId('restored-session'))
   sessions.open(SessionId('restored-session'))
   const binding = sessions.binding(SessionId('restored-session'))
+  expect(attempts).toBe(1)
   hostReady = true
-  await expect.poll(() => sessions.feed.getSnapshot().state).toBe('ready')
-  expect(attempts).toBeGreaterThan(1)
-  expect(attempts).toBeLessThanOrEqual(4)
+  await vi.advanceTimersByTimeAsync(5)
+  await vi.waitFor(() => { expect(sessions.feed.getSnapshot().state).toBe('ready') }, { interval: 1 })
+  expect(attempts).toBe(2)
   expect(sessions.list.getSnapshot().current).toBe(SessionId('restored-session'))
   expect(sessions.binding(SessionId('restored-session'))).toBe(binding)
   await ctx.fiber.dispose()
   const finalAttempts = attempts
   sessions.retryFeed()
+  await vi.runAllTimersAsync()
   expect(attempts).toBe(finalAttempts)
 })

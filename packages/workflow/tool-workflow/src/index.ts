@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
@@ -255,7 +255,7 @@ interface TruncatedWorkflowResult {
 
 /** Persist an oversized serialized value and replace it with explicit recovery metadata. */
 function projectResult(
-  ctx: Context, session: Session, callId: SaveTextSpill['source']['callId'], name: string, value: JsonValue, maxChars: number,
+  ctx: Context, session: Session, callId: ToolCallId, name: string, value: JsonValue, maxChars: number,
 ): JsonValue | Promise<JsonValue> {
   // The engine returns JSON data (null for a valueless script), so stringify never yields undefined.
   const rendered = JSON.stringify(value, null, 2)
@@ -266,7 +266,7 @@ function projectResult(
   }
   const save: SaveTextSpill = {
     owner: { sessionId: session.id },
-    source: { toolName: 'workflow', callId, label: 'result' },
+    source: { kind: 'tool', toolName: 'workflow', callId, label: 'result' },
     suggestedName: `${name}-result.json`,
     content: rendered,
   }
@@ -289,7 +289,7 @@ async function settleSupervisedRun(
   recorder: WorkflowRecorder,
   ctx: Context,
   session: Session,
-  callId: SaveTextSpill['source']['callId'],
+  callId: ToolCallId,
   maxResultChars: number,
 ): Promise<JobOutcome> {
   let result: WorkflowResult

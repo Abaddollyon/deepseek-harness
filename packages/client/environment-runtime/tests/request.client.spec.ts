@@ -15,7 +15,7 @@ describe('environment request', () => {
     expect(carrier).toHaveBeenCalledWith(
       'sigil',
       '/api/tasks?projection=summary',
-      expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) }),
+      expect.objectContaining({ method: 'GET', signal: expect.any(AbortSignal) as AbortSignal }),
     )
   })
 

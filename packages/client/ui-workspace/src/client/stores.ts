@@ -5,7 +5,7 @@
  * register() receives the factory and the browser derives its PropsStore
  * share from the return type.
  */
-import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
+import { defineStore, migrateLocalStorageKey, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
 
 /** Browser-local order account for the hierarchy-free flat Session list. */
 export const FLAT_SESSION_ORDER_KEY = '__flat_session_order__'
@@ -108,19 +108,6 @@ export function createWorkspaceViewStore(
       },
     },
   })
-}
-
-function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    if (localStorage.getItem(nextKey) !== null) return
-    const legacy = localStorage.getItem(legacyKey)
-    if (legacy === null) return
-    localStorage.setItem(nextKey, legacy)
-    localStorage.removeItem(legacyKey)
-  } catch {
-    // Persistence remains best-effort, matching the store engine contract.
-  }
 }
 
 /**

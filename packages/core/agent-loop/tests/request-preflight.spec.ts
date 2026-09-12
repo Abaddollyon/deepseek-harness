@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -22,8 +22,14 @@ class CapacityAdapter extends MockAdapter {
   }
 }
 
+const contexts: Context[] = []
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+})
+
 async function harness(adapter: MockAdapter): Promise<Context> {
   const ctx = new Context()
+  contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
@@ -46,7 +52,7 @@ describe('agent/request-preflight', () => {
   it('redispatches from a committed replacement before deriving the model request', async () => {
     const adapter = new CapacityAdapter([textResponse('ok')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('request-preflight-replace'), {
+    const agent = await ctx.agentLoop.create(SessionId('request-preflight-replace'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -58,9 +64,9 @@ describe('agent/request-preflight', () => {
       expect(Object.isFrozen(payload.header)).toBe(true)
       expect(Object.isFrozen(payload.header.config)).toBe(true)
       if (payload.attempt !== 1) return next()
-      const head = payload.agent.session.surface.nodes[0]!
+      const head = payload.agent.session.surface.nodes[1]!
       payload.agent.session.append('user/message', replacement('checkpoint'), {
-        surfaceOp: { op: 'replace', start: head, end: head },
+        surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],
       })
       return {
@@ -76,6 +82,10 @@ describe('agent/request-preflight', () => {
     await agent.whenIdle()
 
     expect(attempts).toEqual([1, 2])
+    expect(agent.session.eventAt(agent.session.surface.nodes[0]!)?.type).toBe('system/message')
+    const header = agent.session.snapshotEvents().findLast(event => event.type === 'request/header')
+    expect(header?.data).toMatchObject({ reason: 'series' })
+    expect(header?.data).not.toHaveProperty('startsSeries')
     expect(adapter.requests).toHaveLength(1)
     expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('checkpoint')
     expect(JSON.stringify(adapter.requests[0]!.messages)).not.toContain('original durable input')
@@ -84,7 +94,7 @@ describe('agent/request-preflight', () => {
   it('rejects a retry justified only by log growth', async () => {
     const adapter = new CapacityAdapter([textResponse('unused')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('request-preflight-log-only'), {
+    const agent = await ctx.agentLoop.create(SessionId('request-preflight-log-only'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -116,16 +126,16 @@ describe('agent/request-preflight', () => {
   it('admits after the fixed ceiling even when every retry is productive', async () => {
     const adapter = new CapacityAdapter([textResponse('bounded')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('request-preflight-bound'), {
+    const agent = await ctx.agentLoop.create(SessionId('request-preflight-bound'), {
       provider: 'mock',
       model: 'mock',
     })
     const attempts: number[] = []
     ctx.on('agent/request-preflight', async ({ agent: subject, attempt }) => {
       attempts.push(attempt)
-      const head = subject.session.surface.nodes[0]!
+      const head = subject.session.surface.nodes[1]!
       subject.session.append('user/message', replacement(`replacement ${attempt}`), {
-        surfaceOp: { op: 'replace', start: head, end: head },
+        surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],
       })
       return {

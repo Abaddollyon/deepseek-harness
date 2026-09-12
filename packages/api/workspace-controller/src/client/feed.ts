@@ -1,6 +1,6 @@
 /** Workspace-owned readiness recovery over the Gateway carrier lifecycle. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
+import { RemoteFeedLifecycle, type ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type { ClientWorkspaceModel } from './model.ts'
 import { createWorkspaceStateStream, type WorkspaceStateStream } from './transport.ts'
@@ -18,18 +18,13 @@ export interface WorkspaceFeedSnapshot {
 }
 
 /** Serializes Workspace subscriptions and fences callbacks before asynchronous teardown. */
-export class WorkspaceFeedRecovery {
+export class WorkspaceFeedRecovery extends RemoteFeedLifecycle<WorkspaceStateStream> {
   /** Sanitized follow readiness diagnostics exposed to mounted client surfaces. */
   readonly snapshot = createSnapshotStore<WorkspaceFeedSnapshot>({
     endpoint: 'workspace/follow', state: 'loading', attempt: 0, generation: 0,
     hasBaseline: false, lastSuccessfulAt: null, failure: null, canRetry: false,
   })
-  private epoch = 0
-  private disposed = false
   private attempt = 0
-  private stream: WorkspaceStateStream | undefined
-  private timer: ReturnType<typeof setTimeout> | undefined
-  private closing: Promise<void> = Promise.resolve()
   private closeFailed = false
 
   /**
@@ -41,37 +36,22 @@ export class WorkspaceFeedRecovery {
     private readonly remote: ClientRemote,
     private readonly model: ClientWorkspaceModel,
     private readonly delays: readonly number[],
-  ) {}
+  ) { super() }
+
+  /** A rejected teardown cannot prove quiescence; no replacement may open. */
+  protected override readonly onCloseFailure = (): void => {
+    this.closeFailed = true
+    if (!this.disposed) {
+      this.model.handleStreamFailure(new RemoteError('gateway/internal', 'Workspace subscription could not close', {}))
+      this.publish('error', 'teardown', false)
+    }
+  }
 
   /** Start once or explicitly retry an exhausted temporary failure. Repeated clicks coalesce. */
   retry(): void {
     if (this.disposed || this.closeFailed || (this.epoch !== 0 && !this.snapshot.getSnapshot().canRetry)) return
     this.attempt = 0
     this.replace()
-  }
-
-  /** Stop timers and await iterator quiescence; late frames cannot publish. */
-  async dispose(): Promise<void> {
-    this.disposed = true
-    this.epoch++
-    this.close()
-    await this.closing
-  }
-
-  private close(): void {
-    clearTimeout(this.timer)
-    this.timer = undefined
-    const stream = this.stream
-    this.stream = undefined
-    if (stream === undefined) return
-    this.closing = this.closing.then(() => stream.dispose()).catch(() => {
-      // A rejected teardown cannot prove quiescence. Never open a replacement.
-      this.closeFailed = true
-      if (!this.disposed) {
-        this.model.handleStreamFailure(new RemoteError('gateway/internal', 'Workspace subscription could not close', {}))
-        this.publish('error', 'teardown', false)
-      }
-    })
   }
 
   private publish(state: WorkspaceFeedSnapshot['state'], failure: WorkspaceFeedSnapshot['failure'] = null, canRetry = false): void {
@@ -88,6 +68,7 @@ export class WorkspaceFeedRecovery {
     void this.closing.then(() => {
       if (!this.current(epoch)) return
       this.publish(this.attempt === 0 ? 'loading' : 'retrying')
+      if (!this.current(epoch)) return
       this.stream = createWorkspaceStateStream(this.remote, {
         accept: {
           replaceBaseline: (value) => {

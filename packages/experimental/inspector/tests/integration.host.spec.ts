@@ -367,20 +367,34 @@ describe('experimental Inspector real Worker', () => {
     client = await InspectorClientFixture.start(inspector.endpoint.client, { label: 'Console Client' })
     cdp = await TestCdpClient.connect(inspector.endpoint.webSocketDebuggerUrl)
     secondCdp = await TestCdpClient.connect(inspector.endpoint.webSocketDebuggerUrl)
-    await Promise.all([cdp.call('Runtime.enable'), secondCdp.call('Runtime.enable')])
-    const firstContext = await clientContext(cdp)
-    const secondContext = await clientContext(secondCdp)
-    // Client Runtime commands share the source socket with Console enable frames, so these
-    // round-trips establish hook readiness before the fixture logs over its independent port.
-    const [firstReady, secondReady] = await Promise.all([
-      cdp.call('Runtime.evaluate', { expression: 'undefined', contextId: firstContext }),
-      secondCdp.call('Runtime.evaluate', { expression: 'undefined', contextId: secondContext }),
-    ])
-    expect(firstReady.result?.result).toMatchObject({ type: 'undefined' })
-    expect(secondReady.result?.result).toMatchObject({ type: 'undefined' })
+    await vi.waitFor(async () => {
+      const response = await cdp!.call('DSHInspector.getSources')
+      expect(recordArray(response.result?.sources).some(source => source.kind === 'client')).toBe(true)
+    })
+    // The MessagePort can deliver log requests before ingest receives Console subscriptions.
+    await client.setIngestPaused(true)
+    let firstContext: number
+    let secondContext: number
+    let logged: Promise<void> | undefined
     const value = { owner: 'client-console' }
     const marker = 'client-console-event'
-    await client.log(value, marker)
+    try {
+      await Promise.all([cdp.call('Runtime.enable'), secondCdp.call('Runtime.enable')])
+      firstContext = await clientContext(cdp)
+      secondContext = await clientContext(secondCdp)
+      logged = (async () => {
+        // Both subscriptions precede this request on the same ingest WebSocket.
+        // A Client response, unlike Runtime.enable, acknowledges their delivery.
+        expect((await cdp.call('Runtime.evaluate', {
+          contextId: firstContext,
+          expression: 'void 0',
+        })).error).toBeUndefined()
+        await client.log(value, marker)
+      })()
+    } finally {
+      await client.setIngestPaused(false)
+      await logged
+    }
     let firstEvent: CdpMessage | undefined
     let secondEvent: CdpMessage | undefined
     await vi.waitFor(() => {
@@ -406,6 +420,16 @@ describe('experimental Inspector real Worker', () => {
     expect((await cdp.call('Runtime.discardConsoleEntries')).error).toBeUndefined()
     expect((await cdp.call('Runtime.getProperties', { objectId: firstObjectId })).error).toBeDefined()
     expect((await secondCdp.call('Runtime.getProperties', { objectId: secondObjectId })).error).toBeUndefined()
+
+    await client.setIngestPaused(true)
+    await client.close()
+    client = undefined
+    await vi.waitFor(() => {
+      for (const [connection, contextId] of [[cdp!, firstContext], [secondCdp!, secondContext]] as const) {
+        expect(connection.events.some(event => event.method === 'Runtime.executionContextDestroyed'
+          && event.params?.executionContextId === contextId)).toBe(true)
+      }
+    })
   })
 
   it('projects a chunked Client bundle as read-only Debugger source', async () => {

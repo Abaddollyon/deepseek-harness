@@ -1,6 +1,5 @@
 /** Cold-safe Session list and search projection. */
 
-import { stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
@@ -100,7 +99,7 @@ export class ApiSessionList {
    */
   constructor(
     private readonly ctx: Context,
-    private readonly coldBlankProbeMaxBytes: number,
+    private readonly coldBlankProbeMaxBytes: number = DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
   ) {
     ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
@@ -195,7 +194,7 @@ export class ApiSessionList {
     titleCandidates: SessionHeader[],
   ): Promise<SessionSummary> {
     const cached = this.projectionsFor(header, undefined)
-    const projections = cached?.values.sessionListMetadata?.blank === false
+    const projections = cached?.values.title !== undefined || cached?.values.sessionListMetadata?.blank === false
       ? cached
       : await this.probeSmallCold(header, signal) ?? cached
     const visibleProjections = this.titleProjectionFor(header, projections, titleCandidates)
@@ -206,7 +205,7 @@ export class ApiSessionList {
       sessionId: header.id,
       updatedAt: updatedAt(header, metadata),
       running: false,
-      // A large or inaccessible cache miss remains unknown and visible.
+      // A large, metadata-less, or inaccessible cache miss remains unknown and visible.
       blank: metadata?.blank ?? false,
       ...listFields(header),
       ...(visibleProjections === undefined ? {} : { projections: visibleProjections }),
@@ -226,6 +225,7 @@ export class ApiSessionList {
     projections: SessionProjectionHints | undefined,
     titleCandidates: SessionHeader[],
   ): SessionProjectionHints | undefined {
+    if (projections?.values.title !== undefined) return projections
     const query = this.ctx.get('sessionQuery')
     if (query === undefined) return projections
     const current = this.coldTitles.get(header.id)
@@ -245,7 +245,7 @@ export class ApiSessionList {
       return projections
     }
     return {
-      asOfSeq: Math.max(projections?.asOfSeq ?? 0, entry.title.eventSeq),
+      asOfSeq: projections === undefined ? entry.title.eventSeq : Math.min(projections.asOfSeq, entry.title.eventSeq),
       values: { ...projections?.values, title: entry.title.title } as SessionProjectionValues,
     }
   }
@@ -301,11 +301,11 @@ export class ApiSessionList {
   ): Promise<SessionProjectionHints | undefined> {
     if (this.coldBlankProbeMaxBytes === 0) return undefined
     const persistence = this.ctx.get('sessionPersistence')
-    const location = persistence?.locate(header)
-    if (location === undefined) return undefined
+    if (persistence === undefined) return undefined
     signal?.throwIfAborted()
     try {
-      if ((await stat(location.path)).size > this.coldBlankProbeMaxBytes) return undefined
+      const snapshot = await persistence.stat(header.id, signal === undefined ? undefined : { signal })
+      if (snapshot?.sizeBytes === undefined || snapshot.sizeBytes > this.coldBlankProbeMaxBytes) return undefined
     } catch {
       signal?.throwIfAborted()
       return undefined
@@ -441,10 +441,12 @@ export class ApiSessionList {
     session: Session | undefined,
   ): SessionProjectionHints | undefined {
     try {
+      const cache = this.ctx.get('sessionProjectionCache')
       const block = session === undefined
         ? header.isSeeded
           ? undefined
-          : this.ctx.get('sessionProjectionCache')?.cachedSnapshot(header, SessionLogOffset(0))
+          : cache?.cachedSnapshot(header, SessionLogOffset(0))
+            ?? cache?.cachedPredecessorTitle(header, SessionLogOffset(0))
         : this.ctx.sessionProjections.cachedSnapshot(session)
       return block !== undefined && Object.keys(block.values).length > 0
         ? {

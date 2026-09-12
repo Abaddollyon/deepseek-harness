@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Entry, EntryTree } from '@deepseek-ai/cordis-plugin-loader'
+import type { Entry, EntryTree, ModuleLoader } from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -94,6 +94,31 @@ function nearestManifest(modulePath: string): string | undefined {
   }
 }
 
+/** Locate source packages reached by Loader ESM hooks rather than node_modules. */
+function loaderPackageManifest(
+  specifier: string,
+  anchors: readonly string[],
+  loader: ModuleLoader | undefined,
+): string | undefined {
+  if (loader === undefined) return undefined
+  for (const anchor of anchors) {
+    let url: string
+    try {
+      url = loader.version === 'v1'
+        ? loader.resolveSync(specifier, anchor, {}).url
+        : loader.resolveSync(anchor, { specifier }).url
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error
+        && error.code === 'ERR_MODULE_NOT_FOUND') continue
+      throw error
+    }
+    if (new URL(url).protocol !== 'file:') continue
+    const manifest = nearestManifest(fileURLToPath(url))
+    if (manifest !== undefined) return manifest
+  }
+  return undefined
+}
+
 /** Exact package identity resolver with immutable per-process manifest caching. */
 class PackageIdentityResolver {
   // TODO: Invalidate manifest identities if in-process package-version replacement becomes a supported upgrade path.
@@ -102,7 +127,7 @@ class PackageIdentityResolver {
   constructor(private readonly hostBaseUrl: string) {}
 
   /** Resolve one Loader entry's owning package, or absence for a non-package loose module. */
-  resolve({ entry, bareBaseUrl }: ActiveEntry): DeepSeekPluginPackageIdentity | undefined {
+  resolve({ entry, bareBaseUrl }: ActiveEntry, loader: ModuleLoader | undefined): DeepSeekPluginPackageIdentity | undefined {
     /* v8 ignore next -- Loader entry trees inherit a base URL; the fallback supports direct embedders. */
     const treeBase = entry.parent.tree.ctx.baseUrl ?? this.hostBaseUrl
     const anchors = [...new Set([bareBaseUrl ?? treeBase, treeBase, this.hostBaseUrl, import.meta.url])]
@@ -113,6 +138,7 @@ class PackageIdentityResolver {
     let manifest: string | undefined
     if (packageName !== undefined) {
       manifest = barePackageManifest(packageName, anchors)
+        ?? loaderPackageManifest(entry.options.name, anchors, loader)
       if (manifest === undefined) {
         throw new Error(`plugin-package-inventory-deepseek: cannot resolve active package ${JSON.stringify(packageName)}`)
       }
@@ -169,7 +195,7 @@ async function collectActivePluginPackages(
   }
   const unique = new Map<string, DeepSeekPluginPackageIdentity>()
   for (const activeEntry of entries) {
-    const identity = resolver.resolve(activeEntry)
+    const identity = resolver.resolve(activeEntry, ctx.loader.internal)
     if (identity === undefined) continue
     unique.set(`${identity.name}\u0000${identity.version}`, identity)
   }

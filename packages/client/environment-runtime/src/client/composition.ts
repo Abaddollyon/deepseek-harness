@@ -174,7 +174,7 @@ export function createEnvironmentCompositionService(shell: Context): Environment
       let composition!: RunningEnvironmentComposition
       const pending = startComposition(shell, factory, options, () => {
         running = false
-        if (active === composition) active = undefined
+        active = undefined
       })
       starting = pending
       try {
@@ -185,7 +185,7 @@ export function createEnvironmentCompositionService(shell: Context): Environment
         running = false
         throw error
       } finally {
-        if (starting === pending) starting = undefined
+        starting = undefined
       }
     },
   }
@@ -232,12 +232,7 @@ async function startComposition(
       try {
         const runtime = await createEnvironmentRuntime({
           environmentId,
-          request: (boundEnvironmentId, path, init) => {
-            if (boundEnvironmentId !== environmentId) {
-              throw new Error('environment composition: carrier identity mismatch')
-            }
-            return carrier.request(path, init)
-          },
+          request: (_boundEnvironmentId, path, init) => carrier.request(path, init),
           connectionTransport: carrier.connectionTransport,
           createConnection: transport => connectionFactory.create(transport),
           activate: async (context) => { await options.activator.activate(context, domainRoster) },
@@ -325,8 +320,7 @@ async function startComposition(
           assertCurrent()
           const target = environmentOf(location) ?? localEnvironmentId
           if (target === localEnvironmentId) {
-            const state = projection.getSnapshot()
-            if (state.phase !== 'idle' || activePresentation !== undefined) {
+            if (projection.getSnapshot().phase !== 'idle') {
               throw new Error('environment composition: local presentation is not restored')
             }
             const runtime = localRuntimeOf(shell, localEnvironmentId)
@@ -343,7 +337,9 @@ async function startComposition(
           const result = await callback(destination.context, signal)
           assertCurrent()
           assertSameGeneration(destination.runtime, generation)
-          requireRemotePresentation(projection.getSnapshot(), activePresentation, target, destination)
+          if (projection.getSnapshot().phase !== 'ready' || activePresentation !== destination) {
+            throw new Error('environment composition: destination Host is not connected')
+          }
           return result
         },
       )
@@ -401,26 +397,6 @@ function assertSameGeneration(
   }
 }
 
-function requireRemotePresentation(
-  state: ActiveEnvironmentRuntimeState,
-  presentation: ActivePresentation | undefined,
-  environmentId: EnvironmentId,
-  expected?: ActivePresentation,
-): ActivePresentation {
-  if (state.phase === 'error' && state.environmentId === environmentId) {
-    throw new Error('environment composition: destination activation failed', { cause: state.error })
-  }
-  if (state.phase !== 'ready'
-    || state.environmentId !== environmentId
-    || state.connectionState !== 'connected'
-    || presentation === undefined
-    || presentation.runtime !== state.runtime
-    || (expected !== undefined && presentation !== expected)) {
-    throw new Error('environment composition: destination Host is not connected')
-  }
-  return presentation
-}
-
 async function withNavigationIntent<T>(
   navigation: EnvironmentCompositionNavigation,
   location: EnvironmentAppLocation,
@@ -431,7 +407,7 @@ async function withNavigationIntent<T>(
   navigation.open(location)
   const intent = navigation.getSnapshot()
   const superseded = new AbortController()
-  const operationSignal = combineSignals(signal, superseded.signal) ?? superseded.signal
+  const operationSignal = combineSignals(signal, superseded.signal)
   const assertCurrent = (): void => {
     if (operationSignal.aborted) {
       throw abortReason(operationSignal, 'Environment presentation was cancelled')
@@ -457,16 +433,15 @@ function waitForRemotePresentation(
   projection: ActiveEnvironmentRuntimeProjection,
   presentation: () => ActivePresentation | undefined,
   environmentId: EnvironmentId,
-  signal: AbortSignal | undefined,
+  signal: AbortSignal,
 ): Promise<ActivePresentation> {
   return new Promise<ActivePresentation>((resolve, reject) => {
     let settled = false
-    let unsubscribe = (): void => {}
     const finish = (result: { value: ActivePresentation } | { error: unknown }): void => {
       if (settled) return
       settled = true
       unsubscribe()
-      signal?.removeEventListener('abort', aborted)
+      signal.removeEventListener('abort', aborted)
       if ('value' in result) resolve(result.value)
       else reject(asError(result.error, 'Environment presentation resolution failed'))
     }
@@ -488,30 +463,24 @@ function waitForRemotePresentation(
         }
       }
     }
-    unsubscribe = projection.subscribe(inspect)
-    signal?.addEventListener('abort', aborted, { once: true })
-    if (signal?.aborted === true) {
-      aborted()
-      return
-    }
+    const unsubscribe = projection.subscribe(inspect)
+    signal.addEventListener('abort', aborted, { once: true })
     inspect()
   })
 }
 
-function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-  const present = signals.filter((signal): signal is AbortSignal => signal !== undefined)
-  if (present.length === 0) return undefined
-  if (present.length === 1) return present[0]
-  return AbortSignal.any(present)
+function combineSignals(caller: AbortSignal | undefined, lifetime: AbortSignal): AbortSignal {
+  return caller === undefined ? lifetime : AbortSignal.any([caller, lifetime])
 }
 
 async function raceWithSignal<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return operation
-  if (signal.aborted) throw abortReason(signal, 'Environment presentation was cancelled')
   return new Promise<T>((resolve, reject) => {
     const aborted = (): void => { reject(abortReason(signal, 'Environment presentation was cancelled')) }
-    signal.addEventListener('abort', aborted, { once: true })
+    // The operation has started, so retain its rejection handler even after cancellation.
     void operation.then(resolve, reject).finally(() => { signal.removeEventListener('abort', aborted) })
+    if (signal.aborted) aborted()
+    else signal.addEventListener('abort', aborted, { once: true })
   })
 }
 
@@ -566,6 +535,7 @@ function followSessionLocation(
     refresh?(): Promise<void>
   } | undefined
   if (sessions?.list === undefined || sessions.open === undefined) return () => {}
+  const list = sessions.list
   let stopped = false
   let refreshTarget: string | undefined
   let locationTarget: string | undefined
@@ -579,13 +549,12 @@ function followSessionLocation(
       blankIntent = location
       locationTarget = undefined
       locationHydrated = false
-      if (sessions.list?.getSnapshot().current !== undefined) sessions.clear?.()
+      if (list.getSnapshot().current !== undefined) sessions.clear?.()
       return
     }
     blankIntent = undefined
     if (location.kind !== 'session' || location.ref.environmentId !== environmentId) return
-    const snapshot = sessions.list?.getSnapshot()
-    if (snapshot === undefined) return
+    const snapshot = list.getSnapshot()
     const sessionId = location.ref.sessionId
     if (locationTarget !== sessionId) {
       locationTarget = sessionId
@@ -613,7 +582,7 @@ function followSessionLocation(
     })
   }
   const offNavigation = navigation.subscribe(sync)
-  const offSessions = sessions.list.subscribe(sync)
+  const offSessions = list.subscribe(sync)
   sync()
   return () => {
     stopped = true

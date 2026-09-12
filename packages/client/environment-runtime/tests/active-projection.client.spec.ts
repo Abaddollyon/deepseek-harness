@@ -22,7 +22,7 @@ function selection(initial: string): EnvironmentSelectionSource & { set(value: s
   }
 }
 
-function fakeRuntime(environmentId: string): EnvironmentRuntime {
+function fakeRuntime(environmentId: string) {
   const context = new Context()
   context.provide('projectionFixture', { environmentId })
   return {
@@ -50,6 +50,120 @@ function source<T>(initial: T): {
 }
 
 describe('active environment runtime projection', () => {
+  test('contains observer failures and retries failed acquisition with disposer-free activation', async () => {
+    const selected = selection('remote')
+    const runtime = fakeRuntime('remote')
+    const create = vi.fn().mockRejectedValueOnce(new Error('carrier unavailable')).mockResolvedValue(runtime)
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: create })
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selected, activate: () => {} })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const changed = vi.fn()
+    projection.subscribe(() => { throw new Error('observer') })
+    projection.subscribe(changed)
+    try {
+      await projection.whenIdle()
+      expect(projection.getSnapshot()).toMatchObject({ phase: 'error' })
+      expect(logged).toHaveBeenCalled()
+      expect(changed).toHaveBeenCalled()
+      projection.retry()
+      await projection.whenIdle()
+      expect(projection.getSnapshot()).toMatchObject({ phase: 'ready', environmentId: 'remote' })
+    } finally { await projection.dispose(); logged.mockRestore() }
+    projection.retry()
+    await projection.dispose()
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  test('releases an acquisition superseded before its carrier becomes ready', async () => {
+    const selected = source<string | undefined>('slow')
+    const entered = Promise.withResolvers<undefined>()
+    const ready = Promise.withResolvers<EnvironmentRuntime>()
+    const runtime = fakeRuntime('slow')
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => { entered.resolve(undefined); return ready.promise } })
+    const activate = vi.fn()
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selected, activate })
+    await entered.promise
+    selected.set(undefined)
+    ready.resolve(runtime)
+    await projection.whenIdle()
+    expect(runtime.dispose.mock.calls).toHaveLength(1)
+    expect(activate).not.toHaveBeenCalled()
+    expect(projection.getSnapshot()).toEqual({ phase: 'idle' })
+    await projection.dispose()
+  })
+
+  test.each(['second', undefined])('supersedes %s while the previous presentation is retiring', async (next) => {
+    const selected = source<string | undefined>('first')
+    const retiring = Promise.withResolvers<undefined>()
+    const retired = Promise.withResolvers<undefined>()
+    const generation = source<ReturnType<EnvironmentRuntime['generation']['getSnapshot']>>(undefined)
+    const runtimes = new Map<string, { dispose: ReturnType<typeof fakeRuntime>['dispose'] }>()
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: async (id) => {
+      const runtime = { ...fakeRuntime(id), generation }
+      runtimes.set(id, runtime)
+      return runtime
+    } })
+    const mounted: string[] = []
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selected, activate(runtime) {
+      mounted.push(runtime.environmentId)
+      if (runtime.environmentId === 'first') return async () => { retiring.resolve(undefined); await retired.promise }
+    } })
+    await projection.whenIdle()
+    selected.set(next)
+    generation.set(undefined)
+    await retiring.promise
+    selected.set('third')
+    retired.resolve(undefined)
+    await projection.whenIdle()
+    expect(mounted).toEqual(['first', 'third'])
+    if (next !== undefined) expect(runtimes.get(next)?.dispose.mock.calls).toHaveLength(1)
+    expect(projection.getSnapshot()).toMatchObject({ phase: 'ready', environmentId: 'third' })
+    await projection.dispose()
+  })
+
+  test('a rejected retirement does not poison the next navigation transition', async () => {
+    const selected = source<string | undefined>('first')
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: async id => fakeRuntime(id) })
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selected, activate(runtime) {
+      if (runtime.environmentId === 'first') return () => { throw new Error('retirement failed') }
+    } })
+    await projection.whenIdle()
+    selected.set(undefined)
+    await expect(projection.whenIdle()).rejects.toThrow('retirement failed')
+    selected.set('second')
+    await projection.whenIdle()
+    expect(projection.getSnapshot()).toMatchObject({ phase: 'ready', environmentId: 'second' })
+    await projection.dispose()
+  })
+
+  test('rolls back presentation activation when generation observation cannot install', async () => {
+    const runtime = { ...fakeRuntime('remote'), generation: {
+      getSnapshot: () => undefined,
+      subscribe() { throw new Error('observation unavailable') },
+    } }
+    const cleanup = vi.fn()
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => runtime })
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selection('remote'), activate: () => cleanup })
+    await projection.whenIdle()
+    expect(projection.getSnapshot()).toMatchObject({ phase: 'error', error: new Error('observation unavailable') })
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(runtime.dispose.mock.calls).toHaveLength(1)
+    await projection.dispose()
+  })
+
+  test('supports disposal requested by a ready-state observer', async () => {
+    const registry = createEnvironmentRuntimeRegistry({ createRuntime: async id => fakeRuntime(id) })
+    const cleanup = vi.fn()
+    const projection = createActiveEnvironmentRuntimeProjection({ registry, selection: selection('remote'), activate: () => cleanup })
+    let disposal: Promise<void> | undefined
+    projection.subscribe(() => { if (projection.getSnapshot().phase === 'ready') disposal = projection.dispose() })
+    await projection.whenIdle()
+    expect(disposal).toBeDefined()
+    await disposal
+    expect(cleanup).toHaveBeenCalledOnce()
+    projection.retry()
+  })
+
   test('keeps one owning-runtime UI registration active in the shell', async () => {
     const selected = selection('local')
     const registry = createEnvironmentRuntimeRegistry({ createRuntime: async id => fakeRuntime(id) })
@@ -209,6 +323,7 @@ describe('active environment runtime projection', () => {
   test('releases the runtime lease when presentation cleanup throws', async () => {
     const selected = selection('sigil')
     const runtime = fakeRuntime('sigil')
+    const disposeRuntime = vi.spyOn(runtime, 'dispose')
     const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => runtime })
     const projection = createActiveEnvironmentRuntimeProjection({
       registry,
@@ -218,12 +333,13 @@ describe('active environment runtime projection', () => {
     await projection.whenIdle()
 
     await expect(projection.dispose()).rejects.toThrow('presentation cleanup failed')
-    expect(runtime.dispose).toHaveBeenCalledOnce()
+    expect(disposeRuntime).toHaveBeenCalledOnce()
   })
 
   test('settles to idle after a selected presentation cleanup failure', async () => {
     const selected = source<string | undefined>('sigil')
     const runtime = fakeRuntime('sigil')
+    const disposeRuntime = vi.spyOn(runtime, 'dispose')
     const registry = createEnvironmentRuntimeRegistry({ createRuntime: async () => runtime })
     const projection = createActiveEnvironmentRuntimeProjection({
       registry,
@@ -235,7 +351,7 @@ describe('active environment runtime projection', () => {
     selected.set(undefined)
     await expect(projection.whenIdle()).rejects.toThrow('presentation cleanup failed')
     expect(projection.getSnapshot()).toEqual({ phase: 'idle' })
-    expect(runtime.dispose).toHaveBeenCalledOnce()
+    expect(disposeRuntime).toHaveBeenCalledOnce()
     await expect(projection.dispose()).rejects.toThrow('presentation cleanup failed')
   })
 })

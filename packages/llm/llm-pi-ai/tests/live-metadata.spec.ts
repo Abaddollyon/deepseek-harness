@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveProfiles } from '../src/config.ts'
 import { fetchLiveMetadata, normalizeMetadata } from '../src/live-metadata.ts'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 function profile(provider: string) {
   return resolveProfiles({ [provider]: {} }).get(provider)!
@@ -108,5 +108,151 @@ describe('provider metadata protocols', () => {
     await expect(fetchLiveMetadata(profile('openai'), { apiKey: 'fake' }, new AbortController().signal)).rejects.toThrow(/discovery/)
     vi.stubGlobal('fetch', async () => new Response('secret failure body', { status: 401 }))
     await expect(fetchLiveMetadata(profile('openai'), { apiKey: 'fake' }, new AbortController().signal)).rejects.not.toThrow(/secret/)
+  })
+
+  it('normalizes legacy capability fields, explicit modalities, exclusions, and duplicate IDs', () => {
+    expect(normalizeMetadata([{
+      id: 'legacy', name: 'Legacy', type: 'model', context_window: 100, max_tokens: 20,
+      input_modalities: ['text', 'image', 'audio'], supported_reasoning_levels: ['off', { effort: 'max' }],
+      capabilities: { thinking: { supported: false } },
+    }]).models).toEqual([{
+      id: 'legacy', name: 'Legacy', contextWindow: 100, maxTokens: 20,
+      input: ['text', 'image'], reasoningEfforts: false,
+    }])
+    expect(normalizeMetadata([{ id: 'text-only', supports_image_in: false }]).models)
+      .toEqual([{ id: 'text-only', input: ['text'] }])
+    expect(normalizeMetadata([{ slug: 'hidden', visibility: 'internal' }], true)).toEqual({ models: [], excludedIds: ['hidden'] })
+    expect(() => normalizeMetadata([{ id: 'same' }, { id: 'same' }])).toThrow(/discovery/)
+  })
+
+  it('rejects malformed response framing and aborts before reading', async () => {
+    vi.stubGlobal('fetch', async () => new Response(null, { status: 200 }))
+    await expect(fetchLiveMetadata(profile('openai'), { apiKey: 'fake' }, new AbortController().signal)).rejects.toThrow(/discovery/)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(fetchLiveMetadata(profile('openai'), { apiKey: 'fake' }, controller.signal)).rejects.toThrow()
+  })
+
+  it.each([
+    [{ slug: 'model', visibility: 'list', supported_in_api: 'yes' }, true],
+    [{ id: 'model', type: 'embedding' }, false],
+  ] as const)('rejects malformed provider capability discriminants', (row, codex) => {
+    expect(() => normalizeMetadata([row], codex)).toThrow(/discovery/)
+  })
+
+  it('keeps explicit off effort and conservative unknown capabilities', () => {
+    expect(normalizeMetadata([
+      { id: 'off', supported_reasoning_levels: ['off'] },
+      { id: 'unknown', input_modalities: ['audio'], think_efforts: ['ultra'], capabilities: null },
+      { id: 'thinking', capabilities: { thinking: { supported: true }, image_input: { supported: false } } },
+    ]).models).toEqual([
+      { id: 'off', reasoningEfforts: { off: null } },
+      { id: 'unknown', reasoningEfforts: false },
+      { id: 'thinking', input: ['text'] },
+    ])
+  })
+
+  it('rejects a declared oversized response before consuming its body', async () => {
+    const cancel = vi.fn()
+    vi.stubGlobal('fetch', async () => new Response(new ReadableStream({ cancel }), {
+      headers: { 'content-length': String(4 * 1024 * 1024 + 1) },
+    }))
+    await expect(fetchLiveMetadata(profile('openai'), {}, new AbortController().signal)).rejects.toThrow(/discovery/)
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it.each(['abort', 'read failure'] as const)('contains a body cancellation failure after %s', async (mode) => {
+    const entered = Promise.withResolvers<undefined>()
+    const controller = new AbortController()
+    const cancel = vi.fn(() => Promise.reject(new Error('cancel failed')))
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
+    vi.stubGlobal('fetch', async () => new Response(new ReadableStream<Uint8Array>({
+      start(value) { streamController = value },
+      pull() { entered.resolve(undefined) },
+      cancel,
+    })))
+    const result = fetchLiveMetadata(profile('openai'), {}, controller.signal)
+    const rejected = expect(result).rejects.toThrow()
+    await entered.promise
+    if (mode === 'abort') controller.abort()
+    else streamController!.error(new Error('read failed'))
+    await rejected
+    if (mode === 'abort') expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('uses an already-versioned endpoint and supplied auth headers without a bearer key', async () => {
+    const requests: Array<{ url: URL; headers: Headers }> = []
+    vi.stubGlobal('fetch', async (url: URL, options: RequestInit) => {
+      requests.push({ url, headers: new Headers(options.headers) })
+      return Response.json({ data: [{ id: 'one' }] })
+    })
+    const route = resolveProfiles({ anthropic: { baseURL: 'https://proxy.invalid/v1/' } }).get('anthropic')!
+    await fetchLiveMetadata(route, { headers: { 'x-api-key': 'header-key', omitted: null } }, new AbortController().signal)
+    expect(requests[0]?.url.href).toBe('https://proxy.invalid/v1/models?limit=1000')
+    expect(requests[0]?.headers.get('x-api-key')).toBe('header-key')
+    expect(requests[0]?.headers.has('authorization')).toBe(false)
+    expect(requests[0]?.headers.has('omitted')).toBe(false)
+  })
+
+  it('retains the stable version when npm returns a prerelease and avoids duplicating the Codex prefix', async () => {
+    vi.stubGlobal('fetch', async (url: URL) => {
+      if (url.hostname === 'registry.npmjs.org') return Response.json({ version: '1.0.0-beta' })
+      expect(url.href).toBe('https://proxy.invalid/codex/models?client_version=0.153.2')
+      return Response.json({ models: [{ slug: 'one', visibility: 'list' }] })
+    })
+    const route = resolveProfiles({ 'openai-codex': { baseURL: 'https://proxy.invalid/codex' } }).get('openai-codex')!
+    await expect(fetchLiveMetadata(route, { headers: { 'chatgpt-account-id': 'account' } }, new AbortController().signal, '0.153.2'))
+      .resolves.toMatchObject({ clientVersion: '0.153.2', models: [{ id: 'one' }] })
+  })
+
+  it.each(['opaque-token', `head.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': {} })).toString('base64url')}.sig`])(
+    'refuses Codex metadata when the credential cannot supply an account', async (apiKey) => {
+      const fetch = vi.fn(async () => Response.json({ version: '0.153.2' }))
+      vi.stubGlobal('fetch', fetch)
+      await expect(fetchLiveMetadata(profile('openai-codex'), { apiKey }, new AbortController().signal)).rejects.toThrow(/discovery/)
+      expect(fetch).toHaveBeenCalledOnce()
+    },
+  )
+
+  it.each([['list', 'hide'], ['hide', 'list']] as const)('rejects contradictory Codex rows across pages (%s then %s)', async (first, second) => {
+    let pages = 0
+    vi.stubGlobal('fetch', async (url: URL) => {
+      if (url.hostname === 'registry.npmjs.org') return Response.json({ version: '0.153.2' })
+      return Response.json({ models: [{ slug: 'same', visibility: ++pages === 1 ? first : second }], has_more: pages === 1, last_id: 'same' })
+    })
+    await expect(fetchLiveMetadata(profile('openai-codex'), { headers: { 'chatgpt-account-id': 'account' } }, new AbortController().signal))
+      .rejects.toThrow(/discovery/)
+    expect(pages).toBe(2)
+  })
+
+  it.each(['entries', 'pages'] as const)('bounds aggregate %s across distinct pagination cursors', async (bound) => {
+    let pages = 0
+    vi.stubGlobal('fetch', async () => {
+      pages++
+      return Response.json({ data: Array.from({ length: bound === 'entries' ? 1100 : 1 }, (_, index) => ({ id: `${pages}-${index}` })), has_more: true, last_id: `page-${pages}` })
+    })
+    await expect(fetchLiveMetadata(profile('anthropic'), { apiKey: 'key' }, new AbortController().signal)).rejects.toThrow(/discovery/)
+    expect(pages).toBe(bound === 'entries' ? 2 : 10)
+  })
+
+  it('refuses metadata discovery without a route or auth endpoint for a provider with model-specific endpoints', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    await expect(fetchLiveMetadata(profile('amazon-bedrock'), {}, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'DISCOVERY_FAILED' })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('uses configured headers and ambient auth', async () => {
+    const requests: RequestInit[] = []
+    vi.stubGlobal('fetch', async (_url: URL, options: RequestInit) => {
+      requests.push(options)
+      return Response.json({ data: [{ id: 'ambient' }] })
+    })
+    const configured = resolveProfiles({ openai: { headers: { 'x-test': 'value' } } }).get('openai')!
+    const result = await fetchLiveMetadata(configured, { headers: { authorization: 'ambient' } }, new AbortController().signal)
+    expect(result.models[0]?.id).toBe('ambient')
+    expect(new Headers(requests[0]?.headers).get('authorization')).toBe('ambient')
+    expect(new Headers(requests[0]?.headers).get('x-test')).toBe('value')
   })
 })

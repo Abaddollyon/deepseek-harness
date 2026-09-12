@@ -1,6 +1,12 @@
 # Test-only product-shaped composition: mount a deterministic provider behind
 # the same one-shot tool schema as the public Codex example.
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+  disabled: true
+
 - insert:
+    - id: deterministic-jobs
+      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
     - id: subagent-result-diagnostic
       name: '../../../packages/test-support/session-snapshot/tests/fixtures/subagent-result-diagnostic.ts'
     - id: tool-subagent-codex

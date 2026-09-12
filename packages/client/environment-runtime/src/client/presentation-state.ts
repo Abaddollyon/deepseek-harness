@@ -92,9 +92,10 @@ export function createEnvironmentPresentationStore(serialized?: string): Environ
       sessions.delete(key)
       sessions.set(key, next)
       while (sessions.size > MAX_SESSIONS) {
-        const oldest = sessions.keys().next().value
-        if (oldest === undefined) break
-        sessions.delete(oldest)
+        for (const oldest of sessions.keys()) {
+          sessions.delete(oldest)
+          break
+        }
       }
       publish()
     },

@@ -447,7 +447,8 @@ export function startConnection(
         ctx.logger.warn(`${label}: connection attempt failed: ${source === undefined ? String(error) : `(${errorToken(error)})`}`)
       }
       try { await generation.close() } catch { /* transport already gone */ }
-      const quiesced = hasClosed() || await waitForClose(closed.promise)
+      let quiesced = hasClosed()
+      if (!quiesced) quiesced = await waitForClose(closed.promise)
       attemptSettled = true
       if (!isCurrent(generation)) return
       if (!quiesced) {

@@ -1,6 +1,7 @@
 version: 1
 scenario: workflow-run
 profile: headless
+writerOracle: separate
 composition: default
 recording: live
 header:

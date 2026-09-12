@@ -126,7 +126,7 @@ export function apply(ctx: Context): void {
       const flush = (): void => {
         if (!dirty) return
         dirty = false
-        if (timer !== undefined) clearTimeout(timer)
+        clearTimeout(timer)
         timer = undefined
         persistPresentation(presentation.serialize())
       }
@@ -146,7 +146,6 @@ export function apply(ctx: Context): void {
         removeSubscription()
         pageLifecycle.removeEventListener?.('pagehide', pagehide)
         flush()
-        if (timer !== undefined) clearTimeout(timer)
       }
     }, 'environment-runtime: environment presentation persistence')
   }

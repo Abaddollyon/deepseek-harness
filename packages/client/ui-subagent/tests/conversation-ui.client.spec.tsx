@@ -121,6 +121,8 @@ describe('SubagentHeaderLineage', () => {
     ])
     expect(screen.getByRole('treeitem', { name: /workflow.*running descendants: 1/ })).toBeTruthy()
     const history = screen.getByRole('treeitem', { name: 'Inactive agents (112)' })
+    fireEvent.keyDown(within(history).getByText('Inactive agents (112)'), { key: 'Enter' })
+    expect(history.getAttribute('aria-expanded')).toBe('false')
     fireEvent.keyDown(history, { key: 'ArrowRight' })
     expect(history.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByRole('treeitem', { name: /finished-111/ }).getAttribute('aria-level')).toBe('2')

@@ -938,10 +938,12 @@ const NO_PRESENTATION_TRANSITION: HostObservable<boolean> = {
 /** Unmount every presentation consumer before its owning Cordis graph retires. */
 function PresentationRoot({ ownerProps }: { ownerProps: object }) {
   const host = useHost()
-  const transitioning = useSyncExternalStore(
-    host.presentationTransition?.subscribe ?? NO_PRESENTATION_TRANSITION.subscribe,
-    host.presentationTransition?.getSnapshot ?? NO_PRESENTATION_TRANSITION.getSnapshot,
-  )
+  const transition = host.presentationTransition ?? NO_PRESENTATION_TRANSITION
+  const callbacks = useMemo(() => ({
+    subscribe: (listener: () => void) => transition.subscribe(listener),
+    getSnapshot: () => transition.getSnapshot(),
+  }), [transition])
+  const transitioning = useSyncExternalStore(callbacks.subscribe, callbacks.getSnapshot)
   if (transitioning) {
     return (
       <div

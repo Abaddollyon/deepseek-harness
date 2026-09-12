@@ -19,6 +19,11 @@ const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
 describe('reasoning schema boundary', () => {
+  it('rejects non-positive or oversized model discovery intervals', () => {
+    for (const value of [0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => resolveProfiles({ openai: { modelDiscovery: { enabled: true, timeoutMs: value } } })).toThrow(/positive timer interval/)
+    }
+  })
   it('rejects a level pi-ai does not know at the write that produced it', () => {
     expect(configWith({ reasoningEfforts: { ultra: 'x' } })).toThrow(/"off"/)
     expect(configWith({ reasoningEfforts: { high: 42 } })).toThrow()

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent, type AgentBudget } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -7,6 +7,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import { AgentBudgetTracker } from '../src/budget.ts'
 
 function response(chunks: StreamChunk[], usage = { inputTokens: 4, outputTokens: 2 }): StreamChunk[] {
   return [...chunks, { type: 'usage', usage }, { type: 'finish', reason: { kind: chunks.some(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call') ? 'tool-calls' : 'stop' } }]
@@ -53,12 +54,18 @@ class BudgetAdapter extends LlmAdapter {
   }
 }
 
+const contexts: Context[] = []
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+})
+
 async function harness(adapter: BudgetAdapter): Promise<Context> {
   const ctx = new Context()
+  contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(SystemPrompt, { persona: '' })
+  await ctx.plugin(SystemPrompt, { personaPrefix: '' })
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -87,7 +94,7 @@ describe('native agent budgets', () => {
     const adapter = new BudgetAdapter([tool('one'), text('unused')])
     const ctx = await harness(adapter)
     const configuredBudget = budget({ maxTurns: 1 })
-    const agent = ctx.agentLoop.create(SessionId('immutable-budget'), {
+    const agent = await ctx.agentLoop.create(SessionId('immutable-budget'), {
       provider: 'budget', model: 'model', budget: configuredBudget,
     })
     expect(agent.options.budget).toBe(configuredBudget)
@@ -108,16 +115,16 @@ describe('native agent budgets', () => {
     { maxTurns: 1.5 }, { maxInputTokens: Number.POSITIVE_INFINITY }, { maxOutputTokens: Number.MAX_SAFE_INTEGER + 1 },
   ])('rejects invalid budget before publication: $maxTurns $maxInputTokens $maxOutputTokens $maxRetries', async (invalid) => {
     const ctx = await harness(new BudgetAdapter([]))
-    expect(() => ctx.agentLoop.create(SessionId('invalid'), {
+    await expect(ctx.agentLoop.create(SessionId('invalid'), {
       provider: 'budget', model: 'model', budget: { ...budget(), ...invalid },
-    })).toThrow(/agent budget/)
+    })).rejects.toThrow(/agent budget/)
     expect(ctx.agents.list()).toEqual([])
   })
 
   it('limits model steps and stops before an excess request dispatch', async () => {
     const adapter = new BudgetAdapter([tool('one'), text('unused')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('turns'), {
+    const agent = await ctx.agentLoop.create(SessionId('turns'), {
       provider: 'budget', model: 'model', budget: budget({ maxTurns: 1 }),
     })
     send(agent)
@@ -129,7 +136,7 @@ describe('native agent budgets', () => {
   it('clamps each request to the remaining total output budget', async () => {
     const adapter = new BudgetAdapter([tool('one'), text('done', { inputTokens: 4, outputTokens: 3 })])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('output'), {
+    const agent = await ctx.agentLoop.create(SessionId('output'), {
       provider: 'budget', model: 'model', maxTokens: 99, budget: budget({ maxOutputTokens: 5 }),
     })
     send(agent)
@@ -138,10 +145,77 @@ describe('native agent budgets', () => {
     expect(finalReason(agent)).toMatchObject({ kind: 'completed' })
   })
 
+  it('stops before dispatch when a tool response exactly exhausts the output allowance', async () => {
+    const adapter = new BudgetAdapter([tool('one'), text('unused')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('output-exhausted'), {
+      provider: 'budget', model: 'model', budget: budget({ maxOutputTokens: 2 }),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests.map(request => request.maxTokens)).toEqual([2])
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 2' },
+    })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(1)
+  })
+
+  it('charges the requested output cap when usage is absent but exact input was reserved', async () => {
+    const adapter = new BudgetAdapter([
+      tool('one').filter(chunk => chunk.type !== 'usage'), text('unused'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('exact-input-without-usage'), {
+      provider: 'budget', model: 'model', budget: budget(),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 8' },
+    })
+  })
+
+  it('charges reported usage when stream middleware fails before the terminal chunk', async () => {
+    const adapter = new BudgetAdapter([text('interrupted', { inputTokens: 4, outputTokens: 8 }), text('unused')])
+    const ctx = await harness(adapter)
+    const failure = new Error('stream consumer failed')
+    ctx.on('llm/stream', async function* (_request, next) {
+      for await (const chunk of next()) {
+        yield chunk
+        if (chunk.type === 'usage') throw failure
+      }
+    })
+    const agent = await ctx.agentLoop.create(SessionId('failed-stream-budget'), {
+      provider: 'budget', model: 'model', budget: budget(),
+    })
+    send(agent)
+    await agent.whenIdle()
+    expect(finalReason(agent)).toMatchObject({ kind: 'error', error: { message: failure.message } })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/attempt')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(0)
+
+    send(agent)
+    await agent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(finalReason(agent)).toMatchObject({
+      kind: 'error', error: { code: 'BUDGET_EXCEEDED', message: 'agent exceeded its output token limit of 8' },
+    })
+  })
+
+  it('refuses input admission after a dispatched unpriced request settles without usage', () => {
+    const tracker = new AgentBudgetTracker(budget())
+    const request: GenerateOptions = { provider: 'budget', model: 'model', messages: [] }
+    const admitted = tracker.admitRequest(request, undefined)
+    expect(admitted).toBeUndefined()
+    tracker.settleRequest(request, admitted, undefined)
+    expect(() => tracker.admitRequest(request, undefined)).toThrow(/previous response reported no usage/)
+  })
+
   it('uses authoritative response usage and stops before the next request at the input threshold', async () => {
     const adapter = new BudgetAdapter([tool('one'), text('unused')], null)
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('response-input'), {
+    const agent = await ctx.agentLoop.create(SessionId('response-input'), {
       provider: 'budget', model: 'model', budget: budget({ maxInputTokens: 4 }),
     })
     send(agent)
@@ -153,7 +227,7 @@ describe('native agent budgets', () => {
   it('continues with response accounting when an adapter has no exact input counter', async () => {
     const adapter = new BudgetAdapter([tool('one'), text('done', { inputTokens: 4, outputTokens: 2 })], null)
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('response-accounted-input'), {
+    const agent = await ctx.agentLoop.create(SessionId('response-accounted-input'), {
       provider: 'budget', model: 'model', budget: budget({ maxInputTokens: 9 }),
     })
     send(agent)
@@ -166,7 +240,7 @@ describe('native agent budgets', () => {
     const withoutUsage = tool('one').filter(chunk => chunk.type !== 'usage')
     const adapter = new BudgetAdapter([withoutUsage, text('unused')], null)
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('unknown-input'), {
+    const agent = await ctx.agentLoop.create(SessionId('unknown-input'), {
       provider: 'budget', model: 'model', budget: budget(),
     })
     send(agent)
@@ -178,7 +252,7 @@ describe('native agent budgets', () => {
   it('stops before a request whose exact input count exceeds the remaining total', async () => {
     const adapter = new BudgetAdapter([tool('one'), text('unused')], () => 4)
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('input'), {
+    const agent = await ctx.agentLoop.create(SessionId('input'), {
       provider: 'budget', model: 'model', budget: budget({ maxInputTokens: 7 }),
     })
     send(agent)
@@ -190,7 +264,7 @@ describe('native agent budgets', () => {
   it('reports a provider output overshoot instead of treating it as compliant', async () => {
     const adapter = new BudgetAdapter([text('too much', { inputTokens: 4, outputTokens: 6 })])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('output-overshoot'), {
+    const agent = await ctx.agentLoop.create(SessionId('output-overshoot'), {
       provider: 'budget', model: 'model', budget: budget({ maxOutputTokens: 5 }),
     })
     send(agent)
@@ -207,7 +281,7 @@ describe('native agent budgets', () => {
     const adapter = new BudgetAdapter([failure, failure, text('unused')])
     const ctx = await harness(adapter)
     ctx.on('agent/request-error', async () => ({ kind: 'retry' as const }))
-    const agent = ctx.agentLoop.create(SessionId('retries'), {
+    const agent = await ctx.agentLoop.create(SessionId('retries'), {
       provider: 'budget', model: 'model', budget: budget({ maxRetries: 1 }),
     })
     send(agent)

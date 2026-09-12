@@ -6,6 +6,8 @@
 import { type SessionListState, type SessionSearchResultItem, type SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type {} from '@deepseek-ai/dsh-schedule/client'
+import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import { indexSubagentDescendants, type SubagentDescendantSummary } from './subagent-lineage.ts'
 
 type PendingInteractionStatus = 'approval' | 'plan-review' | 'question'
@@ -19,8 +21,7 @@ function pendingStatus(snapshot: PendingInteractionSnapshot, id: SessionId): Pen
 
 /** Whether a session has at least one active (future or overdue) schedule. */
 function activeSchedule(s: SessionSummary): boolean {
-  const schedules = (s as SessionSummary & { projectionValues?: { schedule?: readonly unknown[] } }).projectionValues?.schedule
-  return schedules !== undefined && schedules.length > 0
+  return (s.projectionValues?.schedule?.length ?? 0) > 0
 }
 
 function pendingFields(snapshot: PendingInteractionSnapshot, id: SessionId):
@@ -36,6 +37,20 @@ export const UNGROUPED_KEY = ''
 /** Display label for the ungrouped bucket row. */
 /** Empty sentinel; renderers localize the Ungrouped label through their locale seat. */
 export const UNGROUPED_LABEL = ''
+/**
+ * Resolve the Workspace browser group that owns one Session.
+ * @param workspaces - authoritative Workspace membership.
+ * @param sessionId - Session whose browser group is required.
+ * @returns owning Workspace id, or {@link UNGROUPED_KEY} when no Workspace accounts for it.
+ */
+export function owningGroupKey(
+  workspaces: readonly WorkspaceView[],
+  sessionId: SessionId,
+): string {
+  return (workspaces.find(workspace => workspace.sessionIds.includes(sessionId))
+    ?.workspaceId as string | undefined) ?? UNGROUPED_KEY
+}
+
 
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
@@ -158,19 +173,8 @@ interface Group {
  */
 export function workspaceLabel(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return UNGROUPED_LABEL
-  const base = cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop()
-  return base !== undefined && base !== '' ? base : cwd
-}
-
-/**
- * The group key whose section renders the selected Session's row: the
- * Workspace accounting for it, or the Ungrouped bucket when none does.
- * @param current - the selected Session.
- * @param workspaces - real workspaces in stable Host order.
- * @returns the workspace id as a group key, or {@link UNGROUPED_KEY}.
- */
-export function currentGroupKey(current: SessionId, workspaces: readonly WorkspaceView[]): string {
-  return (workspaces.find(w => w.sessionIds.includes(current))?.workspaceId as string | undefined) ?? UNGROUPED_KEY
+  const base = workspaceTitleOf(cwd)
+  return base !== '' ? base : cwd
 }
 
 /** Recency comparator: newest first, id as the deterministic tiebreak (ids are unique per group). */
@@ -372,7 +376,9 @@ export function deriveGroups(
   const expandedGroups = new Set(view.expandedGroups)
   const userPinned = new Set<string>(view.pinnedSessionIds ?? [])
   const descendants = indexSubagentDescendants(list.byId)
-  const currentGroup = list.current === undefined ? undefined : currentGroupKey(list.current, workspaces)
+  const currentGroup = list.current === undefined
+    ? undefined
+    : owningGroupKey(workspaces, list.current)
   const groups: GroupNode[] = []
   for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder, userPinned)) {
     const expanded = expandedGroups.has(g.key)

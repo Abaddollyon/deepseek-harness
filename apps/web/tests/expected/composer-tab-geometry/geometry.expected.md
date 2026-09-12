@@ -5,7 +5,7 @@
 - Chat: scrollbar-gutter stable, overflow auto/auto
 - Chat scroller scrolls: true
 - Chat reserved band: 8px
-- Trajectory: scrollbar-gutter auto, overflow hidden/auto
+- Trajectory: scrollbar-gutter auto, overflow clip/clip
 - Trajectory scroller scrolls: false
 - Trajectory reserved band: 0px
 - input card left edge moves between tabs: 0px
@@ -17,7 +17,7 @@
 - Chat: scrollbar-gutter stable, overflow auto/auto
 - Chat scroller scrolls: true
 - Chat reserved band: 8px
-- Trajectory: scrollbar-gutter auto, overflow hidden/auto
+- Trajectory: scrollbar-gutter auto, overflow clip/clip
 - Trajectory scroller scrolls: false
 - Trajectory reserved band: 0px
 - input card left edge moves between tabs: 0px
@@ -29,7 +29,7 @@
 - Chat: scrollbar-gutter stable, overflow auto/auto
 - Chat scroller scrolls: true
 - Chat reserved band: 8px
-- Trajectory: scrollbar-gutter auto, overflow hidden/auto
+- Trajectory: scrollbar-gutter auto, overflow clip/clip
 - Trajectory scroller scrolls: false
 - Trajectory reserved band: 0px
 - input card left edge moves between tabs: 4px

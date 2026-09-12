@@ -32,7 +32,8 @@ env:
 
 jobs:
   preview:
-    runs-on: dsh-ubuntu-24-04-16core
+    if: github.repository == 'deepseek-harness/deepseek-harness'
+    runs-on: ubuntu-24.04
     name: cloudflare pages preview
     steps:
       - uses: actions/checkout@v6

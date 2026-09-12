@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-workflow` gives the model the `workflow` tool: a JavaScript orchestration script fans work out across subagents through `ctx.workflowEngine`. Under caller ownership, the parent turn waits for the final value. Under supervisor ownership, the tool durably registers the run, records `run/detached`, and returns its job id immediately while bounded execution continues. Choose it for explicitly requested workflows or large multi-agent orchestration; prefer plain subagent calls for one or two delegations.
+`dsh-tool-workflow` gives the model the `workflow` tool: a JavaScript orchestration script fans work out across subagents through `ctx.workflowEngine`. Under caller ownership, the parent turn waits for the final value. Under supervisor ownership, the tool durably registers the run, records `run/detached`, and returns its job id immediately while bounded execution continues. Choose it for explicitly requested workflows or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Deployments can rename the tool and cap rendered result text through `toolName` and `maxResultChars`.
 
 ## Table of Contents
 
@@ -44,6 +44,8 @@ With `ownership: caller`, the tool awaits the result, bridges the parent step's 
 | `toolName` | `workflow` | The model-facing tool name to register. |
 | `maxResultChars` | `50000` | Ceiling for the serialized return value only; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. The marker envelope may exceed this value, as with bash result metadata. |
 | `ownership` | `caller` | `caller` waits in the tool call; `supervisor` durably hands the bounded run to `ctx.jobs`. |
+| `maxProgressEvents` | `2000` | Shared per-run ceiling for durable phase and log records; the last slot is a log record marked `truncated: true`. |
+| `maxLogChars` | `2000` | Character ceiling for each durable log message; clipping marks the record `truncated: true`. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
 
@@ -63,11 +65,11 @@ The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt g
 
 ### Run lifecycle
 
-`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason. On completion, a return value whose pretty-printed JSON exceeds `maxResultChars` is saved through the session-scoped `ctx.spillStore`; `result` becomes `{ truncated: true, originalChars, spillPath, preview }`, and the referenced file contains the exact complete JSON. The tool fails explicitly if an oversized value cannot be spilled rather than emitting an unrecoverable fragment.
+Caller ownership awaits `run.result`, bridges `exec.signal` to cancellation, and disposes the run before returning; a non-`completed` stop reason becomes a tool error. Supervisor ownership registers the bounded run through `ctx.jobs.startDurable`, records `run/detached`, and returns the job handle; job cancellation owns the detached lifetime, and final settlement waits for disposal. On completion, a return value whose pretty-printed JSON exceeds `maxResultChars` is saved through the session-scoped `ctx.spillStore`; `result` becomes `{ truncated: true, originalChars, spillPath, preview }`, and the referenced file contains the exact complete JSON. The tool fails explicitly if an oversized value cannot be spilled rather than emitting an unrecoverable fragment. Spills carry `kind: 'tool'` provenance with the originating call id; the calling Session remains the artifact owner.
 
 ### Durable session records
 
-For a root transport execution (`exec.parent` absent), the tool projects the run into the calling Agent's Session with four log-only events: run-start after `start()` returns, member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. Nested transport calls execute normally but write no record. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup. The package invariant rejects duplicate starts, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append, while accepting missing terminal suffixes.
+The tool projects each run into the calling Agent's Session: run-start after `start()` returns, phase and log progress plus member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. Nested transport calls also record their run and retain the enclosing model call as `parentCallId`. Phase and log records share increasing ordinals and a bounded per-run allowance; reaching the allowance writes one final truncated log record and drops subsequent progress without suppressing member or terminal records. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup. The package invariant rejects duplicate starts, non-increasing progress ordinals, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append, while accepting missing terminal suffixes.
 
 ### Render intent
 
@@ -78,7 +80,7 @@ Decided up front per the [render-intent Agent Note](../../../.agents/notes/imple
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: tool registration, run lifecycle, recorder wiring |
-| [`src/types.ts`](src/types.ts) | The four log-only record event payloads and their `SessionEventMap` declaration |
+| [`src/types.ts`](src/types.ts) | The log-only lifecycle, progress, and member payloads and their `SessionEventMap` declaration |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion: durable workflow-record protocol validation |
 
 </details>
@@ -140,11 +142,11 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. Success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; a cap adds `… [truncated: <omitted> more characters]` on a new line. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
+The full model-written script, metadata, and args remain in the assistant tool call. Caller success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON. An oversized value is replaced by the recoverable spill marker documented above, not a clipped fragment. Supervisor admission renders JSON containing `runId`, `jobId`, and `status: "running"`; the completed job output uses the same completion text and projected value. Caller cancellation becomes `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`; execution failure becomes `Error: workflow run failed: <error-or-unknown error>`. A call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages and log-only progress records do not enter the parent model context.
 
 #### Token effect
 
-Call tokens can be large and remain until compaction. Result rendering is capped by `maxResultChars`; child-model tokens are separate from the parent's retained context.
+Call tokens can be large and remain until compaction. The serialized result is bounded by `maxResultChars`, but spill metadata and completion text add tokens beyond that ceiling; child-model tokens are separate from the parent's retained context.
 
 #### KV Cache effect
 
@@ -160,7 +162,7 @@ These limits define what the tool does not yet support. They are current constra
 - **Supervisor ownership is durable accounting, not workflow resumption** — the current workflow record is non-resumable after host death and is honestly settled on restart; live supervised runs continue only while the host process remains alive.
 - **`args` must be an object and the result envelope is metadata-bearing** — callers wrap top-level arrays and scalars in a field; `maxResultChars` caps only the serialized return value, while an oversized value is replaced by a recoverable marker whose envelope may exceed the cap, as with bash result metadata.
 - **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
-- **Durable records are top-level and observational** — nested PTC mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **Progress records are bounded and observational** — phase and log narration can be clipped or omitted after their allowance; a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
 
 <a id="dev-note"></a>
 ### Dev Note
@@ -170,6 +172,6 @@ These limits define what the tool does not yet support. They are current constra
 
 This Dev Note is working context for maintainers: open directions that are not decided. It is explicitly non-authoritative — shipped behavior, limits, and accepted rationale live in the sections above, the package code, and the linked Agent Notes.
 
-Open directions: resumable workflow producers; storing truncated JSON behind a retrieval handle instead of clipping the projection; recording nested dispatches beyond the top level.
+Open direction: resumable workflow producers.
 
 </details>

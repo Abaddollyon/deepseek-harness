@@ -24,6 +24,6 @@ A feature identifies its primary scroller with `data-feature-scroll`; the view a
 
 ## Consequences
 
-Offsets survive view remounts while the native scoped store remains alive; they are not durable reload preferences. Chat retains its own anchor restoration and bottom-follow policy. The [sticky-composer decision](2026-07-29-sticky-composer-conversation-scroll.md) and [composer gutter decision](2026-08-04-composer-tab-gutter-reservation.md) remain applicable to Chat and composer positioning; feature clipping specializes the outer scrolling behavior without replacing those decisions.
+Offsets survive view remounts while the native scoped store remains alive; they are not durable reload preferences. Chat retains its own anchor restoration and bottom-follow policy. The historical [sticky-composer decision](../../archived/bug-fix/2026-07-29-sticky-composer-conversation-scroll.md) and [composer gutter decision](../../archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md) explain the rationale for Chat and composer positioning; feature clipping specializes the outer scrolling behavior without replacing those decisions.
 
 Focused DOM tests cover feature and scope isolation, nested scrollers, detached events, and delayed content. Browser geometry checks remain necessary for long lists, responsive widths, composer placement, and tab round-trips because DOM fixtures do not perform layout.

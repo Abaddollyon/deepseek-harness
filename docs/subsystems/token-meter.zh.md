@@ -78,7 +78,8 @@ Replay owner for one service-wide estimator and isolated per-session folds.
  * usage is reused only when the latest successful call's canonical request
  * envelope matches `requestHeader` and its total is no lower than that
  * call's full route-priced anchor; otherwise the complete envelope and
- * surface are repriced.
+ * surface are repriced. The anchor includes all surface nodes immediately
+ * before the assistant message, including inputs admitted after step/start.
  *
  * `requestHeader` replaces the latest logged envelope for pressure and node
  * pricing; the node set always describes the current session surface. Every
@@ -91,9 +92,10 @@ Replay owner for one service-wide estimator and isolated per-session folds.
 measure(session: Session, requestHeader?: EpochHeader): TokenMeasurement
 
 /**
- * Estimate the non-surface tokens in one canonical request envelope.
+ * Estimate tool-schema tokens in one canonical request envelope.
+ * System messages are priced separately as surface nodes.
  * @param header - canonical request envelope, when one is available.
- * @returns estimated request-header tokens.
+ * @returns estimated tool-schema tokens.
  */
 estimateHeader(header: EpochHeader | undefined): number
 
