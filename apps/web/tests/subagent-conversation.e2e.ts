@@ -348,7 +348,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
       await tree.press('Escape')
     } finally {
       releaseCatalog()
-      await page.unroute(pattern)
+      await page.unrouteAll({ behavior: 'wait' })
     }
   })
 
@@ -450,7 +450,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
         .getByRole('button', { name: `Switch subagent: ${LABEL}` }).waitFor()
     } finally {
       releaseCatalog()
-      await page.unroute(pattern)
+      await page.unrouteAll({ behavior: 'wait' })
     }
   })
 
