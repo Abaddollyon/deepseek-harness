@@ -297,6 +297,102 @@ describe('JsonRpcLineTransport', () => {
     transport.close()
   })
 
+  it('rejects new requests after an output stream failure', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    await expect(transport.request('first', {})).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    await expect(transport.request('after-output-failure', {})).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    transport.close()
+  })
+
+  it('contains a queued output failure when closing before the write settles', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        setImmediate(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    const pending = transport.request('queued', {})
+    transport.close()
+    // The callback and the stream's `error` event are separate asynchronous
+    // edges. Keep the transport listener through both so the delayed EPIPE
+    // cannot become an unhandled EventEmitter error.
+    expect(output.listenerCount('error')).toBe(1)
+
+    await expect(pending).rejects.toThrow('JSON-RPC transport closed')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(output.listenerCount('error')).toBe(0)
+  })
+
+  it('contains a delayed inbound handler that settles after close', async () => {
+    const input = new PassThrough()
+    const writes: string[] = []
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        writes.push(String(chunk))
+        callback()
+      },
+    })
+    let release!: () => void
+    const handlerReady = new Promise<void>((resolve) => { release = resolve })
+    let handlerStarted!: () => void
+    const started = new Promise<void>((resolve) => { handlerStarted = resolve })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.onRequest(async () => {
+      handlerStarted()
+      await handlerReady
+      return { ok: true }
+    })
+    transport.start()
+
+    input.write('{"jsonrpc":"2.0","id":"delayed","method":"work"}\n')
+    await started
+    transport.close()
+    release()
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(writes).toEqual([])
+  })
+
+  it('finishes an inbound response after the input half-closes', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let release!: () => void
+    const handlerReady = new Promise<void>((resolve) => { release = resolve })
+    let handlerStarted!: () => void
+    const started = new Promise<void>((resolve) => { handlerStarted = resolve })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.onRequest(async () => {
+      handlerStarted()
+      await handlerReady
+      return { ok: true }
+    })
+    transport.start()
+
+    input.write('{"jsonrpc":"2.0","id":"half-close","method":"work"}\n')
+    await started
+    const inputEnded = once(input, 'end')
+    input.end()
+    await inputEnded
+    const response = once(output, 'data')
+    release()
+    const [chunk] = await response
+
+    expect(JSON.parse(String(chunk))).toEqual({ jsonrpc: '2.0', id: 'half-close', result: { ok: true } })
+    transport.close()
+  })
+
   it('rejects pending requests when the transport closes', async () => {
     const { b } = transportPair()
 
