@@ -8,6 +8,7 @@ import type {
 } from '@deepseek-ai/dsh-subprocess'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { WebError } from '@deepseek-ai/dsh-web'
+import { CodexSearchWire } from '../src/wire.ts'
 import { describe, expect, it, type Mock, vi } from 'vitest'
 import {
   CODEX_AUTH_MESSAGE,
@@ -171,6 +172,19 @@ function serializeError(error: unknown, seen = new Set<unknown>()): unknown {
       .map(key => [key, serializeError(Reflect.get(error, key), seen)]),
   ])
 }
+
+describe('CodexSearchWire stream failures', () => {
+  it('rejects pending protocol work when output emits EPIPE', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const wire = new CodexSearchWire(input, output)
+    wire.start()
+    const pending = wire.initialize(new AbortController().signal)
+    output.destroy(Object.assign(new Error('write failed'), { code: 'EPIPE' }))
+    await expect(pending).rejects.toThrow(/EPIPE/)
+    wire.close()
+  })
+})
 
 describe('CodexSearchProvider', () => {
   it('executes the exact override argv and normalizes structured output', async () => {
