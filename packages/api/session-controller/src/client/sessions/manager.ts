@@ -395,11 +395,15 @@ export class SessionManager {
             error: null,
           })
           const pending = this.pendingSubagentSelection
+          const hydratedEntries = this.catalogs.get(parentSessionId)?.entries ?? []
           if (pending !== undefined) {
-            const child = result.value.entries.find(entry => entry.kind === 'child' && entry.id === pending)
+            const child = hydratedEntries.find(entry => entry.kind === 'child' && entry.id === pending)
             if (child?.kind === 'child') {
               this.pendingSubagentSelection = undefined
               this.selectSubagent({ parentSessionId, childSessionId: pending, mode: child.mode })
+            } else if (this.summaries.some(summary => summary.sessionId === pending
+              && summary.parentSessionId === parentSessionId)) {
+              this.pendingSubagentSelection = undefined
             }
           }
           for (const [childId, address] of this.addresses) {
@@ -758,6 +762,7 @@ export class SessionManager {
    * @param sessionId - removed Session identity.
    */
   handleSessionRemoved(sessionId: SessionId): void {
+    if (this.pendingSubagentSelection === sessionId) this.pendingSubagentSelection = undefined
     const summary = this.summaries.find(candidate => candidate.sessionId === sessionId)
     const durableSubagent = summary?.origin === 'subagent' || this.addresses.has(sessionId)
     this.recordMutation(durableSubagent

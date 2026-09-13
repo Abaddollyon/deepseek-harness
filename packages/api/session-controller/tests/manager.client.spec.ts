@@ -829,6 +829,35 @@ describe('subagent durable address hydration', () => {
     gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
     await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
   })
+
+  it('cancels a pending child selection when the child is removed', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    const child = 'child-removed-race' as SessionId
+    const parent = 'parent-removed-race' as SessionId
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(child, { origin: 'subagent', parentSessionId: parent }))
+    manager.select(child)
+    manager.handleSessionRemoved(child)
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await vi.waitFor(() => expect(manager.getListSnapshot().current).toBeUndefined())
+  })
+
+  it('restores a persisted child selection only after catalog hydration', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const child = 'child-restored-race' as SessionId
+    const parent = 'parent-restored-race' as SessionId
+    const manager = new SessionManager(fakeRemote(api), child, { parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    api.onList = () => Promise.resolve(ok({ items: [summary(child, { origin: 'subagent', parentSessionId: parent })] as never[] }))
+    await manager.refreshList()
+    expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
+  })
 })
 
 describe('completed reminder', () => {
