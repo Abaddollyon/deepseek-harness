@@ -197,6 +197,7 @@ export class SessionManager {
     this.selected = sessionId
     // Looking at the session consumes its completion reminder (dot clears).
     this.completedNotifications.delete(sessionId)
+    this.listRevision++
     void this.refreshSubagents(sessionId)
     this.notifier.notifyNow()
   }
@@ -216,6 +217,7 @@ export class SessionManager {
     this.sessions.get(address.childSessionId)?.configureSubagent(address, catalog?.parentAvailable)
     this.selected = address.childSessionId
     this.completedNotifications.delete(address.childSessionId)
+    this.listRevision++
     void this.refreshSubagents(address.childSessionId)
     this.notifier.notifyNow()
   }
@@ -709,6 +711,7 @@ export class SessionManager {
     }
     if (frame.type === 'projection') {
       this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))
+      this.listRevision++
       this.notifier.markDirty()
       return
     }
@@ -742,6 +745,7 @@ export class SessionManager {
     for (const [sessionId, session] of this.sessions) {
       session.replaceControl(this.queues.get(sessionId) ?? [])
     }
+    this.listRevision++
     this.notifier.markDirty()
   }
 
