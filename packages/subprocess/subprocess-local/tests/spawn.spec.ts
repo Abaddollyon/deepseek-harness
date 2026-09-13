@@ -64,9 +64,10 @@ function shellArgv(command: string): string[] {
   }
 }
 
-const { failNextClose, failNextUnlink } = vi.hoisted(() => ({
+const { failNextClose, failNextUnlink, failNextWrite } = vi.hoisted(() => ({
   failNextClose: { value: false },
   failNextUnlink: { value: false },
+  failNextWrite: { value: false },
 }))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
@@ -78,6 +79,13 @@ vi.mock('node:fs', async (importOriginal) => {
         throw Object.assign(new Error('simulated EIO on close'), { code: 'EIO' })
       }
       actual.closeSync(fd)
+    },
+    writeSync(fd: number, data: Parameters<typeof actual.writeSync>[1]): number {
+      if (failNextWrite.value) {
+        failNextWrite.value = false
+        throw Object.assign(new Error('simulated quota'), { errno: -122, code: 'UNKNOWN', syscall: 'write' })
+      }
+      return actual.writeSync(fd, data)
     },
     unlinkSync(path: Parameters<typeof actual.unlinkSync>[0]): void {
       if (failNextUnlink.value) {
@@ -555,6 +563,17 @@ describe('OutputCollector', () => {
     expect(third.lossy).toBe(true)
     expect(third.text).toBe('c'.repeat(10))
     expect(third.spillPath).toBeDefined()
+  })
+
+  it('contains EDQUOT spill write failures and keeps the bounded tail', () => {
+    const collector = new OutputCollector(4, 100, 'spillfail', spillDir)
+    collector.push(Buffer.from('aaaa'))
+    failNextWrite.value = true
+    expect(() => { collector.push(Buffer.from('bbbb')) }).not.toThrow()
+    expect(collector.finalize()).toMatchObject({
+      text: 'bbbb', truncated: true,
+      spillFailure: { code: 'EDQUOT', syscall: 'write', message: expect.stringContaining('full output could not be saved: EDQUOT') },
+    })
   })
 
   it('contains close failures and drops the spill path', () => {

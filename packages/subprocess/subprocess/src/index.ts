@@ -27,6 +27,7 @@ export type {
   SubprocessOutputRead,
   SubprocessOutputReader,
   SubprocessSpawnSpec,
+  SpillFailure,
   SubprocessStdinMode,
   SubprocessStdio,
   SubprocessTerminalForeground,

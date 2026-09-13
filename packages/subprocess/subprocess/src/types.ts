@@ -18,6 +18,18 @@ export type DshEnvironmentKey = `${typeof DSH_ENV_PREFIX}${string}`
 /** Trusted DeepSeek Harness variables for one child-process execution. */
 export type DshEnvironment = Readonly<Record<DshEnvironmentKey, string>>
 
+/** A failed attempt to persist complete captured output. */
+export interface SpillFailure {
+  /** Stable filesystem error code, including EDQUOT when errno is -122. */
+  code: string
+  /** Filesystem operation that failed, when reported by Node. */
+  syscall?: string
+  /** Spill path involved in the failed operation, when known. */
+  path?: string
+  /** Human-readable diagnostic. */
+  message: string
+}
+
 /** One captured stream: the (possibly truncated) text plus recovery info. */
 export interface CollectedOutput {
   /** Collected text — the TAIL of the stream when truncated. */
@@ -26,6 +38,8 @@ export interface CollectedOutput {
   truncated: boolean
   /** Path to a file holding the COMPLETE stream, when truncated and available. */
   spillPath?: string
+  /** Diagnostic recorded when spilling failed; the in-memory tail remains available. */
+  spillFailure?: SpillFailure
 }
 
 /**
@@ -128,6 +142,8 @@ export interface SubprocessOutputRead {
   lossy: boolean
   /** Path to the full-stream spill file, when one was created and remains intact. */
   spillPath?: string
+  /** Diagnostic recorded when spilling failed. */
+  spillFailure?: SpillFailure
 }
 
 /**

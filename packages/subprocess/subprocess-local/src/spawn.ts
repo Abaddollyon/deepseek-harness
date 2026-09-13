@@ -24,6 +24,7 @@ import type {
   SubprocessOutcome,
   SubprocessOutputMode,
   SubprocessSpawnSpec,
+  type SpillFailure,
 } from '@deepseek-ai/dsh-subprocess'
 import type { BoundProcessOwner, ManagedProcessLaunch } from './managed-owner.ts'
 import { waitWithAbort } from './managed-owner.ts'
@@ -144,6 +145,7 @@ export class OutputCollector {
   private spillFd: number | undefined
   private spillFile: string | undefined
   private spillDisabled: boolean
+  private spillFailure: SpillFailure | undefined
   /** Total bytes ever pushed (not just retained). */
   private total = 0
 
@@ -194,6 +196,22 @@ export class OutputCollector {
       this.discardSpill()
       return
     }
+    try {
+      this.writeSpill(chunk)
+    } catch (error: unknown) {
+      const failure = error as NodeJS.ErrnoException
+      const code = failure.errno === -122 ? 'EDQUOT' : failure.code ?? 'UNKNOWN'
+      this.spillFailure = {
+        code,
+        ...failure.syscall !== undefined ? { syscall: failure.syscall } : {},
+        ...this.spillFile !== undefined ? { path: this.spillFile } : {},
+        message: `full output could not be saved: ${code} (${failure.message}) at ${this.spillDir}`,
+      }
+      this.discardSpill()
+    }
+  }
+
+  private writeSpill(chunk: Buffer): void {
     if (this.spillFd === undefined) {
       // Random suffix + O_EXCL + no-follow-equivalent ('wx' fails on any
       // existing path, symlink or not) + owner-only mode: defeats spill-path
@@ -240,7 +258,7 @@ export class OutputCollector {
    * @param fromByte - whole-stream offset to resume from (a prior read's `nextOffset`; 0 for the first read).
    * @returns the delta text, the offset for the next read, the `lossy` flag, and the spill path when one was created.
    */
-  readFrom(fromByte: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string } {
+  readFrom(fromByte: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string; spillFailure?: SpillFailure } {
     const windowStart = this.total - this.bytes
     const buffer = Buffer.concat(this.chunks)
     const lossy = fromByte < windowStart
@@ -250,6 +268,7 @@ export class OutputCollector {
       nextOffset: this.total,
       lossy,
       ...this.spillFile !== undefined ? { spillPath: this.spillFile } : {},
+      ...this.spillFailure !== undefined ? { spillFailure: this.spillFailure } : {},
     }
   }
 
@@ -282,6 +301,7 @@ export class OutputCollector {
       text: Buffer.concat(this.chunks).toString('utf8'),
       truncated: this.dropped,
       ...this.spillFile !== undefined ? { spillPath: this.spillFile } : {},
+      ...this.spillFailure !== undefined ? { spillFailure: this.spillFailure } : {},
     }
   }
 }
