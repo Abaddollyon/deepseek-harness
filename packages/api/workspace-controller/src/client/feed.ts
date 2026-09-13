@@ -1,6 +1,6 @@
 /** Workspace-owned readiness recovery over the Gateway carrier lifecycle. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { RemoteFeedLifecycle, type ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
+import { RemoteFeedLifecycle, RemoteStreamCarrierError, type ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type { ClientWorkspaceModel } from './model.ts'
 import { createWorkspaceStateStream, type WorkspaceStateStream } from './transport.ts'
@@ -93,10 +93,14 @@ export class WorkspaceFeedRecovery extends RemoteFeedLifecycle<WorkspaceStateStr
           this.epoch++
           this.close()
           const temporary = error.code === 'gateway/service-unavailable'
+          // The Gateway folds exhausted carrier retries into a marked internal
+          // error, retaining the physical failure as its cause. Allow a fresh
+          // explicit read subscription without retrying terminal Host errors.
+          const carrierExhausted = error.code === 'gateway/internal' && error.cause instanceof RemoteStreamCarrierError
           const delay = temporary ? this.delays[this.attempt] : undefined
           if (delay === undefined) {
             this.model.handleStreamFailure(error)
-            this.publish('error', temporary ? 'service-unavailable' : 'terminal', temporary)
+            this.publish('error', temporary ? 'service-unavailable' : carrierExhausted ? 'carrier' : 'terminal', temporary || carrierExhausted)
             return
           }
           this.attempt++

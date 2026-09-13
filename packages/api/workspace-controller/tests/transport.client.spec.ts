@@ -522,13 +522,14 @@ describe('Workspace Controller Client apply', () => {
     vi.useRealTimers()
   })
 
-  it('publishes exhausted carrier retries as a gateway/internal error state', async () => {
+  it('allows a manual retry after carrier exhaustion without reloading the client', async () => {
     const ctx = new Context()
     // Neither generation reaches an accepted baseline, so the retry budget runs
     // out and the escaping carrier failure crosses the stream boundary marked.
     const remote = new ScriptedWorkspaceRemote([
       { frames: [], error: new RemoteStreamCarrierError('generation lost') },
       { frames: [], error: new RemoteStreamCarrierError('generation lost again') },
+      { frames: [baseline('restored')], hold: true },
     ])
     provideClientServices(ctx, remote)
     const fiber = ctx.plugin(WorkspaceClientPlugin)
@@ -540,6 +541,12 @@ describe('Workspace Controller Client apply', () => {
       })
     })
     expect(remote.calls).toBe(2)
+    expect(ctx.workspaces.feed.getSnapshot()).toMatchObject({ state: 'error', failure: 'carrier', canRetry: true })
+    ctx.workspaces.retryFeed()
+    ctx.workspaces.retryFeed()
+    await waitFor(() => { expect(ctx.workspaces.feed.getSnapshot().state).toBe('ready') })
+    expect(remote.calls).toBe(3)
+    expect(ctx.workspaces.list.getSnapshot().items[0]?.workspaceId).toBe('restored')
     await fiber.dispose()
   })
 
