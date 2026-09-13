@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-13-stream-failure-containment.md
-2026-09-13-stream-failure-containment.md: 07153c81d0b44fb4508a29118c79069769a3e385
-2026-09-13-stream-failure-containment.zh.md: 2495f91abc1feee78fd9481422dc7adffe75c839
+2026-09-13-stream-failure-containment.md: b406d192b41d80766f986e050c92708fce05c1b6
+2026-09-13-stream-failure-containment.zh.md: be51c2a52f8b9904c3d63f6b559bf0753aca9338

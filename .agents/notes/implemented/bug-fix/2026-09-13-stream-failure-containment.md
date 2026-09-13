@@ -16,6 +16,8 @@ JSON-RPC terminal write errors settle pending requests and terminate the connect
 
 Workspace feeds recognize an exhausted remote stream carrier as a retryable read failure. The explicit Retry action starts one fresh subscription and coalesces repeated clicks. Terminal Host errors remain terminal; this recovery never replays commands.
 
+The CI runner traverses sampled process tables with a visited-PID set and individual queue insertions. Duplicate rows and stale cyclic parent links cannot repeat processes, include the root among its descendants, or overflow the argument stack during fail-fast process sampling.
+
 ## Alternatives considered
 
 **Only catch initial provider calls.** Stream failures can occur during consumption, after the call has returned, so this leaves asynchronous errors unowned.
