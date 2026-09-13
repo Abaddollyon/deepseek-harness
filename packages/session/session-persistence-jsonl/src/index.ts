@@ -978,11 +978,13 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   private async listArtifacts(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding(signal)
+    // Generation resolution below validates encoding while discovering each
+    // session; avoid enumerating every project and session directory twice.
     const dirs = await mapConcurrent(
       await this.listProjectDirs(signal), this.listConcurrency,
       project => this.listSessionDirs(project, signal), signal,
     )
+    this.rootEncodingChecked = true
     const discovered = await mapConcurrent(dirs.flat(), this.listConcurrency, async (dir) => {
       const selected = await this.resolveGenerationInDirectory(dir, signal)
       if (selected === undefined) return undefined

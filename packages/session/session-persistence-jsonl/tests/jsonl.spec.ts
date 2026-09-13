@@ -51,6 +51,11 @@ const readTally = vi.hoisted(() => ({
   enabled: false,
 }))
 
+const readdirTally = vi.hoisted(() => ({
+  calls: 0,
+  enabled: false,
+}))
+
 const readFailure = vi.hoisted(() => ({
   path: undefined as string | undefined,
   error: undefined as Error | undefined,
@@ -105,6 +110,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
     }) as typeof actual.readFile,
     readdir: (async (...args: Parameters<typeof actual.readdir>) => {
+      if (readdirTally.enabled) readdirTally.calls += 1
       if (String(args[0]) === readdirFailure.path && readdirFailure.error !== undefined) {
         throw readdirFailure.error
       }
@@ -311,6 +317,8 @@ afterEach(async () => {
   statFailure.error = undefined
   readdirFailure.path = undefined
   readdirFailure.error = undefined
+  readdirTally.calls = 0
+  readdirTally.enabled = false
   vi.restoreAllMocks()
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
@@ -2616,6 +2624,19 @@ describe('JsonlSessionPersistence: edge cases', () => {
     })
     expect(await ctx2.sessionPersistence.list()).toEqual([])
     await ctx2.fiber.dispose()
+  })
+
+  it('discovers session directories once per listing', async () => {
+    const m = meta('single-pass-list', '/work')
+    const path = rawLogPath(root, m.cwd, m.id)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, [JSON.stringify(toHeaderLine(m)), ...oneTurnLog().map(event => JSON.stringify(event)), ''].join('\n'))
+    readdirTally.calls = 0
+    readdirTally.enabled = true
+    await expect(ctx.sessionPersistence.list()).resolves.toHaveLength(1)
+    readdirTally.enabled = false
+    // root, project, and session (generation also validates encoding).
+    expect(readdirTally.calls).toBe(3)
   })
 
   it('plugin load rejects an existing root that is not a directory', async () => {
