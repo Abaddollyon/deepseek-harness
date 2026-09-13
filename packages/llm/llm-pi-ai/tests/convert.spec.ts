@@ -980,6 +980,8 @@ describe('mapStopReason / mapUsage', () => {
     'OpenAI Responses stream ended before a terminal response event',
     'openrouter stream ended without a terminal event',
     'bridge_previous_response_not_found: Upstream websocket closed before response.completed',
+    'stream_incomplete: The previous response anchor was rejected upstream; retry the request.',
+    'stream_incomplete: previous_response_id anchor rejected',
     'Stream ended without finish_reason',
     // HTTP/2 stream resets: nghttp2's `stream ID N; CODE; received from peer`
     // wording, Node's NGHTTP2_* error-code rendering, and the RST_STREAM frame
