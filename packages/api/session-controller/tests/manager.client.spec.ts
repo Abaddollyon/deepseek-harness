@@ -814,6 +814,23 @@ describe('connected generation', () => {
   })
 })
 
+describe('subagent durable address hydration', () => {
+  it('defers a child selected from the flat list until its catalog supplies an address', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    const child = 'child-address-race' as SessionId
+    const parent = 'parent-address-race' as SessionId
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(child, { origin: 'subagent', parentSessionId: parent }))
+    manager.select(child)
+    expect(manager.getListSnapshot().current).toBeUndefined()
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
+  })
+})
+
 describe('completed reminder', () => {
   const status = (manager: SessionManager, sessionId: SessionId, running: boolean): void => {
     manager.handleSessionStatus(sessionId, running)
