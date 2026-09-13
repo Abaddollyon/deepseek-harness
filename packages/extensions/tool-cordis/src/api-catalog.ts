@@ -3983,7 +3983,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CollectedOutput',
-    declaration: 'export interface CollectedOutput {\n    text: string;\n    truncated: boolean;\n    spillPath?: string;\n}',
+    declaration: 'export interface CollectedOutput {\n    text: string;\n    truncated: boolean;\n    spillPath?: string;\n    spillFailure?: SpillFailure;\n}',
   },
   {
     name: 'CommandDefinition',
@@ -5862,6 +5862,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SpawnTeammateResult {\n    readonly member: TeamMemberView;\n}',
   },
   {
+    name: 'SpillFailure',
+    declaration: 'export interface SpillFailure {\n    code: string;\n    syscall?: string;\n    path?: string;\n    message: string;\n}',
+  },
+  {
     name: 'SpillLocator',
     declaration: 'export type SpillLocator = Branded<\'SpillLocator\'>;',
   },
@@ -6003,7 +6007,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubprocessOutputRead',
-    declaration: 'export interface SubprocessOutputRead {\n    text: string;\n    nextOffset: number;\n    lossy: boolean;\n    spillPath?: string;\n}',
+    declaration: 'export interface SubprocessOutputRead {\n    text: string;\n    nextOffset: number;\n    lossy: boolean;\n    spillPath?: string;\n    spillFailure?: SpillFailure;\n}',
   },
   {
     name: 'SubprocessOutputReader',

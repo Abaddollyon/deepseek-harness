@@ -285,7 +285,7 @@ describe('JsonRpcLineTransport', () => {
     const input = new PassThrough()
     const output = new Writable({
       write(_chunk, _encoding, callback) {
-        queueMicrotask(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+        queueMicrotask(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
       },
     })
     const transport = new JsonRpcLineTransport(input, output)
@@ -301,7 +301,7 @@ describe('JsonRpcLineTransport', () => {
     const input = new PassThrough()
     const output = new Writable({
       write(_chunk, _encoding, callback) {
-        queueMicrotask(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+        queueMicrotask(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
       },
     })
     const transport = new JsonRpcLineTransport(input, output)
@@ -316,7 +316,7 @@ describe('JsonRpcLineTransport', () => {
     const input = new PassThrough()
     const output = new Writable({
       write(_chunk, _encoding, callback) {
-        setImmediate(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+        setImmediate(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
       },
     })
     const transport = new JsonRpcLineTransport(input, output)
@@ -387,7 +387,8 @@ describe('JsonRpcLineTransport', () => {
     await inputEnded
     const response = once(output, 'data')
     release()
-    const [chunk] = await response
+    const chunks: unknown[] = await response
+    const chunk = chunks[0]
 
     expect(JSON.parse(String(chunk))).toEqual({ jsonrpc: '2.0', id: 'half-close', result: { ok: true } })
     transport.close()

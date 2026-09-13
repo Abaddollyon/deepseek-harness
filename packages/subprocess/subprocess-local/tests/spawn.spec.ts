@@ -570,10 +570,12 @@ describe('OutputCollector', () => {
     collector.push(Buffer.from('aaaa'))
     failNextWrite.value = true
     expect(() => { collector.push(Buffer.from('bbbb')) }).not.toThrow()
-    expect(collector.finalize()).toMatchObject({
+    const result = collector.finalize()
+    expect(result).toMatchObject({
       text: 'bbbb', truncated: true,
-      spillFailure: { code: 'EDQUOT', syscall: 'write', message: expect.stringContaining('full output could not be saved: EDQUOT') },
+      spillFailure: { code: 'EDQUOT', syscall: 'write' },
     })
+    expect(result.spillFailure?.message).toContain('full output could not be saved: EDQUOT')
   })
 
   it('contains close failures and drops the spill path', () => {

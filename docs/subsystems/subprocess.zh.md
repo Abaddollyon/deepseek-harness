@@ -25,6 +25,20 @@ type DshEnvironment = Readonly<Record<DshEnvironmentKey, string>>
 ```
 
 ```ts type-equiv
+/** A failed attempt to persist complete captured output. */
+interface SpillFailure {
+  /** Stable filesystem error code, including EDQUOT when errno is -122. */
+  code: string
+  /** Filesystem operation that failed, when reported by Node. */
+  syscall?: string
+  /** Spill path involved in the failed operation, when known. */
+  path?: string
+  /** Human-readable diagnostic. */
+  message: string
+}
+```
+
+```ts type-equiv
 /** One captured stream: the (possibly truncated) text plus recovery info. */
 interface CollectedOutput {
   /** Collected text — the TAIL of the stream when truncated. */
@@ -33,6 +47,8 @@ interface CollectedOutput {
   truncated: boolean
   /** Path to a file holding the COMPLETE stream, when truncated and available. */
   spillPath?: string
+  /** Diagnostic recorded when spilling failed; the in-memory tail remains available. */
+  spillFailure?: SpillFailure
 }
 ```
 
@@ -202,6 +218,8 @@ interface SubprocessOutputRead {
   lossy: boolean
   /** Path to the full-stream spill file, when one was created and remains intact. */
   spillPath?: string
+  /** Diagnostic recorded when spilling failed. */
+  spillFailure?: SpillFailure
 }
 ```
 
