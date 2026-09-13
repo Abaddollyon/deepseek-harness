@@ -982,7 +982,7 @@ describe('cold list title warmup', () => {
     await ctx.fiber.dispose()
   })
 
-  it('retries a failed first batch after more than sixteen cold rows', async () => {
+  it('retries a failed title observation without duplicating corpus scans', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
@@ -999,17 +999,92 @@ describe('cold list title warmup', () => {
     })
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    expect(batchIds.slice(0, 2)).toEqual([
-      headers.slice(0, 16).map(item => item.id),
-      headers.slice(16).map(item => item.id),
-    ])
+    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
+    expect(batchIds).toEqual([headers.map(item => item.id)])
     await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(3) })
+    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
     const titled = await remote.list(request({}))
     if (!titled.ok) throw new Error('list failed')
     expect(titled.value.items.find(item => item.sessionId === headers[0]?.id)?.projections?.values.title).toBe('title-' + String(headers[0]?.id))
     await ctx.fiber.dispose()
+  })
+
+  it('shares queued and in-flight cold title reads across seven list polls', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    installSessionReadTestServices(ctx)
+    const headers = Array.from({ length: 33 }, (_, index) => header('shared-title-' + String(index), index))
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
+    const release = Promise.withResolvers<undefined>()
+    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation(async (ids) => {
+      await release.promise
+      return ids.map(id => ({ status: 'fulfilled' as const, sessionId: id, value: { session: headers.find(item => item.id === id)!, title: { title: 'title-' + id, eventSeq: SessionSeq(2), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' as const } } } }))
+    })
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      for (let poll = 0; poll < 7; poll++) await list.list()
+      const whileBlocked = readTitles.mock.calls.length
+      release.resolve(undefined)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const reads = readTitles.mock.calls.flatMap(([ids]) => ids)
+      expect({ whileBlocked, completedBatches: readTitles.mock.calls.length, snapshotReads: reads.length }).toEqual({
+        whileBlocked: 1, completedBatches: 1, snapshotReads: 33,
+      })
+      expect(new Set(reads).size).toBe(33)
+      const titled = await list.list()
+      expect(titled.every(item => item.projections?.values.title === 'title-' + item.sessionId)).toBe(true)
+      expect(readTitles).toHaveBeenCalledOnce()
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('loads 64 cold titles once through the bounded query provider while seven clients refresh', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const headers = Array.from({ length: 64 }, (_, index) => header('corpus-title-' + String(index), index))
+    const release = Promise.withResolvers<undefined>()
+    let active = 0
+    let maximum = 0
+    const persistedList = vi.fn(async () => headers)
+    const inspect = vi.fn(async (id: SessionId) => {
+      active++
+      maximum = Math.max(maximum, active)
+      try {
+        await release.promise
+        return {
+          meta: headers.find(item => item.id === id)!,
+          events: [...conversationEvents(), {
+            type: 'session/title', seq: SessionSeq(2), time: 1300,
+            data: { title: 'Title ' + id, messageSeqs: [], source: { kind: 'fallback' } },
+          } as SessionEvent],
+        }
+      } finally { active-- }
+    })
+    providePersistence(ctx, { list: persistedList, inspect })
+    installSessionReadTestServices(ctx)
+    await ctx.plugin(function settlePersistence() {}).await()
+    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      for (let client = 0; client < 7; client++) await list.list()
+      await vi.waitFor(() => { expect(active).toBe(4) })
+      expect(readTitles).toHaveBeenCalledOnce()
+      expect(persistedList).toHaveBeenCalledTimes(8)
+      release.resolve(undefined)
+      await readTitles.mock.results[0]!.value
+      const titled = await list.list()
+      expect(titled).toHaveLength(64)
+      expect(titled.every(item => item.projections?.values.title === 'Title ' + item.sessionId)).toBe(true)
+      expect(inspect).toHaveBeenCalledTimes(64)
+      expect(maximum).toBe(4)
+      expect(active).toBe(0)
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
   })
 
   it('fences overlapping stale results through public list responses', async () => {
@@ -1025,6 +1100,11 @@ describe('cold list title warmup', () => {
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     await remote.list(request({}))
     await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
+    // Invalidate the original reservation before starting a replacement read.
+    const live = ctx.sessions.prepare(source.id, { meta: source })
+    const detach = ctx.sessions.enter(live)
+    ctx.sessions.announce(live)
+    detach()
     await remote.list(request({}))
     await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
     const result = (title: string) => [{ status: 'fulfilled' as const, sessionId: source.id, value: { session: source, title: { title, eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }]
@@ -1126,7 +1206,7 @@ describe('cold list title warmup', () => {
     const refreshed = await remote.list(request({}))
     if (!refreshed.ok) throw new Error('list failed')
     expect(refreshed.value.items.find(item => item.sessionId === invalidated.id)?.projections?.values.title).toBe('fresh')
-    expect(batchIds.filter(ids => ids.length > 0).every(ids => ids.length <= 16)).toBe(true)
+    expect(batchIds[0]).toEqual(headers.map(item => item.id))
     await ctx.fiber.dispose()
   })
 

@@ -508,6 +508,10 @@ export class SessionManager {
           this.summaries = summaries
           this.listState = 'idle'
           this.listPhase = 'ready'
+          if (this.pendingSubagentSelection !== undefined
+            && !summaries.some(summary => summary.sessionId === this.pendingSubagentSelection)) {
+            this.pendingSubagentSelection = undefined
+          }
           const restored = this.selected === undefined ? undefined : this.summaries.find(s => s.sessionId === this.selected)
           if (restored?.origin === 'subagent' && restored.parentSessionId !== undefined
             && this.navigationAddress(restored.sessionId) === undefined) {

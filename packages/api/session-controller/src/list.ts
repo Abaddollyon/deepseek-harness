@@ -24,12 +24,12 @@ import type {
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
 
 const COLD_SUMMARY_BATCH_SIZE = 16
-const COLD_TITLE_BATCH_SIZE = 16
 
 interface ColdTitleCacheEntry {
   readonly createdAt: number
   readonly cwd: string | undefined
   settled: boolean
+  warming: boolean
   title?: SessionTitleSnapshot
 }
 const SEARCH_PROVIDER_CALL_LIMIT = 100
@@ -236,12 +236,13 @@ export class ApiSessionList {
         createdAt: header.createdAt,
         cwd: header.cwd,
         settled: false,
+        warming: false,
       })
       titleCandidates.push(header)
       return projections
     }
     if (!entry.settled || entry.title === undefined) {
-      if (!entry.settled) titleCandidates.push(header)
+      if (!entry.settled && !entry.warming) titleCandidates.push(header)
       return projections
     }
     return {
@@ -256,38 +257,40 @@ export class ApiSessionList {
     const operationSignal = signal === undefined
       ? this.warmAbortController.signal
       : AbortSignal.any([signal, this.warmAbortController.signal])
+    const reserved = new Map<SessionId, { header: SessionHeader; entry: ColdTitleCacheEntry }>()
+    for (const header of headers) {
+      const entry = this.coldTitles.get(header.id)
+      if (entry === undefined || entry.settled || entry.warming
+        || entry.createdAt !== header.createdAt || entry.cwd !== header.cwd) continue
+      const current = { ...entry, warming: true }
+      this.coldTitles.set(header.id, current)
+      reserved.set(header.id, { header, entry: current })
+    }
+    if (reserved.size === 0) return
     const operation = (async () => {
-      for (let offset = 0; offset < headers.length; offset += COLD_TITLE_BATCH_SIZE) {
-        const batch = headers.slice(offset, offset + COLD_TITLE_BATCH_SIZE)
-        const batchEntries = new Map<SessionId, ColdTitleCacheEntry>()
-        for (const source of batch) {
-          const entry = this.coldTitles.get(source.id) as ColdTitleCacheEntry
-          const current = { ...entry }
-          this.coldTitles.set(source.id, current)
-          batchEntries.set(source.id, current)
-        }
-        try {
-          const results = await query.readTitleSnapshots(batch.map(header => header.id), operationSignal)
-          if (operationSignal.aborted) return
-          for (const result of results) {
-            const source = batch.find(header => header.id === result.sessionId)
-            const entry = this.coldTitles.get(result.sessionId)
-            const batchEntry = batchEntries.get(result.sessionId)
-            if (
-              source === undefined || entry === undefined || entry !== batchEntry
-              || entry.createdAt !== source.createdAt || entry.cwd !== source.cwd
-            ) continue
-            if (this.ctx.sessions.get(result.sessionId) !== undefined) { this.coldTitles.delete(result.sessionId); continue }
-            if (result.status === 'rejected') continue
-            entry.settled = true
-            if (result.value.session.createdAt === source.createdAt && result.value.session.cwd === source.cwd) {
-              if (result.value.title !== undefined) entry.title = result.value.title
-            }
+      try {
+        // The query provider bounds persisted reads and lists the corpus once per call.
+        const results = await query.readTitleSnapshots([...reserved.keys()], operationSignal)
+        if (operationSignal.aborted) return
+        for (const result of results) {
+          const reservation = reserved.get(result.sessionId)
+          if (reservation === undefined) continue
+          const { header, entry } = reservation
+          if (this.coldTitles.get(result.sessionId) !== entry) continue
+          if (this.ctx.sessions.get(result.sessionId) !== undefined) {
+            this.coldTitles.delete(result.sessionId)
+            continue
           }
-        } catch {
-          // Keep failed entries unsettled so a later poll can retry them.
-          if (signal?.aborted) return
-          continue
+          if (result.status === 'rejected') continue
+          entry.settled = true
+          if (result.value.session.createdAt === header.createdAt && result.value.session.cwd === header.cwd
+            && result.value.title !== undefined) entry.title = result.value.title
+        }
+      } catch {
+        // Unsettled entries are retried by a later list request after failure or cancellation.
+      } finally {
+        for (const [id, { entry }] of reserved) {
+          if (this.coldTitles.get(id) === entry) entry.warming = false
         }
       }
     })()

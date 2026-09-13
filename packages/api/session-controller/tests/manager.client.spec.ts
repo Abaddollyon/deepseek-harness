@@ -842,7 +842,25 @@ describe('subagent durable address hydration', () => {
     manager.select(child)
     manager.handleSessionRemoved(child)
     gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
-    await vi.waitFor(() => expect(manager.getListSnapshot().current).toBeUndefined())
+    await manager.refreshSubagents(parent)
+    expect(manager.getListSnapshot().current).toBeUndefined()
+  })
+
+  it('cancels a pending child selection when an authoritative list removes its row', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1 }))
+    manager.select(S2)
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items).toHaveLength(0)
+    gate.resolve(ok({ parentAvailable: true, entries: [] }))
+    await manager.refreshSubagents(S1)
+    api.onSubagentList = () => Promise.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: S2, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await manager.refreshSubagents(S1)
+    expect(manager.getListSnapshot().current).toBeUndefined()
   })
 
   it('restores a persisted child selection only after catalog hydration', async () => {
@@ -851,10 +869,10 @@ describe('subagent durable address hydration', () => {
     api.onSubagentList = () => gate.promise
     const child = 'child-restored-race' as SessionId
     const parent = 'parent-restored-race' as SessionId
-    const manager = new SessionManager(fakeRemote(api), child, { parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    const manager = new SessionManager(fakeRemote(api), child)
     api.onList = () => Promise.resolve(ok({ items: [summary(child, { origin: 'subagent', parentSessionId: parent })] as never[] }))
     await manager.refreshList()
-    expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    expect(manager.getListSnapshot().current).toBeUndefined()
     gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
     await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
   })
