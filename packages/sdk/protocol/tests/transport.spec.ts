@@ -281,6 +281,22 @@ describe('JsonRpcLineTransport', () => {
     b.close()
   })
 
+  it('rejects pending requests when the output stream errors', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    const pending = transport.request('never-replies', {})
+
+    await expect(pending).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    transport.close()
+  })
+
   it('rejects pending requests when the transport closes', async () => {
     const { b } = transportPair()
 

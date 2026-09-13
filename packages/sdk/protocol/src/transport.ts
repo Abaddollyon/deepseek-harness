@@ -67,11 +67,24 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   private notificationHandler: NotificationHandler | undefined
   private malformedHandler: ((line: string) => void) | undefined
   private readonly pending = new Map<JsonRpcId, PendingRequest>()
+  private readonly onOutputError = (error: Error): void => {
+    // Let more specific stream owners observe the same error first (for
+    // example, a provider wire that adds protocol context), then settle the
+    // generic request waiters before the next event-loop turn.
+    queueMicrotask(() => { this.failPending(error) })
+  }
 
   constructor(
     private readonly input: Readable,
     private readonly output: Writable,
-  ) {}
+  ) {
+    // Writable errors are asynchronous and can occur after write() returned;
+    // keep them from becoming unhandled EventEmitter errors and settle every
+    // request that can no longer receive a response.
+    // A few embedders provide a write-only test double; real Node Writable
+    // streams always expose EventEmitter's `on`/`off` methods.
+    if (typeof this.output.on === 'function') this.output.on('error', this.onOutputError)
+  }
 
   /** Attach the input listeners and begin reading frames. Idempotent. */
   start(): void {
@@ -89,6 +102,7 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
     this.input.off('data', this.onData)
     this.input.off('error', this.onInputError)
     this.input.off('end', this.onInputEnd)
+    if (typeof this.output.off === 'function') this.output.off('error', this.onOutputError)
     this.failPending(new Error('JSON-RPC transport closed'))
   }
 
