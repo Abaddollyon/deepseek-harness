@@ -605,7 +605,7 @@ describe('OutputCollector', () => {
     expect(collector.readFrom(0)).toMatchObject({
       text: 'bbbb',
       lossy: true,
-      spillFailure: { code: 'EIO', message: expect.stringContaining('simulated I/O') },
+      spillFailure: { code: 'EIO', message: expect.stringContaining('simulated I/O') as string },
     })
   })
 
@@ -618,7 +618,7 @@ describe('OutputCollector', () => {
     collector.push(Buffer.from('bbbb'))
     expect(collector.finalize().spillFailure).toMatchObject({
       code: 'UNKNOWN',
-      message: expect.stringContaining('untyped spill failure'),
+      message: expect.stringContaining('untyped spill failure') as string,
     })
   })
 
@@ -631,7 +631,7 @@ describe('OutputCollector', () => {
     expect(collector.finalize().spillFailure).toMatchObject({
       code: 'EIO',
       syscall: 'getrandom',
-      message: expect.stringContaining('simulated random source failure'),
+      message: expect.stringContaining('simulated random source failure') as string,
     })
     expect(collector.finalize().spillFailure?.path).toBeUndefined()
   })
