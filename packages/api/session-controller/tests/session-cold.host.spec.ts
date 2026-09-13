@@ -1041,6 +1041,49 @@ describe('cold list title warmup', () => {
     }
   })
 
+  it('shares reservations when seven list requests discover cold titles concurrently', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    installSessionReadTestServices(ctx)
+    const source = header('simultaneous-title', 1)
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
+    const release = Promise.withResolvers<Awaited<ReturnType<typeof ctx.sessionQuery.readTitleSnapshots>>>()
+    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockReturnValue(release.promise)
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      const results = await Promise.all(Array.from({ length: 7 }, () => list.list()))
+      expect(results.every(items => items[0]?.sessionId === source.id)).toBe(true)
+      expect(readTitles).toHaveBeenCalledOnce()
+      expect(readTitles.mock.calls[0]?.[0]).toEqual([source.id])
+    } finally {
+      release.resolve([])
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('ignores title results outside the requested catalog', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    installSessionReadTestServices(ctx)
+    const source = header('requested-title', 1)
+    const unrelated = header('unrequested-title', 2)
+    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
+    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([
+      { status: 'fulfilled', sessionId: unrelated.id, value: { session: unrelated } },
+      { status: 'fulfilled', sessionId: source.id, value: { session: source } },
+    ])
+    const list = new ApiSessionList(ctx, 0)
+    try {
+      await list.list()
+      await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
+      const items = await list.list()
+      expect(items.map(item => item.sessionId)).toEqual([source.id])
+      expect(readTitles).toHaveBeenCalledOnce()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('loads 64 cold titles once through the bounded query provider while seven clients refresh', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
