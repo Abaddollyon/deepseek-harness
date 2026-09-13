@@ -308,6 +308,33 @@ describe('ClientWorkspaceModel', () => {
     expect(model.getSnapshot().archivedSessionIds).toEqual(['fresh'])
   })
 
+  it('does not let a delayed archive echo overwrite a newer stream frame', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model)
+    const gate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    remote.onArchiveSession = () => gate.promise
+    const pending = model.archiveSession(sid('first'))
+    model.replaceArchived([sid('first'), sid('second')])
+    gate.resolve(remoteOk({ archivedSessionIds: [sid('first')] }))
+    await pending
+    expect(model.getSnapshot().archivedSessionIds).toEqual([sid('first'), sid('second')])
+  })
+
+  it('keeps a streamed row when a stale unary echo has the same timestamp', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    const initial = workspace('one', [], '2026-01-01T00:00:00.001Z')
+    baseline(model, [initial])
+    const gate = deferred<RemoteResult<WorkspaceValue>>()
+    remote.onRename = () => gate.promise
+    const pending = model.rename(wid('one'), 'old')
+    model.upsertView({ ...initial, title: 'new' })
+    gate.resolve(remoteOk({ workspace: { ...initial, title: 'old' } }))
+    await pending
+    expect(model.getSnapshot().items[0]?.title).toBe('new')
+  })
+
   it('keeps the newest row and places Workspaces missing from partial orders last', async () => {
     const model = modelFor()
     baseline(model, [

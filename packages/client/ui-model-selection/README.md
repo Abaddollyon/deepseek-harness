@@ -47,6 +47,8 @@ When the Host reports that no adapter serves the session's route, this plugin ra
 
 Two entries over ONE per-session directory owned by `ModelDirectoryResolver` (`ctx.modelDirectories`): the `/model` popupSelect contribution (registered through `ctx.commandUi`) and the composer's named `conversation.input.model` seat both load the session's advisory directory through `session.models` and submit through `session.selectModel` via the same `ModelDirectory` instance, so a switch made in either entry is what the other shows next. Directory loads and selections share a generation counter so an older response never overwrites a newer one; a connection reset drops every resident projection and repulls the Host-restored selection. Directories are per-session, resolved lazily, and disposed with the session scope; addressed subagent sessions expose neither entry. The shared catalog coalesces open-time stale revalidation and explicit discovery refreshes, retains last-good rows on failure, and refetches every resident projection on forwarded `llm/adapters-updated` and `settings/document-updated` owner events.
 
+A rejected selection releases the busy state and exposes its error so both controls permit a retry. Completion from an older connection generation or a disposed directory cannot change the current selection state.
+
 </details>
 
 -----

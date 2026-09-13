@@ -218,6 +218,45 @@ async function bench() {
 const projection = (id: string) => ({ sessionId: sid(id) })
 
 describe('ui-model-selection dual entry', () => {
+  it('unlocks model choices after a rejected selection and permits a retry', async () => {
+    const b = await bench()
+    try {
+      b.mint('s1')
+      const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+      await directory.load()
+      vi.spyOn(b.remote.session, 'selectModel').mockRejectedValueOnce(new Error('no active Connection'))
+      const selection = { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }
+
+      await expect(directory.select(selection)).rejects.toThrow('no active Connection')
+      expect(directory.store.getSnapshot()).toMatchObject({ status: 'error', error: 'no active Connection' })
+      await directory.select(selection)
+      expect(directory.store.getSnapshot()).toMatchObject({ status: 'ready', current: selection, error: null })
+    } finally {
+      await b.fiber.dispose()
+    }
+  })
+
+  it('ignores a rejected selection from a previous connection generation', async () => {
+    const b = await bench()
+    try {
+      b.mint('s1')
+      const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+      await directory.load()
+      const pending = Promise.withResolvers<never>()
+      vi.spyOn(b.remote.session, 'selectModel').mockReturnValueOnce(pending.promise)
+      const selection = { provider: 'deepseek-official', model: 'deepseek-v4-pro' }
+      const operation = directory.select(selection)
+      const rejected = expect(operation).rejects.toThrow('old Connection')
+      directory.resetConnected()
+      await directory.select(selection)
+      pending.reject(new Error('old Connection'))
+      await rejected
+      expect(directory.store.getSnapshot()).toMatchObject({ status: 'ready', current: selection, error: null })
+    } finally {
+      await b.fiber.dispose()
+    }
+  })
+
   it('registers the /model contribution and the composer model seat', async () => {
     const b = await bench()
     expect(b.contribution().name).toBe('model')

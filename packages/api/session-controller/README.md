@@ -56,7 +56,9 @@ The Client entry accepts `controlRetryDelaysMs`, defaulting to `[250, 500, 1000,
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
-Cold list rows remain visible immediately. Durable titles are warmed through bounded `sessionQuery.readTitleSnapshots` reads and appear on a later poll; failed or cancelled batches remain retryable, cache entries are limited to visible cold rows, and live-session transitions invalidate cached titles.
+Cold list rows remain visible immediately. One `sessionQuery.readTitleSnapshots` call warms each set of uncached titles; the query provider bounds concurrent history reads and lists persistence once per call. Overlapping list requests share reserved titles, including work waiting for a reader. Failed or cancelled reads remain retryable, cache entries are limited to visible cold rows, and live-session transitions invalidate cached titles. Titles appear on a later poll after the observation finishes.
+
+Selecting a subagent list row waits for its direct-parent catalog to supply the durable history address. A child is never opened as an ordinary Session while that address is unresolved; another selection or removal cancels pending navigation.
 
 -----
 

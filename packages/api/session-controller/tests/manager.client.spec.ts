@@ -814,6 +814,74 @@ describe('connected generation', () => {
   })
 })
 
+describe('subagent durable address hydration', () => {
+  it('defers a child selected from the flat list until its catalog supplies an address', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    const child = 'child-address-race' as SessionId
+    const parent = 'parent-address-race' as SessionId
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(child, { origin: 'subagent', parentSessionId: parent }))
+    manager.select(child)
+    expect(manager.getListSnapshot().current).toBeUndefined()
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await vi.waitFor(() => {
+      expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    })
+  })
+
+  it('cancels a pending child selection when the child is removed', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    const child = 'child-removed-race' as SessionId
+    const parent = 'parent-removed-race' as SessionId
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(child, { origin: 'subagent', parentSessionId: parent }))
+    manager.select(child)
+    manager.handleSessionRemoved(child)
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await manager.refreshSubagents(parent)
+    expect(manager.getListSnapshot().current).toBeUndefined()
+  })
+
+  it('cancels a pending child selection when an authoritative list removes its row', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const manager = new SessionManager(fakeRemote(api))
+    await manager.refreshList()
+    manager.handleSessionAdded(summary(S2, { origin: 'subagent', parentSessionId: S1 }))
+    manager.select(S2)
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items).toHaveLength(0)
+    gate.resolve(ok({ parentAvailable: true, entries: [] }))
+    await manager.refreshSubagents(S1)
+    api.onSubagentList = () => Promise.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: S2, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await manager.refreshSubagents(S1)
+    expect(manager.getListSnapshot().current).toBeUndefined()
+  })
+
+  it('restores a persisted child selection only after catalog hydration', async () => {
+    const api = new FakeApiClient()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onSubagentList']>>>()
+    api.onSubagentList = () => gate.promise
+    const child = 'child-restored-race' as SessionId
+    const parent = 'parent-restored-race' as SessionId
+    const manager = new SessionManager(fakeRemote(api), child)
+    api.onList = () => Promise.resolve(ok({ items: [summary(child, { origin: 'subagent', parentSessionId: parent })] as never[] }))
+    await manager.refreshList()
+    expect(manager.getListSnapshot().current).toBeUndefined()
+    gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
+    await vi.waitFor(() => {
+      expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    })
+  })
+})
+
 describe('completed reminder', () => {
   const status = (manager: SessionManager, sessionId: SessionId, running: boolean): void => {
     manager.handleSessionStatus(sessionId, running)

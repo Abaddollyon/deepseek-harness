@@ -92,14 +92,25 @@ export class ModelDirectory {
     this.assertAvailable()
     const generation = ++this.generation
     this.store.update((s) => { s.status = 'selecting'; s.error = null })
-    const result = await this.sessions.selectModel({
-      sessionId: this.sessionId,
-      provider: selection.provider,
-      model: selection.model,
-      ...selection.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: selection.reasoningEffort },
-    })
+    let result
+    try {
+      result = await this.sessions.selectModel({
+        sessionId: this.sessionId,
+        provider: selection.provider,
+        model: selection.model,
+        ...selection.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: selection.reasoningEffort },
+      })
+    } catch (error: unknown) {
+      if (!this.disposed && generation === this.generation) {
+        this.store.update((state) => {
+          state.status = 'error'
+          state.error = error instanceof Error ? error.message : String(error)
+        })
+      }
+      throw error
+    }
     if (this.disposed || generation !== this.generation) {
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       return

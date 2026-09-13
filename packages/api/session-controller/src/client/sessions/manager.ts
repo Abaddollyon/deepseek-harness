@@ -104,6 +104,8 @@ export class SessionManager {
    * on select and session-removed, re-armed by the next completion).
    */
   private readonly completedNotifications = new Set<SessionId>()
+  /** Child clicked from the flat list while its direct-parent catalog is still loading. */
+  private pendingSubagentSelection: SessionId | undefined
   /** Last-observed running bits per session; the true→false edge here arms {@link completedNotifications}. */
   private readonly prevRunning = new Map<SessionId, boolean>()
   /** Per-session projection value stores, retained independently of instance arrival (the
@@ -166,7 +168,17 @@ export class SessionManager {
    * @param sessionId - listed or catalog-addressed Session id.
    */
   select(sessionId: SessionId): void {
+    this.pendingSubagentSelection = undefined
     const address = this.navigationAddress(sessionId)
+    const summary = this.summaries.find(candidate => candidate.sessionId === sessionId)
+    // Host list rows expose subagent lineage before the catalog RPC has arrived.
+    // Never stage such a row as an ordinary Session: history would be rejected
+    // by the durable-address fence. Resolve it once the parent catalog hydrates.
+    if (address === undefined && summary?.origin === 'subagent' && summary.parentSessionId !== undefined) {
+      this.pendingSubagentSelection = sessionId
+      void this.refreshSubagents(summary.parentSessionId)
+      return
+    }
     if (!this.summaries.some(summary => summary.sessionId === sessionId) && address === undefined) {
       throw new Error(`sessions.select: unknown session ${sessionId}`)
     }
@@ -189,6 +201,7 @@ export class SessionManager {
    * @param address - catalog-derived parent and child ids.
    */
   selectSubagent(address: SubagentAddress): void {
+    this.pendingSubagentSelection = undefined
     const catalog = this.catalogs.get(address.parentSessionId)
     const entry = catalog?.entries.find(candidate => candidate.id === address.childSessionId)
     if (entry === undefined || entry.kind !== 'child' || entry.mode !== address.mode) {
@@ -204,6 +217,7 @@ export class SessionManager {
 
   /** Clear the selection (the layout falls to the no-session view state). */
   clearSelection(): void {
+    this.pendingSubagentSelection = undefined
     this.selected = undefined
     this.notifier.notifyNow()
   }
@@ -380,6 +394,18 @@ export class SessionManager {
             state: 'ready',
             error: null,
           })
+          const pending = this.pendingSubagentSelection
+          const hydratedEntries = this.catalogs.get(parentSessionId)?.entries ?? []
+          if (pending !== undefined) {
+            const child = hydratedEntries.find(entry => entry.kind === 'child' && entry.id === pending)
+            if (child?.kind === 'child') {
+              this.pendingSubagentSelection = undefined
+              this.selectSubagent({ parentSessionId, childSessionId: pending, mode: child.mode })
+            } else if (this.summaries.some(summary => summary.sessionId === pending
+              && summary.parentSessionId === parentSessionId)) {
+              this.pendingSubagentSelection = undefined
+            }
+          }
           for (const [childId, address] of this.addresses) {
             if (address.parentSessionId !== parentSessionId) continue
             this.sessions.get(childId)?.handleSubagentParentAvailable(parentAvailable)
@@ -482,6 +508,16 @@ export class SessionManager {
           this.summaries = summaries
           this.listState = 'idle'
           this.listPhase = 'ready'
+          if (this.pendingSubagentSelection !== undefined
+            && !summaries.some(summary => summary.sessionId === this.pendingSubagentSelection)) {
+            this.pendingSubagentSelection = undefined
+          }
+          const restored = this.selected === undefined ? undefined : this.summaries.find(s => s.sessionId === this.selected)
+          if (restored?.origin === 'subagent' && restored.parentSessionId !== undefined
+            && this.navigationAddress(restored.sessionId) === undefined) {
+            this.pendingSubagentSelection = restored.sessionId
+            void this.refreshSubagents(restored.parentSessionId)
+          }
           // Covers the empty-mutations pull (a plain baseline carries no edge).
           this.syncCompletedNotifications()
           // Push running/blank bits down to instantiated Sessions (the list is the authoritative summary source).
@@ -730,6 +766,7 @@ export class SessionManager {
    * @param sessionId - removed Session identity.
    */
   handleSessionRemoved(sessionId: SessionId): void {
+    if (this.pendingSubagentSelection === sessionId) this.pendingSubagentSelection = undefined
     const summary = this.summaries.find(candidate => candidate.sessionId === sessionId)
     const durableSubagent = summary?.origin === 'subagent' || this.addresses.has(sessionId)
     this.recordMutation(durableSubagent
@@ -942,8 +979,11 @@ export class SessionManager {
     const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
     if (!sameOrder) this.itemsCache = items
     const selected = this.selected
+    const selectedSummary = this.summaries.find(item => item.sessionId === selected)
     const current = selected !== undefined
-      && (items.some(item => item.sessionId === selected) || this.addresses.has(selected))
+      && ((selectedSummary?.origin === 'subagent'
+        ? this.addresses.has(selected)
+        : items.some(item => item.sessionId === selected) || this.addresses.has(selected)))
       ? selected
       : undefined
     return {
