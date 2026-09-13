@@ -1051,6 +1051,30 @@ describe('user-explicit invocation injection', () => {
     expect(later.messages.filter(message => (message.source as { kind?: string }).kind === 'skill-invocation')).toHaveLength(1)
   })
 
+  it('records downstream invocation contributions and ignores malformed history entries', async () => {
+    const { ctx, agent } = await invokeHarness()
+    const trigger = gesture('/shared-skill downstream')
+    ctx.on('agent/pre-step', async (_payload, next) => {
+      const decision = await next()
+      if (decision.kind !== 'enter') return decision
+      return {
+        ...decision,
+        messages: [...decision.messages, createUserMessage({
+          content: [{ type: 'text', text: 'already handled' }],
+          source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions', triggerMessageId: trigger.id },
+        })],
+      }
+    })
+    // An incomplete historical source is ignored while scanning the session.
+    agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'legacy' }],
+      source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' },
+    } as UserMessage), { surfaceOp: 'append' })
+    const decision = await proposeStep(ctx, agent, [trigger])
+    if (decision.kind !== 'enter') throw new Error('expected enter')
+    expect(decision.messages.filter(message => message.source.kind === 'skill-invocation')).toHaveLength(1)
+  })
+
   it('recognizes a mid-sentence gesture but not paths, fractions, or broken boundaries', async () => {
     const { ctx, agent } = await invokeHarness()
     const decision = await proposeStep(ctx, agent, [
