@@ -59,4 +59,19 @@ describe('Session lineage flattening', () => {
     expect(out.find(e => e.sessionId === 'b')?.completed).toBe(true)
     expect(flattenLineage([s('a', 10)])[0]?.completed).toBe(false)
   })
+
+  it('handles 1,500 sessions and 50 children without quadratic cleanup work', () => {
+    const summaries = Array.from({ length: 1_500 }, (_, index) =>
+      s(
+        `session-${index}`,
+        index,
+        index >= 1_450 ? `session-${index - 1_450}` : undefined,
+      ),
+    )
+    const started = performance.now()
+    const out = flattenLineage(summaries)
+    const elapsed = performance.now() - started
+    expect(out).toHaveLength(1_500)
+    expect(elapsed).toBeLessThan(1_000)
+  })
 })

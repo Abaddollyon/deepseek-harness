@@ -123,6 +123,8 @@ export class SessionManager {
   private listMutations: SessionListMutation[] | null = null
   private readonly addresses = new Map<SessionId, SubagentAddress>()
   private readonly catalogs = new Map<SessionId, SubagentCatalogSnapshot>()
+  /** Parent catalogs indexed by child id so live activity updates visit only affected rows. */
+  private readonly catalogParentsByChild = new Map<SessionId, Set<SessionId>>()
   private readonly catalogInflight = new Map<SessionId, CatalogInflight>()
   /** Catalog owners whose membership changed while a pull was in flight: one trailing refresh after it settles. */
   private readonly catalogStale = new Set<SessionId>()
@@ -143,6 +145,9 @@ export class SessionManager {
    *  must be recovered by value or every SessionListItem memo misses on every refresh. */
   private entryCache = new Map<SessionId, SessionListEntry>()
   private itemsCache: readonly SessionListEntry[] = []
+  /** Revision of list inputs that can affect lineage or row values. */
+  private listRevision = 0
+  private lineageCache: { revision: number; items: SessionListEntry[] } | undefined
   private readonly notifier = new Notifier(() => {
     this.listSnapshotCache = this.buildListSnapshot()
   })
@@ -356,7 +361,7 @@ export class SessionManager {
       store = new ProjectionValueStore()
       // List rows project off store keys (title); any-key changes re-enter
       // the manager's own batched rebuild channel.
-      store.subscribeAny(() => { this.notifier.markDirty() })
+      store.subscribeAny(() => { this.listRevision++; this.notifier.markDirty() })
       this.projectionStores.set(sessionId, store)
     }
     return store
@@ -372,7 +377,7 @@ export class SessionManager {
     const previous = this.catalogs.get(parentSessionId)
     const expandableRows = new Set<SessionId>()
     const activityRows = new Map<SessionId, 'running' | 'inactive'>()
-    this.catalogs.set(parentSessionId, {
+    this.setCatalog(parentSessionId, {
       entries: previous?.entries ?? [],
       ...(previous?.parentAvailable === undefined
         ? {}
@@ -387,7 +392,7 @@ export class SessionManager {
         if (result.ok) {
           const parentAvailable = this.catalogInflight.get(parentSessionId)?.parentAvailableOverride
             ?? result.value.parentAvailable
-          this.catalogs.set(parentSessionId, {
+          this.setCatalog(parentSessionId, {
             ...result.value,
             entries: this.withCatalogMutations(result.value.entries, expandableRows, activityRows),
             parentAvailable,
@@ -411,7 +416,7 @@ export class SessionManager {
             this.sessions.get(childId)?.handleSubagentParentAvailable(parentAvailable)
           }
         } else {
-          this.catalogs.set(parentSessionId, {
+          this.setCatalog(parentSessionId, {
             entries: this.withCatalogMutations(
               previous?.entries ?? [], expandableRows, activityRows,
             ),
@@ -425,7 +430,7 @@ export class SessionManager {
         }
       } catch (error: unknown) {
         if (!isRemoteFailure(error)) throw error
-        this.catalogs.set(parentSessionId, {
+        this.setCatalog(parentSessionId, {
           entries: this.withCatalogMutations(
             previous?.entries ?? [], expandableRows, activityRows,
           ),
@@ -506,6 +511,7 @@ export class SessionManager {
             this.syncCompletedNotifications()
           }
           this.summaries = summaries
+          this.listRevision++
           this.listState = 'idle'
           this.listPhase = 'ready'
           if (this.pendingSubagentSelection !== undefined
@@ -664,6 +670,7 @@ export class SessionManager {
   private recordMutation(mutation: SessionListMutation): void {
     this.listMutations?.push(mutation)
     this.summaries = applyMutation(this.summaries, mutation)
+    this.listRevision++
     // Eager edge reconciliation — a snapshot-build-time pass would miss consecutive status frames.
     this.syncCompletedNotifications()
     this.notifier.markDirty()
@@ -785,7 +792,7 @@ export class SessionManager {
     }
     const ownedCatalog = this.catalogs.get(sessionId)
     if (ownedCatalog !== undefined && ownedCatalog.parentAvailable) {
-      this.catalogs.set(sessionId, { ...ownedCatalog, parentAvailable: false })
+      this.setCatalog(sessionId, { ...ownedCatalog, parentAvailable: false })
     }
     for (const [childId, address] of this.addresses) {
       if (address.parentSessionId === sessionId) {
@@ -854,6 +861,29 @@ export class SessionManager {
     this.catalogDebounce.set(parentSessionId, timer)
   }
 
+  /** Replace one catalog and maintain the child-to-parent activity index. */
+  private setCatalog(parentSessionId: SessionId, catalog: SubagentCatalogSnapshot): void {
+    const previous = this.catalogs.get(parentSessionId)
+    if (previous !== undefined) {
+      for (const entry of previous.entries) {
+        if (entry.kind !== 'child') continue
+        const parents = this.catalogParentsByChild.get(entry.id)
+        parents?.delete(parentSessionId)
+        if (parents?.size === 0) this.catalogParentsByChild.delete(entry.id)
+      }
+    }
+    this.catalogs.set(parentSessionId, catalog)
+    for (const entry of catalog.entries) {
+      if (entry.kind !== 'child') continue
+      let parents = this.catalogParentsByChild.get(entry.id)
+      if (parents === undefined) {
+        parents = new Set()
+        this.catalogParentsByChild.set(entry.id, parents)
+      }
+      parents.add(parentSessionId)
+    }
+  }
+
   /** Apply one Agent-driver transition to loaded and in-flight catalogs. */
   private updateCatalogActivity(childSessionId: SessionId, running: boolean): void {
     const activity = running ? 'running' as const : 'inactive' as const
@@ -861,15 +891,16 @@ export class SessionManager {
       inflight.activityRows.set(childSessionId, activity)
     }
     let changed = false
-    for (const [parentSessionId, catalog] of this.catalogs) {
-      if (!catalog.entries.some(entry =>
+    for (const parentSessionId of [...this.catalogParentsByChild.get(childSessionId) ?? []]) {
+      const catalog = this.catalogs.get(parentSessionId)
+      if (catalog === undefined || !catalog.entries.some(entry =>
         entry.kind === 'child' && entry.id === childSessionId && entry.activity !== activity)) continue
       const entries = catalog.entries.map((entry) => {
         if (entry.kind !== 'child' || entry.id !== childSessionId) return entry
         return { ...entry, activity }
       })
       changed = true
-      this.catalogs.set(parentSessionId, { ...catalog, entries })
+      this.setCatalog(parentSessionId, { ...catalog, entries })
     }
     if (changed) this.notifier.markDirty()
   }
@@ -883,15 +914,16 @@ export class SessionManager {
   /** Apply one positive expandability hint to every loaded catalog containing that unique row id. */
   private applyCatalogParentExpandable(parentSessionId: SessionId): void {
     let changed = false
-    for (const [catalogParentId, catalog] of this.catalogs) {
-      if (!catalog.entries.some(entry =>
+    for (const catalogParentId of [...this.catalogParentsByChild.get(parentSessionId) ?? []]) {
+      const catalog = this.catalogs.get(catalogParentId)
+      if (catalog === undefined || !catalog.entries.some(entry =>
         entry.kind === 'child' && entry.id === parentSessionId && !entry.hasChildren)) continue
       const entries = catalog.entries.map((entry) => {
         if (entry.kind !== 'child' || entry.id !== parentSessionId || entry.hasChildren) return entry
         return { ...entry, hasChildren: true }
       })
       changed = true
-      this.catalogs.set(catalogParentId, { ...catalog, entries })
+      this.setCatalog(catalogParentId, { ...catalog, entries })
     }
     if (changed) this.notifier.markDirty()
   }
@@ -947,19 +979,25 @@ export class SessionManager {
   }
 
   private buildListSnapshot(): SessionListSnapshot {
-    const merged: TitledSessionSummary[] = this.summaries.map((summary) => {
-      // List rows read the generic 'title' projection key (host-computed unit
-      // value; there is no dedicated title frame).
-      const projectionStore = this.projectionStores.get(summary.sessionId)
-      const title = projectionStore?.get('title')
-      const projectionValues = projectionStore?.values()
-      return {
-        ...summary,
-        ...(typeof title === 'string' && title !== '' ? { title } : {}),
-        ...(projectionValues === undefined ? {} : { projectionValues }),
-      }
-    })
-    const fresh = flattenLineage(merged, this.completedNotifications)
+    let fresh: SessionListEntry[]
+    if (this.lineageCache?.revision === this.listRevision) {
+      fresh = this.lineageCache.items
+    } else {
+      const merged: TitledSessionSummary[] = this.summaries.map((summary) => {
+        // List rows read the generic 'title' projection key (host-computed unit
+        // value; there is no dedicated title frame).
+        const projectionStore = this.projectionStores.get(summary.sessionId)
+        const title = projectionStore?.get('title')
+        const projectionValues = projectionStore?.values()
+        return {
+          ...summary,
+          ...(typeof title === 'string' && title !== '' ? { title } : {}),
+          ...(projectionValues === undefined ? {} : { projectionValues }),
+        }
+      })
+      fresh = flattenLineage(merged, this.completedNotifications)
+      this.lineageCache = { revision: this.listRevision, items: fresh }
+    }
     const items = fresh.map((entry) => {
       const prev = this.entryCache.get(entry.sessionId)
       if (
@@ -973,19 +1011,21 @@ export class SessionManager {
       this.entryCache.set(entry.sessionId, entry)
       return entry
     })
+    const present = new Set(items.map(item => item.sessionId))
     for (const id of this.entryCache.keys()) {
-      if (!items.some(e => e.sessionId === id)) this.entryCache.delete(id)
+      if (!present.has(id)) this.entryCache.delete(id)
     }
-    const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
-    if (!sameOrder) this.itemsCache = items
+    const itemIds = new Set(items.map(item => item.sessionId))
     const selected = this.selected
     const selectedSummary = this.summaries.find(item => item.sessionId === selected)
     const current = selected !== undefined
       && ((selectedSummary?.origin === 'subagent'
         ? this.addresses.has(selected)
-        : items.some(item => item.sessionId === selected) || this.addresses.has(selected)))
+        : itemIds.has(selected) || this.addresses.has(selected)))
       ? selected
       : undefined
+    const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
+    if (!sameOrder) this.itemsCache = items
     return {
       items: this.itemsCache,
       current,
