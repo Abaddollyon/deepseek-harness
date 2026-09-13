@@ -55,9 +55,12 @@ interface PendingRequest {
 
 /**
  * Line-delimited endpoint over caller-owned streams. {@link start} attaches
- * listeners; {@link close} detaches them and rejects pending requests without
- * destroying the streams. Missing request handlers return `-32601`; handler
- * failures return `-32603`. Notifications without a handler are dropped.
+ * input listeners; {@link close} detaches them and rejects pending requests
+ * without destroying the streams. An output error is terminal for this
+ * transport, and the output error listener remains attached until every write
+ * already handed to the caller-owned stream has settled. Missing request
+ * handlers return `-32601`; handler failures return `-32603`. Notifications
+ * without a handler are dropped.
  */
 export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   private buffer = ''
@@ -67,11 +70,32 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   private notificationHandler: NotificationHandler | undefined
   private malformedHandler: ((line: string) => void) | undefined
   private readonly pending = new Map<JsonRpcId, PendingRequest>()
+  private inputError: Error | undefined
+  private terminalError: Error | undefined
+  private pendingWrites = 0
+  private outputErrorListenerAttached = false
+  private outputListenerReleaseScheduled = false
+  private readonly onOutputError = (error: Error): void => {
+    // Let more specific stream owners observe the same error first (for
+    // example, a provider wire that adds protocol context), then settle the
+    // generic request waiters before the next event-loop turn.
+    this.recordTerminal(error, true)
+  }
 
   constructor(
     private readonly input: Readable,
     private readonly output: Writable,
-  ) {}
+  ) {
+    // Writable errors are asynchronous and can occur after write() returned;
+    // keep them from becoming unhandled EventEmitter errors and settle every
+    // request that can no longer receive a response.
+    // A few embedders provide a write-only test double; real Node Writable
+    // streams always expose EventEmitter's `on`/`off` methods.
+    if (typeof this.output.on === 'function') {
+      this.output.on('error', this.onOutputError)
+      this.outputErrorListenerAttached = true
+    }
+  }
 
   /** Attach the input listeners and begin reading frames. Idempotent. */
   start(): void {
@@ -83,13 +107,16 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   }
 
   /**
-   * Detach listeners and reject pending requests. Safe before {@link start}.
+   * Detach input listeners and reject pending requests. A queued output write
+   * keeps its error listener until its callback settles; the caller-owned
+   * streams are never destroyed. Safe before {@link start}.
    */
   close(): void {
     this.input.off('data', this.onData)
     this.input.off('error', this.onInputError)
     this.input.off('end', this.onInputEnd)
-    this.failPending(new Error('JSON-RPC transport closed'))
+    this.recordTerminal(new Error('JSON-RPC transport closed'))
+    this.scheduleOutputListenerRelease()
   }
 
   /**
@@ -128,6 +155,8 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
    * @returns the result; rejects per {@link JsonRpcTransportPeer.request}.
    */
   request(method: string, params: object, signal?: AbortSignal): Promise<unknown> {
+    if (this.terminalError !== undefined) return Promise.reject(this.terminalError)
+    if (this.inputError !== undefined) return Promise.reject(this.inputError)
     const id = `req_${randomUUID().replaceAll('-', '')}`
     const message = { jsonrpc: '2.0', id, method, params }
     return new Promise((resolve, reject) => {
@@ -159,13 +188,23 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       } catch (error) {
         this.pending.delete(id)
         detach()
-        reject(error instanceof Error ? error : new Error(String(error)))
+        const failure = this.terminalError
+          ?? (this.inputError !== undefined && error === this.inputError
+            ? this.inputError
+            : this.recordTerminal(error))
+        reject(failure)
       }
     })
   }
 
   notify(method: string, params?: object): void {
-    this.write(params === undefined ? { jsonrpc: '2.0', method } : { jsonrpc: '2.0', method, params })
+    if (this.terminalError !== undefined || this.inputError !== undefined) return
+    try {
+      this.write(params === undefined ? { jsonrpc: '2.0', method } : { jsonrpc: '2.0', method, params })
+    } catch {
+      // The write path records the terminal error and fails request waiters;
+      // notifications have no caller-owned promise to reject.
+    }
   }
 
   /**
@@ -173,11 +212,17 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
    * @returns a promise that settles with the output write callback.
    */
   flush(): Promise<void> {
+    if (this.terminalError !== undefined) return Promise.reject(this.terminalError)
+    if (this.inputError !== undefined) return Promise.reject(this.inputError)
     return new Promise<void>((resolve, reject) => {
-      this.output.write('', (error) => {
-        if (error) reject(error)
-        else resolve()
-      })
+      try {
+        this.writeRaw('', (error) => {
+          if (error !== undefined) reject(error)
+          else resolve()
+        })
+      } catch (error) {
+        reject(this.recordTerminal(error))
+      }
     })
   }
 
@@ -193,18 +238,20 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       const line = this.buffer.slice(0, newline).trim()
       this.buffer = this.buffer.slice(newline + 1)
       if (!line) continue
-      void this.handleLine(line)
+      void this.handleLine(line).catch((error: unknown) => {
+        this.recordTerminal(error)
+      })
     }
   }
 
   private readonly onInputError = (error: Error): void => {
-    this.failPending(error)
+    this.recordInputError(error)
   }
 
   private readonly onInputEnd = (): void => {
     this.buffer += this.decoder.end()
     this.drainLines()
-    this.failPending(new Error('JSON-RPC input closed'))
+    this.recordInputError(new Error('JSON-RPC input closed'))
   }
 
   private async handleLine(line: string): Promise<void> {
@@ -251,7 +298,9 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       const result = await handler(method, params)
       this.write({ jsonrpc: '2.0', id, result })
     } catch (error) {
-      this.writeError(id, -32603, error instanceof Error ? error.message : String(error))
+      if (this.terminalError === undefined) {
+        this.writeError(id, -32603, error instanceof Error ? error.message : String(error))
+      }
     }
   }
 
@@ -272,11 +321,83 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
   }
 
   private writeError(id: JsonRpcId, code: number, message: string): void {
-    this.write({ jsonrpc: '2.0', id, error: { code, message } })
+    this.tryWrite({ jsonrpc: '2.0', id, error: { code, message } })
   }
 
-  private write(message: Record<string, unknown>): void {
-    this.output.write(`${JSON.stringify(message)}\n`)
+  private tryWrite(message: Record<string, unknown>): void {
+    if (this.terminalError !== undefined) return
+    try {
+      this.write(message)
+    } catch {
+      // A response has no caller-owned promise to reject. The write path has
+      // already recorded the terminal failure and all pending requests.
+    }
+  }
+
+  private write(message: Record<string, unknown>, onDone?: (error?: Error) => void): void {
+    this.writeRaw(`${JSON.stringify(message)}\n`, onDone)
+  }
+
+  private writeRaw(payload: string, onDone?: (error?: Error) => void): void {
+    if (this.terminalError !== undefined) throw this.terminalError
+    this.pendingWrites += 1
+    let settled = false
+    const done = (error?: Error | null): void => {
+      if (settled) return
+      settled = true
+      this.pendingWrites -= 1
+      const failure = error === undefined || error === null ? undefined : this.recordTerminal(error)
+      try {
+        onDone?.(failure)
+      } finally {
+        this.scheduleOutputListenerRelease()
+      }
+    }
+    try {
+      this.output.write(payload, done)
+    } catch (error) {
+      done(error instanceof Error ? error : new Error(String(error)))
+      throw error
+    }
+  }
+
+  private recordTerminal(error: unknown, deferPending = false): Error {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    const terminal = this.terminalError ?? failure
+    this.terminalError = terminal
+    if (deferPending) queueMicrotask(() => { this.failPending(terminal) })
+    else this.failPending(terminal)
+    this.scheduleOutputListenerRelease()
+    return terminal
+  }
+
+  private recordInputError(error: unknown): Error {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    this.inputError ??= failure
+    this.failPending(this.inputError)
+    return this.inputError
+  }
+
+  private scheduleOutputListenerRelease(): void {
+    if (!this.outputErrorListenerAttached || this.terminalError === undefined || this.pendingWrites > 0
+      || this.outputListenerReleaseScheduled) return
+    this.outputListenerReleaseScheduled = true
+    setImmediate(() => {
+      this.outputListenerReleaseScheduled = false
+      this.detachOutputErrorListener()
+    })
+  }
+
+  private detachOutputErrorListener(): void {
+    if (typeof this.output.off === 'function') {
+      this.output.off('error', this.onOutputError)
+      this.outputErrorListenerAttached = false
+      return
+    }
+    if (typeof this.output.removeListener === 'function') {
+      this.output.removeListener('error', this.onOutputError)
+      this.outputErrorListenerAttached = false
+    }
   }
 
   private failPending(error: Error): void {

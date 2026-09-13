@@ -63,6 +63,7 @@ function finalOutput(reader: SubprocessOutputReader): CollectedOutput {
     text: read.text,
     truncated: read.lossy,
     ...read.spillPath !== undefined ? { spillPath: read.spillPath } : {},
+    ...read.spillFailure !== undefined ? { spillFailure: read.spillFailure } : {},
   }
 }
 

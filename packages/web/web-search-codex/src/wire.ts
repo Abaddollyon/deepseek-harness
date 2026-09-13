@@ -56,10 +56,23 @@ export class CodexSearchWire {
   private turnId: string | undefined
   private turnCompleted: PromiseWithResolvers<JsonObject> | undefined
   private closed = false
+  private readonly onInputError = (error: Error): void => {
+    this.rejectFatal(new CodexProtocolError(`Codex app-server input stream failed (${this.errorCode(error)}): ${error.message}`))
+  }
+  private readonly onOutputError = (error: Error): void => {
+    this.rejectFatal(new CodexProtocolError(`Codex app-server output stream failed (${this.errorCode(error)}): ${error.message}`))
+  }
+
+  private errorCode(error: Error): string {
+    const code = (error as Error & { code?: unknown }).code
+    return typeof code === 'string' ? code : 'UNKNOWN'
+  }
 
   /** Create a protocol client over caller-owned streams. */
   constructor(input: Readable, output: Writable) {
     this.transport = new JsonRpcLineTransport(input, output)
+    input.on('error', this.onInputError)
+    output.on('error', this.onOutputError)
     void this.fatal.promise.catch(() => undefined)
     this.transport.onRequest((method) => {
       if (method === 'currentTime/read') {

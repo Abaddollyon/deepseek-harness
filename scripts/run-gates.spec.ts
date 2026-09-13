@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import {
   cliGateOptions,
+  collectDescendants,
   defaultConcurrency,
   formatGateResultReason,
   gatesForMode,
@@ -973,5 +974,22 @@ describe('Windows tree termination', () => {
 
   it('terminates the root alone when no descendant was captured', () => {
     expect(taskkillArgs(100, [])).toEqual([['/PID', '100', '/T', '/F']])
+  })
+})
+
+
+describe('process-table descendant traversal', () => {
+  it('handles broad process tables without an argument-stack overflow', () => {
+    const rows: Array<[number, number]> = [[2, 1]]
+    for (let pid = 3; pid < 200_003; pid += 1) rows.push([pid, 2])
+    const descendants = collectDescendants(1, rows)
+    expect(descendants).toHaveLength(200_001)
+    expect(descendants.at(-1)).toBe(200_002)
+  })
+
+  it('visits each descendant once despite stale cyclic parent links and duplicates', () => {
+    const rows: Array<[number, number]> = [[2, 1], [3, 2], [1, 3], [3, 2], [4, 4], [4, 3]]
+    expect(collectDescendants(1, rows)).toEqual([2, 3, 4])
+    expect(rows).toHaveLength(6)
   })
 })

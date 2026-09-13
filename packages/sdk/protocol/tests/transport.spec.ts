@@ -1,6 +1,6 @@
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { JsonRpcLineTransport, JsonRpcResponseError } from '../src/index.ts'
 
 function transportPair() {
@@ -259,6 +259,52 @@ describe('JsonRpcLineTransport', () => {
     await expect(transport.flush()).rejects.toThrow('flush failed')
   })
 
+  it('contains a synchronous flush write failure', async () => {
+    const output = {
+      write() {
+        throw new Error('flush write exploded')
+      },
+    }
+    const transport = new JsonRpcLineTransport(new PassThrough(), output as never)
+
+    await expect(transport.flush()).rejects.toThrow('flush write exploded')
+  })
+
+  it('settles an output callback once and treats null as success', async () => {
+    let writes = 0
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        writes += 1
+        callback()
+        callback(new Error('late callback failure'))
+      },
+    })
+    const transport = new JsonRpcLineTransport(new PassThrough(), output)
+
+    await expect(transport.flush()).resolves.toBeUndefined()
+    expect(writes).toBe(1)
+    transport.close()
+
+    const nullOutput = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(null)
+      },
+    })
+    const nullTransport = new JsonRpcLineTransport(new PassThrough(), nullOutput)
+    await expect(nullTransport.flush()).resolves.toBeUndefined()
+    nullTransport.close()
+
+    const doubleOutput = {
+      write(_payload: string, callback?: (error?: Error) => void) {
+        callback?.()
+        callback?.()
+        return true
+      },
+    }
+    const doubleTransport = new JsonRpcLineTransport(new PassThrough(), doubleOutput as never)
+    await expect(doubleTransport.flush()).resolves.toBeUndefined()
+  })
+
   it('rejects pending requests when the input closes', async () => {
     const { aToB, b } = transportPair()
     b.start()
@@ -279,6 +325,255 @@ describe('JsonRpcLineTransport', () => {
 
     await expect(pending).rejects.toThrow('input broke')
     b.close()
+  })
+
+  it('retains the first input error for later requests, notifications, and flush', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+    const first = new Error('input broke')
+    input.emit('error', first)
+    input.emit('error', new Error('later input broke'))
+    input.emit('end')
+
+    await expect(transport.request('after-input-error', {})).rejects.toBe(first)
+    transport.notify('ignored')
+    await expect(transport.flush()).rejects.toBe(first)
+    transport.close()
+
+    const nonErrorInput = new PassThrough()
+    const nonErrorOutput = new PassThrough()
+    const nonErrorTransport = new JsonRpcLineTransport(nonErrorInput, nonErrorOutput)
+    nonErrorTransport.start()
+    const pending = nonErrorTransport.request('non-error-input', {})
+    nonErrorInput.emit('error', 'string input failure')
+    await expect(pending).rejects.toThrow('string input failure')
+    nonErrorTransport.close()
+  })
+
+  it('uses an input error that races a request serialization failure', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    const inputFailure = new Error('input raced serialization')
+    const sameFailure = {
+      toJSON: () => {
+        input.emit('error', inputFailure)
+        throw inputFailure
+      },
+    }
+    await expect(transport.request('same-failure', sameFailure)).rejects.toBe(inputFailure)
+    transport.close()
+
+    const secondInput = new PassThrough()
+    const secondOutput = new PassThrough()
+    const second = new JsonRpcLineTransport(secondInput, secondOutput)
+    second.start()
+    const secondInputFailure = new Error('second input failure')
+    const serializationFailure = new Error('serialization failed')
+    const differentFailure = {
+      toJSON: () => {
+        secondInput.emit('error', secondInputFailure)
+        throw serializationFailure
+      },
+    }
+    await expect(second.request('different-failure', differentFailure)).rejects.toBe(secondInputFailure)
+    second.close()
+  })
+
+  it('detaches an abort listener after a request resolves', async () => {
+    const { a, b } = transportPair()
+    a.onRequest(async () => ({ ok: true }))
+    a.start()
+    b.start()
+    const controller = new AbortController()
+
+    await expect(b.request('with-signal', {}, controller.signal)).resolves.toEqual({ ok: true })
+    controller.abort()
+    a.close()
+    b.close()
+  })
+
+  it('rejects pending requests when the output stream errors', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    const pending = transport.request('never-replies', {})
+
+    await expect(pending).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    transport.close()
+  })
+
+  it('contains a non-Error output event and rejects later operations', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+    const pending = transport.request('never-replies', {})
+
+    output.emit('error', 'string output failure')
+
+    await expect(pending).rejects.toThrow('string output failure')
+    await expect(transport.request('after-output-error', {})).rejects.toThrow('string output failure')
+    transport.notify('ignored')
+    await expect(transport.flush()).rejects.toThrow('string output failure')
+    transport.close()
+  })
+
+  it('contains an input notification handler failure', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.onNotification(() => { throw new Error('notification exploded') })
+    transport.start()
+
+    input.write('{"jsonrpc":"2.0","method":"explode"}\n')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await expect(transport.request('after-notification-failure', {})).rejects.toThrow('notification exploded')
+    transport.close()
+  })
+
+  it('skips a response write after an earlier output failure', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+    output.emit('error', new Error('output already failed'))
+    input.write('{"jsonrpc":"2.0","id":"missing-handler","method":"work"}\n')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    transport.close()
+  })
+
+  it('uses the removeListener fallback when output lacks off', async () => {
+    const output = new EventEmitter() as EventEmitter & {
+      write: (payload: string, callback?: (error?: Error) => void) => boolean
+    }
+    Object.defineProperty(output, 'off', { configurable: true, value: undefined })
+    const removeListener = vi.spyOn(output, 'removeListener')
+    output.write = (_payload, callback) => {
+      callback?.()
+      return true
+    }
+    const transport = new JsonRpcLineTransport(new PassThrough(), output as never)
+
+    transport.close()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(output.listenerCount('error')).toBe(0)
+    expect(removeListener).toHaveBeenCalledWith('error', expect.any(Function))
+
+    const noDetachOutput = {
+      on: vi.fn(),
+      write: () => true,
+    }
+    const noDetachTransport = new JsonRpcLineTransport(new PassThrough(), noDetachOutput as never)
+    noDetachTransport.close()
+    await new Promise<void>(resolve => setImmediate(resolve))
+  })
+
+  it('rejects new requests after an output stream failure', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    await expect(transport.request('first', {})).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    await expect(transport.request('after-output-failure', {})).rejects.toMatchObject({ message: 'write EPIPE', code: 'EPIPE' })
+    transport.close()
+  })
+
+  it('contains a queued output failure when closing before the write settles', async () => {
+    const input = new PassThrough()
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        setImmediate(() => { callback(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })) })
+      },
+    })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.start()
+
+    const pending = transport.request('queued', {})
+    transport.close()
+    // The callback and the stream's `error` event are separate asynchronous
+    // edges. Keep the transport listener through both so the delayed EPIPE
+    // cannot become an unhandled EventEmitter error.
+    expect(output.listenerCount('error')).toBe(1)
+
+    await expect(pending).rejects.toThrow('JSON-RPC transport closed')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(output.listenerCount('error')).toBe(0)
+  })
+
+  it('contains a delayed inbound handler that settles after close', async () => {
+    const input = new PassThrough()
+    const writes: string[] = []
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        writes.push(String(chunk))
+        callback()
+      },
+    })
+    let release!: () => void
+    const handlerReady = new Promise<void>((resolve) => { release = resolve })
+    let handlerStarted!: () => void
+    const started = new Promise<void>((resolve) => { handlerStarted = resolve })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.onRequest(async () => {
+      handlerStarted()
+      await handlerReady
+      return { ok: true }
+    })
+    transport.start()
+
+    input.write('{"jsonrpc":"2.0","id":"delayed","method":"work"}\n')
+    await started
+    transport.close()
+    release()
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    expect(writes).toEqual([])
+  })
+
+  it('finishes an inbound response after the input half-closes', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    let release!: () => void
+    const handlerReady = new Promise<void>((resolve) => { release = resolve })
+    let handlerStarted!: () => void
+    const started = new Promise<void>((resolve) => { handlerStarted = resolve })
+    const transport = new JsonRpcLineTransport(input, output)
+    transport.onRequest(async () => {
+      handlerStarted()
+      await handlerReady
+      return { ok: true }
+    })
+    transport.start()
+
+    input.write('{"jsonrpc":"2.0","id":"half-close","method":"work"}\n')
+    await started
+    const inputEnded = once(input, 'end')
+    input.end()
+    await inputEnded
+    const response = once(output, 'data')
+    release()
+    const chunks: unknown[] = await response
+    const chunk = chunks[0]
+
+    expect(JSON.parse(String(chunk))).toEqual({ jsonrpc: '2.0', id: 'half-close', result: { ok: true } })
+    transport.close()
   })
 
   it('rejects pending requests when the transport closes', async () => {
