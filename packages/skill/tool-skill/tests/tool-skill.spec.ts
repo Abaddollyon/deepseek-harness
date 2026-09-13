@@ -1068,8 +1068,8 @@ describe('user-explicit invocation injection', () => {
     // An incomplete historical source is ignored while scanning the session.
     agent.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'legacy' }],
-      source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' },
-    } as UserMessage), { surfaceOp: 'append' })
+      source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' } as never,
+    }), { surfaceOp: 'append' })
     const decision = await proposeStep(ctx, agent, [trigger])
     if (decision.kind !== 'enter') throw new Error('expected enter')
     expect(decision.messages.filter(message => message.source.kind === 'skill-invocation')).toHaveLength(1)
