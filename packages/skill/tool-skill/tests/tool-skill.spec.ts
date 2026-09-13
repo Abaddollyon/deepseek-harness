@@ -1059,10 +1059,16 @@ describe('user-explicit invocation injection', () => {
       if (decision.kind !== 'enter') return decision
       return {
         ...decision,
-        messages: [...decision.messages, createUserMessage({
-          content: [{ type: 'text', text: 'already handled' }],
-          source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions', triggerMessageId: trigger.id },
-        })],
+        messages: [...decision.messages,
+          createUserMessage({
+            content: [{ type: 'text', text: 'already handled' }],
+            source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions', triggerMessageId: trigger.id },
+          }),
+          createUserMessage({
+            content: [{ type: 'text', text: 'missing trigger' }],
+            source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' } as never,
+          }),
+        ],
       }
     })
     // An incomplete historical source is ignored while scanning the session.
@@ -1072,7 +1078,7 @@ describe('user-explicit invocation injection', () => {
     }), { surfaceOp: 'append' })
     const decision = await proposeStep(ctx, agent, [trigger])
     if (decision.kind !== 'enter') throw new Error('expected enter')
-    expect(decision.messages.filter(message => message.source.kind === 'skill-invocation')).toHaveLength(1)
+    expect(decision.messages.filter(message => message.source.kind === 'skill-invocation')).toHaveLength(2)
   })
 
   it('recognizes a mid-sentence gesture but not paths, fractions, or broken boundaries', async () => {
