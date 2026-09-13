@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { afterAll, afterEach, describe, expect, it, onTestFinished } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { PwshLocalExecutor, ENCODING_PREAMBLE, candidatePwshPaths, resolvePwshPath } from '@deepseek-ai/dsh-pwsh-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -212,6 +212,33 @@ describe('spawn construction (pure, every platform)', () => {
     expect(argv[5]).toBe(`${ENCODING_PREAMBLE}Write-Output 你好`)
     expect(ENCODING_PREAMBLE).toContain('[Console]::OutputEncoding')
     expect(ENCODING_PREAMBLE).toContain('$OutputEncoding')
+  })
+
+  it('returns spill failure metadata with settled foreground output', async () => {
+    const ctx = new Context()
+    const subprocess = new CapturingSubprocessRuntime(ctx)
+    await ctx.plugin(PwshLocalExecutor)
+    const spillFailure = {
+      code: 'EDQUOT',
+      syscall: 'write',
+      message: 'full output could not be saved: EDQUOT',
+    }
+    const reader: SubprocessOutputReader = {
+      readFrom: () => ({ text: 'tail', nextOffset: 4, lossy: true, spillFailure }),
+    }
+    vi.spyOn(subprocess, 'spawn').mockReturnValue({
+      stdin: undefined,
+      stdout: undefined,
+      stderr: undefined,
+      collected: { stdout: reader, stderr: reader },
+      done: Promise.resolve({ exitCode: 0, signal: null }),
+      terminate: vi.fn(),
+      waitForExit: async () => true,
+    } satisfies SubprocessHandle)
+
+    const result = await ctx.shell.run(ctx.shell.resolve({ command: 'Write-Output ok' }))
+    expect(result.stdout.spillFailure).toEqual(spillFailure)
+    expect(result.stderr.spillFailure).toEqual(spillFailure)
   })
 
   it('reports both unread stderr and an asynchronous provider rejection exactly once', async () => {

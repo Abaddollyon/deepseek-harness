@@ -365,7 +365,7 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
     const failure = error instanceof Error ? error : new Error(String(error))
     const terminal = this.terminalError ?? failure
     this.terminalError = terminal
-    if (deferPending) queueMicrotask(() => { this.failPending(this.terminalError ?? terminal) })
+    if (deferPending) queueMicrotask(() => { this.failPending(terminal) })
     else this.failPending(terminal)
     this.scheduleOutputListenerRelease()
     return terminal
@@ -384,13 +384,11 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
     this.outputListenerReleaseScheduled = true
     setImmediate(() => {
       this.outputListenerReleaseScheduled = false
-      if (this.pendingWrites > 0 || this.terminalError === undefined) return
       this.detachOutputErrorListener()
     })
   }
 
   private detachOutputErrorListener(): void {
-    if (!this.outputErrorListenerAttached) return
     if (typeof this.output.off === 'function') {
       this.output.off('error', this.onOutputError)
       this.outputErrorListenerAttached = false

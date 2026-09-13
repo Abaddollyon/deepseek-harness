@@ -184,6 +184,18 @@ describe('CodexSearchWire stream failures', () => {
     await expect(pending).rejects.toThrow(/EPIPE/)
     wire.close()
   })
+
+  it('reports an uncoded input failure with an UNKNOWN code', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const wire = new CodexSearchWire(input, output)
+    wire.start()
+    const pending = wire.initialize(new AbortController().signal)
+    input.emit('error', new Error('read failed'))
+
+    await expect(pending).rejects.toThrow('Codex app-server input stream failed (UNKNOWN): read failed')
+    wire.close()
+  })
 })
 
 describe('CodexSearchProvider', () => {

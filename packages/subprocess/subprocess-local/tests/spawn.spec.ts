@@ -64,11 +64,26 @@ function shellArgv(command: string): string[] {
   }
 }
 
-const { failNextClose, failNextUnlink, failNextWrite } = vi.hoisted(() => ({
+const { failNextClose, failNextUnlink, failNextWrite, failNextWriteError, failNextRandomBytes } = vi.hoisted(() => ({
   failNextClose: { value: false },
   failNextUnlink: { value: false },
   failNextWrite: { value: false },
+  failNextWriteError: { value: undefined as (Error & NodeJS.ErrnoException) | undefined },
+  failNextRandomBytes: { value: false },
 }))
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>()
+  return {
+    ...actual,
+    randomBytes(size: number): Buffer {
+      if (failNextRandomBytes.value) {
+        failNextRandomBytes.value = false
+        throw Object.assign(new Error('simulated random source failure'), { code: 'EIO', syscall: 'getrandom' })
+      }
+      return actual.randomBytes(size)
+    },
+  }
+})
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return {
@@ -83,7 +98,9 @@ vi.mock('node:fs', async (importOriginal) => {
     writeSync(fd: number, data: Parameters<typeof actual.writeSync>[1]): number {
       if (failNextWrite.value) {
         failNextWrite.value = false
-        throw Object.assign(new Error('simulated quota'), { errno: -122, code: 'UNKNOWN', syscall: 'write' })
+        const failure = failNextWriteError.value
+        failNextWriteError.value = undefined
+        throw failure ?? Object.assign(new Error('simulated quota'), { errno: -122, code: 'UNKNOWN', syscall: 'write' })
       }
       return actual.writeSync(fd, data)
     },
@@ -576,6 +593,47 @@ describe('OutputCollector', () => {
       spillFailure: { code: 'EDQUOT', syscall: 'write' },
     })
     expect(result.spillFailure?.message).toContain('full output could not be saved: EDQUOT')
+  })
+
+  it('preserves ordinary spill errors and exposes them through incremental reads', () => {
+    const collector = new OutputCollector(4, 100, 'spill-error', spillDir)
+    collector.push(Buffer.from('aaaa'))
+    failNextWriteError.value = Object.assign(new Error('simulated I/O'), { code: 'EIO' })
+    failNextWrite.value = true
+
+    expect(() => { collector.push(Buffer.from('bbbb')) }).not.toThrow()
+    expect(collector.readFrom(0)).toMatchObject({
+      text: 'bbbb',
+      lossy: true,
+      spillFailure: { code: 'EIO', message: expect.stringContaining('simulated I/O') },
+    })
+  })
+
+  it('uses UNKNOWN when a spill error has no errno or code', () => {
+    const collector = new OutputCollector(4, 100, 'spill-unknown', spillDir)
+    collector.push(Buffer.from('aaaa'))
+    failNextWriteError.value = Object.assign(new Error('untyped spill failure'), { errno: 5 })
+    failNextWrite.value = true
+
+    collector.push(Buffer.from('bbbb'))
+    expect(collector.finalize().spillFailure).toMatchObject({
+      code: 'UNKNOWN',
+      message: expect.stringContaining('untyped spill failure'),
+    })
+  })
+
+  it('records a spill failure without inventing a path when name generation fails', () => {
+    const collector = new OutputCollector(4, 100, 'spill-name-failure', spillDir)
+    collector.push(Buffer.from('aaaa'))
+    failNextRandomBytes.value = true
+
+    collector.push(Buffer.from('bbbb'))
+    expect(collector.finalize().spillFailure).toMatchObject({
+      code: 'EIO',
+      syscall: 'getrandom',
+      message: expect.stringContaining('simulated random source failure'),
+    })
+    expect(collector.finalize().spillFailure?.path).toBeUndefined()
   })
 
   it('contains close failures and drops the spill path', () => {

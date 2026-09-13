@@ -50,6 +50,31 @@ describe('LocalBashExecutor.run', () => {
     expect(result.timeoutMs).toBe(5_000)
   })
 
+  it('returns spill failure metadata with settled foreground output', async () => {
+    const { ctx, bash } = await setup()
+    const spillFailure = {
+      code: 'EDQUOT',
+      syscall: 'write',
+      message: 'full output could not be saved: EDQUOT',
+    }
+    const reader: SubprocessOutputReader = {
+      readFrom: () => ({ text: 'tail', nextOffset: 4, lossy: true, spillFailure }),
+    }
+    vi.spyOn(ctx.subprocess, 'spawn').mockReturnValue({
+      stdin: undefined,
+      stdout: undefined,
+      stderr: undefined,
+      collected: { stdout: reader, stderr: reader },
+      done: Promise.resolve({ exitCode: 0, signal: null }),
+      terminate: vi.fn(),
+      waitForExit: async () => true,
+    } satisfies SubprocessHandle)
+
+    const result = await bash.run(bash.resolve({ command: 'true' }))
+    expect(result.stdout.spillFailure).toEqual(spillFailure)
+    expect(result.stderr.spillFailure).toEqual(spillFailure)
+  })
+
   it('uses config cwd, overridable per call', async () => {
     const { bash } = await setup({ cwd: '/tmp' })
     const fromConfig = await bash.run(bash.resolve({ command: 'pwd' }))
