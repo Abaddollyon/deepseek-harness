@@ -185,7 +185,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const seen = skillInvocationHistory(agent)
     for (const message of decision.messages) {
       if (message.source.kind !== 'skill-invocation') continue
-      const source = message.source as SkillInvocationSource
+      const source = message.source
       if (source.triggerMessageId !== undefined) seen.add(invocationKey(source.name, source.triggerMessageId))
     }
     signal.throwIfAborted()
