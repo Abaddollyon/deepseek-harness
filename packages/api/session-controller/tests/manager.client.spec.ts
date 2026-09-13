@@ -827,7 +827,9 @@ describe('subagent durable address hydration', () => {
     manager.select(child)
     expect(manager.getListSnapshot().current).toBeUndefined()
     gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
-    await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
+    await vi.waitFor(() => {
+      expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    })
   })
 
   it('cancels a pending child selection when the child is removed', async () => {
@@ -874,7 +876,9 @@ describe('subagent durable address hydration', () => {
     await manager.refreshList()
     expect(manager.getListSnapshot().current).toBeUndefined()
     gate.resolve(ok({ parentAvailable: true, entries: [{ kind: 'child', id: child, mode: 'continuable', label: 'child', activity: 'inactive', hasChildren: false }] }))
-    await vi.waitFor(() => expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' }))
+    await vi.waitFor(() => {
+      expect(manager.getListSnapshot().currentAddress).toEqual({ parentSessionId: parent, childSessionId: child, mode: 'continuable' })
+    })
   })
 })
 

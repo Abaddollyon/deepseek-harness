@@ -1059,7 +1059,7 @@ describe('cold list title warmup', () => {
           events: [...conversationEvents(), {
             type: 'session/title', seq: SessionSeq(2), time: 1300,
             data: { title: 'Title ' + id, messageSeqs: [], source: { kind: 'fallback' } },
-          } as SessionEvent],
+          } satisfies SessionEvent],
         }
       } finally { active-- }
     })
