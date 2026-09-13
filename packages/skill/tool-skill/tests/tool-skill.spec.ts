@@ -1016,7 +1016,7 @@ describe('user-explicit invocation injection', () => {
     expect(kinds.at(-1)).toBe('skill-invocation')
     expect(kinds.indexOf('skill-catalog')).toBeLessThan(kinds.indexOf('skill-invocation'))
     const injection = decision.messages.at(-1)!
-    expect(injection.source).toMatchObject({ kind: 'skill-invocation', name: 'hidden-demo', form: 'instructions' })
+    expect(injection.source).toMatchObject({ kind: 'skill-invocation', name: 'hidden-demo', form: 'instructions', triggerMessageId: first.id })
     const block = injection.content[0]
     if (block?.type !== 'text') throw new Error('expected text injection')
     expect(block.text).toContain('<skill_content name="hidden-demo">')
@@ -1031,6 +1031,24 @@ describe('user-explicit invocation injection', () => {
     expect(decision.messages.some(message =>
       (message.source as { kind?: string; name?: string }).kind === 'skill-invocation'
       && (message.source as { name?: string }).name === 'shared-skill')).toBe(true)
+  })
+
+  it('does not reinject a gesture when the same trigger step is retried', async () => {
+    const { ctx, agent } = await invokeHarness()
+    const first = gesture('/shared-skill retry me')
+    const initial = await proposeStep(ctx, agent, [first])
+    if (initial.kind !== 'enter') throw new Error('expected enter')
+    const injection = initial.messages.find(message => (message.source as { kind?: string }).kind === 'skill-invocation')
+    expect(injection).toBeDefined()
+    agent.session.append('user/message', injection!, { surfaceOp: 'append' })
+
+    const retry = await proposeStep(ctx, agent, [first])
+    if (retry.kind !== 'enter') throw new Error('expected enter')
+    expect(retry.messages.filter(message => (message.source as { kind?: string }).kind === 'skill-invocation')).toHaveLength(0)
+
+    const later = await proposeStep(ctx, agent, [gesture('/shared-skill later invocation')])
+    if (later.kind !== 'enter') throw new Error('expected enter')
+    expect(later.messages.filter(message => (message.source as { kind?: string }).kind === 'skill-invocation')).toHaveLength(1)
   })
 
   it('recognizes a mid-sentence gesture but not paths, fractions, or broken boundaries', async () => {
