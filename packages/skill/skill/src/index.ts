@@ -151,6 +151,8 @@ export interface SkillInvocationSource {
   readonly name: string
   /** Injected skill bodies are instructions for the model to follow. */
   readonly form: 'instructions'
+  /** ID of the user message whose /name gesture caused this injection. */
+  readonly triggerMessageId?: string
 }
 
 declare module '@deepseek-ai/dsh-llm' {

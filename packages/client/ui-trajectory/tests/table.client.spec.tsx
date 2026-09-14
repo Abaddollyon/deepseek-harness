@@ -65,8 +65,18 @@ function TrajectoryTable(
   )
 }
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  if (vi.isFakeTimers()) {
+    // TanStack's fallback scroll-end debounce survives observer removal.
+    // Drain it while jsdom still exists, before restoring the real clock.
+    try {
+      await vi.runOnlyPendingTimersAsync()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  }
   vi.restoreAllMocks()
   Reflect.deleteProperty(HTMLElement.prototype, 'scrollTo')
 })
@@ -690,13 +700,13 @@ describe('TrajectoryTable', () => {
     expect(screen.queryByText('Context 500')).toBeNull()
 
     const tablePane = screen.getByRole('table').parentElement as HTMLElement
+    vi.useFakeTimers()
     tablePane.scrollTop = 9_000
     fireEvent.scroll(tablePane)
-    await waitFor(() => {
-      expect(Number(view.container.querySelector(
-        'tr[data-virtual-position]',
-      )?.getAttribute('data-virtual-position'))).toBeGreaterThan(0)
-    })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    expect(Number(view.container.querySelector(
+      'tr[data-virtual-position]',
+    )?.getAttribute('data-virtual-position'))).toBeGreaterThan(0)
     expect(view.container.querySelector('tr[data-virtual-spacer="top"]')).toBeTruthy()
     expect(screen.queryByText('Context 1')).toBeNull()
   })
@@ -742,7 +752,7 @@ describe('TrajectoryTable', () => {
     expect(screen.getByText('Context 1 streaming update')).toBeTruthy()
   })
 
-  it('keeps the virtual tail reachable with collapsed-summary row heights', async () => {
+  it('keeps the virtual tail reachable with collapsed-summary row heights', () => {
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600)
     Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
       configurable: true,
@@ -783,12 +793,12 @@ describe('TrajectoryTable', () => {
       />,
     )
     const tablePane = screen.getByRole('table').parentElement as HTMLElement
+    vi.useFakeTimers()
     tablePane.scrollTop = 5_000
     fireEvent.scroll(tablePane)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
 
-    await waitFor(() => {
-      expect(view.container.querySelector('tr[data-virtual-position="201"]')).toBeTruthy()
-    })
+    expect(view.container.querySelector('tr[data-virtual-position="201"]')).toBeTruthy()
   })
 
   it('keeps running and failure semantics distinct from record roles', () => {

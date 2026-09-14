@@ -1016,7 +1016,7 @@ describe('user-explicit invocation injection', () => {
     expect(kinds.at(-1)).toBe('skill-invocation')
     expect(kinds.indexOf('skill-catalog')).toBeLessThan(kinds.indexOf('skill-invocation'))
     const injection = decision.messages.at(-1)!
-    expect(injection.source).toMatchObject({ kind: 'skill-invocation', name: 'hidden-demo', form: 'instructions' })
+    expect(injection.source).toMatchObject({ kind: 'skill-invocation', name: 'hidden-demo', form: 'instructions', triggerMessageId: first.id })
     const block = injection.content[0]
     if (block?.type !== 'text') throw new Error('expected text injection')
     expect(block.text).toContain('<skill_content name="hidden-demo">')
@@ -1031,6 +1031,54 @@ describe('user-explicit invocation injection', () => {
     expect(decision.messages.some(message =>
       (message.source as { kind?: string; name?: string }).kind === 'skill-invocation'
       && (message.source as { name?: string }).name === 'shared-skill')).toBe(true)
+  })
+
+  it('does not reinject a gesture when the same trigger step is retried', async () => {
+    const { ctx, agent } = await invokeHarness()
+    const first = gesture('/shared-skill retry me')
+    const initial = await proposeStep(ctx, agent, [first])
+    if (initial.kind !== 'enter') throw new Error('expected enter')
+    const injection = initial.messages.find(message => (message.source as { kind?: string }).kind === 'skill-invocation')
+    expect(injection).toBeDefined()
+    agent.session.append('user/message', injection!, { surfaceOp: 'append' })
+
+    const retry = await proposeStep(ctx, agent, [first])
+    if (retry.kind !== 'enter') throw new Error('expected enter')
+    expect(retry.messages.filter(message => (message.source as { kind?: string }).kind === 'skill-invocation')).toHaveLength(0)
+
+    const later = await proposeStep(ctx, agent, [gesture('/shared-skill later invocation')])
+    if (later.kind !== 'enter') throw new Error('expected enter')
+    expect(later.messages.filter(message => (message.source as { kind?: string }).kind === 'skill-invocation')).toHaveLength(1)
+  })
+
+  it('records downstream invocation contributions and ignores malformed history entries', async () => {
+    const { ctx, agent } = await invokeHarness()
+    const trigger = gesture('/shared-skill downstream')
+    ctx.on('agent/pre-step', async (_payload, next) => {
+      const decision = await next()
+      if (decision.kind !== 'enter') return decision
+      return {
+        ...decision,
+        messages: [...decision.messages,
+          createUserMessage({
+            content: [{ type: 'text', text: 'already handled' }],
+            source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions', triggerMessageId: trigger.id },
+          }),
+          createUserMessage({
+            content: [{ type: 'text', text: 'missing trigger' }],
+            source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' } as never,
+          }),
+        ],
+      }
+    })
+    // An incomplete historical source is ignored while scanning the session.
+    agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'legacy' }],
+      source: { kind: 'skill-invocation', name: 'shared-skill', form: 'instructions' } as never,
+    }), { surfaceOp: 'append' })
+    const decision = await proposeStep(ctx, agent, [trigger])
+    if (decision.kind !== 'enter') throw new Error('expected enter')
+    expect(decision.messages.filter(message => message.source.kind === 'skill-invocation')).toHaveLength(2)
   })
 
   it('recognizes a mid-sentence gesture but not paths, fractions, or broken boundaries', async () => {

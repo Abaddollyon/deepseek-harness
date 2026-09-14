@@ -2360,7 +2360,7 @@ export interface Config {
 }
 ```
 
-来源： [`packages/skill/skill/src/index.ts:280`](../packages/skill/skill/src/index.ts)
+来源： [`packages/skill/skill/src/index.ts:282`](../packages/skill/skill/src/index.ts)
 
 <a id="deepseek-aidsh-skill-filesystem"></a>
 

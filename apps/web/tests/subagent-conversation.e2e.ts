@@ -417,9 +417,15 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
     onTestFailed(() => saveFailureShot(page, 'web-e2e-subagent-restore'))
     const pattern = '**/api/subagents/list'
     let requested = false
+    let held = false
     let releaseCatalog = (): void => {}
     const catalogHeld = new Promise<void>((resolve) => { releaseCatalog = resolve })
     await page.route(pattern, async (route) => {
+      if (held) {
+        await route.continue()
+        return
+      }
+      held = true
       const response = await route.fetch()
       requested = true
       await catalogHeld

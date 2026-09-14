@@ -180,12 +180,19 @@ export function apply(ctx: Context, config: Config = {}): void {
   ): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    const names = invokedSkillNames(messages)
-    if (names.length === 0) return decision
+    const invocations = invokedSkills(messages)
+    if (invocations.length === 0) return decision
+    const seen = skillInvocationHistory(agent)
+    for (const message of decision.messages) {
+      if (message.source.kind !== 'skill-invocation') continue
+      const source = message.source
+      if (source.triggerMessageId !== undefined) seen.add(invocationKey(source.name, source.triggerMessageId))
+    }
     signal.throwIfAborted()
     const lookup = { cwd: agent.session.header.cwd, signal, scope: agent }
     const injections: UserMessage[] = []
-    for (const name of names) {
+    for (const { name, triggerMessageId } of invocations) {
+      if (seen.has(invocationKey(name, triggerMessageId))) continue
       const skill = await ctx.skills.get(name, lookup)
       signal.throwIfAborted()
       // Unknown names and user-disabled skills stay plain prose: the
@@ -193,11 +200,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       // on the loaded definition — the single lookup that produces what is
       // actually injected.
       if (skill === undefined || !isUserInvocable(skill)) continue
-      const source: SkillInvocationSource = { kind: 'skill-invocation', name, form: 'instructions' }
+      const source: SkillInvocationSource = { kind: 'skill-invocation', name, form: 'instructions', triggerMessageId }
       injections.push(createUserMessage({
         content: [{ type: 'text', text: renderSkillContent(skill) }],
         source,
       }))
+      seen.add(invocationKey(name, triggerMessageId))
     }
     if (injections.length === 0) return decision
     return { ...decision, messages: [...decision.messages, ...injections] }
@@ -414,17 +422,39 @@ const SKILL_GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
  * @param messages - the step's claimed batch.
  * @returns candidate skill names, unvalidated against the registry.
  */
-function invokedSkillNames(messages: readonly UserMessage[]): string[] {
-  const names: string[] = []
+interface SkillInvocation {
+  readonly name: string
+  readonly triggerMessageId: string
+}
+
+function invocationKey(name: string, triggerMessageId: string): string {
+  return name + '\u0000' + triggerMessageId
+}
+
+function skillInvocationHistory(agent: Agent): Set<string> {
+  const seen = new Set<string>()
+  for (const event of agent.session.snapshotEvents()) {
+    if (event.type !== 'user/message') continue
+    const source = event.data.source as Partial<SkillInvocationSource>
+    if (source.kind !== 'skill-invocation' || source.name === undefined || source.triggerMessageId === undefined) continue
+    seen.add(invocationKey(source.name, source.triggerMessageId))
+  }
+  return seen
+}
+
+function invokedSkills(messages: readonly UserMessage[]): SkillInvocation[] {
+  const invocations: SkillInvocation[] = []
   for (const message of messages) {
     if ((message.source as { kind?: unknown }).kind !== 'user') continue
     for (const block of message.content) {
       if (block.type !== 'text') continue
       for (const match of block.text.matchAll(SKILL_GESTURE)) {
         const name = match[2]
-        if (name !== undefined && !names.includes(name)) names.push(name)
+        if (name !== undefined && !invocations.some(item => item.name === name)) {
+          invocations.push({ name, triggerMessageId: message.id })
+        }
       }
     }
   }
-  return names
+  return invocations
 }
