@@ -37,6 +37,32 @@ const SEED_ID = 'workspace-management-web-e2e'
 const POINTER_TRANSIT_MS = 300
 const POINTER_HOLD_MS = 600
 
+it('creates an editable Ungrouped chat through the sidebar without adopting a workspace', async () => {
+  const scaffold = await launchWebScaffold({})
+  let browser: Browser | undefined
+  try {
+    await seedSession(scaffold, await readFile(SEED, 'utf8'), SEED_ID)
+    browser = await chromium.launch()
+    const page = await newEnglishPage(browser)
+    const tripwire = watchConsole(page)
+    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
+    const group = page.getByRole('treeitem').filter({ has: page.getByText('Ungrouped', { exact: true }) })
+    await group.waitFor({ timeout: 30_000 })
+    await group.hover()
+    await group.getByRole('button', { name: 'New session in Ungrouped' }).click()
+    const input = page.locator('[data-composer-input][contenteditable="true"]')
+    await input.waitFor({ timeout: 30_000 })
+    await input.fill('An ungrouped draft without a workspace')
+    expect(await input.textContent()).toBe('An ungrouped draft without a workspace')
+    await expect.poll(async () => (await scaffold.ctx.sessionPersistence.list()).length).toBe(2)
+    expect(scaffold.ctx.workspaceRegistry.list()).toEqual([])
+    expect(tripwire.pageErrors).toEqual([])
+    expect(tripwire.warnings).toEqual([])
+  } finally {
+    try { await browser?.close() } finally { await scaffold.close() }
+  }
+})
+
 describe('web e2e: workspace management (create / rename / flat view / hover affordances)', () => {
   let scaffold: WebScaffold
   let browser: Browser
