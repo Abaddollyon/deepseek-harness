@@ -620,8 +620,13 @@ export class Session implements SessionFace {
     while (!this.disposed) {
       this.openGeneration++
       const events = this.events
+      const opening = this.openPromise
       this.events = undefined
       await events?.dispose()
+      // Do not launch a replacement observation while the initial open is
+      // still settling.  Startup selection can request a resync during that
+      // window; coalescing here prevents duplicate historyTail observations.
+      await opening
       if (this.isDisposed()) return
 
       // Requests received while the prior stream was closing all share this replacement.
