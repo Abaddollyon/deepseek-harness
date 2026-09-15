@@ -11,7 +11,8 @@
 // are host RPCs with no model involvement, and the one session row the
 // flat/hover/menu/archive scenarios need comes from a seeded fixture (the
 // seeded-history seed reused verbatim — no new recording).
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { join, sep } from 'node:path'
 import type { Browser, Locator, Page } from 'playwright'
@@ -37,30 +38,118 @@ const SEED_ID = 'workspace-management-web-e2e'
 const POINTER_TRANSIT_MS = 300
 const POINTER_HOLD_MS = 600
 
-it('creates an editable Ungrouped chat through the sidebar without adopting a workspace', async () => {
-  const scaffold = await launchWebScaffold({})
+it.skipIf(MODE === 'record')('creates a workspace-less chat from cold start and keeps the Chats plus usable', async () => {
+  const replayDir = await mkdtemp(join(tmpdir(), 'dsh-workspace-free-choice-replay-'))
+  const replayOverride = join(replayDir, 'replay.override.json')
+  let scaffold: WebScaffold | undefined
   let browser: Browser | undefined
+  let failurePage: Page | undefined
+  const failures: unknown[] = []
   try {
-    await seedSession(scaffold, await readFile(SEED, 'utf8'), SEED_ID)
+    await writeFile(replayOverride, JSON.stringify([{
+      kind: 'chunks',
+      chunks: [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'WORKSPACE_FREE_MOCK_RESPONSE' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'WORKSPACE_FREE_MOCK_RESPONSE' } },
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+    }]))
+    const activeScaffold = await launchWebScaffold({
+      replayFixture: join(replayDir, 'override-only.jsonl'),
+      replayOverride,
+    })
+    scaffold = activeScaffold
     browser = await chromium.launch()
     const page = await newEnglishPage(browser)
+    failurePage = page
     const tripwire = watchConsole(page)
-    await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
-    const group = page.getByRole('treeitem').filter({ has: page.getByText('Ungrouped', { exact: true }) })
-    await group.waitFor({ timeout: 30_000 })
-    await group.hover()
-    await group.getByRole('button', { name: 'New session in Ungrouped' }).click()
+    await page.goto(activeScaffold.authenticatedUrl, { waitUntil: 'load' })
+    await page.getByRole('button', { name: 'New session', exact: true }).last().click()
+
+    // The empty Hero must offer the workspace-free choice before any Session
+    // exists. Selecting it creates a real Session while leaving the Host
+    // Workspace registry untouched.
+    await page.getByRole('textbox', { name: 'Choose workspace' }).click()
+    await page.getByRole('menuitem', { name: "Don't use a workspace", exact: true }).click()
     const input = page.locator('[data-composer-input][contenteditable="true"]')
     await input.waitFor({ timeout: 30_000 })
-    await input.fill('An ungrouped draft without a workspace')
-    expect(await input.textContent()).toBe('An ungrouped draft without a workspace')
-    await expect.poll(async () => (await scaffold.ctx.sessionPersistence.list()).length).toBe(2)
-    expect(scaffold.ctx.workspaceRegistry.list()).toEqual([])
+    await expect.poll(async () => (await activeScaffold.ctx.sessionPersistence.list()).length).toBe(1)
+    expect(activeScaffold.ctx.workspaceRegistry.list()).toEqual([])
+
+    // Submit one harmless scripted response through the real composer/SSE
+    // path. The temporary replay override is the only model boundary here.
+    const settled = activeScaffold.whenTurnSettled()
+    await input.fill('A harmless workspace-free mock submission')
+    await page.getByRole('button', { name: 'Send message', exact: true }).click()
+    await settled
+    await page.getByText('WORKSPACE_FREE_MOCK_RESPONSE', { exact: true }).waitFor({ timeout: 15_000 })
+    await expect.poll(() => input.textContent()).toBe('')
+    expect(activeScaffold.ctx.workspaceRegistry.list()).toEqual([])
+
+    // The existing Chats + route must remain usable after the cold-start
+    // choice created a loose Session. A second blank Session is enough to
+    // prove the route opens an editable workspace-less composer.
+    const group = page.getByRole('treeitem').filter({ has: page.getByText('Chats', { exact: true }) })
+    await group.waitFor({ timeout: 30_000 })
+    await group.hover()
+    await group.getByRole('button', { name: 'New session in Chats' }).click()
+    await expect.poll(async () => (await activeScaffold.ctx.sessionPersistence.list()).length).toBe(2)
+    await page.getByRole('tree', { name: 'Sessions' }).getByText('New Session', { exact: true }).waitFor({ timeout: 15_000 })
+    const secondInput = page.locator('[data-composer-input][contenteditable="true"]')
+    await secondInput.waitFor({ timeout: 30_000 })
+    await secondInput.fill('A workspace-free draft without a workspace')
+    expect(await secondInput.textContent()).toBe('A workspace-free draft without a workspace')
+    expect(activeScaffold.ctx.workspaceRegistry.list()).toEqual([])
+
+    // A global New session inherits the current Workspace's blank session.
+    // Choosing no Workspace from that hero must create a separate loose chat,
+    // leaving the existing Workspace membership unchanged.
+    const inheritedPath = join(activeScaffold.workspaceCwd, 'workspace-choice')
+    await mkdir(inheritedPath, { recursive: true })
+    await page.getByRole('button', { name: 'Add workspace', exact: true }).click()
+    const directoryDialog = page.getByRole('dialog', { name: 'Select Workspace Directory' })
+    await directoryDialog.waitFor({ timeout: 10_000 })
+    await directoryDialog.getByRole('button', { name: 'Edit path' }).click()
+    const directoryPath = directoryDialog.getByRole('textbox', { name: 'Edit path' })
+    await directoryPath.fill(inheritedPath)
+    await directoryPath.press('Enter')
+    await directoryDialog.getByRole('button', { name: 'Open', exact: true }).click()
+    await directoryDialog.waitFor({ state: 'hidden', timeout: 10_000 })
+    await expect.poll(
+      () => activeScaffold.ctx.workspaceRegistry.resolveByPath(inheritedPath),
+      { timeout: 10_000 },
+    ).not.toBeUndefined()
+    await expect.poll(async () => (await activeScaffold.ctx.sessionPersistence.list()).length).toBe(3)
+    const inheritedWorkspace = await activeScaffold.ctx.workspaceRegistry.resolveByPath(inheritedPath)
+    if (inheritedWorkspace === undefined) throw new Error('workspace choice did not register the directory')
+    await expect.poll(() => inheritedWorkspace.sessionIds.length, { timeout: 10_000 }).toBeGreaterThan(0)
+    const workspaceSessionIds = [...inheritedWorkspace.sessionIds]
+
+    await page.getByRole('button', { name: 'New session', exact: true }).last().click()
+    await page.getByRole('button', { name: 'Choose workspace', exact: true }).click()
+    await page.getByRole('menuitem', { name: "Don't use a workspace", exact: true }).click()
+    await expect.poll(async () => (await activeScaffold.ctx.sessionPersistence.list()).length).toBe(4)
+    await expect.poll(
+      async () => (await activeScaffold.ctx.workspaceRegistry.resolveByPath(inheritedPath))?.sessionIds,
+      { timeout: 10_000 },
+    ).toEqual(workspaceSessionIds)
+    expect(activeScaffold.ctx.workspaceRegistry.list()).toHaveLength(1)
+    const finalInput = page.locator('[data-composer-input][contenteditable="true"]')
+    await finalInput.waitFor({ timeout: 15_000 })
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
+  } catch (error) {
+    failures.push(error)
+    if (failurePage !== undefined) await saveFailureShot(failurePage, 'web-e2e-workspace-free-choice')
   } finally {
-    try { await browser?.close() } finally { await scaffold.close() }
+    await browser?.close().catch((error: unknown) => failures.push(error))
+    if (scaffold !== undefined) await scaffold.close().catch((error: unknown) => failures.push(error))
+    await rm(replayDir, { recursive: true, force: true }).catch((error: unknown) => failures.push(error))
   }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) throw new AggregateError(failures, 'workspace-free browser regression and cleanup failed')
 })
 
 describe('web e2e: workspace management (create / rename / flat view / hover affordances)', () => {
@@ -158,7 +247,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
 
   beforeAll(async () => {
     scaffold = await launchWebScaffold({})
-    // Seed one cold session (Ungrouped bucket) for the flat view + hover card.
+    // Seed one cold session (Chats bucket) for the flat view + hover card.
     const sessionCwd = join(scaffold.workspaceCwd, 'workspace')
     await mkdir(sessionCwd, { recursive: true })
     await writeFile(join(sessionCwd, 'a.txt'), 'alpha\n')
@@ -308,7 +397,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     const copy = await dialog.textContent()
     expect(copy).toContain('workspace list')
     expect(copy).toContain('folder and session logs will be kept')
-    expect(copy).toContain('sessions will appear under Ungrouped')
+    expect(copy).toContain('sessions will appear under Chats')
     await dialog.getByRole('button', { name: 'Delete workspace' }).click()
     await expect.poll(() => dialog.count(), { timeout: 10_000 }).toBe(0)
 
@@ -317,7 +406,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
       () => page.getByRole('button', { name: `Workspace actions for ${workspace.title}` }).count(),
       { timeout: 10_000 },
     ).toBe(0)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 })
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 10_000 })
       .toBeGreaterThanOrEqual(1)
     await expect.poll(
       () => page.locator('[role="treeitem"][aria-selected="true"]').count(),
@@ -345,7 +434,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
       { timeout: 10_000 },
     ).not.toEqual([])
     expect(reregistered?.sessionIds).not.toContain(SEED_ID)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 })
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 10_000 })
       .toBeGreaterThanOrEqual(1)
     expect(await readFile(join(scaffold.workspaceCwd, 'workspace', 'a.txt'), 'utf8')).toBe('alpha\n')
     await stat(seededLogPath)
@@ -363,7 +452,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 15_000 })
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 15_000 })
       .toBeGreaterThanOrEqual(1)
     await expect.poll(
       () => page.locator('[role="treeitem"][aria-selected="true"]').count(),
@@ -434,7 +523,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
   it('switches to the flat "In one list" view and persists the preference', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-ws-flat'))
     // Grouped default: workspace group rows render (the seeded session sits
-    // under Ungrouped; the created workspaces are empty groups).
+    // under Chats; the created workspaces are empty groups).
     await expect.poll(() => page.locator('[class*="sectionHeader"]').getByText('Workspaces', { exact: true }).count(), { timeout: 10_000 }).toBe(1)
     // Grouping and ordering moved into the View options menu.
     await page.getByRole('button', { name: 'View options' }).click()
@@ -442,7 +531,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     // Flat mode: the section label flips and the seeded session is a
     // top-level row with no group headers above it.
     await expect.poll(() => page.locator('[class*="sectionHeader"]').getByText('Sessions', { exact: true }).count(), { timeout: 10_000 }).toBe(1)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 5_000 }).toBe(0)
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 5_000 }).toBe(0)
     await expect.poll(() => page.locator('[role="treeitem"]').count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
     expect(await page.evaluate(() => localStorage.getItem('dsh.workspace.view.v6.local'))).toContain('flat')
     // Persisted across reload; then restore grouped for inter-spec hygiene.
@@ -450,10 +539,10 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 15_000 }).toBe(0)
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 15_000 }).toBe(0)
     await page.getByRole('button', { name: 'View options' }).click()
     await page.getByRole('menuitem', { name: 'WorkSpace' }).click()
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(1)
     expect(tripwire.pageErrors).toEqual([])
   }, 90_000)
 
@@ -525,18 +614,18 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
   }, 60_000)
 
   /**
-   * Expand Ungrouped and return its only non-blank session row. A selected
+   * Expand Chats and return its only non-blank session row. A selected
    * blank Session from a deleted Workspace may also be visible, without actions.
    * @returns the session row locator, already present.
    */
   async function seededSessionRow() {
-    const ungroupedRow = page.getByText('Ungrouped', { exact: true }).locator('..').locator('..')
+    const ungroupedRow = page.getByText('Chats', { exact: true }).locator('..').locator('..')
     const ungroupedSection = ungroupedRow.locator('..')
     // Initial-current auto-expansion can race this gesture; converge on
     // expanded rather than assuming which update wins first.
     await expect.poll(async () => {
       if (await ungroupedRow.getAttribute('aria-expanded') !== 'true') {
-        await page.getByText('Ungrouped', { exact: true }).click()
+        await page.getByText('Chats', { exact: true }).click()
         await page.waitForTimeout(50)
       }
       return await ungroupedRow.getAttribute('aria-expanded')
@@ -617,10 +706,10 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     onTestFailed(() => saveFailureShot(page, 'web-e2e-ws-archive'))
     const sessionRow = await seededSessionRow()
     // Selecting the seed hides any blank stray left by Workspace deletion,
-    // so archiving this last visible Ungrouped Session must remove the bucket.
+    // so archiving this last visible Chats Session must remove the bucket.
     await sessionRow.click()
     await expect.poll(() => sessionRow.getAttribute('aria-selected'), { timeout: 10_000 }).toBe('true')
-    const ungroupedSection = page.getByText('Ungrouped', { exact: true }).locator('..').locator('..').locator('..')
+    const ungroupedSection = page.getByText('Chats', { exact: true }).locator('..').locator('..').locator('..')
     await expect.poll(() => ungroupedSection.locator('[role="treeitem"]').count(), { timeout: 10_000 }).toBe(2)
     const rowTitle = await sessionRow.locator('[class*="title"]').innerText()
     // Row menu: hover reveals the actions button; Archive session commits
@@ -628,9 +717,9 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     await clickHoverAction(sessionRow, `Session actions for ${rowTitle}`)
     await page.getByRole('menuitem', { name: 'Archive session' }).click()
     // The row disappears on the archive-set echo; with no other visible
-    // stray, the whole Ungrouped bucket withdraws.
+    // stray, the whole Chats bucket withdraws.
     await expect.poll(() => page.getByText(rowTitle, { exact: true }).count(), { timeout: 10_000 }).toBe(0)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 }).toBe(0)
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 10_000 }).toBe(0)
     // Durable on the host: the registry-global set carries the id while the
     // session log itself stays in persistence untouched.
     expect([...scaffold.ctx.workspaceRegistry.archivedSessionIds]).toEqual([SessionId(SEED_ID)])
@@ -641,7 +730,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
     await expect.poll(() => page.locator('[class*="sectionHeader"]').getByText('Workspaces', { exact: true }).count(), { timeout: 15_000 }).toBe(1)
-    // The archived row must not resurface (the Ungrouped bucket itself may
+    // The archived row must not resurface (the Chats bucket itself may
     // reappear if selection restore lands on another stray — not this test's
     // concern).
     expect(await page.getByText(rowTitle, { exact: true }).count()).toBe(0)

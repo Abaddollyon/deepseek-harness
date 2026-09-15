@@ -614,7 +614,7 @@ function SessionTree({
                 ? group.sessions
                 : limitedSessions
               ).map((node) => {
-              // Session drag never leaves its group. Ungrouped writes only the
+              // Session drag never leaves its group. Chats writes only the
               // browser-local account; real Workspaces may also write Host order.
                 const sameGroupDrag = drag !== null && drag.accountKey === group.key
                 const dragProps = {
@@ -1039,7 +1039,7 @@ export function WorkspaceBrowser({
   const currentSessionId = useSessions(state => state.current)
   const reveal = useMemo<CurrentGroupReveal | null>(() => {
     // Workspace membership decides which group renders the Session; before the
-    // baseline lands every Session reads as Ungrouped, so the reveal waits
+    // baseline lands every Session reads as Chats, so the reveal waits
     // instead of opening a group the membership will contradict.
     if (currentSessionId === undefined || workspacePhase !== 'ready') return null
     const key = owningGroupKey(workspaces, currentSessionId)

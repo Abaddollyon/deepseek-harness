@@ -164,6 +164,9 @@ describe('ui-workspace apply', () => {
     expect(b.create).toHaveBeenCalledWith({ path: '/tmp/browser-project' })
 
     const picker = (b.slots.entries('conversation.hero.workspace')[0]!.inject as () => WorkspacePickerInjected)()
+    const createLooseSession = vi.spyOn(b.ctx.uiWorkspace, 'createLooseSession')
+    picker.createLooseSession()
+    expect(createLooseSession).toHaveBeenCalledOnce()
     await picker.createWorkspace({ path: '/tmp/project' })
     expect(b.create).toHaveBeenCalledWith({ path: '/tmp/project' })
   })

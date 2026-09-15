@@ -302,6 +302,10 @@ export function ConversationRoot({
       {renderSlot('conversation.hero.workspace', {
         open: pickerOpen,
         anchorRef: pickerAnchor,
+        // A selected blank Session is still a New Session route. Choosing no
+        // Workspace creates a separate loose Session; it never retargets this
+        // existing blank Session.
+        allowNoWorkspace: hero,
         selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
         onPick: (workspaceId) => {
           setPickerOpen(false)
@@ -309,6 +313,10 @@ export function ConversationRoot({
           void selectWorkspace(workspaceId).catch(() => {
             setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
           })
+        },
+        onChooseNoWorkspace: () => {
+          setPickerOpen(false)
+          setPendingWorkspaceId(undefined)
         },
         onClose: () => { setPickerOpen(false) },
       })}

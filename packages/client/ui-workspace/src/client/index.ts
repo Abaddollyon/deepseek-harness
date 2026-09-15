@@ -118,7 +118,7 @@ export function apply(ctx: Context): void {
     // Explicit group actions keep their target; unscoped New Session inherits
     // the current Session Workspace before the recent-Workspace fallback.
     startSession: (workspaceId) => { uiWorkspace.startSession(workspaceId) },
-    // Ungrouped creation is owned by the Cordis navigation service.
+    // Chats creation is owned by the Cordis navigation service.
     createLooseSession: () => { uiWorkspace.createLooseSession() },
     open: (sessionId) => { uiWorkspace.openSession(sessionId) },
     setSidebarQuery: (query) => {
@@ -160,6 +160,7 @@ export function apply(ctx: Context): void {
     },
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
+    createLooseSession: () => { uiWorkspace.createLooseSession() },
     createWorkspace: input => workspaces.create(input),
     hooks: { directoryFlow: pickerFlowSource },
   })

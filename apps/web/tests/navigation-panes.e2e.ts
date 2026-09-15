@@ -112,7 +112,7 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
       }
     })
     // Arm before navigation so the Session response cannot be missed. The
-    // Workspace stream settles through the user-visible Ungrouped barrier.
+    // Workspace stream settles through the user-visible Chats barrier.
     const sessionBaseline = baselineResponse(page)
     const [, sessionResponse] = await Promise.all([
       page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' }),
@@ -123,8 +123,8 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
     // The frame mounts before the asynchronous session-list baseline lands.
     // Search must target the settled seeded row, not the startup input that
     // the ready projection replaces (the compact layout dropped group session
-    // counts; the Ungrouped bucket row is the barrier).
-    await page.getByText('Ungrouped', { exact: true }).waitFor({ timeout: 30_000 })
+    // counts; the Chats bucket row is the barrier).
+    await page.getByText('Chats', { exact: true }).waitFor({ timeout: 30_000 })
   }, 120_000)
 
   afterEach(async () => {
@@ -180,9 +180,9 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
   it.skipIf(MODE === 'record')('finds an unopened seeded session by message content and opens it', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-navigation-search'))
     // The API baselines can settle before React commits their projection. The
-    // seeded Ungrouped bucket row is the final user-visible barrier before
+    // seeded Chats bucket row is the final user-visible barrier before
     // editing search (the compact layout dropped group session counts).
-    await page.getByText('Ungrouped', { exact: true }).waitFor({ timeout: 30_000 })
+    await page.getByText('Chats', { exact: true }).waitFor({ timeout: 30_000 })
     // Search is a collapsed header action; expand it so the input is actionable.
     const searchButton = page.getByRole('button', { name: 'Search sessions' })
     if (await searchButton.getAttribute('aria-expanded') !== 'true') await searchButton.click()
@@ -327,7 +327,7 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
       observerSessionBaseline,
     ])
     await assertBaselineSucceeded(observerSessionResponse, 'observer session.list')
-    await observer.getByText('Ungrouped', { exact: true }).waitFor({ timeout: 30_000 })
+    await observer.getByText('Chats', { exact: true }).waitFor({ timeout: 30_000 })
     await ensureSeedOpen(observer)
 
     try {

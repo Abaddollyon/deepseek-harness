@@ -87,6 +87,9 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
+  allowNoWorkspace = false,
+  createLooseSession = vi.fn(),
+  selectedWorkspaceId?: WorkspaceId,
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
@@ -100,8 +103,11 @@ function mount(
       useSessionPendingInteraction={hook(noPendingInteraction)}
       useResource={useResource}
       useWorkspaces={hook(workspaceState(nextItems))}
+      allowNoWorkspace={allowNoWorkspace}
+      selectedId={selectedWorkspaceId}
       onPick={onPick}
       onClose={onClose}
+      createLooseSession={createLooseSession}
       createWorkspace={createWorkspace}
       useDirectoryFlow={occupancy.useDirectoryFlow}
       renderSlot={renderSlot}
@@ -112,7 +118,7 @@ function mount(
     renderPicker(items),
   )
   return {
-    view, onPick, onClose, createWorkspace, probe, occupancy,
+    view, onPick, onClose, createWorkspace, createLooseSession, probe, occupancy,
     rerenderItems: (nextItems: readonly WorkspaceView[]) => { view.rerender(renderPicker(nextItems)) },
   }
 }
@@ -122,6 +128,39 @@ function chooseAdd(): void {
 }
 
 describe('WorkspacePicker', () => {
+  it('offers an explicit no-workspace choice for a new conversation', () => {
+    const createLooseSession = vi.fn()
+    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), true, createLooseSession)
+    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
+    expect(createLooseSession).toHaveBeenCalledOnce()
+    expect(b.onClose).toHaveBeenCalledOnce()
+    expect(b.onPick).not.toHaveBeenCalled()
+  })
+
+  it('does not offer a no-workspace action for an existing Session picker', () => {
+    mount([workspace('alpha', 'Alpha')])
+    expect(screen.queryByRole('menuitem', { name: '不使用工作区' })).toBeNull()
+  })
+
+  it('starts a separate loose chat instead of changing the selected blank Workspace Session', () => {
+    const createLooseSession = vi.fn()
+    const b = mount(
+      [workspace('alpha', 'Alpha')], vi.fn(), occupancySource(false), true, createLooseSession, wid('alpha'),
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
+    expect(createLooseSession).toHaveBeenCalledOnce()
+    expect(b.onPick).not.toHaveBeenCalled()
+  })
+
+  it('keeps the no-workspace choice when no directory picker or Workspace exists', () => {
+    const createLooseSession = vi.fn()
+    const b = mount([], vi.fn(), occupancySource(false), true, createLooseSession)
+    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
+    expect(createLooseSession).toHaveBeenCalledOnce()
+    expect(b.onPick).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+  })
+
   it('lists same-title Workspaces separately and forwards the selected id', () => {
     const b = mount([workspace('alpha', 'Shared'), workspace('beta', 'Shared')])
     const entries = screen.getAllByRole('menuitem', { name: 'Shared' })
@@ -221,7 +260,7 @@ describe('WorkspacePicker', () => {
         open useSessions={hook(sessions)} useWorkspaces={hook(workspaceState([workspace('alpha', 'Alpha')]))}
         useSessionPendingInteraction={hook(noPendingInteraction)}
         useResource={useResource}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        allowNoWorkspace={false} onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )
@@ -238,7 +277,7 @@ describe('WorkspacePicker', () => {
         open anchorRef={anchor()} useSessions={hook(sessions)} useWorkspaces={hook(state)}
         useSessionPendingInteraction={hook(noPendingInteraction)}
         useResource={useResource}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        allowNoWorkspace={false} onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )

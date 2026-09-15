@@ -649,14 +649,48 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByText('one')).toBeTruthy()
   })
 
+  it('clears a pending Workspace label when choosing a loose Session', async () => {
+    let resolveSelection!: () => void
+    const selection = new Promise<void>((resolve) => { resolveSelection = resolve })
+    const selectWorkspace = vi.fn(() => selection)
+    const b = mount(
+      sessionSnapshotOf({ blank: true }),
+      [
+        { ...workspace('one'), sessionIds: [SID] },
+        { ...workspace('second'), title: 'Selected Folder' },
+      ],
+      selectWorkspace,
+    )
+    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
+    const owner = b.pickerOwner() as {
+      onPick(id: WorkspaceId): void
+      onChooseNoWorkspace(): void
+    }
+    act(() => { owner.onPick(wid('second')) })
+    expect(b.view.getByText('Selected Folder')).toBeTruthy()
+
+    act(() => { owner.onChooseNoWorkspace() })
+    expect(b.view.queryByText('Selected Folder')).toBeNull()
+    expect(b.view.getByText('one')).toBeTruthy()
+
+    resolveSelection()
+    await selection
+  })
+
   it('blank session keeps the interactive picker chip (workspace switchable until the first message)', () => {
     const b = mount(sessionSnapshotOf({ blank: true }))
     const chip = b.view.getByRole('button', { name: '选择工作区' })
     expect((chip as HTMLButtonElement).disabled).toBe(false)
     expect(b.slotCalls).toContain('conversation.hero.workspace')
+    expect((b.pickerOwner() as { allowNoWorkspace: boolean }).allowNoWorkspace).toBe(true)
     // The agent-preset chip sits in the same row, for the same reason: both
     // choices are only open before the first message.
     expect(b.slotCalls).toContain('conversation.hero.agentPreset')
+  })
+
+  it('keeps the no-workspace choice out of an active Session picker', () => {
+    const b = mount(sessionSnapshotOf())
+    expect((b.pickerOwner() as { allowNoWorkspace: boolean }).allowNoWorkspace).toBe(false)
   })
 
   it('prompt failure renders the promptError strip (ordinary failure, no transaction UI)', () => {

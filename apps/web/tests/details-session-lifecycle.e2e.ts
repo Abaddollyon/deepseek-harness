@@ -195,7 +195,7 @@ describe.skipIf(MODE === 'record')('web e2e: details panel follows the current S
     await expect.poll(() => detailsTrack(page), { timeout: 5_000 }).toBe(0)
     expect(await page.getByText('Details', { exact: true }).isVisible()).toBe(false)
 
-    const ungrouped = page.getByText('Ungrouped', { exact: true })
+    const ungrouped = page.getByText('Chats', { exact: true })
     const ungroupedRow = ungrouped.locator('..').locator('..')
     if (await ungroupedRow.getAttribute('aria-expanded') !== 'true') await ungrouped.click()
     await expect.poll(() => ungroupedRow.getAttribute('aria-expanded')).toBe('true')
