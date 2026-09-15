@@ -42,7 +42,7 @@ View 选择规则固定：有效且已注册的持久化选择优先，其次是
 
 Session 首次绑定或缓存的 Session 成为 current 时，shell 会在渲染前读取持久化 View 偏好，在复合 local store 物化前迁移旧的本地 Session-only key，激活已注册的偏好 View 或 Chat fallback，并在后续 tab 或 focus 选择写入 store 前先激活对应 target。blank Session 仍不渲染 `conversation.view` slot；未选中的 target 不会激活。
 
-已有 Session 无需归属 Workspace 即可编辑草稿和提交，包括空的聊天聊天以及所属 Workspace 已删除的 Session。Workspace chip 仍然可用，Session 自身的 composer 阻止条件仍然生效。
+已有 Session 无需归属 Workspace 即可编辑草稿和提交，包括空的无 Workspace 聊天以及所属 Workspace 已删除的 Session。Workspace chip 仍然可用，Session 自身的 composer 阻止条件仍然生效。
 
 新 Session 的 Workspace 选择器会在无 Session 和空白 New Session 路由中提供**不使用工作区**。该操作会创建并打开一个独立的无 Workspace Session，不会重新定位或解除当前显示 Session 的 Workspace。侧边栏会将这些 Session 显示在**聊天**分组下。
 

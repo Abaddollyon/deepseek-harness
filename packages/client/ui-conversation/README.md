@@ -42,7 +42,7 @@ View selection is deterministic: a registered persisted selection wins, otherwis
 
 The shell reads the persisted View preference before rendering when a Session first binds or a cached Session becomes current, migrates the legacy local Session-only key before a compound local store is materialized, activates the registered preferred View or Chat fallback, and activates later tab or focus selections before committing them to the store. A blank Session still omits the `conversation.view` slot; no unselected target is activated.
 
-Existing Sessions can draft and submit without an owning Workspace, including empty Chats chats and Sessions whose Workspace was deleted. The Workspace chip remains available, and Session-specific composer blockers still apply.
+Existing Sessions can draft and submit without an owning Workspace, including empty workspace-free chats and Sessions whose Workspace was deleted. The Workspace chip remains available, and Session-specific composer blockers still apply.
 
 The New Session Workspace picker offers **Don't use a workspace** on the no-Session and blank New Session routes. That action creates and opens a separate workspace-free Session; it does not retarget or detach the Session currently shown. The sidebar presents these Sessions under **Chats**.
 

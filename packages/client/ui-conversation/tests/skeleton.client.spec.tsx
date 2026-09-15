@@ -317,6 +317,9 @@ function mount(
     view, store, wiring, sink, retargetWorkspace, session, conversation, slotCalls, lineageOwners, seatOwners, open,
     pickerOwner: () => pickerOwner,
     rerender: () => { view.rerender(<ConversationRoot {...props} />) },
+    rerenderSession: (nextSessionId: SessionId) => {
+      view.rerender(<ConversationRoot {...props} sessionId={nextSessionId} />)
+    },
   }
 }
 
@@ -499,7 +502,7 @@ describe('ConversationRoot resident composer', () => {
     const owner = b.pickerOwner() as { open: boolean; onPick(id: WorkspaceId): void }
     expect(owner.open).toBe(true)
     act(() => { owner.onPick(wid('second')) })
-    expect(b.retargetWorkspace).toHaveBeenCalledWith(wid('second'))
+    expect(b.retargetWorkspace).toHaveBeenCalledWith(wid('second'), expect.any(AbortSignal))
     expect(b.view.getByText('Selected Folder')).toBeTruthy()
   })
 
@@ -644,15 +647,54 @@ describe('ConversationRoot resident composer', () => {
     fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
     const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
     await act(async () => { owner.onPick(wid('second')); await Promise.resolve() })
-    expect(selectWorkspace).toHaveBeenCalledWith(wid('second'))
+    expect(selectWorkspace).toHaveBeenCalledWith(wid('second'), expect.any(AbortSignal))
     expect(b.view.queryByText('Selected Folder')).toBeNull()
     expect(b.view.getByText('one')).toBeTruthy()
+  })
+
+  it('does not let an older failed Workspace pick clear a newer pick of the same Workspace', async () => {
+    let rejectFirst!: () => void
+    const first = new Promise<void>((_resolve, reject) => {
+      rejectFirst = () => { reject(new Error('stale connection failed')) }
+    })
+    const second = new Promise<void>(() => {})
+    const signals: AbortSignal[] = []
+    let call = 0
+    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
+      if (signal !== undefined) signals.push(signal)
+      return call++ === 0 ? first : second
+    })
+    const b = mount(
+      sessionSnapshotOf({ blank: true }),
+      [
+        { ...workspace('one'), sessionIds: [SID] },
+        { ...workspace('second'), title: 'Selected Folder' },
+      ],
+      selectWorkspace,
+    )
+    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
+    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
+    act(() => { owner.onPick(wid('second')) })
+    const nextOwner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
+    act(() => { nextOwner.onPick(wid('second')) })
+    expect(signals[0]?.aborted).toBe(true)
+    expect(signals[1]?.aborted).toBe(false)
+
+    await act(async () => {
+      rejectFirst()
+      await first.catch(() => {})
+    })
+    expect(b.view.getByText('Selected Folder')).toBeTruthy()
   })
 
   it('clears a pending Workspace label when choosing a loose Session', async () => {
     let resolveSelection!: () => void
     const selection = new Promise<void>((resolve) => { resolveSelection = resolve })
-    const selectWorkspace = vi.fn(() => selection)
+    let selectionSignal: AbortSignal | undefined
+    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
+      selectionSignal = signal
+      return selection
+    })
     const b = mount(
       sessionSnapshotOf({ blank: true }),
       [
@@ -668,13 +710,49 @@ describe('ConversationRoot resident composer', () => {
     }
     act(() => { owner.onPick(wid('second')) })
     expect(b.view.getByText('Selected Folder')).toBeTruthy()
+    expect(selectionSignal?.aborted).toBe(false)
 
     act(() => { owner.onChooseNoWorkspace() })
+    expect(selectionSignal?.aborted).toBe(true)
     expect(b.view.queryByText('Selected Folder')).toBeNull()
     expect(b.view.getByText('one')).toBeTruthy()
 
     resolveSelection()
     await selection
+  })
+
+  it('aborts a pending Workspace selection when the resident root unmounts', () => {
+    let selectionSignal: AbortSignal | undefined
+    const selection = new Promise<void>(() => {})
+    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
+      selectionSignal = signal
+      return selection
+    })
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, selectWorkspace)
+    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
+    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
+    act(() => { owner.onPick(wid('second')) })
+    expect(selectionSignal?.aborted).toBe(false)
+
+    act(() => { b.view.unmount() })
+    expect(selectionSignal?.aborted).toBe(true)
+  })
+
+  it('aborts a pending Workspace selection when the resident Session changes', () => {
+    let selectionSignal: AbortSignal | undefined
+    const selection = new Promise<void>(() => {})
+    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
+      selectionSignal = signal
+      return selection
+    })
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, selectWorkspace)
+    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
+    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
+    act(() => { owner.onPick(wid('second')) })
+    expect(selectionSignal?.aborted).toBe(false)
+
+    act(() => { b.rerenderSession(sid('other')) })
+    expect(selectionSignal?.aborted).toBe(true)
   })
 
   it('blank session keeps the interactive picker chip (workspace switchable until the first message)', () => {

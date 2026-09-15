@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-15-workspace-free-chat-choice.md
-2026-09-15-workspace-free-chat-choice.md: 212b71bb0f0245dd22887c59631f1ddab29d437b
-2026-09-15-workspace-free-chat-choice.zh.md: 77c76fd001649cd6551bf0e9baa56de1bd59335a
+2026-09-15-workspace-free-chat-choice.md: 2bdeb5ecc4e24edb4e1e77302f9edcd070231d06
+2026-09-15-workspace-free-chat-choice.zh.md: 1019b79c2c38eb2fc7dfda4d7cc26a7b834a1093
