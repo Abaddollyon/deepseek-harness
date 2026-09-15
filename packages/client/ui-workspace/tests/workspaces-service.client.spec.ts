@@ -462,6 +462,44 @@ describe('UiWorkspaceService', () => {
 })
 
 describe('explicit shell navigation', () => {
+  it('coalesces repeated loose creation while the first Session is pending', async () => {
+    const b = bench({
+      sessions: sessionState([summary('current')], sid('current')),
+      workspaces: workspaceState(),
+    })
+    const pending = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValueOnce(pending.promise)
+
+    b.uiWorkspace.createLooseSession()
+    b.uiWorkspace.createLooseSession()
+
+    expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({})
+    pending.resolve(sid('created'))
+    await vi.waitFor(() => {
+      expect(b.sessions.open).toHaveBeenCalledWith(sid('created'))
+    })
+    expect(b.sessions.open).toHaveBeenCalledOnce()
+    await b.ctx.fiber.dispose()
+  })
+
+  it('uses the pending loose Session for the latest request after another navigation', async () => {
+    const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState() })
+    const pending = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValueOnce(pending.promise)
+    try {
+      b.uiWorkspace.createLooseSession()
+      b.uiWorkspace.openSession(sid('current'))
+      b.uiWorkspace.createLooseSession()
+      expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({})
+      pending.resolve(sid('created'))
+      await vi.waitFor(() => { expect(b.sessions.open).toHaveBeenLastCalledWith(sid('created')) })
+      expect(b.sessions.open).toHaveBeenCalledTimes(2)
+    } finally {
+      pending.resolve(sid('created'))
+      await b.ctx.fiber.dispose()
+    }
+  })
+
   it('does not cancel creation for unrelated presentation changes', async () => {
     const navigation = { ...createEnvironmentNavigation({ kind: 'environments' }), presentation: createEnvironmentPresentationStore() }
     const b = bench({ sessions: sessionState([summary('current')], sid('current')), workspaces: workspaceState(), navigation })

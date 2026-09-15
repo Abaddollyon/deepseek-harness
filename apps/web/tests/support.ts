@@ -97,9 +97,8 @@ export function probeFreePort(): Promise<number> {
 /**
  * Enter New Session from the Environments overview, then drive the hero's
  * workspace picker until the live composer unlocks. A fresh world has no
- * Workspace; every scenario that types into the composer must connect one
- * first. With nothing to list, activating the composer surface raises the dialog directly —
- * adding a workspace is the picker's only entry. The directory is staged here
+ * Workspace; scenarios that need workspace files use the explicit Add workspace
+ * entry. The directory is staged here
  * and adopted through the path editor, which is idempotent across the repeated
  * connects a scenario may make; creating a folder from inside the dialog (the
  * product's other half of the same route) is covered by
@@ -114,6 +113,7 @@ export async function connectFreshWorkspace(page: Page, root: string, name = 'wo
   mkdirSync(join(root, name), { recursive: true })
   await page.getByRole('button', { name: 'New session', exact: true }).last().click()
   await page.getByRole('textbox', { name: 'Choose workspace' }).click()
+  await page.getByRole('menuitem', { name: 'Add workspace…', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Select Workspace Directory' })
   await dialog.waitFor({ timeout: 10_000 })
   await dialog.getByRole('button', { name: 'Edit path' }).click()
@@ -140,6 +140,7 @@ export async function connectFreshWorkspaceZh(page: Page, root: string, name = '
   mkdirSync(join(root, name), { recursive: true })
   await page.getByRole('button', { name: '新建会话', exact: true }).last().click()
   await page.getByRole('textbox', { name: '选择工作区' }).click()
+  await page.getByRole('menuitem', { name: '添加工作区…', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '选择工作区目录' })
   await dialog.waitFor({ timeout: 10_000 })
   await dialog.getByRole('button', { name: '编辑路径' }).click()

@@ -300,8 +300,9 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       hooks: {
         composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId),
       },
-      selectWorkspace: async (workspaceId) => {
+      selectWorkspace: async (workspaceId, signal) => {
         const nextId = await workspaceNavigation.connectWorkspace(workspaceId)
+        if (signal?.aborted) return
         if (sessionId !== undefined && nextId !== sessionId) {
           const from = inputHub.shell(sessionId)
           const draft = from.snapshot.draft

@@ -151,7 +151,20 @@ export function ConversationRoot({
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
+  const workspaceSelectionController = useRef<AbortController | undefined>()
   const pickerAnchor = useRef<HTMLButtonElement>(null)
+  const cancelWorkspaceSelection = useCallback(() => {
+    const controller = workspaceSelectionController.current
+    workspaceSelectionController.current = undefined
+    controller?.abort()
+  }, [])
+
+  // A workspace connection may outlive the current Hero. Its completion must
+  // not move draft state after the user leaves this Session or the component.
+  useEffect(() => () => {
+    cancelWorkspaceSelection()
+    setPendingWorkspaceId(undefined)
+  }, [cancelWorkspaceSelection, sessionId])
 
   // Publishes the two live measurements floating View chrome reads off the
   // scroll body: the seat's height as --dsh-composer-height, so controls clear
@@ -302,13 +315,32 @@ export function ConversationRoot({
       {renderSlot('conversation.hero.workspace', {
         open: pickerOpen,
         anchorRef: pickerAnchor,
+        // A selected blank Session is still a New Session route. Choosing no
+        // Workspace creates a separate loose Session; it never retargets this
+        // existing blank Session.
+        allowNoWorkspace: hero,
         selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
         onPick: (workspaceId) => {
           setPickerOpen(false)
+          cancelWorkspaceSelection()
+          const controller = new AbortController()
+          workspaceSelectionController.current = controller
           setPendingWorkspaceId(workspaceId)
-          void selectWorkspace(workspaceId).catch(() => {
-            setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
-          })
+          void selectWorkspace(workspaceId, controller.signal)
+            .catch(() => {
+              if (workspaceSelectionController.current !== controller) return
+              setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
+            })
+            .finally(() => {
+              if (workspaceSelectionController.current === controller) {
+                workspaceSelectionController.current = undefined
+              }
+            })
+        },
+        onChooseNoWorkspace: () => {
+          setPickerOpen(false)
+          cancelWorkspaceSelection()
+          setPendingWorkspaceId(undefined)
         },
         onClose: () => { setPickerOpen(false) },
       })}

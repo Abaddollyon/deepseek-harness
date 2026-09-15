@@ -21,6 +21,7 @@ import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from './contract/s
 import css from './WorkspacePicker.module.css'
 
 const ADD_WORKSPACE = '::add-workspace'
+const NO_WORKSPACE = '::no-workspace'
 
 /** Core flow props: the owner supplies popover control and pick semantics. */
 export interface WorkspacePickFlowProps {
@@ -40,6 +41,8 @@ export interface WorkspacePickFlowProps {
   renderDirectoryFlow: (owner: DirectoryFlowOwnerProps) => ReactNode
   /** A real Workspace was picked or created. */
   onPick: (workspaceId: WorkspaceId) => void
+  /** Create a new Session without a Workspace; omitted by the sidebar add-only surface. */
+  onChooseNoWorkspace?: () => void
   /** Close the popover (outside click / Escape / post-pick). */
   onClose: () => void
   /** Only offer the add action, hide existing workspaces. */
@@ -64,6 +67,7 @@ export function WorkspacePickFlow({
   useDirectoryFlow,
   renderDirectoryFlow,
   onPick,
+  onChooseNoWorkspace,
   onClose,
   addOnly = false,
   side = 'bottom',
@@ -101,17 +105,21 @@ export function WorkspacePickFlow({
   const addEntries: MenuEntry[] = flowAvailable
     ? [{ id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutline16 size={16} />, disabled: flowBusy }]
     : []
+  const noWorkspaceEntries: MenuEntry[] = !addOnly && onChooseNoWorkspace !== undefined
+    ? [{ id: NO_WORKSPACE, label: t('menu.noWorkspace'), disabled: flowBusy }]
+    : []
   // With workspaces listed, the add action pins below the scroll region
-  // (divider + always visible); otherwise it IS the menu.
+  // (divider + always visible); otherwise it is part of the primary list.
   const pinAdd = !addOnly && workspaces.length > 0
-  const items: MenuEntry[] = pinAdd
-    ? workspaces.map(workspace => ({
-      id: workspace.workspaceId,
-      label: workspace.title,
-      icon: <IconFolderClose16 size={16} />,
-      disabled: flowBusy,
-    }))
-    : addEntries
+  const workspaceEntries: MenuEntry[] = workspaces.map(workspace => ({
+    id: workspace.workspaceId,
+    label: workspace.title,
+    icon: <IconFolderClose16 size={16} />,
+    disabled: flowBusy,
+  }))
+  const items: MenuEntry[] = addOnly
+    ? addEntries
+    : [...noWorkspaceEntries, ...workspaceEntries, ...(pinAdd ? [] : addEntries)]
   // Nothing listed and nothing to add with (a composition that mounts this
   // package without any directory-picker): an empty popover would claim a
   // choice that does not exist, so the anchor gesture shows nothing at all.
@@ -149,7 +157,8 @@ export function WorkspacePickFlow({
   // loading status instead of jumping into a flow the arriving list would have
   // made unnecessary; the add-only surface lists nothing and never waits.
   const listSettled = addOnly || workspaceSnapshot.phase === 'ready'
-  const addIsTheOnlyEntry = !pinAdd && listSettled && addEntries.length === 1
+  const addIsTheOnlyEntry = noWorkspaceEntries.length === 0
+    && !pinAdd && listSettled && addEntries.length === 1
   // `flowBusy` gates this exactly as it disables the equivalent menu entry: a
   // pick still being adopted owns the surface until it settles.
   useEffect(() => {
@@ -173,6 +182,11 @@ export function WorkspacePickFlow({
   }
 
   const handleSelect = (id: string): void => {
+    if (id === NO_WORKSPACE) {
+      onClose()
+      onChooseNoWorkspace?.()
+      return
+    }
     if (id === ADD_WORKSPACE) {
       openDirectoryFlow()
       return
@@ -228,12 +242,23 @@ export function WorkspacePicker({
   useWorkspaces,
   selectedId,
   onPick,
+  onChooseNoWorkspace,
+  allowNoWorkspace,
   onClose,
+  createLooseSession,
   createWorkspace,
   useDirectoryFlow,
   renderSlot,
   t,
 }: WorkspacePickerProps) {
+  const noWorkspaceChoice = allowNoWorkspace
+    ? {
+      onChooseNoWorkspace: () => {
+        onChooseNoWorkspace?.()
+        createLooseSession()
+      },
+    }
+    : {}
   return (
     <WorkspacePickFlow
       t={t}
@@ -245,6 +270,7 @@ export function WorkspacePicker({
       renderDirectoryFlow={owner => renderSlot('conversation.hero.workspace.directoryFlow', owner)}
       selectedId={selectedId}
       onPick={onPick}
+      {...noWorkspaceChoice}
       onClose={onClose}
     />
   )

@@ -494,6 +494,56 @@ describe('Conversation inject API', () => {
     await b.runtime.dispose()
   })
 
+  it('does not let a no-workspace cancellation move draft or attachments, and later Workspace selection still works', async () => {
+    const b = await bench()
+    const resident = b.residentApi(ROOT)
+    const { state, actions } = b.inputApi(ROOT)
+    actions.setDraft('carry me')
+    expect(b.composerApi(ROOT).addFiles?.([
+      new File([Uint8Array.of(1)], 'draft.pdf', { type: 'application/pdf' }),
+    ])).toBeNull()
+    await vi.waitFor(() => { expect(b.rootUpload).toHaveBeenCalledOnce() })
+
+    const other = 'other-2' as SessionId
+    const targetUpload = vi.fn(() => Promise.resolve({
+      ok: true,
+      value: {
+        receiptId: 'target-receipt' as never,
+        file: { attachmentId: 'target-file' as never, name: 'draft.pdf', bytes: 1 },
+      },
+    }))
+    b.uploads.set(other, targetUpload)
+    await b.runtime.sessions.add({ id: other, session: {} }, { current: false })
+
+    let resolveConnection!: (sessionId: SessionId) => void
+    b.connectWorkspace.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveConnection = resolve
+    }))
+    const stale = new AbortController()
+    const select = resident.selectWorkspace
+    const staleSelection = select('workspace-stale' as WorkspaceId, stale.signal)
+    stale.abort()
+    resolveConnection(other)
+    await staleSelection
+
+    expect(state.getSnapshot().draft).toBe('carry me')
+    expect(state.getSnapshot().attachmentIds).toHaveLength(1)
+    expect(b.inputApi(other).state.getSnapshot().draft).toBe('')
+    expect(b.inputApi(other).state.getSnapshot().attachmentIds).toEqual([])
+    expect(b.runtime.sessions.calls.filter(call => call.method === 'open')).toHaveLength(0)
+
+    b.connectWorkspace.mockResolvedValueOnce(other)
+    const current = new AbortController()
+    await select('workspace-current' as WorkspaceId, current.signal)
+    expect(current.signal.aborted).toBe(false)
+    expect(b.runtime.sessions.calls).toContainEqual({ method: 'open', args: [other] })
+    expect(state.getSnapshot().draft).toBe('')
+    expect(b.inputApi(other).state.getSnapshot().draft).toBe('carry me')
+    await vi.waitFor(() => { expect(targetUpload).toHaveBeenCalledOnce() })
+    expect(b.inputApi(other).state.getSnapshot().attachmentIds).toHaveLength(1)
+    await b.runtime.dispose()
+  })
+
   it('supports no-Session navigation and propagates Workspace connection failure', async () => {
     const b = await bench()
     b.connectWorkspace.mockResolvedValueOnce(ROOT)

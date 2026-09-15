@@ -590,18 +590,18 @@ describe('WorkspaceBrowser', () => {
     ])
   })
 
-  it('omits a pinned loose session from the Ungrouped bucket', () => {
+  it('omits a pinned loose session from the Chats bucket', () => {
     const b = mount({
       useSessions: hook(sessionState([summary('loose-a', 2), summary('loose-b', 1)])),
       useWorkspaces: hook(workspaceState([])),
     })
-    fireEvent.click(screen.getByText('未分组'))
+    fireEvent.click(screen.getByText('聊天'))
     act(() => { b.store.actions.togglePinnedSession('loose-a') })
     expect(screen.getAllByText('loose-a')).toHaveLength(1)
     expect(screen.getByText('loose-b')).toBeTruthy()
     // The pinned row renders above the bucket header, inside the section.
     const position = screen.getByText('loose-a')
-      .compareDocumentPosition(screen.getByText('未分组'))
+      .compareDocumentPosition(screen.getByText('聊天'))
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
@@ -725,7 +725,7 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByText('已置顶')).toBeTruthy()
     expect(screen.getAllByText('one')).toHaveLength(1)
     // The unpinned session is back in its (folded) bucket, not in the section.
-    fireEvent.click(screen.getByText('未分组'))
+    fireEvent.click(screen.getByText('聊天'))
     expect(screen.getByText('two')).toBeTruthy()
   })
 
@@ -791,7 +791,7 @@ describe('WorkspaceBrowser', () => {
     expect(startSession).toHaveBeenCalledWith(wid('alpha'))
   })
 
-  it('reveals Ungrouped and creates a workspace-less live session from its ＋', async () => {
+  it('reveals Chats and creates a workspace-less live session from its ＋', async () => {
     const startSession = vi.fn()
     const createLooseSession = vi.fn()
     const b = mount({
@@ -804,8 +804,8 @@ describe('WorkspaceBrowser', () => {
     // the persisted fold bit records that.
     await waitFor(() => { expect(screen.getByText('loose')).toBeTruthy() })
     expect(b.store.getSnapshot().groupExpansion).toEqual({ [UNGROUPED_KEY]: true })
-    expect(screen.queryByRole('button', { name: '工作区“未分组”的操作' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '在“未分组”中新建会话' }))
+    expect(screen.queryByRole('button', { name: '工作区“聊天”的操作' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '在“聊天”中新建会话' }))
     expect(startSession).not.toHaveBeenCalled()
     expect(createLooseSession).toHaveBeenCalledOnce()
   })
@@ -1535,7 +1535,7 @@ describe('WorkspaceBrowser', () => {
     expect(insertSessionBefore).toHaveBeenCalledTimes(1)
   })
 
-  it('persists Ungrouped drag order in both modes without writing a Host Workspace account', async () => {
+  it('persists Chats drag order in both modes without writing a Host Workspace account', async () => {
     const insertSessionBefore = vi.fn(async () => {})
     const sessions = sessionState([summary('one', 3), summary('two', 2), summary('three', 1)])
     const b = mount({
@@ -1543,7 +1543,7 @@ describe('WorkspaceBrowser', () => {
       useWorkspaces: hook(workspaceState([])),
       insertSessionBefore,
     })
-    fireEvent.click(screen.getByText('未分组'))
+    fireEvent.click(screen.getByText('聊天'))
 
     const dragAfter = (sourceTitle: string, targetTitle: string): void => {
       const source = screen.getByText(sourceTitle).closest('[role="treeitem"]') as HTMLElement
@@ -1758,7 +1758,7 @@ describe('WorkspaceBrowser', () => {
     const dialog = screen.getByRole('dialog', { name: '删除工作区' })
     expect(dialog.textContent).toContain('将把“Alpha”从工作区列表中移除')
     expect(dialog.textContent).toContain('文件夹与会话记录会保留')
-    expect(dialog.textContent).toContain('其会话将显示在“未分组”下')
+    expect(dialog.textContent).toContain('其会话将显示在“聊天”下')
 
     const confirm = screen.getByRole<HTMLButtonElement>('button', { name: '删除工作区' })
     fireEvent.click(confirm)
@@ -1885,7 +1885,7 @@ describe('WorkspaceBrowser', () => {
     expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toBeUndefined()
   })
 
-  it('promotes a workspace-less blank Session to the top of the Ungrouped and flat orders', async () => {
+  it('promotes a workspace-less blank Session to the top of the Chats and flat orders', async () => {
     const blank = sessionState([summary('blank', 1, { blank: true })], { current: sid('blank') })
     const b = mount({ useSessions: hook(blank), useWorkspaces: hook(workspaceState([])) })
     await waitFor(() => {
@@ -2010,7 +2010,7 @@ describe('WorkspaceBrowser', () => {
     fireDrag(three, 'dragOver', 205)
     // The whole Workspace leaves the tree while the drag is in flight.
     rerender(b, { useWorkspaces: hook(workspaceState([])) })
-    fireEvent.click(screen.getByText('未分组'))
+    fireEvent.click(screen.getByText('聊天'))
     fireEvent.dragEnd(screen.getByText('two').closest('[role="treeitem"]') as HTMLElement)
     expect(insertSessionBefore).not.toHaveBeenCalled()
 

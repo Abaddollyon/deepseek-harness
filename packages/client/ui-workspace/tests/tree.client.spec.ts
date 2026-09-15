@@ -39,7 +39,7 @@ const noArchive: readonly SessionId[] = []
 const archived = (...ids: string[]): readonly SessionId[] => ids.map(sid)
 
 describe('owningGroupKey', () => {
-  it('returns the owning Workspace id or the Ungrouped key', () => {
+  it('returns the owning Workspace id or the Chats key', () => {
     const workspaces = [workspace('first', ['owned'])]
     expect(owningGroupKey(workspaces, sid('owned'))).toBe('first')
     expect(owningGroupKey(workspaces, sid('loose'))).toBe(UNGROUPED_KEY)
@@ -67,14 +67,14 @@ describe('deriveGroups', () => {
     expect(rows.map(row => row.pendingInteraction)).toEqual(['approval', 'plan-review', 'question', undefined])
   })
 
-  it('puts only real unaccounted Sessions in the trailing Ungrouped group', () => {
+  it('puts only real unaccounted Sessions in the trailing Chats group', () => {
     const sessions = list(summary('owned', 1, '/projects/first'), summary('loose', 9, '/other'))
     const groups = deriveGroups(sessions, [workspace('first', ['owned'])], noArchive, view([UNGROUPED_KEY]))
     expect(groups.map(group => group.key)).toEqual(['first', UNGROUPED_KEY])
     expect(groups[1]!.sessions.map(session => session.id)).toEqual([sid('loose')])
   })
 
-  it('applies stored Ungrouped order and appends new loose Sessions by recency', () => {
+  it('applies stored Chats order and appends new loose Sessions by recency', () => {
     const sessions = list(summary('one', 3), summary('two', 2), summary('new', 4))
     const groups = deriveGroups(
       sessions,
@@ -106,7 +106,7 @@ describe('deriveGroups', () => {
     expect(blankNode.blank).toBe(true)
     expect(groups[0]!.sessions.find(session => session.id === real.id)!.blank).toBe(false)
     expect(groups[0]!.sessionCount).toBe(2)
-    // A non-current blank stray never surfaces an Ungrouped bucket either.
+    // A non-current blank stray never surfaces an Chats bucket either.
     const strayGroups = deriveGroups(list({ ...summary('stray', 2), blank: true }), [workspace('first', [])], noArchive, view())
     expect(strayGroups.map(group => group.key)).toEqual(['first'])
   })
@@ -307,7 +307,7 @@ describe('deriveGroups', () => {
     expect(groups[0]!.sessions.map(node => node.id)).toEqual([sid('present')])
   })
 
-  it('hides archived sessions from workspace groups and Ungrouped', () => {
+  it('hides archived sessions from workspace groups and Chats', () => {
     const kept = summary('kept', 1, '/projects/first')
     const gone = summary('gone', 2, '/projects/first')
     const looseGone = summary('loose-gone', 3, '/other')
@@ -316,13 +316,13 @@ describe('deriveGroups', () => {
       sessions, [workspace('first', ['kept', 'gone'])], archived('gone', 'loose-gone'), view(['first', UNGROUPED_KEY]),
     )
     // The archived member drops from its group AND the archived stray never
-    // surfaces an Ungrouped bucket; counts follow the visible rows.
+    // surfaces an Chats bucket; counts follow the visible rows.
     expect(groups.map(group => group.key)).toEqual(['first'])
     expect(groups[0]!.sessions.map(node => node.id)).toEqual([kept.id])
     expect(groups[0]!.sessionCount).toBe(1)
   })
 
-  it('marks selected Workspace and Ungrouped sessions without relying on an Intent', () => {
+  it('marks selected Workspace and Chats sessions without relying on an Intent', () => {
     const owned = summary('owned', 1)
     const loose = summary('loose', 2)
     const ws = workspace('project', ['owned'])
@@ -549,7 +549,7 @@ describe('user-pinned threads', () => {
     expect(restored[0]!.sessions.map(node => node.id)).toEqual([sid('a-s'), sid('b-s'), sid('c-s')])
   })
 
-  it('omits pinned loose sessions from the Ungrouped bucket', () => {
+  it('omits pinned loose sessions from the Chats bucket', () => {
     const sessions = list(summary('loose-a', 2), summary('loose-b', 1))
     const groups = deriveGroups(
       sessions, [], noArchive, view([UNGROUPED_KEY], ['loose-a', 'loose-b'], ['loose-a']),
@@ -725,7 +725,7 @@ describe('createWorkspaceViewStore', () => {
 })
 
 describe('workspaceLabel', () => {
-  it('uses the Ungrouped fallback and extracts POSIX and Windows basenames', () => {
+  it('uses the Chats fallback and extracts POSIX and Windows basenames', () => {
     expect(workspaceLabel(undefined)).toBe(UNGROUPED_LABEL)
     expect(workspaceLabel('')).toBe(UNGROUPED_LABEL)
     expect(workspaceLabel('/projects/demo/')).toBe('demo')

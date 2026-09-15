@@ -1,6 +1,6 @@
 /**
  * Derives the workspace browser tree from Host Workspace order and membership.
- * Unassigned Sessions trail under Ungrouped; only the selected blank Session
+ * Unassigned Sessions trail under Chats; only the selected blank Session
  * remains visible.
  */
 import { type SessionListState, type SessionSearchResultItem, type SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -35,7 +35,7 @@ function pendingFields(snapshot: PendingInteractionSnapshot, id: SessionId):
 export const UNGROUPED_KEY = ''
 
 /** Display label for the ungrouped bucket row. */
-/** Empty sentinel; renderers localize the Ungrouped label through their locale seat. */
+/** Empty sentinel; renderers localize the Chats label through their locale seat. */
 export const UNGROUPED_LABEL = ''
 /**
  * Resolve the Workspace browser group that owns one Session.
@@ -167,7 +167,7 @@ interface Group {
 
 /**
  * Directory display label: basename of the path (both separators accepted).
- * Ungrouped-bucket fallback for surfaces without a workspace title.
+ * Chats-bucket fallback for surfaces without a workspace title.
  * @param cwd - directory path, or undefined for the ungrouped bucket.
  * @returns basename, the raw cwd when it has no basename, or the ungrouped label.
  */
@@ -215,13 +215,13 @@ function buildGroup(
   order: 'account' | 'recency',
 ): Group {
   const sessions = [...members]
-  // Real Workspace order comes from sessionIds. Ungrouped falls back to
+  // Real Workspace order comes from sessionIds. Chats falls back to
   // recency until the browser supplies its persisted local order.
   if (order === 'recency') sessions.sort(byRecency)
   return { key, workspaceId, cwd, createdAt, label, sessions }
 }
 
-/** Apply a stored Ungrouped order and append newly loose Sessions by recency. */
+/** Apply a stored Chats order and append newly loose Sessions by recency. */
 function orderedUngrouped(members: readonly SessionSummary[], stored: readonly string[]): SessionSummary[] {
   const byId = new Map(members.map(session => [session.id as string, session]))
   const included = new Set<string>()
@@ -242,7 +242,7 @@ function orderedUngrouped(members: readonly SessionSummary[], stored: readonly s
 /**
  * Group Sessions by Host Workspace: one group per entity in stable Host
  * order, with members resolved from sessionIds in their stored order. Sessions
- * outside every Workspace trail in the browser-local Ungrouped order, which
+ * outside every Workspace trail in the browser-local Chats order, which
  * falls back to recency before that order is initialized.
  */
 function groupByWorkspace(

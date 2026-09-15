@@ -84,6 +84,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
   private intent = 0
   private disposed = false
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
+  private looseCreation: Promise<SessionId> | undefined
 
   /**
    * @param ctx - Client root Context.
@@ -191,7 +192,9 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       this.navigationError.set('not-ready')
       return
     }
-    this.completeSessionCreation(intent, this.sessions.create({}))
+    const creation = this.looseCreation ??= this.sessions.create({})
+      .finally(() => { this.looseCreation = undefined })
+    this.completeSessionCreation(intent, creation)
   }
 
   private completeSessionCreation(intent: number, creation: Promise<SessionId>): void {

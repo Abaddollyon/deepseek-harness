@@ -258,8 +258,11 @@ export type ConvViewProps = PropsRuntime<'conversation.view'>
 
 /** Business callbacks injected into the resident Conversation shell. */
 export interface ConversationInjected {
-  /** Connect and open a blank Session in the selected Workspace. */
-  selectWorkspace: (workspaceId: WorkspaceId) => Promise<void>
+  /**
+   * Connect and open a blank Session in the selected Workspace.
+   * An aborted signal discards the async completion.
+   */
+  selectWorkspace: (workspaceId: WorkspaceId, signal?: AbortSignal) => Promise<void>
   /** Session-addressed composer block source, or the stable absent source. */
   hooks: { composerBlock: ObservableSnapshot<ComposerBlock | undefined> }
 }
@@ -409,8 +412,12 @@ export type ComposerAttachmentsProps =
 export interface EmptyWorkspaceOwnerProps {
   open: boolean
   anchorRef?: RefObject<HTMLElement>
+  /** Whether the current new-chat hero may create a Session without a Workspace. */
+  allowNoWorkspace: boolean
   /** Currently selected Workspace, when available. */
   selectedId?: WorkspaceId | undefined
   onPick: (workspaceId: WorkspaceId) => void
+  /** Clear a pending Workspace pick before opening a workspace-free Session. */
+  onChooseNoWorkspace?: () => void
   onClose: () => void
 }
