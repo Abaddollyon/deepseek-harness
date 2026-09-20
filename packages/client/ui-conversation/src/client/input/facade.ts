@@ -53,7 +53,7 @@ export interface SessionInputDeps {
   inputTriggers?: (() => InputTriggerController | undefined) | undefined
   /** PopupSelect shell face resolver (dismissal on submit lock / escape). */
   popup?: (() => PopupDismissFace | undefined) | undefined
-  /** Queue read face; overlaid onto InputState.queue (absent = empty). */
+  /** Queue read face; overlaid onto InputState.queue (absent = empty), subscribed until shell disposal. */
   queue?: ObservableSnapshot<readonly QueuedMessage[]> | undefined
   /**
    * Steer every still-pending queued message into the running turn, in FIFO
@@ -176,6 +176,7 @@ export class SessionInputShell implements SessionInput {
       nodes: [ReferenceChipNode, TextRefNode],
       onError: (error) => { throw error },
     })
+    this.state = createSnapshotStore<InputState>(this.compose())
     this.unregister = mergeRegister(
       registerPlainText(this.editor),
       registerHistory(this.editor, createEmptyHistoryState(), HISTORY_MERGE_DELAY_MS),
@@ -183,9 +184,8 @@ export class SessionInputShell implements SessionInput {
       registerClaimDecoration(this.editor, () => this.activeClaimToken()),
       registerTextRefDecoration(this.editor, () => this.lexicon.getSnapshot(), () => this.activeClaimToken()),
       () => { this.lexiconOff?.() },
+      deps.queue?.subscribe(() => { this.publish() }) ?? (() => {}),
     )
-    this.state = createSnapshotStore<InputState>(this.compose())
-    deps.queue?.subscribe(() => { this.publish() })
   }
 
   // ---- editor plumbing ----

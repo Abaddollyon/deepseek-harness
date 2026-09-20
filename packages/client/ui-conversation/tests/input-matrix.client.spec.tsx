@@ -122,6 +122,60 @@ function bench(over?: {
 }
 
 describe('matrix row: plain', () => {
+  it('owns the queue subscription across disposal and remount', () => {
+    const listeners = new Set<() => void>()
+    const getSnapshot = vi.fn(() => [])
+    const unsubscribe = vi.fn((listener: () => void) => { listeners.delete(listener) })
+    const subscribe = vi.fn((listener: () => void) => {
+      listeners.add(listener)
+      return () => { unsubscribe(listener) }
+    })
+    const makeShell = () => new SessionInputShell({
+      actx: SCTX,
+      defaultSink: () => Promise.resolve({ kind: 'success' }),
+      queue: { getSnapshot, subscribe },
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => token,
+      },
+    })
+    for (let mount = 0; mount < 3; mount++) {
+      const shell = makeShell()
+      try {
+        expect(listeners.size).toBe(1)
+        expect(subscribe).toHaveBeenCalledTimes(mount + 1)
+      } finally {
+        shell.dispose()
+        shell.dispose()
+      }
+      expect(unsubscribe).toHaveBeenCalledTimes(mount + 1)
+      expect(listeners.size).toBe(0)
+      getSnapshot.mockClear()
+      for (const listener of listeners) listener()
+      expect(getSnapshot).not.toHaveBeenCalled()
+    }
+  })
+
+  it('initializes state before the queue subscription publishes synchronously', () => {
+    const unsubscribe = vi.fn()
+    const shell = new SessionInputShell({
+      actx: SCTX,
+      defaultSink: () => Promise.resolve({ kind: 'success' }),
+      queue: {
+        getSnapshot: () => [],
+        subscribe: (listener) => { listener(); return unsubscribe },
+      },
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => token,
+      },
+    })
+    shell.dispose()
+    expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
   it('enter falls to the default sink; no claim on the currency; edits free', async () => {
     const { textarea, shell, sink } = bench()
     act(() => { shell.setDraft('普通消息') })
