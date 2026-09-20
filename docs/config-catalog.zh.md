@@ -2021,7 +2021,7 @@ export interface Config {
 
 依赖于： [`SandboxMode`](subsystems/sandbox.zh.md)
 
-来源： [`packages/sandbox/sandbox-policy/src/index.ts:70`](../packages/sandbox/sandbox-policy/src/index.ts)
+来源： [`packages/sandbox/sandbox-policy/src/index.ts:74`](../packages/sandbox/sandbox-policy/src/index.ts)
 
 <a id="deepseek-aidsh-sdk-app"></a>
 

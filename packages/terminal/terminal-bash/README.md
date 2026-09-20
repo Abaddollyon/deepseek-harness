@@ -76,6 +76,8 @@ An open returns the session id and a bounded startup message. Sends settle with 
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 
+Output retention counts UTF-8 bytes and line boundaries incrementally over bounded string chunks. Append work does not rescan the retained history; snapshots and reads still assemble the retained text. See the [retention decision](../../../.agents/notes/implemented/bug-fix/2026-09-20-incremental-terminal-retention.md).
+
 <details>
 <summary>Implementation internals — click to expand</summary>
 

@@ -8,7 +8,7 @@ kind: "package-reference"
 
 ## 概述
 
-`@deepseek-ai/dsh-api-workspace-controller` 拥有 Host 的 `ctx.workspaceController` 服务和生成的 Client `ctx.remote.workspace` namespace。它的 Remote 方法负责创建、重命名、移除和重排 Workspace，在 Workspace 内重排 Session，从 Workspace 导航中归档 Session，以及跟随完整的 Workspace 投影。当 Client 必须修改或跟随 Workspace 导航时，请通过 API Gateway 使用它。本包同时拥有用于交互式选择的 `ctx.directoryPickerController` / `ctx.remote.directoryPicker`，以及用于无需显示界面的列举与创建的 `ctx.directoryBrowserController` / `ctx.remote.directoryBrowser`。两个 namespace 分离后，远程客户端可以浏览，而 Host 的本地 picker 仍保持原生。
+`@deepseek-ai/dsh-api-workspace-controller` 拥有 Host 的 `ctx.workspaceController` 服务和生成的 Client `ctx.remote.workspace` namespace。它的 Remote 方法负责创建带主路径及可选附加根目录的 Workspace、以原子方式更新这些根目录、重命名、移除和重排 Workspace，在 Workspace 内重排 Session，从 Workspace 导航中归档 Session，以及跟随完整的 Workspace 投影。当 Client 必须修改或跟随 Workspace 导航时，请通过 API Gateway 使用它。本包同时拥有用于交互式选择的 `ctx.directoryPickerController` / `ctx.remote.directoryPicker`，以及用于无需显示界面的列举与创建的 `ctx.directoryBrowserController` / `ctx.remote.directoryBrowser`。两个 namespace 分离后，远程客户端可以浏览，而 Host 的本地 picker 仍保持原生。
 
 ## 目录
 
@@ -22,7 +22,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-Host 控制器会串行执行正确性取决于当前 registry 状态的变更，并为预期失败抛出带稳定 `workspace/*` 或 `directory-picker/*` 码的 `RemoteError`。它的 `follow()` 流会同步订阅持久 Workspace 变更，先发出一份完整 baseline，再按顺序发出 `upsert`、`remove`、`order` 和 `archived` 增量。重连会以替换 baseline 开始新一代，因此消费方不依赖收到断线期间的每个增量。
+Host 控制器接受 create({ path, additionalPaths? }) 和 updatePaths({ workspaceId, additionalPaths })；所有根目录都在 Host 上规范化、校验为目录并去重。更新根目录会改变新建 Session 使用的 Workspace 快照，但不会悄悄扩大已活动 Session 的权限。Host 控制器会串行执行正确性取决于当前 registry 状态的变更，并为预期失败抛出带稳定 `workspace/*` 或 `directory-picker/*` 码的 `RemoteError`。它的 `follow()` 流会同步订阅持久 Workspace 变更，先发出一份完整 baseline，再按顺序发出 `upsert`、`remove`、`order` 和 `archived` 增量。重连会以替换 baseline 开始新一代，因此消费方不依赖收到断线期间的每个增量。
 
 Client 入口提供 `ClientWorkspaceModel` 和 `createWorkspaceStateStream()`。该模型拥有 Workspace 行、registry 顺序、已归档 Session id、一元变更回声，以及流与一元调用的竞态处理。较新的 Host 行按 `updatedAt` 获胜；变更期间收到的流行、归档集合或顺序优先于其延迟的一元回声，包括时间戳相同的行；已经移除的 Workspace id 不会被延迟数据复活。该包公开与框架无关的快照和订阅，把导航策略与 React hook 留给 UI owner。Feed 恢复使用 Gateway 的有序清理生命周期；dispose 失败会阻止替换流，并在所有者仍活动时发布为清理失败。
 

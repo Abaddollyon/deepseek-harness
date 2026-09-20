@@ -12,6 +12,17 @@ import { describe, expect, it } from 'vitest'
 import { tempWriteSid, workspaceWriteSid } from '../src/index.ts'
 
 describe('workspaceWriteSid', () => {
+  it('separates complete root snapshots while preserving single-root identities', () => {
+    const primary = '/primary'
+    const single = workspaceWriteSid(primary)
+    expect(workspaceWriteSid(primary, [])).toBe(single)
+    expect(workspaceWriteSid(primary, [primary])).toBe(single)
+    const multi = workspaceWriteSid(primary, ['/side', '/docs'])
+    expect(multi).not.toBe(single)
+    expect(multi).not.toBe(workspaceWriteSid(primary, ['/side']))
+    expect(multi).toBe(workspaceWriteSid(primary, ['/docs', '/side', '/side']))
+  })
+
   it('derives a stable capability-shaped SID per workspace path', () => {
     const first = workspaceWriteSid('C:\\Users\\agent\\repo')
     const second = workspaceWriteSid('C:\\Users\\agent\\repo')

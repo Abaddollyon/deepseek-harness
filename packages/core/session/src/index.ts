@@ -290,6 +290,20 @@ function assertAssistantSettlementShape(
   }
 }
 
+const EMPTY_WORKSPACE_ROOTS: readonly string[] = Object.freeze([])
+
+// Callers either guard the event type or construct a workspace/roots event.
+function validateWorkspaceRoots(event: SessionEvent): void {
+  if (event.seq !== 0 || event.ignorable !== undefined) throw new Error('workspace/roots must be required at seq 0')
+  const paths: unknown = (event.data as { readonly additionalPaths?: unknown }).additionalPaths
+  if (!Array.isArray(paths)) throw new Error('workspace/roots additionalPaths must be an array')
+  if (paths.some(path => typeof path !== 'string')) throw new Error('workspace/roots additionalPaths must contain strings')
+  const stringPaths = paths as string[]
+  if (stringPaths.some(path => !isAbsolute(path)) || new Set(stringPaths).size !== stringPaths.length) {
+    throw new Error('workspace/roots additionalPaths must contain unique absolute strings')
+  }
+}
+
 const allowedAdapterKeys = new Set(['reasoningEffort', 'maxTokens'])
 
 /** Validate adapter-default markers imported from a durable request header. */
@@ -448,6 +462,12 @@ export class Session {
   /** Single incremental owner of surface acceptance and projection state. */
   private readonly surfaceManager = new SurfaceManager(this.log)
 
+  /** Immutable additional roots restored from the required creation event; legacy sessions have none. */
+  get additionalPaths(): readonly string[] {
+    const first = this.log[0]
+    return first?.type === 'workspace/roots' ? first.data.additionalPaths : EMPTY_WORKSPACE_ROOTS
+  }
+
   /** The ordered surface over this session's event log. */
   get surface(): SessionSurface {
     return this.surfaceManager
@@ -503,6 +523,7 @@ export class Session {
    * @param seed - optional borrowed replay or fork events.
    * @param header - optional borrowed storage metadata.
    * @param inheritedEventCount - exact fork-inherited prefix length for a seeded header.
+   * @param additionalPaths - immutable additional roots captured only at creation.
    * @returns a detached session.
    */
   static create(
@@ -510,14 +531,16 @@ export class Session {
     seed?: readonly SessionEvent[],
     header?: SessionHeader,
     inheritedEventCount?: SessionLogOffset,
+    additionalPaths?: readonly string[],
   ): Session {
-    return new Session(id, seed, header, 'snapshot', inheritedEventCount)
+    return new Session(id, seed, header, 'snapshot', inheritedEventCount, additionalPaths)
   }
 
   /**
    * Restore a detached session by adopting an independently owned or deeply frozen seed.
    * Runtime-required event fields, event envelopes, sequence continuity, surface
-   * transitions, and header fields are validated without copying or freezing events.
+   * transitions, and header fields are validated without copying whole events.
+   * The exposed workspace-root authority array is frozen; opaque payloads stay adopted.
    * Embedded Assistant streams remain opaque until a stream consumer or storage
    * verifier reads them.
    * @param id - restored session identity.
@@ -549,6 +572,7 @@ export class Session {
     header?: SessionHeader,
     mode: 'snapshot' | SessionSeedEventState = 'snapshot',
     suppliedInheritedEventCount?: SessionLogOffset,
+    additionalPaths?: readonly string[],
   ) {
     const restoredHeader = mode === 'snapshot' ? undefined : validateRestoredSessionHeader(id, header)
     if (seed !== undefined) {
@@ -559,6 +583,8 @@ export class Session {
       // `seq = log.length` contract the whole system relies on). Without this,
       // a bad seed would surface only later as a backend rejection or a silent
       // divergence between the live log and disk.
+      // workspace/roots is required at seq 0 and the seed sequence is contiguous, so
+      // a second workspace/roots event is rejected by the envelope/sequence guards.
       for (const [index, source] of seed.entries()) {
         // The seed is a persistence/replay boundary: validate and detach the
         // complete event in one lossless-JSON pass.
@@ -578,8 +604,28 @@ export class Session {
         } catch (error: unknown) {
           throw new Error(`invalid seed event at index ${index}: ${error instanceof Error ? error.message : 'invalid surface metadata'}`)
         }
+        if (snapshot.type === 'workspace/roots') {
+          validateWorkspaceRoots(snapshot)
+          // Unlike opaque restored payloads, this array is exposed as immutable authority.
+          Object.freeze(snapshot.data.additionalPaths)
+        }
         this.log.push(mode === 'snapshot' ? deepFreeze(snapshot) : snapshot)
       }
+    }
+    // Explicit roots get a required creation event; absent roots preserve the historical empty log.
+    if (seed === undefined && additionalPaths !== undefined) {
+      const event = deepFreeze(snapshotSessionEvent({
+        type: 'workspace/roots',
+        data: { additionalPaths: [...additionalPaths] },
+        seq: SessionSeq(0),
+        time: Date.now(),
+      }))
+      validateWorkspaceRoots(event)
+      this.surfaceManager.validateNext(event)
+      this.log.push(event)
+    } else if (seed !== undefined && additionalPaths !== undefined
+      && JSON.stringify(additionalPaths) !== JSON.stringify(this.additionalPaths)) {
+      throw new Error('cannot replace workspace roots of a seeded session')
     }
     this.firstLiveSeq = SessionLogOffset(this.log.length)
     this.header = restoredHeader ?? snapshotSessionHeader(id, header)
@@ -705,6 +751,7 @@ export class Session {
     data: SessionEventMap[T],
     ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : []
   ): SessionEvent<T> {
+    if (type === 'workspace/roots') throw new Error('workspace roots are immutable creation-only state')
     const surfaceOpts: SurfaceIntent | undefined = opts[0]
     const surfaceMetadata = {
       ...surfaceOpts?.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
@@ -1000,7 +1047,7 @@ export class SessionStore extends Service {
       ...meta?.delegationDepth === undefined ? {} : { delegationDepth: meta.delegationDepth },
       ...meta?.agentPreset === undefined ? {} : { agentPreset: meta.agentPreset },
     }
-    return Session.create(sessionId, seed, header, options?.inheritedEventCount)
+    return Session.create(sessionId, seed, header, options?.inheritedEventCount, meta?.additionalPaths)
   }
 
   /**

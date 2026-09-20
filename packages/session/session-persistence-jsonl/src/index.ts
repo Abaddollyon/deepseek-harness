@@ -978,7 +978,8 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   private async listArtifacts(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     signal?.throwIfAborted()
-    await this.ensureRootEncoding(signal)
+    // Generation resolution below validates encoding while discovering each
+    // session; avoid enumerating every project and session directory twice.
     const dirs = await mapConcurrent(
       await this.listProjectDirs(signal), this.listConcurrency,
       project => this.listSessionDirs(project, signal), signal,
@@ -1002,6 +1003,9 @@ class JsonlSessionPersistence extends SessionPersistence {
       }
       ids.add(snapshot.header.id)
     }
+    // Cache only a completed validation; a failed or cancelled listing must not
+    // let a later write skip the root-wide encoding guard.
+    this.rootEncodingChecked = true
     return snapshots
   }
 
@@ -1380,18 +1384,20 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     signal?.throwIfAborted()
     const generations: Array<{ readonly path: string; readonly version: number }> = []
-    const opposite: string[] = []
+    const opposite: Array<{ readonly path: string; readonly version: number }> = []
     for (const entry of entries) {
       const version = parseGenerationLogFilename(entry.name, this.compression)
       if (version !== undefined) {
         generations.push({ path: join(dir, entry.name), version })
         continue
       }
-      if (parseGenerationLogFilename(entry.name, this.oppositeCompression()) !== undefined) {
-        opposite.push(join(dir, entry.name))
+      const oppositeVersion = parseGenerationLogFilename(entry.name, this.oppositeCompression())
+      if (oppositeVersion !== undefined) {
+        opposite.push({ path: join(dir, entry.name), version: oppositeVersion })
       }
     }
-    if (opposite.length > 0) throw this.encodingMismatch(opposite[0] as string)
+    const oppositeLatest = opposite.sort((left, right) => right.version - left.version)[0]
+    if (oppositeLatest !== undefined) throw this.encodingMismatch(oppositeLatest.path)
     const latest = generations.sort((left, right) => right.version - left.version)[0]
     if (latest === undefined) return undefined
     return {

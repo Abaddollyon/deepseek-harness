@@ -121,8 +121,11 @@ export async function connectFreshWorkspace(page: Page, root: string, name = 'wo
   await pathInput.fill(join(root, name))
   await pathInput.press('Enter')
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
-  // The pick connected the workspace: the blank session's live composer
-  // replaces the locked placeholder and enables.
+  // Picking a directory only stages the draft; submit the complete roots first.
+  const draft = page.getByRole('dialog', { name: 'Create workspace', exact: true })
+  await draft.getByRole('button', { name: 'Create workspace', exact: true }).click()
+  await draft.waitFor({ state: 'hidden' })
+  // The confirmed workspace replaces the locked placeholder with a live composer.
   await page.locator('[data-composer-input][contenteditable="true"][data-placeholder="Describe what you want to build, / commands, @ files or sessions"]')
     .waitFor({ timeout: 15_000 })
 }
@@ -148,6 +151,9 @@ export async function connectFreshWorkspaceZh(page: Page, root: string, name = '
   await pathInput.fill(join(root, name))
   await pathInput.press('Enter')
   await dialog.getByRole('button', { name: '打开', exact: true }).click()
+  const draft = page.getByRole('dialog', { name: '创建工作区', exact: true })
+  await draft.getByRole('button', { name: '创建工作区', exact: true }).click()
+  await draft.waitFor({ state: 'hidden' })
   await page.locator('[data-composer-input][contenteditable="true"][data-placeholder="描述你想要构建的内容, / 调用指令, @ 文件或对话"]')
     .waitFor({ timeout: 15_000 })
 }

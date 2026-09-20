@@ -107,6 +107,26 @@ describe.skipIf(!isWin32 || !pwshAvailable())('windows-acl runner', () => {
     expect(existsSync(join(writableDir, 'child-wrote.txt'))).toBe(true)
   }, 30_000)
 
+  it('workspace-write accepts an extra root but read-only and the old single-root snapshot do not', () => {
+    const extra = join(scratchRoot, 'additional')
+    mkdirSync(extra)
+    const destination = join(extra, 'child.txt')
+    const probe = "try{Set-Content -Path '" + destination + "' -Value ok -ErrorAction Stop;'EXTRA: OK'}catch{'EXTRA: DENIED'}"
+    for (const [mode, additional, allowed] of [
+      ['workspace-write', true, true], ['read-only', true, false], ['workspace-write', false, false],
+    ] as const) {
+      rmSync(destination, { force: true })
+      const result = runRunner([
+        '--workspace', writableDir, ...(additional ? ['--additional-workspace', extra] : []),
+        '--temp', isolatedTemp, '--mode', mode,
+        '--', 'pwsh', '/NoLogo', '/NonInteractive', '/NoProfile', '/Command', probe,
+      ])
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toContain(allowed ? 'EXTRA: OK' : 'EXTRA: DENIED')
+      expect(existsSync(destination)).toBe(allowed)
+    }
+  }, 90_000)
+
   it('read-only: no write-SID grants — workspace/temp writes denied, reads and $null redirection fine, CIM unavailable', () => {
     const probe = [
       "$ErrorActionPreference='SilentlyContinue';",

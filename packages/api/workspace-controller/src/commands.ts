@@ -21,6 +21,7 @@ import type {
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
 } from './types.ts'
 
@@ -41,9 +42,16 @@ export class WorkspaceCommands {
       try {
         const existing = await this.ctx.workspaceRegistry.resolveByPath(request.path)
         if (existing !== undefined) {
+          // Re-run the registry validation even for idempotent adoption so an
+          // invalid additional root is never silently accepted.
+          await this.ctx.workspaceRegistry.create(request.path, undefined, request.additionalPaths)
           return { workspace: workspaceView(existing), created: false }
         }
-        const workspace = await this.ctx.workspaceRegistry.create(request.path)
+        const workspace = await this.ctx.workspaceRegistry.create(
+          request.path,
+          undefined,
+          request.additionalPaths,
+        )
         return { workspace: workspaceView(workspace), created: true }
       } catch (error) {
         if (remoteErrorOf(error) !== undefined) throw error
@@ -80,6 +88,19 @@ export class WorkspaceCommands {
         }
         await workspace.setTitle(title)
       }
+      return { workspace: workspaceView(workspace) }
+    })
+  }
+
+  /**
+   * Replace a Workspace's additional directory roots atomically.
+   * @param request - Workspace identity and requested additional roots.
+   * @returns the updated Workspace projection.
+   */
+  updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue> {
+    return this.enqueue(async () => {
+      const workspace = this.requireWorkspace(request.workspaceId)
+      await workspace.setAdditionalPaths(request.additionalPaths)
       return { workspace: workspaceView(workspace) }
     })
   }

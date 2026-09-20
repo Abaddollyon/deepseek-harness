@@ -492,7 +492,7 @@ Concrete agent factory and driver service.
  * @param meta - optional fresh-session workspace metadata.
  * @returns the published running agent.
  */
-async create(id: SessionId, options: AgentOptions = {}, meta: Pick<SessionHeader, 'cwd'> = {}): Promise<Agent>
+async create( id: SessionId, options: AgentOptions = {}, meta: { readonly cwd?: string; readonly additionalPaths?: readonly string[] } = {}, ): Promise<Agent>
 
 /**
  * Create an owned agent on a caller-supplied session id.
@@ -510,8 +510,6 @@ async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<Agent
  */
 async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>
 ```
-
-Types: [SessionHeader](persistence.zh.md)
 
 Source: [`packages/core/agent-loop/src/index.ts`](../../packages/core/agent-loop/src/index.ts)
 

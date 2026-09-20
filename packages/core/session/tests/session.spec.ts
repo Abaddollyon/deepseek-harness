@@ -1423,6 +1423,53 @@ describe('SessionStore', () => {
     })
   })
 
+  it('snapshots additional roots in the durable creation event and fork', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const parent = ctx.sessions.create(SessionId('roots-parent'), {
+      meta: { cwd: '/work/project', additionalPaths: ['/work/shared', '/work/docs'] },
+    })
+    expect(parent.additionalPaths).toEqual(['/work/shared', '/work/docs'])
+    const child = ctx.sessions.fork(parent)
+    expect(child.additionalPaths).toEqual(['/work/shared', '/work/docs'])
+    expect(child.header.parentSession).toBe(parent.id)
+  })
+
+  it('keeps restored root authority immutable and rejects replacement or malformed events', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    try {
+      const parent = ctx.sessions.create(SessionId('restore-roots'), {
+        meta: { cwd: '/work/project', additionalPaths: ['/work/shared'] },
+      })
+      const restored = Session.fromRestore(parent.id, structuredClone(parent.snapshotEvents()),
+        structuredClone(parent.header), SessionLogOffset(0), 'detached')
+      expect(restored.additionalPaths).toEqual(['/work/shared'])
+      expect(Object.isFrozen(restored.additionalPaths)).toBe(true)
+      expect(restored.header).not.toHaveProperty('additionalPaths')
+      expect(() => restored.append('workspace/roots', { additionalPaths: ['/changed'] })).toThrow(/creation-only/)
+      expect(() => ctx.sessions.prepare(SessionId('replace-roots'), {
+        seed: parent.snapshotEvents(), meta: { additionalPaths: ['/changed'] },
+      })).toThrow(/cannot replace workspace roots/)
+      for (const data of [{}, { additionalPaths: ['relative'] }, { additionalPaths: ['/x', '/x'] }, { additionalPaths: [1] }]) {
+        expect(() => Session.create(SessionId('malformed-roots'), [{
+          type: 'workspace/roots', data, seq: SessionSeq(0), time: 1,
+        } as unknown as SessionEvent])).toThrow(/workspace.*roots/)
+      }
+      const rootEvent = parent.snapshotEvents()[0]!
+      expect(() => Session.create(SessionId('ignorable-roots'), [{ ...rootEvent, ignorable: true }]))
+        .toThrow(/required at seq 0/)
+      expect(() => Session.create(SessionId('late-roots'), [
+        { type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } },
+        { ...rootEvent, seq: SessionSeq(1) },
+      ])).toThrow(/required at seq 0/)
+      expect(() => Session.create(SessionId('duplicate-roots'), [
+        rootEvent, { ...rootEvent, seq: SessionSeq(0) },
+      ])).toThrow(/seq 0.*expected 1/)
+      expect(Session.create(SessionId('legacy-roots')).additionalPaths).toEqual([])
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('attaches subagent origin and delegationDepth from meta to the header', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -1443,6 +1490,7 @@ describe('SessionStore', () => {
     const cases: Array<{ meta: unknown; error: RegExp }> = [
       { meta: { parentSession: 1n }, error: /header is not losslessly JSON-serializable/ },
       { meta: { cwd: 1 }, error: /header cwd must be a string/ },
+      { meta: { additionalPaths: ['/ok', 1] }, error: /additionalPaths must contain strings/ },
       { meta: { parentSession: 1 }, error: /header parentSession must be a string/ },
       { meta: { createdAt: '123' }, error: /header createdAt must be a non-negative safe integer/ },
       { meta: { createdAt: 1.5 }, error: /header createdAt must be a non-negative safe integer/ },

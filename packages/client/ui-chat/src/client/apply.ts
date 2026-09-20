@@ -8,7 +8,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 // The `file` entry of `SidebarRightResourceParamsMap`, which types `{ params: { line } }` below.
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-textpreview/client'
-import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
+import { fileAddressFor, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 // Type-only service and declaration merges used by the apply world.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -76,7 +76,7 @@ function decodeChatScroll(encoded: string | undefined): ChatScrollPosition | nul
 /** Services required by the Chat target and its presentation registrations. */
 export const inject = [
   'slots', 'sessions', 'uiSession', 'uiConversation', 'locale',
-  'settingsScope', 'remote', 'remote.session', 'sidebarRight',
+  'settingsScope', 'remote', 'remote.session',
 ]
 
 /**
@@ -157,24 +157,23 @@ export function apply(ctx: Context): void {
             chatNodeProcess: key => chat.getSnapshot().nodes.processSource(key),
           },
           fileMentions: (owner: TurnTailOwnerProps) => ctx.get('chatFileMentions')?.forClosing(owner),
-          // Files open in the right Sidebar, not in a desktop application: the
-          // content stays in the product, beside the conversation that produced
-          // it. A relative path, or an absolute one inside the session's
-          // workspace, is addressed under this session's scope,
-          // `dsh-resource://file/session/<id>/<relative path>`; an absolute path
-          // elsewhere is addressed as `dsh-resource://file/absolute/<path>` and
-          // read through the session on screen. Which tab type claims the
-          // address is the Sidebar's decision, not this call site's.
-          // A line travels as a navigation parameter, not as part of the
-          // address: the file is one piece of content whether it is opened at
-          // its top or at line 400, so the same tab is revealed and told where
-          // to land.
+          // The viewer is optional composition. Resolve it for each gesture so
+          // an already-mounted Chat survives viewer removal and remount. Without
+          // it, preserve the Host's ordinary file-opening capability and errors;
+          // do not expose a new file API or bypass the session's remote boundary.
           openFile: async (path, options) => {
             const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
-            const url = fileAddressFor(sessionId, cwd, path)
-            if (options?.line === undefined) ctx.sidebarRight.openResource(url)
-            else ctx.sidebarRight.openResource(url, { params: { line: options.line } })
-            await Promise.resolve()
+            const sidebar = ctx.get('sidebarRight')
+            if (sidebar) {
+              const url = fileAddressFor(sessionId, cwd, path)
+              if (options?.line === undefined) sidebar.openResource(url)
+              else sidebar.openResource(url, { params: { line: options.line } })
+              return
+            }
+            const result = await ctx.remote.session.openWorkspacePath({
+              path: resolveWorkspacePath(cwd, path),
+            })
+            if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
           },
           loadOlder: () => { void session.loadOlder() },
           loadThrough: seq => session.loadThrough(seq),

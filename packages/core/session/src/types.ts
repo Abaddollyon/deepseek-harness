@@ -148,6 +148,8 @@ export interface CreateSessionOptions {
    * lineage; supplying replay history alone does not make it inherited.
    */
   readonly meta?: {
+    /** Immutable additional workspace roots captured by the creation event. */
+    readonly additionalPaths?: readonly string[]
     readonly cwd?: string
     readonly parentSession?: SessionId
     readonly createdAt?: number
@@ -267,6 +269,8 @@ export type RequestHeaderReason = 'initial' | 'resume' | 'change' | 'series'
  * compact raw streams so persistence stores one durable settlement per attempt.
  */
 export interface SessionEventMap {
+  /** Immutable additional workspace roots, recorded only at seq 0 before publication. */
+  'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**
    * Opens turn `turn` before the loop claims queued input or runs pre-step.
    * Rejection, empty input, cancellation, or failure may close it with no

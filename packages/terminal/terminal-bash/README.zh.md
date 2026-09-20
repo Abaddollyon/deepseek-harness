@@ -76,6 +76,8 @@ shell 在整个生命周期内运行在有效的沙箱边界之下。当所有�
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
+输出保留使用有界字符串块增量统计 UTF-8 字节和行边界。追加时不再重新扫描已保留的历史；快照与读取仍会组装保留文本。参见[保留策略决策](../../../.agents/notes/implemented/bug-fix/2026-09-20-incremental-terminal-retention.zh.md)。
+
 <details>
 <summary>实现细节——点击展开</summary>
 

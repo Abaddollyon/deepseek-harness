@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiSessionAgentController,
   ApiSessionCwdConflict,
+  ApiSessionWorkspaceConflict,
   ApiSessionNotFound,
   ApiSessionSubagentOwnership,
   inspectApiSession,
@@ -80,6 +81,8 @@ describe('ApiSession identity failures', () => {
       .toContain('records no cwd')
     expect(new ApiSessionCwdConflict(SessionId('wrong-cwd'), '/wanted', '/existing').message)
       .toContain('belongs to "/existing"')
+    expect(new ApiSessionWorkspaceConflict(SessionId('missing-roots'), ['/wanted'], undefined).message)
+      .toContain('records no additional roots')
   })
 
   it('maps absent and cwd-less point observations to not found', async () => {
@@ -298,6 +301,44 @@ describe('ApiSession model selection', () => {
 })
 
 describe('ApiSession create or adoption', () => {
+  it('rejects changed root snapshots before adopting live or cold sessions', async () => {
+    const { ctx, agents } = await harness()
+    const id = SessionId('live-roots')
+    const session = ctx.sessions.create(id, { meta: { cwd: '/workspace', additionalPaths: ['/original'] } })
+    const live = { id, session, status: 'idle', ctx } as Agent
+    ctx.agents.register(live)
+    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/original'])).resolves.toBe(live)
+    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/changed']))
+      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
+    expect(session.additionalPaths).toEqual(['/original'])
+
+    const cold = await harness()
+    const meta = header('cold-roots')
+    const events: SessionEvent[] = [{ type: 'workspace/roots', seq: SessionSeq(0), time: 1, data: { additionalPaths: ['/original'] } }]
+    providePersistence(cold.ctx, { list: () => Promise.resolve([meta]), inspect: () => Promise.resolve({ meta, events }) })
+    const resume = vi.spyOn(cold.ctx.agents, 'resume')
+    await expect(cold.agents.ensureSession(meta.id, '/workspace', true, undefined, ['/changed']))
+      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
+    expect(resume).not.toHaveBeenCalled()
+    expect(cold.ctx.agents.get(meta.id)).toBeUndefined()
+  })
+
+  it('copies non-empty additional roots into a newly created Agent', async () => {
+    const { ctx, agents } = await harness()
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-roots-'))
+    tempDirs.push(cwd)
+    const id = SessionId('created-roots')
+    const meta = { ...header('created-roots', cwd), additionalPaths: ['/shared'] } as SessionHeader
+    const created = agent(ctx, meta)
+    const create = vi.spyOn(ctx.agents, 'create').mockResolvedValue({
+      agent: created, dispose: () => Promise.resolve(),
+    })
+
+    await expect(agents.ensureSession(id, cwd, false, undefined, ['/shared'])).resolves.toBe(created)
+    expect(create).toHaveBeenCalledOnce()
+    expect(create.mock.calls[0]?.[0].meta).toMatchObject({ cwd, additionalPaths: ['/shared'] })
+  })
+
   it('shares one in-flight creation between concurrent callers', async () => {
     const { ctx, agents } = await harness()
     const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-concurrent-'))

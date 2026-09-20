@@ -51,6 +51,11 @@ const readTally = vi.hoisted(() => ({
   enabled: false,
 }))
 
+const readdirTally = vi.hoisted(() => ({
+  calls: 0,
+  enabled: false,
+}))
+
 const readFailure = vi.hoisted(() => ({
   path: undefined as string | undefined,
   error: undefined as Error | undefined,
@@ -105,6 +110,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
     }) as typeof actual.readFile,
     readdir: (async (...args: Parameters<typeof actual.readdir>) => {
+      if (readdirTally.enabled) readdirTally.calls += 1
       if (String(args[0]) === readdirFailure.path && readdirFailure.error !== undefined) {
         throw readdirFailure.error
       }
@@ -311,6 +317,8 @@ afterEach(async () => {
   statFailure.error = undefined
   readdirFailure.path = undefined
   readdirFailure.error = undefined
+  readdirTally.calls = 0
+  readdirTally.enabled = false
   vi.restoreAllMocks()
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true })
 })
@@ -771,6 +779,18 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     })
   })
 
+  it('selects the newest opposite-compression generation before refusing the root', async () => {
+    const persistence = ctx.sessionPersistence as JsonlSessionPersistence
+    const id = SessionId('opposite-multiple')
+    const older = generationLogPath(root, undefined, id, SESSION_FORMAT_VERSION - 1, 'zstd')
+    const newer = generationLogPath(root, undefined, id, SESSION_FORMAT_VERSION, 'zstd')
+    await mkdir(dirname(older), { recursive: true })
+    await writeFile(older, '')
+    await writeFile(newer, '')
+
+    await expect(persistence.stat(id)).rejects.toThrow(JSON.stringify(newer))
+  })
+
   it('singleflights concurrent historical reads and keeps service flush read-only', async () => {
     const header = meta('released-v0-source-drift', '/work')
     const sourcePath = historicalLogPath(root, header.cwd, header.id)
@@ -1198,6 +1218,21 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     await writeFile(highest, 'newer')
 
     await expect(ctx.sessionPersistence.list()).rejects.toThrow(JSON.stringify(highest))
+  })
+
+  it('does not cache root encoding validation after a rejected listing', async () => {
+    const incompatible = meta('opposite-after-list', '/work')
+    const oppositePath = generationLogPath(root, incompatible.cwd, incompatible.id, 4, 'zstd')
+    await mkdir(dirname(oppositePath), { recursive: true })
+    await writeFile(oppositePath, 'incompatible encoding')
+
+    await expect(ctx.sessionPersistence.list()).rejects.toThrow(JSON.stringify(oppositePath))
+    const next = meta('new-after-rejected-list', '/another-project')
+    await expect(ctx.sessionPersistence.create(next).then(async (handle) => {
+      await handle.close()
+      return 'created despite the incompatible root'
+    })).rejects.toThrow(JSON.stringify(oppositePath))
+    await expect(stat(rawLogPath(root, next.cwd, next.id))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('propagates a non-ENOENT opposite-generation scan failure during materialization', async () => {
@@ -2616,6 +2651,19 @@ describe('JsonlSessionPersistence: edge cases', () => {
     })
     expect(await ctx2.sessionPersistence.list()).toEqual([])
     await ctx2.fiber.dispose()
+  })
+
+  it('discovers session directories once per listing', async () => {
+    const m = meta('single-pass-list', '/work')
+    const path = rawLogPath(root, m.cwd, m.id)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, [JSON.stringify(toHeaderLine(m)), ...oneTurnLog().map(event => JSON.stringify(event)), ''].join('\n'))
+    readdirTally.calls = 0
+    readdirTally.enabled = true
+    await expect(ctx.sessionPersistence.list()).resolves.toHaveLength(1)
+    readdirTally.enabled = false
+    // root, project, and session (generation also validates encoding).
+    expect(readdirTally.calls).toBe(3)
   })
 
   it('plugin load rejects an existing root that is not a directory', async () => {

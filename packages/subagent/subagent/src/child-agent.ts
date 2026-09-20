@@ -144,6 +144,7 @@ export function childSessionMeta(
   const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
   return {
     ...parentHeader.cwd !== undefined ? { cwd: parentHeader.cwd } : {},
+    ...(parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: [...parent.session.additionalPaths] }),
     ...agentPreset === undefined ? {} : { agentPreset },
     parentSession: parentHeader.id,
     isSeeded,
