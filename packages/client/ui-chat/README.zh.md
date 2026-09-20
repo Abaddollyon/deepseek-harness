@@ -8,9 +8,9 @@ kind: "package-reference"
 
 ## 概述
 
-使用本包可在浏览器中渲染已记录的 Session 对话，包括历史图片、本地化操作和滚动位置恢复。紧凑显示会收起已完成轮次的过程行，同时保持最终答案和独立有用的上下文可见；已打包的历史 Assistant 连续消息保持收起。本地 transcript 与 steering 提交会立即显示并保留在原区域，在权威 Session 记录到达时原子地消失，而 queued 提交始终不进入 Chat。本包不组装或修改模型请求。
+使用本包可在浏览器中渲染已记录的 Session Chat，支持历史图片、本地化操作、滚动位置恢复、紧凑过程折叠和即时 transcript 更新。权威 Session 记录会协调这些乐观行，queued 提交不会进入 Chat。本包不组装或修改模型请求。
 
-右侧 Sidebar 是可选组合，不是 Chat 的依赖。每次打开文件时，若查看器已挂载，就使用当前查看器并支持行号导航；否则调用现有的 Host `session.openWorkspacePath` 操作。相对路径以 Session 的当前工作目录为基准解析，绝对路径保持不变；没有目录的无工作区 Session 则将相对路径交给 Host。原生打开不支持行号定位，且 Host 可能没有可用的打开程序；失败时 Promise 会拒绝，不会报告成功。移除或重新挂载查看器不会重新挂载 Chat，也不会重置其滚动状态。
+右侧 Sidebar 是可选的。打开文件时优先使用已挂载的查看器，否则调用 Host `session.openWorkspacePath`。相对路径以 Session cwd 为基准，绝对路径保持不变；无工作区 Session 会把相对路径交给 Host。移除查看器不会重新挂载 Chat 或重置滚动状态。
 
 ## 目录
 
@@ -67,6 +67,7 @@ Chat 会在历史前插与 renderer 重新挂载时恢复语义锚点。采样�
 
 - **transcript 只反映已加载的 Session 窗口**——只有 Session Controller 加载前一页 event 后，更早的 transcript node 才会出现。轮次导航比窗口更宽：轨道把已加载的 Turn 与宿主 `turnOutline` 投影合并，每个已开始的 Turn 都有固定间距刻度（相隔 10px；阶梯高于外框时在框内滚动并以渐变淡出标示可滚方向），激活未加载刻度会先把历史分页拉到该 Turn 的 `turn/start` seq 再落到它的行上。没有该投影时（未挂载 `dsh-session-turn-outline` 的装配），轨道回退到仅显示已加载 Turn。
 - **导航预览按卡片尺寸截断**——提示词一行（50 字符）、回复至多三行（120 字符），已加载与未加载 Turn 一致；未加载 Turn 的回复要等该轮落定后才随大纲到达，进行中的轮次在此之前只预览提示词（或仅轮次号）。
+- **原生文件打开有局限**——Host 可能没有可用的打开程序，且不支持行号定位；失败时 Promise 会拒绝，不会报告成功。
 
 
 <a id="dev-note"></a>

@@ -8,9 +8,9 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use this package to render a browser chat from recorded Session conversations, including historical images, localized actions, and restored scroll position. Compact display folds completed-turn process rows while keeping the final answer and independently useful context visible; packed historical Assistant runs remain collapsed. Local transcript and steering submissions appear immediately, remain in their original surface, and disappear atomically when authoritative Session records arrive, while queued submissions stay outside Chat. The package does not assemble or modify model requests.
+Use this package to render browser Chat from recorded Session conversations, with historical images, localized actions, restored scroll position, compact process folding, and immediate local transcript updates. Authoritative Session records reconcile those optimistic rows; queued submissions stay outside Chat. The package does not assemble or modify model requests.
 
-The right Sidebar is optional composition, not a Chat dependency. Each file-open gesture uses the current viewer when mounted, including line navigation; otherwise it calls the existing Host `session.openWorkspacePath` operation. Relative paths resolve against the Session's current working directory, absolute paths are preserved, and a workspace-free Session without a directory leaves relative paths to the Host. Native opening does not support line targeting and may be unavailable on the Host; failures reject rather than reporting success. Removing or remounting the viewer does not remount Chat or reset its scroll state.
+The right Sidebar is optional. File-open gestures use the mounted viewer when available; otherwise they call Host `session.openWorkspacePath`. Relative paths use the Session cwd, absolute paths stay unchanged, and workspace-free Sessions delegate relative paths to Host. Viewer removal does not remount Chat or reset scroll state.
 
 ## Table of Contents
 
@@ -67,6 +67,7 @@ None; Chat presentation does not assemble or mutate provider requests.
 
 - **The transcript reflects the loaded Session window** — older transcript nodes become available only after Session Controller loads the preceding event page. Turn navigation is wider than the window: the rail merges the loaded Turns with the host `turnOutline` projection, so every started Turn gets a fixed-pitch mark (10px apart; a ladder taller than the frame scrolls inside it with gradient fades), and activating an unloaded mark pages history through the Turn's `turn/start` seq before landing on its row. Without the projection (assemblies not mounting `dsh-session-turn-outline`) the rail falls back to loaded Turns only.
 - **Rail previews are card-sized** — one prompt line (50 characters) and up to three response lines (120), on loaded and unloaded Turns alike; an unloaded Turn's response arrives from the outline only once the Turn settled, so an open Turn previews its prompt (or just the Turn number) until then.
+- **Native file opening is limited** — the Host opener may be unavailable and does not target lines; failures reject rather than reporting success.
 
 
 <a id="dev-note"></a>
