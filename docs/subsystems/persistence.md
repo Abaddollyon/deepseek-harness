@@ -212,6 +212,8 @@ interface CreateSessionOptions {
    * lineage; supplying replay history alone does not make it inherited.
    */
   readonly meta?: {
+    /** Immutable additional workspace roots captured by the creation event. */
+    readonly additionalPaths?: readonly string[]
     readonly cwd?: string
     readonly parentSession?: SessionId
     readonly createdAt?: number

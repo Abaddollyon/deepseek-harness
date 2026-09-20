@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -312,7 +312,7 @@ describe('ApiSession create or adoption', () => {
 
     const cold = await harness()
     const meta = header('cold-roots')
-    const events = [{ type: 'workspace/roots', seq: 0, time: 1, data: { additionalPaths: ['/original'] } }] as SessionEvent[]
+    const events: SessionEvent[] = [{ type: 'workspace/roots', seq: SessionSeq(0), time: 1, data: { additionalPaths: ['/original'] } }]
     providePersistence(cold.ctx, { list: () => Promise.resolve([meta]), inspect: () => Promise.resolve({ meta, events }) })
     const resume = vi.spyOn(cold.ctx.agents, 'resume')
     await expect(cold.agents.ensureSession(meta.id, '/workspace', true, undefined, ['/changed']))

@@ -25,6 +25,8 @@ interface UserMessage extends Message {
  * compact raw streams so persistence stores one durable settlement per attempt.
  */
 interface SessionEventMap {
+  /** Immutable additional workspace roots, recorded only at seq 0 before publication. */
+  'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**
    * Opens turn `turn` before the loop claims queued input or runs pre-step.
    * Rejection, empty input, cancellation, or failure may close it with no
@@ -397,6 +399,8 @@ The body-stripped declaration keeps the plain class's detached factory, state ac
  * @typert object
  */
 declare class Session {
+  /** Immutable additional roots restored from the required creation event; legacy sessions have none. */
+  get additionalPaths(): readonly string[];
   /** The ordered surface over this session's event log. */
   get surface(): SessionSurface;
   /**
@@ -443,6 +447,7 @@ declare class Session {
    * @param seed - optional borrowed replay or fork events.
    * @param header - optional borrowed storage metadata.
    * @param inheritedEventCount - exact fork-inherited prefix length for a seeded header.
+   * @param additionalPaths - immutable additional roots captured only at creation.
    * @returns a detached session.
    */
   static create(
@@ -450,11 +455,13 @@ declare class Session {
     seed?: readonly SessionEvent[],
     header?: SessionHeader,
     inheritedEventCount?: SessionLogOffset,
+    additionalPaths?: readonly string[],
   ): Session;
   /**
    * Restore a detached session by adopting an independently owned or deeply frozen seed.
    * Runtime-required event fields, event envelopes, sequence continuity, surface
-   * transitions, and header fields are validated without copying or freezing events.
+   * transitions, and header fields are validated without copying whole events.
+   * The exposed workspace-root authority array is frozen; opaque payloads stay adopted.
    * Embedded Assistant streams remain opaque until a stream consumer or storage
    * verifier reads them.
    * @param id - restored session identity.

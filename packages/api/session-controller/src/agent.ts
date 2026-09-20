@@ -247,6 +247,7 @@ export class ApiSessionAgentController {
    * @param cwd - directory the Session must own.
    * @param checkPersistedIdentity - whether to inspect a cold identity before creation.
    * @param presetId - optional Agent preset the Session must own.
+   * @param additionalPaths - immutable additional roots the Session must own.
    * @returns the matching live ordinary Agent.
    */
   async ensureSession(

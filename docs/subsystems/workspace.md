@@ -40,6 +40,9 @@ interface Workspace {
    */
   readonly path: string
 
+  /** Canonical additional directories available to this Workspace, excluding the primary path. */
+  readonly additionalPaths: readonly string[]
+
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
 
@@ -65,6 +68,14 @@ interface Workspace {
    * @returns resolution after durability.
    */
   setTitle(title: string): Promise<void>
+
+  /**
+   * Replace the additional directory roots durably. Paths are canonicalized,
+   * validated as existing directories, deduplicated, and stored in request order.
+   * @param additionalPaths - Fully qualified existing directories to expose beside {@link path}.
+   * @returns resolution after durability.
+   */
+  setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>
 
   /**
    * Prepend a session to this workspace's candidate account. An already
@@ -257,6 +268,13 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('rename') rename(request: WorkspaceRenameRequest): Promise<WorkspaceValue>
 
 /**
+ * Replace one Workspace's additional directory roots atomically.
+ * @param request - Workspace identity and additional roots.
+ * @returns the updated Workspace projection.
+ */
+@Remote('updatePaths') updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue>
+
+/**
  * Remove one Workspace registration while retaining files and Sessions.
  * @param request - Workspace identity to remove.
  * @returns deletion confirmation.
@@ -372,9 +390,10 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
+ * @param additionalPaths - Existing directories to canonicalize; supplied roots must match when reusing a workspace.
  * @returns the existing or newly durable workspace.
  */
-async create(path: string, title?: string): Promise<Workspace>
+async create(path: string, title?: string, additionalPaths?: readonly string[]): Promise<Workspace>
 
 /**
  * Look up a workspace by id.
