@@ -10,6 +10,7 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionControlFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {} from '@deepseek-ai/dsh-session-title/client'
 import { SessionManager } from '../src/client/sessions/manager.ts'
+import * as lineage from '../src/client/sessions/lineage.ts'
 import { FakeApiClient, deferred, err, fakeRemote, ok } from './fake-api.client.ts'
 import { entries, plainTurn } from './event-script.client.ts'
 
@@ -62,6 +63,34 @@ describe('list lifecycle', () => {
     const snapshot = manager.getListSnapshot()
     expect(snapshot.state).toBe('idle')
     expect(snapshot.items.map(i => i.sessionId)).toEqual([S2, S1])
+  })
+
+  it('reuses the lineage projection until a list input changes', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({ items: [summary(S1)] as never[] }))
+    const manager = new SessionManager(fakeRemote(api))
+    const flatten = vi.spyOn(lineage, 'flattenLineage')
+
+    await manager.refreshList()
+    const first = manager.getListSnapshot()
+    expect(flatten).toHaveBeenCalledTimes(1)
+    expect(manager.getListSnapshot()).toBe(first)
+    expect(flatten).toHaveBeenCalledTimes(1)
+
+    // Job/control metadata still publishes a fresh outer snapshot without
+    // rebuilding the lineage projection.
+    manager.handleControlFrame({ type: 'jobs', sessionId: S1, jobs: [] })
+    manager.getListSnapshot()
+    expect(flatten).toHaveBeenCalledTimes(1)
+
+    // A summary and a projected row value each invalidate the cached inputs.
+    manager.handleSessionStatus(S1, true)
+    manager.getListSnapshot()
+    expect(flatten).toHaveBeenCalledTimes(2)
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'new', seq: 1 })
+    expect(manager.getListSnapshot().items[0]?.title).toBe('new')
+    expect(flatten).toHaveBeenCalledTimes(3)
+    flatten.mockRestore()
   })
 
   it('replays incremental frames over hydration and never batch-reorders established ids', async () => {
