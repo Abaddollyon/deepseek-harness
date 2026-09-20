@@ -292,8 +292,8 @@ function assertAssistantSettlementShape(
 
 const EMPTY_WORKSPACE_ROOTS: readonly string[] = Object.freeze([])
 
+// Callers either guard the event type or construct a workspace/roots event.
 function validateWorkspaceRoots(event: SessionEvent): void {
-  if (event.type !== 'workspace/roots') return
   if (event.seq !== 0 || event.ignorable !== undefined) throw new Error('workspace/roots must be required at seq 0')
   const paths: unknown = (event.data as { readonly additionalPaths?: unknown }).additionalPaths
   if (!Array.isArray(paths)) throw new Error('workspace/roots additionalPaths must be an array')
