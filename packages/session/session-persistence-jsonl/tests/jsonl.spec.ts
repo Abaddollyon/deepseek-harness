@@ -788,7 +788,7 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     await writeFile(older, '')
     await writeFile(newer, '')
 
-    await expect(persistence.stat(id)).rejects.toThrow(newer)
+    await expect(persistence.stat(id)).rejects.toThrow(JSON.stringify(newer))
   })
 
   it('singleflights concurrent historical reads and keeps service flush read-only', async () => {
