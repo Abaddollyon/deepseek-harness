@@ -1208,6 +1208,21 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     await expect(ctx.sessionPersistence.list()).rejects.toThrow(JSON.stringify(highest))
   })
 
+  it('does not cache root encoding validation after a rejected listing', async () => {
+    const incompatible = meta('opposite-after-list', '/work')
+    const oppositePath = generationLogPath(root, incompatible.cwd, incompatible.id, 4, 'zstd')
+    await mkdir(dirname(oppositePath), { recursive: true })
+    await writeFile(oppositePath, 'incompatible encoding')
+
+    await expect(ctx.sessionPersistence.list()).rejects.toThrow(JSON.stringify(oppositePath))
+    const next = meta('new-after-rejected-list', '/another-project')
+    await expect(ctx.sessionPersistence.create(next).then(async (handle) => {
+      await handle.close()
+      return 'created despite the incompatible root'
+    })).rejects.toThrow(JSON.stringify(oppositePath))
+    await expect(stat(rawLogPath(root, next.cwd, next.id))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('propagates a non-ENOENT opposite-generation scan failure during materialization', async () => {
     const header = meta('opposite-generation-scan-failure', '/work')
     const handle = await ctx.sessionPersistence.create(header)

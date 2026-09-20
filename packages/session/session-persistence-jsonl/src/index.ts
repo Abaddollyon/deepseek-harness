@@ -984,7 +984,6 @@ class JsonlSessionPersistence extends SessionPersistence {
       await this.listProjectDirs(signal), this.listConcurrency,
       project => this.listSessionDirs(project, signal), signal,
     )
-    this.rootEncodingChecked = true
     const discovered = await mapConcurrent(dirs.flat(), this.listConcurrency, async (dir) => {
       const selected = await this.resolveGenerationInDirectory(dir, signal)
       if (selected === undefined) return undefined
@@ -1004,6 +1003,9 @@ class JsonlSessionPersistence extends SessionPersistence {
       }
       ids.add(snapshot.header.id)
     }
+    // Cache only a completed validation; a failed or cancelled listing must not
+    // let a later write skip the root-wide encoding guard.
+    this.rootEncodingChecked = true
     return snapshots
   }
 
