@@ -684,6 +684,16 @@ describe('DeepSeek e2e workflow', () => {
     expect(JSON.stringify(steps)).not.toContain('apt-get')
   })
 
+  it('downloads the verified payload from an immutable Ubuntu snapshot', () => {
+    const helper = readFileSync(resolve(root, 'scripts/prepare-ci-bubblewrap.sh'), 'utf8')
+
+    expect(helper).toContain("readonly BUBBLEWRAP_SNAPSHOT='20260901T000000Z'")
+    expect(helper).toContain('https://snapshot.ubuntu.com/ubuntu/${BUBBLEWRAP_SNAPSHOT}/pool/main/b/bubblewrap/')
+    expect(helper).toContain("readonly BUBBLEWRAP_SHA256='1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a'")
+    expect(helper).not.toContain('https://archive.ubuntu.com/')
+    expect(helper.indexOf('sha256sum --check --status')).toBeLessThan(helper.indexOf('dpkg-deb --extract'))
+  })
+
   it('bounds profile subprocess fan-out to the tested e2e default', () => {
     const workflow = loadWorkflow('.github/workflows/e2e.yml')
     const e2e = workflowJob(workflow, 'e2e')
