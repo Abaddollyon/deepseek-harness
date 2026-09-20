@@ -39,6 +39,9 @@ export interface Workspace {
    */
   readonly path: string
 
+  /** Canonical additional directories available to this Workspace, excluding the primary path. */
+  readonly additionalPaths: readonly string[]
+
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
 
@@ -64,6 +67,14 @@ export interface Workspace {
    * @returns resolution after durability.
    */
   setTitle(title: string): Promise<void>
+
+  /**
+   * Replace the additional directory roots durably. Paths are canonicalized,
+   * validated as existing directories, deduplicated, and stored in request order.
+   * @param additionalPaths - Fully qualified existing directories to expose beside {@link path}.
+   * @returns resolution after durability.
+   */
+  setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>
 
   /**
    * Prepend a session to this workspace's candidate account. An already

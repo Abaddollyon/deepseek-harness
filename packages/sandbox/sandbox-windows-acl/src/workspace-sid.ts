@@ -1,7 +1,7 @@
 /**
  * The per-workspace write identity: a deterministic `S-1-4-x-y` SID derived
- * from the canonical workspace path, whose ACEs form that workspace's write
- * allowlist. Every confined execution of the same workspace — across
+ * from the canonical primary path and additional-root set, whose ACEs form
+ * that snapshot's write allowlist. Every execution of the same snapshot — across
  * sessions, server restarts, and calls — carries the SAME write SID, so the
  * workspace-root ACE materializes once per workspace per machine (the
  * grant's exact-ACE skip then makes every later provision O(1)) instead of
@@ -29,14 +29,19 @@ import { createHash } from 'node:crypto'
 /**
  * Derive the workspace's write SID (`S-1-4-x-y`; subauthorities 30-bit,
  * matching the workspace-capability shape the token and ACE layers carry).
- * @param workspaceRoot - the canonical workspace path.
- * @returns the SDDL string form.
+ * Additional-root sets use a separate SID domain, so changing a Workspace
+ * cannot widen sessions that captured an earlier set of roots.
+ * @param workspaceRoot - the canonical primary workspace path.
+ * @param additionalRoots - canonical additional roots; order and duplicates do not affect authority.
+ * @returns the SDDL string form; single-root identities retain their existing form.
  */
-export function workspaceWriteSid(workspaceRoot: string): string {
-  const digest = createHash('sha256').update(workspaceRoot, 'utf8').digest()
+export function workspaceWriteSid(workspaceRoot: string, additionalRoots: readonly string[] = []): string {
+  const extra = [...new Set(additionalRoots)].filter(root => root !== workspaceRoot).sort()
+  const identity = extra.length === 0 ? workspaceRoot : JSON.stringify([workspaceRoot, ...extra])
+  const digest = createHash('sha256').update(identity, 'utf8').digest()
   const first = (digest.readUInt32LE(0) % (2 ** 30 - 1)) + 1
   const second = (digest.readUInt32LE(4) % (2 ** 30 - 1)) + 1
-  return `S-1-4-${first}-${second}`
+  return `S-1-4-${first}-${second}${extra.length === 0 ? '' : '-2'}`
 }
 
 /**

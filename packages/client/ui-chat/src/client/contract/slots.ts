@@ -32,7 +32,7 @@ export type UseChatNodeProcess = KeyedSnapshotSelectorHook<ChatTurnProcessPresen
 
 /** Where in a file an open should land. */
 export interface OpenFileOptions {
-  /** 1-based line to reveal; absent = the file's beginning. */
+  /** 1-based viewer line; absent = the file's beginning. Native Host opening ignores it. */
   readonly line?: number
 }
 
@@ -137,6 +137,7 @@ export interface ChatViewInjected {
     /** Resolve the stable Turn-process source for one Chat Node key. */
     chatNodeProcess: (key: string) => ChatNodeProcessSource
   }
+  /** Open in the optional viewer, or through the Host's native opener when absent; rejects on failure. */
   openFile: (path: string, options?: OpenFileOptions) => Promise<void>
   loadOlder: () => void
   /** Jump loader: page history back through seq; resolves when the window covers it. */

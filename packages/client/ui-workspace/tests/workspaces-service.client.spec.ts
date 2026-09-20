@@ -28,6 +28,7 @@ function workspace(
   return {
     workspaceId: wid(id),
     path: `/w/${id}`,
+    additionalPaths: [],
     title: id,
     sessionIds,
     createdAt,
@@ -138,6 +139,13 @@ class FakeWorkspaces implements IWorkspaces {
 
   declare readonly create: IWorkspaces['create']
   declare readonly rename: IWorkspaces['rename']
+  updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    const item = this.list.getSnapshot().items.find(workspace => workspace.workspaceId === workspaceId)
+    if (item === undefined) throw new Error('unknown workspace')
+    const next = { ...item, additionalPaths: [...additionalPaths] }
+    this.list.update(state => ({ ...state, items: state.items.map(workspace => workspace.workspaceId === workspaceId ? next : workspace) }))
+    return Promise.resolve(next)
+  }
   declare readonly delete: IWorkspaces['delete']
   declare readonly insertBefore: IWorkspaces['insertBefore']
   declare readonly insertSessionBefore: IWorkspaces['insertSessionBefore']

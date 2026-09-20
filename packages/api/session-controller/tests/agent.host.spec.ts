@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiSessionAgentController,
   ApiSessionCwdConflict,
+  ApiSessionWorkspaceConflict,
   ApiSessionNotFound,
   ApiSessionSubagentOwnership,
   inspectApiSession,
@@ -298,6 +299,28 @@ describe('ApiSession model selection', () => {
 })
 
 describe('ApiSession create or adoption', () => {
+  it('rejects changed root snapshots before adopting live or cold sessions', async () => {
+    const { ctx, agents } = await harness()
+    const id = SessionId('live-roots')
+    const session = ctx.sessions.create(id, { meta: { cwd: '/workspace', additionalPaths: ['/original'] } })
+    const live = { id, session, status: 'idle', ctx } as Agent
+    ctx.agents.register(live)
+    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/original'])).resolves.toBe(live)
+    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/changed']))
+      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
+    expect(session.additionalPaths).toEqual(['/original'])
+
+    const cold = await harness()
+    const meta = header('cold-roots')
+    const events = [{ type: 'workspace/roots', seq: 0, time: 1, data: { additionalPaths: ['/original'] } }] as SessionEvent[]
+    providePersistence(cold.ctx, { list: () => Promise.resolve([meta]), inspect: () => Promise.resolve({ meta, events }) })
+    const resume = vi.spyOn(cold.ctx.agents, 'resume')
+    await expect(cold.agents.ensureSession(meta.id, '/workspace', true, undefined, ['/changed']))
+      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
+    expect(resume).not.toHaveBeenCalled()
+    expect(cold.ctx.agents.get(meta.id)).toBeUndefined()
+  })
+
   it('shares one in-flight creation between concurrent callers', async () => {
     const { ctx, agents } = await harness()
     const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-concurrent-'))

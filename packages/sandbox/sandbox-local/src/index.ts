@@ -357,21 +357,24 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   private windowsAclRunnerArgv(policy: SandboxPolicy): string[] {
     const sessionId = policy.sessionId
+    const additionalArgs = (policy.additionalRoots ?? []).flatMap(root => ['--additional-workspace', root])
     if (sessionId === undefined || policy.mode === 'read-only') {
       return [
         ...this.windowsAclRunnerInvocation(),
         '--workspace', policy.workspaceRoot,
+        ...additionalArgs,
         '--temp', tmpdir(),
         '--mode', policy.mode,
       ]
     }
-    const temp = this.materializeAclGrant(sessionId, policy.workspaceRoot)
+    const temp = this.materializeAclGrant(sessionId, policy.workspaceRoot, policy.additionalRoots ?? [])
     return [
       ...this.windowsAclRunnerInvocation(),
       '--workspace', policy.workspaceRoot,
+      ...additionalArgs,
       '--temp', temp.dir,
       '--mode', policy.mode,
-      '--write-sid', workspaceWriteSid(policy.workspaceRoot),
+      '--write-sid', workspaceWriteSid(policy.workspaceRoot, policy.additionalRoots),
       '--temp-write-sid', temp.writeSid,
     ]
   }
@@ -389,13 +392,15 @@ export class LocalSandboxProvider extends SandboxProvider {
    * @param workspaceRoot - the resolved policy root.
    * @returns the pair's private temp directory and write capability.
    */
-  private materializeAclGrant(sessionId: SessionId, workspaceRoot: string): AclTempCapability {
-    assertTempRootOutsideWorkspace(workspaceRoot, tmpdir())
-    const writeSid = workspaceWriteSid(workspaceRoot)
-    if (!this.workspaceGrants.has(workspaceRoot)) {
+  private materializeAclGrant(sessionId: SessionId, workspaceRoot: string, additionalRoots: readonly string[]): AclTempCapability {
+    const roots = [...new Set([workspaceRoot, ...additionalRoots])]
+    const workspaceKey = JSON.stringify([workspaceRoot, ...roots.filter(root => root !== workspaceRoot).sort()])
+    for (const root of roots) assertTempRootOutsideWorkspace(root, tmpdir())
+    const writeSid = workspaceWriteSid(workspaceRoot, additionalRoots)
+    if (!this.workspaceGrants.has(workspaceKey)) {
       const grant = AclWriteGrant.create(writeSid)
       try {
-        grant.add(workspaceRoot, true)
+        for (const root of roots) grant.add(root, true)
       } catch (error) {
         // Free the SID; a standing ACE (if the apply succeeded before a
         // post-apply throw) is the intended end state, not an error
@@ -407,9 +412,9 @@ export class LocalSandboxProvider extends SandboxProvider {
         }
         throw error
       }
-      this.workspaceGrants.set(workspaceRoot, grant)
+      this.workspaceGrants.set(workspaceKey, grant)
     }
-    const key = JSON.stringify([String(sessionId), workspaceRoot])
+    const key = JSON.stringify([String(sessionId), workspaceKey])
     const existing = this.tempCapabilities.get(key)
     if (existing !== undefined) return existing
     const tempDir = mkdtempSync(join(tmpdir(), 'dsh-'))

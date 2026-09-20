@@ -15,7 +15,7 @@ import { WorkspaceEntity } from './entity.ts'
 import type { WorkspaceEntityHost } from './entity.ts'
 
 export { WorkspaceMoveInvalidError } from './entity.ts'
-import { defaultWorkspaceTitle, realpathNormalize } from './paths.ts'
+import { defaultWorkspaceTitle, normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
 import { workspaceDomainSpec } from './spec.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
 import type { Workspace, WorkspaceId as WorkspaceIdBrand } from './types.ts'
@@ -23,7 +23,7 @@ import type { Workspace, WorkspaceId as WorkspaceIdBrand } from './types.ts'
 export type { Workspace } from './types.ts'
 export { workspaceDomainState, workspaceRecord, workspaceDomainSpec } from './spec.ts'
 export type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
-export { realpathNormalize } from './paths.ts'
+export { normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
 
 /** Identifies one workspace record (see `src/types.ts` for the brand rationale). */
 export type WorkspaceId = WorkspaceIdBrand
@@ -154,12 +154,15 @@ export class WorkspaceRegistry extends Service {
   // (.agents/notes/archived/simplification/2026-07-31-one-route-to-add-a-workspace.md);
   // drop the parameter with its @param clause and the `create(path, title?)`
   // lines in this package's README pair.
-  async create(path: string, title?: string): Promise<Workspace> {
+  async create(path: string, title?: string, additionalPaths?: readonly string[]): Promise<Workspace> {
     const canonical = await realpathNormalize(path)
     if (!(await stat(canonical)).isDirectory()) {
       throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
     }
-    return await this.enqueueOperation(() => this.createCanonical(canonical, title))
+    const canonicalAdditionalPaths = additionalPaths === undefined
+      ? undefined
+      : await normalizeAdditionalWorkspacePaths(additionalPaths, canonical)
+    return await this.enqueueOperation(() => this.createCanonical(canonical, title, canonicalAdditionalPaths))
   }
 
   /**
@@ -281,9 +284,17 @@ export class WorkspaceRegistry extends Service {
     return undefined
   }
 
-  private async createCanonical(canonical: string, title?: string): Promise<WorkspaceEntity> {
+  private async createCanonical(
+    canonical: string,
+    title: string | undefined,
+    additionalPaths: readonly string[] | undefined,
+  ): Promise<WorkspaceEntity> {
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path !== canonical) continue
+      if (additionalPaths !== undefined && !samePathSet(entity.additionalPaths, additionalPaths)) {
+        throw new Error('workspace already exists with different additional paths; use Manage folders to update it')
+      }
+      return entity
     }
 
     const workspaceName = title ?? defaultWorkspaceTitle(canonical)
@@ -293,6 +304,7 @@ export class WorkspaceRegistry extends Service {
     const now = new Date().toISOString()
     const record: WorkspaceRecord = {
       path: canonical,
+      additionalPaths: [...(additionalPaths ?? [])],
       title: workspaceName,
       sessionIds: [],
       createdAt: now,
@@ -458,6 +470,7 @@ export class WorkspaceRegistry extends Service {
         const createdAt = new Date(group.newestAt).toISOString()
         const record: WorkspaceRecord = {
           path: group.path,
+          additionalPaths: [],
           title: defaultWorkspaceTitle(group.path),
           sessionIds,
           createdAt,
@@ -661,6 +674,9 @@ export class WorkspaceRegistry extends Service {
     return result
   }
 }
+
+const samePathSet = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every(path => right.includes(path))
 
 const sameSessionIds = (left: readonly SessionId[], right: readonly SessionId[]): boolean =>
   left.length === right.length && left.every((id, index) => id === right[index])

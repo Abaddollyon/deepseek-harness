@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   ApiSessionAgentController,
   ApiSessionCwdConflict,
+  ApiSessionWorkspaceConflict,
 } from '../src/agent.ts'
 import { SessionCommandController } from '../src/commands.ts'
 import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
@@ -84,6 +85,7 @@ describe('Session creation failures', () => {
     const workspace = {
       id: 'workspace-1' as WorkspaceId,
       path: '/workspace',
+      additionalPaths: [],
       attachSession: () => Promise.reject(new Error('read-only workspace')),
     } as unknown as Workspace
     failed.provide('workspaceRegistry', {
@@ -118,6 +120,10 @@ describe('Session creation failures', () => {
     {
       error: new ApiSessionCwdConflict(SessionId('wrong-cwd'), '/requested', '/stored'),
       code: 'session/conflict',
+    },
+    {
+      error: new ApiSessionWorkspaceConflict(SessionId('wrong-roots'), ['/new'], ['/stored']),
+      code: 'session/workspace-conflict',
     },
     {
       error: new Error('factory unavailable'),

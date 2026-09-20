@@ -14,6 +14,7 @@ import type {
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
   WorkspaceId,
   WorkspaceView,
@@ -33,6 +34,7 @@ function workspace(
     workspaceId: wid(id),
     path: `/w/${id}`,
     title: id,
+    additionalPaths: [],
     sessionIds,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt,
@@ -69,6 +71,8 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     Promise.resolve(remoteOk({ workspace: workspace(request.path.split('/').pop() ?? 'workspace'), created: true }))
   onRename: (request: WorkspaceRenameRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
     Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), title: request.title } }))
+  onUpdatePaths: (request: WorkspaceUpdatePathsRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
+    Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), additionalPaths: request.additionalPaths } }))
   onDelete: (_request: WorkspaceDeleteRequest) => Promise<RemoteResult<WorkspaceDeleteValue>> = () =>
     Promise.resolve(remoteOk({ deleted: true }))
   onInsertBefore: (
@@ -93,6 +97,10 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   rename(request: WorkspaceRenameRequest): Promise<RemoteResult<WorkspaceValue>> {
     this.record('rename', request)
     return this.onRename(request)
+  }
+
+  updatePaths(request: WorkspaceUpdatePathsRequest): Promise<RemoteResult<WorkspaceValue>> {
+    return this.onUpdatePaths(request)
   }
 
   delete(request: WorkspaceDeleteRequest): Promise<RemoteResult<WorkspaceDeleteValue>> {
@@ -319,6 +327,22 @@ describe('ClientWorkspaceModel', () => {
     gate.resolve(remoteOk({ archivedSessionIds: [sid('first')] }))
     await pending
     expect(model.getSnapshot().archivedSessionIds).toEqual([sid('first'), sid('second')])
+  })
+
+  it.each(['stream', 'baseline'] as const)('keeps newer roots from %s over an equal-timestamp unary echo', async (kind) => {
+    const remote = new FakeWorkspaceRemote()
+    const model = new ClientWorkspaceModel(remote)
+    const initial = workspace('one')
+    baseline(model, [initial])
+    const echo = deferred<RemoteResult<WorkspaceValue>>()
+    remote.onUpdatePaths = () => echo.promise
+    const pending = model.updatePaths(wid('one'), ['/old'])
+    const newer = { ...initial, additionalPaths: ['/new'] }
+    if (kind === 'stream') model.upsertView(newer)
+    else baseline(model, [newer])
+    echo.resolve(remoteOk({ workspace: { ...initial, additionalPaths: ['/old'] } }))
+    await pending
+    expect(model.getSnapshot().items[0]?.additionalPaths).toEqual(['/new'])
   })
 
   it('keeps a streamed row when a stale unary echo has the same timestamp', async () => {

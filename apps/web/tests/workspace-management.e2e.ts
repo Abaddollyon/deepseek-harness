@@ -117,6 +117,7 @@ it.skipIf(MODE === 'record')('creates a workspace-less chat from cold start and 
     await directoryPath.press('Enter')
     await directoryDialog.getByRole('button', { name: 'Open', exact: true }).click()
     await directoryDialog.waitFor({ state: 'hidden', timeout: 10_000 })
+    await page.getByRole('button', { name: 'Create workspace', exact: true }).click()
     await expect.poll(
       () => activeScaffold.ctx.workspaceRegistry.resolveByPath(inheritedPath),
       { timeout: 10_000 },
@@ -191,6 +192,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     // Creating selects the new folder in the listing; Open adopts it.
     await dialog.getByRole('button', { name: 'Open', exact: true }).click()
     await dialog.waitFor({ state: 'hidden', timeout: 10_000 })
+    await page.getByRole('button', { name: 'Create workspace', exact: true }).click()
     await expect.poll(
       () => scaffold.ctx.workspaceRegistry.resolveByPath(join(parent, name)),
       { timeout: 10_000 },
@@ -211,6 +213,7 @@ describe('web e2e: workspace management (create / rename / flat view / hover aff
     const dialog = await browseTo(path)
     await dialog.getByRole('button', { name: 'Open', exact: true }).click()
     await dialog.waitFor({ state: 'hidden', timeout: 10_000 })
+    await page.getByRole('button', { name: 'Create workspace', exact: true }).click()
     await expect.poll(
       () => scaffold.ctx.workspaceRegistry.resolveByPath(path),
       { timeout: 10_000 },

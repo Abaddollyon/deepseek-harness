@@ -76,7 +76,7 @@ export class TestWorkspaces implements IWorkspaces {
    * @param input - the Host create payload.
    * @returns the created Workspace view.
    */
-  async create(input: { path: string }): Promise<WorkspaceView> {
+  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     this.calls.push({ method: 'create', args: [input] })
     const stub = this.stubs.get('create')
     if (stub !== undefined) return await (stub(input) as Promise<WorkspaceView>)
@@ -84,6 +84,7 @@ export class TestWorkspaces implements IWorkspaces {
       workspaceId: `ws-${input.path}` as WorkspaceId,
       title: input.path,
       path: input.path,
+      additionalPaths: input.additionalPaths ?? [],
       sessionIds: [],
     } as unknown as WorkspaceView
   }
@@ -99,6 +100,21 @@ export class TestWorkspaces implements IWorkspaces {
     const stub = this.stubs.get('rename')
     if (stub !== undefined) return await (stub(workspaceId, title) as Promise<WorkspaceView>)
     return { workspaceId, title, path: `/${title}`, sessionIds: [] } as unknown as WorkspaceView
+  }
+
+  /**
+   * Update a Workspace's sidepaths (recorded).
+   * @param workspaceId - target Workspace.
+   * @param additionalPaths - explicit sidepaths for new Sessions.
+   * @returns the updated fixture view.
+   */
+  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    this.calls.push({ method: 'updatePaths', args: [workspaceId, additionalPaths] })
+    const stub = this.stubs.get('updatePaths')
+    if (stub !== undefined) return await (stub(workspaceId, additionalPaths) as Promise<WorkspaceView>)
+    const workspace = this.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+    if (workspace === undefined) throw new Error('unknown workspace fixture')
+    return { ...workspace, additionalPaths }
   }
 
   /**

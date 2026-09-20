@@ -58,7 +58,7 @@ vi.mock('@deepseek-ai/dsh-sandbox-windows-acl', () => {
         throw new Error(`Windows ACL temp root must be outside the workspace: workspace=${workspaceRoot}; temp=${tempRoot}`)
       }
     },
-    workspaceWriteSid: () => 'S-1-4-42-42',
+    workspaceWriteSid: (_root: string, additionalRoots: readonly string[] = []) => additionalRoots.length === 0 ? 'S-1-4-42-42' : JSON.stringify(additionalRoots),
     tempWriteSid: (path: string) => `TEMP:${path}`,
   }
 })
@@ -139,6 +139,34 @@ describe('windows-acl write grants (LocalSandboxProvider)', () => {
       expect(mockState.grants.every(grant => grant.disposed)).toBe(true)
       expect(existsSync(tempDir ?? '')).toBe(false)
     } finally {
+      cleanup()
+    }
+  })
+
+  it('isolates grants for different session root snapshots sharing a primary directory', async () => {
+    const { sandbox, fiber } = await setup()
+    try {
+      const primary = workspaceRoot()
+      const side = workspaceRoot()
+      scratch.push(primary, side)
+      const policy: SandboxPolicy = { mode: 'workspace-write', workspaceRoot: primary, sessionId: SessionId('snapshot') }
+      const single = sandbox.confine(['true'], policy)
+      const multi = sandbox.confine(['true'], { ...policy, additionalRoots: [side] })
+      expect(flag(multi.argv, '--write-sid')).not.toBe(flag(single.argv, '--write-sid'))
+      expect(flag(multi.argv, '--additional-workspace')).toBe(side)
+      const multiGrant = mockState.grants.find(grant => grant.writeSid === flag(multi.argv, '--write-sid'))!
+      expect(multiGrant.added).toEqual([{ path: primary, standing: true }, { path: side, standing: true }])
+      expect(mockState.grants.find(grant => grant.writeSid === flag(single.argv, '--write-sid'))!.added)
+        .toEqual([{ path: primary, standing: true }])
+      expect(sandbox.confine(['true'], policy).argv).toEqual(single.argv)
+      const agentless = sandbox.confine(['true'], { mode: 'workspace-write', workspaceRoot: primary, additionalRoots: [side] })
+      expect(flag(agentless.argv, '--additional-workspace')).toBe(side)
+      expect(flag(agentless.argv, '--write-sid')).toBeUndefined()
+      const readOnly = sandbox.confine(['true'], { ...policy, mode: 'read-only', additionalRoots: [side] })
+      expect(flag(readOnly.argv, '--write-sid')).toBeUndefined()
+      expect(mockState.grants).toHaveLength(4)
+    } finally {
+      await fiber.dispose()
       cleanup()
     }
   })

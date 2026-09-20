@@ -193,6 +193,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       readonly requestedCwd: string
       readonly existingCwd?: string
     }
+    'session/workspace-conflict': {
+      readonly sessionId: SessionId
+      readonly requestedPaths: readonly string[]
+      readonly existingPaths: readonly string[]
+    }
     'session/agent-busy': { readonly reason: string }
     'session/invalid-time-zone': { readonly value: string }
     'session/workspace-attach-failed': { readonly sessionId: SessionId; readonly workspaceId: string }

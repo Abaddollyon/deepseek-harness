@@ -29,6 +29,12 @@ Use the sidebar to browse Workspaces and their Sessions, reorder them, and start
 
 The browser distinguishes Session feed loading, failure, stale retained rows, and successful empty results; workspace readiness is required before empty wording appears. Explicit New Session failures remain visible in the sidebar. Workspace-bound and loose creation share completion handling: a superseded navigation intent or disposed owner cannot open a Session or publish a late failure. Every explicit open uses the shared shell navigation owner, including opening the current Session from Environments and entering a blank New Session. The query is shared with Activity, while grouping, ordering, and Add Workspace controls apply only to Workspaces.
 
+### Workspace folders
+
+**Add workspace** first chooses the primary directory (the working directory), then opens **Create workspace**. Use **Add folder** to include other directories before confirming; they are saved together as one Workspace, not separate entries. **Manage folders** in a Workspace row’s actions adds or removes sidepaths later. The Host validates all paths atomically. Changes apply only to new Sessions; existing Sessions retain their original roots and permission mode. Cancelling the draft does not create or change a Workspace. Workspace-free **Chats** remains unchanged.
+
+Workspace groups default to collapsed. Restoring the selected Session on page load no longer expands its folder; explicit saved expansion, search-result reveal, and new-session actions remain available.
+
 ### Reordering and view options
 
 View options combine grouping with one browser-persisted Session order per account: **Manual** and **Last updated** apply in either presentation. Entering Last updated performs a complete recency sort and later user prompts or steers promote their Session once; entering Manual preserves every current position and disables later promotion. Dragging edits the current order in either mode; Manual-mode drags for real Workspaces also update the Host Session account, while Chats and flat-list orders remain browser-local. In a collapsed group, drag boundaries follow rendered rows and place the source before intervening hidden rows, so a drag cannot hide its source. Workspace drag order is Host-durable in either Session order mode.

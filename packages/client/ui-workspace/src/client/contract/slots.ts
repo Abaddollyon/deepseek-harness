@@ -146,6 +146,8 @@ export type WorkspaceBrowserInjected = {
   forkSession: (sessionId: SessionId) => void
   /** Rename a Host Workspace (rejects on name conflict; resolves on durability). */
   renameWorkspace: (workspaceId: WorkspaceId, title: string) => Promise<void>
+  /** Change the explicit sidepaths inherited by newly created Sessions. */
+  updateWorkspacePaths: (workspaceId: WorkspaceId, additionalPaths: readonly string[]) => Promise<void>
   /** Delete only a Host Workspace registration; directory and Session logs remain. */
   deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
   /**
@@ -166,7 +168,7 @@ export type WorkspaceBrowserInjected = {
    */
   insertSessionBefore: (workspaceId: WorkspaceId, sessionId: SessionId, beforeSessionId?: SessionId) => Promise<void>
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
-  createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  createWorkspace: (input: { path: string; additionalPaths?: readonly string[] }) => Promise<WorkspaceView>
 }
 
 /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
@@ -191,7 +193,7 @@ export type WorkspacePickerInjected = DirectoryPickingInjected & {
   /** Create and open a Session without Workspace attachment. */
   createLooseSession: () => void
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
-  createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  createWorkspace: (input: { path: string; additionalPaths?: readonly string[] }) => Promise<WorkspaceView>
 }
 
 /**

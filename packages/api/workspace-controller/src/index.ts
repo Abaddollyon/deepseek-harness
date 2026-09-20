@@ -18,6 +18,7 @@ import type {
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
 } from './types.ts'
 
@@ -70,6 +71,16 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('rename')
   rename(request: WorkspaceRenameRequest): Promise<WorkspaceValue> {
     return this.commands.rename(request)
+  }
+
+  /**
+   * Replace one Workspace's additional directory roots atomically.
+   * @param request - Workspace identity and additional roots.
+   * @returns the updated Workspace projection.
+   */
+  @Remote('updatePaths')
+  updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue> {
+    return this.commands.updatePaths(request)
   }
 
   /**

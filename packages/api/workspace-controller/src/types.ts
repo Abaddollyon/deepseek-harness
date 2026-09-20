@@ -16,6 +16,8 @@ export interface WorkspaceView {
   readonly workspaceId: WorkspaceId
   /** Canonical host directory path. */
   readonly path: string
+  /** Canonical additional directories available to this Workspace. */
+  readonly additionalPaths: readonly string[]
   /** User-visible title. */
   readonly title: string
   /** Sessions accounted to this Workspace in manual order. */
@@ -52,6 +54,13 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 /** Existing directory requested for Workspace adoption. */
 export interface WorkspaceCreateRequest {
   readonly path: string
+  readonly additionalPaths?: readonly string[]
+}
+
+/** Additional directory roots mutation. */
+export interface WorkspaceUpdatePathsRequest {
+  readonly workspaceId: WorkspaceId
+  readonly additionalPaths: readonly string[]
 }
 
 /** Created or previously registered Workspace. */

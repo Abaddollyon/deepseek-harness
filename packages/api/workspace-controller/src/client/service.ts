@@ -3,8 +3,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
-import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
-import type { WorkspaceView } from '../types.ts'
+import type { WorkspaceId, WorkspaceView } from '../types.ts'
 import type { WorkspaceFeedRecovery, WorkspaceFeedSnapshot } from './feed.ts'
 import type { ClientWorkspaceModel, WorkspaceSnapshot } from './model.ts'
 
@@ -43,7 +42,14 @@ export interface IWorkspaces {
    * @param input - Host create payload.
    * @returns the created or idempotently resolved Workspace.
    */
-  create(input: { path: string }): Promise<WorkspaceView>
+  create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
+  /**
+   * Replace a Workspace's additional directory roots.
+   * @param workspaceId - target Workspace.
+   * @param additionalPaths - requested additional roots.
+   * @returns the updated Workspace.
+   */
+  updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView>
   /**
    * Rename a Workspace.
    * @param workspaceId - target Workspace.
@@ -99,9 +105,15 @@ export class WorkspaceController extends Service implements IWorkspaces {
 
   retryFeed(): void { this.recovery.retry() }
 
-  async create(input: { path: string }): Promise<WorkspaceView> {
+  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     const result = await this.model.create(input)
     if (!result.ok) throw new WorkspaceCreateError(result.error)
+    return result.value.workspace
+  }
+
+  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    const result = await this.model.updatePaths(workspaceId, additionalPaths)
+    if (!result.ok) throw commandError('update paths', result.error)
     return result.value.workspace
   }
 
