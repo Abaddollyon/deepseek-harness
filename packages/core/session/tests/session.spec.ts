@@ -1423,6 +1423,18 @@ describe('SessionStore', () => {
     })
   })
 
+  it('snapshots additional roots in the durable header and fork', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const parent = ctx.sessions.create(SessionId('roots-parent'), {
+      meta: { cwd: '/work/project', additionalPaths: ['/work/shared', '/work/docs'] },
+    })
+    expect(parent.additionalPaths).toEqual(['/work/shared', '/work/docs'])
+    const child = ctx.sessions.fork(parent)
+    expect(child.additionalPaths).toEqual(['/work/shared', '/work/docs'])
+    expect(child.header.parentSession).toBe(parent.id)
+  })
+
   it('attaches subagent origin and delegationDepth from meta to the header', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -1443,6 +1455,7 @@ describe('SessionStore', () => {
     const cases: Array<{ meta: unknown; error: RegExp }> = [
       { meta: { parentSession: 1n }, error: /header is not losslessly JSON-serializable/ },
       { meta: { cwd: 1 }, error: /header cwd must be a string/ },
+      { meta: { additionalPaths: ['/ok', 1] }, error: /additionalPaths must contain strings/ },
       { meta: { parentSession: 1 }, error: /header parentSession must be a string/ },
       { meta: { createdAt: '123' }, error: /header createdAt must be a non-negative safe integer/ },
       { meta: { createdAt: 1.5 }, error: /header createdAt must be a non-negative safe integer/ },

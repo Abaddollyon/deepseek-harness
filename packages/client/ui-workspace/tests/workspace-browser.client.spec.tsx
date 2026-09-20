@@ -48,7 +48,7 @@ const sessionState = (items: readonly SessionSummary[], overrides: Partial<Sessi
   ...overrides,
 })
 const workspace = (id: string, sessionIds: string[], title = id): WorkspaceView => ({
-  workspaceId: wid(id), path: `/projects/${id}`, title,
+  workspaceId: wid(id), path: `/projects/${id}`, additionalPaths: [], title,
   sessionIds: sessionIds.map(sid), createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 })
 const workspaceState = (items: readonly WorkspaceView[], archivedSessionIds: readonly SessionId[] = []): WorkspaceListState => ({
@@ -96,6 +96,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     renameSession: vi.fn(async () => {}),
     forkSession: vi.fn(),
     renameWorkspace: vi.fn(async () => {}),
+    updateWorkspacePaths: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
     archiveSession: vi.fn(async () => {}),
     insertWorkspaceBefore: vi.fn(async () => {}),
@@ -390,6 +391,7 @@ describe('WorkspaceBrowser', () => {
       useSessions: hook(sessionState(items, { current: blank.id })),
       useWorkspaces: hook(workspaceState([workspace('alpha', items.map(item => item.id))])),
     })
+    fireEvent.click(screen.getByText('alpha'))
     const assertFolded = () => {
       expect(screen.getAllByRole('treeitem')).toHaveLength(7)
       expect(screen.getByText('新会话')).toBeTruthy()
@@ -703,10 +705,9 @@ describe('WorkspaceBrowser', () => {
       useWorkspaces: hook(workspaceState([workspace('alpha', ['cur-s', 'other-s'])])),
     })
     expect(b.store.getSnapshot().pinnedSessionIds).toEqual(['cur-s'])
-    // The reveal still opens the current session's group, but the pinned
-    // current row renders exactly once — in the Pinned section.
-    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
-    expect(screen.getByText('other-s')).toBeTruthy()
+    // Restored selection leaves folders folded; the pinned row stays accessible.
+    expect(b.store.getSnapshot().groupExpansion).toEqual({})
+    expect(screen.queryByText('other-s')).toBeNull()
     expect(screen.getByText('已置顶')).toBeTruthy()
     expect(screen.getAllByText('cur-s')).toHaveLength(1)
   })
@@ -774,6 +775,36 @@ describe('WorkspaceBrowser', () => {
     expect(screen.getByText('child-s').closest('[role="treeitem"]')?.getAttribute('draggable')).toBe('true')
   })
 
+  it('edits sidepaths through the workspace actions without starting a Session', async () => {
+    const b = mount({ useWorkspaces: hook(workspaceState([{ ...workspace('alpha', []), additionalPaths: ['/side'] }])) })
+    fireEvent.click(screen.getByRole('button', { name: t('actions.workspace.aria', { name: 'alpha' }) }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '管理文件夹' }))
+    expect(screen.getByText('/projects/alpha')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '移除文件夹 /side' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存文件夹' }))
+    await waitFor(() => { expect(b.props.updateWorkspacePaths).toHaveBeenCalledWith(wid('alpha'), []) })
+    expect(b.props.startSession).not.toHaveBeenCalled()
+  })
+
+  it('keeps an explicitly expanded folder on remount without expanding others', () => {
+    const seed = createWorkspaceViewStore().create()
+    seed.actions.setGroupExpanded('alpha', true)
+    mount({ useSessions: hook(sessionState([summary('beta-s', 1)], { current: sid('beta-s') })),
+      useWorkspaces: hook(workspaceState([workspace('alpha', []), workspace('beta', ['beta-s'])])) })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
+    expect(groupHeader('beta').getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('keeps workspace folders collapsed when restoring a selected session', () => {
+    const b = mount({
+      useSessions: hook(sessionState([summary('alpha-s', 1)], { current: sid('alpha-s') })),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['alpha-s'])])),
+    })
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('false')
+    expect(b.store.getSnapshot().groupExpansion).toEqual({})
+    expect(screen.queryByText('alpha-s')).toBeNull()
+  })
+
   it('expands the target group before starting a session from its ＋', () => {
     const startSession = vi.fn()
     const b = mount({
@@ -816,7 +847,10 @@ describe('WorkspaceBrowser', () => {
       useSessions: hook(first),
       useWorkspaces: hook(workspaceState([workspace('alpha', ['a', 'b'])])),
     })
-    // Navigation opened the group; the persisted bit and the header agree.
+    // Restored selection stays folded; explicit navigation reveals the group.
+    expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('false')
+    rerender(b, { useSessions: hook({ ...first, current: undefined }) })
+    rerender(b, { useSessions: hook(first) })
     await waitFor(() => { expect(screen.getByText('a')).toBeTruthy() })
     expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
     expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
@@ -865,9 +899,10 @@ describe('WorkspaceBrowser', () => {
         workspace('alpha', ['alpha-idle']), workspace('beta', ['beta-live', 'beta-idle']),
       ])),
     })
-    // The reveal is scoped to the navigation: only the current session's group
-    // opens, and an idle current row is exactly the case pinning cannot serve.
-    await waitFor(() => { expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true }) })
+    // Explicit expansion affects only this folder; restoration expands neither.
+    expect(b.store.getSnapshot().groupExpansion).toEqual({})
+    fireEvent.click(screen.getByText('alpha'))
+    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
     expect(screen.getByText('alpha-idle')).toBeTruthy()
     expect(groupHeader('alpha').getAttribute('aria-expanded')).toBe('true')
 
@@ -892,8 +927,8 @@ describe('WorkspaceBrowser', () => {
         workspace('alpha', ['alpha-blank']), workspace('beta', ['beta-blank']),
       ])),
     })
-    // The blank row is the current session, so the navigation reveal opens
-    // the group that renders it.
+    // A restored blank selection also keeps its folder closed by default.
+    fireEvent.click(screen.getByText('alpha'))
     await waitFor(() => { expect(screen.getByText('新会话')).toBeTruthy() })
     expect(screen.queryByText('alpha-blank')).toBeNull()
     expect(screen.queryByText('beta-blank')).toBeNull()
@@ -955,6 +990,7 @@ describe('WorkspaceBrowser', () => {
     await waitFor(() => {
       expect(b.store.getSnapshot().sessionOrderByAccount.alpha).toEqual(['blank', 'old', 'mid'])
     })
+    fireEvent.click(screen.getByText('alpha'))
     const blank = screen.getByText('新会话').closest('[role="treeitem"]') as HTMLElement
     const mid = screen.getByText('mid').closest('[role="treeitem"]') as HTMLElement
     mid.getBoundingClientRect = () => ({
@@ -2290,6 +2326,7 @@ describe('WorkspaceBrowser', () => {
     fireEvent.click(screen.getByRole('button', { name: '添加工作区' }))
     await waitFor(() => { expect(owner?.open).toBe(true) })
     await act(async () => { owner!.onPicked('/tmp/project') })
+    fireEvent.click(screen.getByRole('button', { name: '创建工作区' }))
     await waitFor(() => { expect(startSession).toHaveBeenCalledWith(wid('created')) })
   })
 })

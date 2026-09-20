@@ -3,7 +3,7 @@
  * @module @deepseek-ai/dsh-workspace/src/paths
  */
 
-import { realpath } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import { posix, win32 } from 'node:path'
 
 /**
@@ -54,4 +54,30 @@ export async function realpathNormalize(path: string): Promise<string> {
     throw new TypeError(`Workspace path is not fully qualified: '${path}'`)
   }
   return await realpath(path)
+}
+
+/**
+ * Canonicalize and validate additional Workspace roots, preserving first-seen
+ * order and excluding the primary root. Every path must resolve to a directory.
+ * @param paths - Candidate additional roots.
+ * @param primary - Canonical primary Workspace root.
+ * @returns canonical, deduplicated additional roots.
+ */
+export async function normalizeAdditionalWorkspacePaths(
+  paths: readonly string[],
+  primary: string,
+): Promise<string[]> {
+  const normalized: string[] = []
+  const seen = new Set<string>([primary])
+  for (const path of paths) {
+    const canonical = await realpathNormalize(path)
+    if (!(await stat(canonical)).isDirectory()) {
+      throw new Error(`Workspace additional path '${path}' is not a directory`)
+    }
+    if (!seen.has(canonical)) {
+      seen.add(canonical)
+      normalized.push(canonical)
+    }
+  }
+  return normalized
 }

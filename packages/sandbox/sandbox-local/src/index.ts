@@ -365,7 +365,7 @@ export class LocalSandboxProvider extends SandboxProvider {
         '--mode', policy.mode,
       ]
     }
-    const temp = this.materializeAclGrant(sessionId, policy.workspaceRoot)
+    const temp = this.materializeAclGrant(sessionId, policy.workspaceRoot, policy.additionalRoots ?? [])
     return [
       ...this.windowsAclRunnerInvocation(),
       '--workspace', policy.workspaceRoot,
@@ -389,13 +389,14 @@ export class LocalSandboxProvider extends SandboxProvider {
    * @param workspaceRoot - the resolved policy root.
    * @returns the pair's private temp directory and write capability.
    */
-  private materializeAclGrant(sessionId: SessionId, workspaceRoot: string): AclTempCapability {
-    assertTempRootOutsideWorkspace(workspaceRoot, tmpdir())
+  private materializeAclGrant(sessionId: SessionId, workspaceRoot: string, additionalRoots: readonly string[]): AclTempCapability {
+    const roots = [workspaceRoot, ...additionalRoots]
+    for (const root of roots) assertTempRootOutsideWorkspace(root, tmpdir())
     const writeSid = workspaceWriteSid(workspaceRoot)
     if (!this.workspaceGrants.has(workspaceRoot)) {
       const grant = AclWriteGrant.create(writeSid)
       try {
-        grant.add(workspaceRoot, true)
+        for (const root of roots) grant.add(root, true)
       } catch (error) {
         // Free the SID; a standing ACE (if the apply succeeded before a
         // post-apply throw) is the intended end state, not an error

@@ -45,7 +45,7 @@ function sessionFakeFor() {
   } satisfies SessionBehaviorOverrides
 }
 
-async function bench(options: { environmentId?: string } = {}) {
+async function bench(options: { environmentId?: string; sidebar?: boolean } = {}) {
   const runtime = await SlotTestRuntime.create()
   const presentationState = new Map<string, { scrollAnchor?: string }>()
   const presentation = {
@@ -64,7 +64,10 @@ async function bench(options: { environmentId?: string } = {}) {
   const layout = { closeRightbar: vi.fn(), openRightbar: vi.fn() }
   runtime.ctx.provide('layout', layout as never)
   const sidebarRight = { openResource: vi.fn<(address: string) => void>() }
-  runtime.ctx.provide('sidebarRight', sidebarRight as never)
+  const mountSidebar = () => runtime.mount({
+    apply(ctx) { ctx.provide('sidebarRight', sidebarRight as never) },
+  })
+  const sidebarFeature = options.sidebar === false ? undefined : await mountSidebar()
   const openWorkspacePath = vi.fn<ClientRemote['session']['openWorkspacePath']>(
     () => Promise.resolve({ ok: true, value: { opened: true } }),
   )
@@ -97,7 +100,7 @@ async function bench(options: { environmentId?: string } = {}) {
     ) => ChatViewInjected)(id, instance.actions)
     return { instance, injected }
   }
-  return { runtime, layout, openWorkspacePath, sidebarRight, session, chatFeature, chatViewApi, presentation }
+  return { runtime, layout, openWorkspacePath, sidebarRight, sidebarFeature, mountSidebar, session, chatFeature, chatViewApi, presentation }
 }
 
 describe('Chat inject API', () => {
@@ -211,6 +214,62 @@ describe('Chat inject API', () => {
     expect(b.session.readAttachment).toHaveBeenCalledWith(ATTACHMENT.attachmentId)
     expect(injected.loadImage.peek?.(ATTACHMENT)).toBe(loaded)
     await b.runtime.dispose()
+  })
+
+  it('mounts without a viewer and opens relative, absolute and workspace-free paths through its session Host', async () => {
+    const b = await bench({ sidebar: false })
+    try {
+      const { injected } = b.chatViewApi(ROOT)
+      await injected.openFile('reports/final.html', { line: 12 })
+      await injected.openFile('/outside/final.html')
+      expect(b.openWorkspacePath).toHaveBeenNthCalledWith(1, { path: '/proj/reports/final.html' })
+      expect(b.openWorkspacePath).toHaveBeenNthCalledWith(2, { path: '/outside/final.html' })
+      const loose = 'loose' as SessionId
+      await b.runtime.sessions.add({ id: loose, summary: { title: 'Loose', displayTitle: 'Loose' } })
+      await b.chatViewApi(loose).injected.openFile('result.html')
+      expect(b.openWorkspacePath).toHaveBeenLastCalledWith({ path: 'result.html' })
+      injected.loadOlder()
+      expect(b.session.loadOlder).toHaveBeenCalledOnce()
+      expect(b.sidebarRight.openResource).not.toHaveBeenCalled()
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
+  it('keeps the same Chat mounted across viewer removal and remount', async () => {
+    const b = await bench()
+    try {
+      const entry = b.runtime.slots.entries('conversation.view')[0]
+      const { injected } = b.chatViewApi(ROOT)
+      const position = { anchorKey: 'node-stable', anchorTop: 4, scrollTop: 120 }
+      injected.chatScroll.save(position)
+      await b.sidebarFeature!.dispose()
+      expect(b.runtime.ctx.get('sidebarRight')).toBeUndefined()
+      expect(b.runtime.slots.entries('conversation.view')[0]).toBe(entry)
+      await injected.openFile('without.html')
+      expect(b.openWorkspacePath).toHaveBeenCalledOnce()
+      await b.mountSidebar()
+      expect(b.runtime.slots.entries('conversation.view')[0]).toBe(entry)
+      expect(injected.chatScroll.read()).toEqual(position)
+      await injected.openFile('with.html', { line: 23 })
+      expect(b.sidebarRight.openResource).toHaveBeenLastCalledWith(
+        'dsh-resource://file/session/root-1/with.html', { params: { line: 23 } },
+      )
+      expect(b.openWorkspacePath).toHaveBeenCalledOnce()
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
+  it('surfaces Host file-opening rejection instead of claiming success', async () => {
+    const b = await bench({ sidebar: false })
+    try {
+      b.openWorkspacePath.mockResolvedValueOnce({ ok: false, error: { name: 'RemoteError', code: 'workspace-file/unknown-workspace', message: 'No local opener', details: { address: 'report.html' }, isDSHRemoteError: true } })
+      await expect(b.chatViewApi(ROOT).injected.openFile('report.html')).rejects.toThrow('workspace-file/unknown-workspace: No local opener')
+      expect(b.runtime.slots.entries('conversation.view')).toHaveLength(1)
+    } finally {
+      await b.runtime.dispose()
+    }
   })
 
   it('falls back to bottom-follow for malformed persisted scroll anchors', async () => {

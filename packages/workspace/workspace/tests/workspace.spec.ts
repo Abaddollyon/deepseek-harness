@@ -137,6 +137,7 @@ function selectiveFailureBackend(
 function record(path: string, sessionIds: string[], createdAt = '2026-07-24T00:00:00.000Z'): WorkspaceRecord {
   return {
     path,
+    additionalPaths: [],
     title: basename(path),
     sessionIds: sessionIds.map(SessionId),
     createdAt,
@@ -390,6 +391,36 @@ describe('WorkspaceRegistry create and lookup', () => {
     expect(storedState(pool).workspaceIds).toEqual([second.id, first.id])
     expect(await registry.resolveByPath(alias)).toBe(first)
     expect(await registry.resolveByPath(await makeDir('unowned'))).toBeUndefined()
+  })
+
+  it('canonicalizes, deduplicates, and persists additional workspace roots', async () => {
+    const primary = await makeDir('multi-primary')
+    const extra = await makeDir('multi-extra')
+    const alias = join(base, 'multi-extra-link')
+    await symlink(extra, alias)
+    const { registry, pool } = await harness()
+
+    const workspace = await registry.create(primary, undefined, [alias, extra, primary])
+
+    expect(workspace.path).toBe(primary)
+    expect(workspace.additionalPaths).toEqual([extra])
+    expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([extra])
+  })
+
+  it('updates additional roots atomically and leaves them unchanged on validation failure', async () => {
+    const primary = await makeDir('update-primary')
+    const first = await makeDir('update-first')
+    const second = await makeDir('update-second')
+    const { registry, pool } = await harness()
+    const workspace = await registry.create(primary, undefined, [first])
+
+    await workspace.setAdditionalPaths([second, first])
+    expect(workspace.additionalPaths).toEqual([second, first])
+    expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([second, first])
+
+    await expect(workspace.setAdditionalPaths([join(base, 'missing-additional')])).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(workspace.additionalPaths).toEqual([second, first])
+    expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([second, first])
   })
 
   it('serializes concurrent same-path creates into one entity', async () => {

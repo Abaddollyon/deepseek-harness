@@ -718,7 +718,11 @@ export class AgentLoop extends Service implements AgentFactory {
    * @param meta - optional fresh-session workspace metadata.
    * @returns the published running agent.
    */
-  async create(id: SessionId, options: AgentOptions = {}, meta: Pick<SessionHeader, 'cwd'> = {}): Promise<Agent> {
+  async create(
+    id: SessionId,
+    options: AgentOptions = {},
+    meta: { readonly cwd?: string; readonly additionalPaths?: readonly string[] } = {},
+  ): Promise<Agent> {
     using preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, { meta }))
     const stored = await this.createStoredSession(preparation.session)
     let prepared: PreparedAgent

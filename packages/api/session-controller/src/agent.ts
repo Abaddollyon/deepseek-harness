@@ -9,12 +9,17 @@ import type {
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { ModelSelection } from './types.ts'
+
+function additionalPathsFromEvents(events: readonly SessionEvent[]): readonly string[] {
+  const roots = events.find(event => event.type === 'workspace/roots')
+  return roots?.type === 'workspace/roots' ? roots.data.additionalPaths : []
+}
 
 /** Cold Session identity absent from persistence. */
 export class ApiSessionNotFound extends Error {}
@@ -43,6 +48,21 @@ export class ApiSessionCwdConflict extends Error {
 }
 
 /** Explicit-id creation attempted to adopt a Session under another preset. */
+/** Explicit-id creation attempted to adopt a Session under another root snapshot. */
+export class ApiSessionWorkspaceConflict extends Error {
+  constructor(
+    readonly sessionId: SessionId,
+    readonly requestedPaths: readonly string[],
+    readonly existingPaths: readonly string[] | undefined,
+  ) {
+    super(
+      existingPaths === undefined
+        ? `session "${sessionId}" records no additional roots and cannot be adopted with additional roots`
+        : `session "${sessionId}" has a different additional-root snapshot`,
+    )
+  }
+}
+
 export class ApiSessionPresetConflict extends Error {
   constructor(
     readonly sessionId: SessionId,
@@ -234,10 +254,11 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId?: string,
+    additionalPaths: readonly string[] = [],
   ): Promise<Agent> {
     let creation = this.creations.get(sessionId)
     if (creation === undefined) {
-      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId)
+      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId, additionalPaths)
         .catch((error: unknown) => {
           const live = this.ctx.agents.get(sessionId)
           if (live !== undefined) {
@@ -264,6 +285,9 @@ export class ApiSessionAgentController {
     }
     if (agent.session.header.cwd !== cwd) {
       throw new ApiSessionCwdConflict(sessionId, cwd, agent.session.header.cwd)
+    }
+    if (!samePaths(agent.session.additionalPaths, additionalPaths)) {
+      throw new ApiSessionWorkspaceConflict(sessionId, additionalPaths, agent.session.additionalPaths)
     }
     return agent
   }
@@ -439,6 +463,7 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId: string | undefined,
+    additionalPaths: readonly string[],
   ): Promise<Agent> {
     const attached = this.ctx.sessions.get(sessionId)
     const live = this.ctx.agents.get(sessionId)
@@ -455,6 +480,9 @@ export class ApiSessionAgentController {
         }
         if (observation.header.cwd !== cwd) {
           throw new ApiSessionCwdConflict(sessionId, cwd, observation.header.cwd)
+        }
+        if (!samePaths(additionalPathsFromEvents(observation.events), additionalPaths)) {
+          throw new ApiSessionWorkspaceConflict(sessionId, additionalPaths, additionalPathsFromEvents(observation.events))
         }
         const storedPreset = this.presetForObservation(observation)
         this.assertPresetUnchanged(sessionId, presetId, storedPreset)
@@ -481,6 +509,7 @@ export class ApiSessionAgentController {
       agentOptions: this.agentOptions(),
       meta: {
         cwd,
+        ...(additionalPaths.length === 0 ? {} : { additionalPaths: [...additionalPaths] }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
@@ -516,6 +545,10 @@ export class ApiSessionAgentController {
     if (requested === undefined || requested === existing) return
     throw new ApiSessionPresetConflict(sessionId, requested, existing)
   }
+}
+
+function samePaths(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  return (left ?? []).length === right.length && (left ?? []).every((value, index) => value === right[index])
 }
 
 function agentModelSelection(selection: ModelSelection): AgentModelSelection {

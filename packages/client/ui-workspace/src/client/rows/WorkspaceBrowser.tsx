@@ -26,6 +26,7 @@ import {
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
 import { FLAT_SESSION_ORDER_KEY } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
+import { WorkspaceFoldersDialog } from '../WorkspaceFoldersDialog.tsx'
 import css from './WorkspaceBrowser.module.css'
 
 /**
@@ -257,6 +258,8 @@ type SessionTreeProps = Pick<
   togglePinnedSession: (sessionId: SessionNode['id']) => void
   /** Open the browser-owned rename dialog for a real Workspace group. */
   onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
+  /** Open the folder editor without changing an existing Session. */
+  onFoldersRequest: (workspaceId: WorkspaceId) => void
   /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
   onDeleteRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the browser-owned session rename dialog. */
@@ -327,7 +330,8 @@ function PinnedSessionSection({
 function SessionTree({
   useSessions, startSession, createLooseSession, open, forkSession, workspaces, archivedSessionIds, showEmpty,
   pinnedSessionIds, togglePinnedSession,
-  onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
+  onRenameRequest,
+  onFoldersRequest, onDeleteRequest, onSessionRename, onSessionArchive,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, pendingInteractions, home, t,
@@ -347,13 +351,6 @@ function SessionTree({
   const previousOrderBy = useRef(orderBy)
   const nativeDragActive = drag !== null || workspaceDrag !== null
   useNativeDragAcceptance(nativeDragActive)
-  const currentGroup = current === undefined || !workspaceReady
-    ? undefined
-    : owningGroupKey(workspaces, current)
-  useEffect(() => {
-    if (current === undefined || currentGroup === undefined || Object.hasOwn(groupExpansion, currentGroup)) return
-    setGroupExpanded(currentGroup, true)
-  }, [current, currentGroup, setGroupExpanded, groupExpansion])
   const expandedGroups = useMemo(
     () => Object.entries(groupExpansion).filter(([, expanded]) => expanded).map(([key]) => key),
     [groupExpansion],
@@ -580,6 +577,7 @@ function SessionTree({
                   ? undefined
                   : {
                     rename: () => { onRenameRequest(workspaceId, group.label) },
+                    folders: () => { onFoldersRequest(workspaceId) },
                     delete: () => { onDeleteRequest(workspaceId, group.label) },
                   }}
               />
@@ -927,11 +925,22 @@ interface CurrentGroupReveal {
  * so the stored fold bit and the rendered state remain one fact.
  * @param reveal - the current navigation and the group to open, or null while nothing is
  * selected or the Workspace baseline cannot yet say which group renders it.
+ * @param ready - both initial catalogs have settled, so restoration is distinguishable from navigation.
  * @param expand - persists one group's expansion.
  */
-function useCurrentGroupReveal(reveal: CurrentGroupReveal | null, expand: (key: string, expanded: boolean) => void): void {
+function useCurrentGroupReveal(reveal: CurrentGroupReveal | null, ready: boolean, expand: (key: string, expanded: boolean) => void): void {
   const answered = useRef<string | null>(null)
+  const initialized = useRef(false)
   useEffect(() => {
+    if (!ready) return
+    if (!initialized.current) {
+      initialized.current = true
+      answered.current = reveal?.navigation ?? null
+      // Restoring selection is not a user request to unfold a Workspace.
+      // Chats stays accessible, and explicit saved expansion is untouched.
+      if (reveal?.foldedKey === UNGROUPED_KEY) expand(UNGROUPED_KEY, true)
+      return
+    }
     if (reveal === null) {
       answered.current = null
       return
@@ -939,7 +948,7 @@ function useCurrentGroupReveal(reveal: CurrentGroupReveal | null, expand: (key: 
     if (reveal.navigation === answered.current) return
     answered.current = reveal.navigation
     if (reveal.foldedKey !== null) expand(reveal.foldedKey, true)
-  }, [reveal, expand])
+  }, [reveal, ready, expand])
 }
 
 /**
@@ -960,6 +969,7 @@ export function WorkspaceBrowser({
   renameSession,
   forkSession,
   renameWorkspace,
+  updateWorkspacePaths,
   deleteWorkspace,
   insertWorkspaceBefore,
   archiveSession,
@@ -1045,7 +1055,8 @@ export function WorkspaceBrowser({
     const key = owningGroupKey(workspaces, currentSessionId)
     return { navigation: `${currentSessionId}\u0000${key}`, foldedKey: groupExpansion[key] === true ? null : key }
   }, [currentSessionId, groupExpansion, workspacePhase, workspaces])
-  useCurrentGroupReveal(reveal, actions.setGroupExpanded)
+  const sessionsReady = useSessions(state => state.phase === 'ready')
+  useCurrentGroupReveal(reveal, sessionsReady && workspacePhase === 'ready', actions.setGroupExpanded)
   // The query outlives the tree and the input (both wide-only) so collapsing
   // does not silently drop an in-progress filter.
   const query = useSidebarQuery(value => value)
@@ -1158,6 +1169,7 @@ export function WorkspaceBrowser({
   }, [normalizedQuery, searchSessions, underlyingHidden, ready])
 
   // Rename dialog (browser-owned so it outlives row unmounts during collapse).
+  const [foldersTarget, setFoldersTarget] = useState<WorkspaceView | null>(null)
   const [renameTarget, setRenameTarget] = useState<{ workspaceId: WorkspaceId; currentTitle: string } | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renaming, setRenaming] = useState(false)
@@ -1358,7 +1370,7 @@ export function WorkspaceBrowser({
           )}
         </div>
         {/* Add flow + its error dialog (same package — direct composition). */}
-        <WorkspacePickFlow
+        {foldersTarget === null && <WorkspacePickFlow
           t={t}
           open={wsPickerOpen}
           anchorRef={wsPlusRef}
@@ -1373,7 +1385,7 @@ export function WorkspaceBrowser({
             startSession(workspaceId)
           }}
           onClose={() => { setWsPickerOpen(false) }}
-        />
+        />}
       </div>
 
       {/* The collapsed rail keeps search as its own 36px control. */}
@@ -1487,6 +1499,10 @@ export function WorkspaceBrowser({
                   orderBy={orderBy}
                   home={home}
                   t={t}
+                  onFoldersRequest={(workspaceId) => {
+                    setWsPickerOpen(false)
+                    setFoldersTarget(workspaces.find(workspace => workspace.workspaceId === workspaceId) ?? null)
+                  }}
                   onRenameRequest={(workspaceId, currentTitle) => {
                     setRenameTarget({ workspaceId, currentTitle })
                     setRenameDraft(currentTitle)
@@ -1502,6 +1518,16 @@ export function WorkspaceBrowser({
         {renderSlot('sidebar.workspaces.content.overlay', { wide, expandSidebar, setUnderlyingHidden })}
       </div>
 
+      {foldersTarget !== null && <WorkspaceFoldersDialog
+        key={foldersTarget.workspaceId}
+        path={foldersTarget.path}
+        additionalPaths={foldersTarget.additionalPaths}
+        flowAvailable={directoryFlowAvailable}
+        renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
+        onSave={async (paths) => { await updateWorkspacePaths(foldersTarget.workspaceId, paths) }}
+        onClose={() => { setFoldersTarget(null) }}
+        t={t}
+      />}
       <Modal
         open={renameTarget !== null}
         onClose={closeRename}

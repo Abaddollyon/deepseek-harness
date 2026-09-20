@@ -8,7 +8,9 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use this package to render a browser chat from recorded Session conversations, including historical images, localized actions, and restored scroll position. Compact display folds completed-turn process rows while keeping the final answer and independently useful context visible; packed historical Assistant runs remain collapsed. Local transcript and steering submissions appear immediately, remain in their original surface, and disappear atomically when authoritative Session records arrive, while queued submissions stay outside Chat. The package does not assemble or modify model requests.
+Use this package to render browser Chat from recorded Session conversations, with historical images, localized actions, restored scroll position, compact process folding, and immediate local transcript updates. Authoritative Session records reconcile those optimistic rows; queued submissions stay outside Chat. The package does not assemble or modify model requests.
+
+The right Sidebar is optional. File-open gestures use the mounted viewer when available; otherwise they call Host `session.openWorkspacePath`. Relative paths use the Session cwd, absolute paths stay unchanged, and workspace-free Sessions delegate relative paths to Host. Viewer removal does not remount Chat or reset scroll state.
 
 ## Table of Contents
 

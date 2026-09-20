@@ -22,7 +22,7 @@ async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'dange
   return ctx
 }
 
-function session(id: string, cwd?: string): Session {
+function session(id: string, cwd?: string, additionalPaths?: readonly string[]): Session {
   const sessionId = SessionId(id)
   return Session.create(sessionId, undefined, {
     version: SESSION_FORMAT_VERSION,
@@ -30,7 +30,7 @@ function session(id: string, cwd?: string): Session {
     createdAt: 0,
     isSeeded: false,
     ...cwd === undefined ? {} : { cwd },
-  })
+  }, undefined, additionalPaths)
 }
 
 function agentFor(activeSession: Session): Agent {
@@ -110,6 +110,17 @@ describe('SandboxPolicyService', () => {
     }
   })
 
+  it('resolves session additional roots and renders them in the policy context', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/fallback' })
+    const active = session('sess-roots', '/projects/primary', ['/projects/side', '/projects/docs'])
+    expect(ctx.sandboxPolicy.resolve({ session: active })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: resolve('/projects/primary'),
+      additionalRoots: [resolve('/projects/side'), resolve('/projects/docs')],
+      sessionId: 'sess-roots',
+    })
+  })
+
   it('lets an approved mode outrank the session mode while retaining its root', async () => {
     const ctx = await mounted({ workspaceRoot: '/fallback' })
     const active = session('sess-approved', '/projects/approved')
@@ -167,6 +178,12 @@ describe('sandbox:policy request context', () => {
     } as const
 
     expect(await policyContext(ctx, session(`sess-${mode}`, '/projects/../projects/current'))).toBe(expected[mode])
+  })
+
+  it('renders all session workspace roots in the model-visible policy context', async () => {
+    const ctx = await promptMounted({ mode: 'workspace-write' })
+    await expect(policyContext(ctx, session('sess-prompt-roots', '/projects/primary', ['/projects/side', '/projects/docs'])))
+      .resolves.toContain(JSON.stringify([resolve('/projects/primary'), resolve('/projects/side'), resolve('/projects/docs')]))
   })
 
   it('keeps the complete rendered prompt byte-stable across TMPDIR changes', async () => {

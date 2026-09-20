@@ -8,7 +8,9 @@ kind: "package-reference"
 
 ## 概述
 
-使用本包可在浏览器中渲染已记录的 Session 对话，包括历史图片、本地化操作和滚动位置恢复。紧凑显示会收起已完成轮次的过程行，同时保持最终答案和独立有用的上下文可见；已打包的历史 Assistant 连续消息保持收起。本地 transcript 与 steering 提交会立即显示并保留在原区域，在权威 Session 记录到达时原子地消失，而 queued 提交始终不进入 Chat。本包不组装或修改模型请求。
+使用本包可在浏览器中渲染已记录的 Session Chat，支持历史图片、本地化操作、滚动位置恢复、紧凑过程折叠和即时 transcript 更新。权威 Session 记录会协调这些乐观行，queued 提交不会进入 Chat。本包不组装或修改模型请求。
+
+右侧 Sidebar 是可选的。打开文件时优先使用已挂载的查看器，否则调用 Host `session.openWorkspacePath`。相对路径以 Session cwd 为基准，绝对路径保持不变；无工作区 Session 会把相对路径交给 Host。移除查看器不会重新挂载 Chat 或重置滚动状态。
 
 ## 目录
 

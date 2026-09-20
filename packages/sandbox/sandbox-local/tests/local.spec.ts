@@ -23,6 +23,7 @@ import { bwrapProfileArgs, landlockProfileArgs, seatbeltProfileArgs } from '../s
 
 const RO: SandboxPolicy = { mode: 'read-only', workspaceRoot: '/ws' }
 const WW: SandboxPolicy = { mode: 'workspace-write', workspaceRoot: '/ws' }
+const WW_MULTI: SandboxPolicy = { mode: 'workspace-write', workspaceRoot: '/ws', additionalRoots: ['/side', '/docs'] }
 
 /** Every temp dir created by this file (fake launchers and runner entries), removed after each test. */
 const tempDirs: string[] = []
@@ -81,6 +82,14 @@ describe('profile dialects', () => {
       '--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--die-with-parent',
       '--tmpfs', '/tmp', '--bind', '/ws', '/ws',
     ])
+  })
+
+  it('bwrap workspace-write binds every workspace root', () => {
+    expect(bwrapProfileArgs(WW_MULTI).slice(-6)).toEqual(['--bind', '/side', '/side', '--bind', '/docs', '/docs'])
+  })
+
+  it('landlock workspace-write grants every workspace root', () => {
+    expect(landlockProfileArgs(WW_MULTI)).toEqual(['--ro', '/', '--rw', '/dev/null', '--rw', '/tmp', '--rw', '/ws', '--rw', '/side', '--rw', '/docs'])
   })
 
   it('landlock read-only: readable tree plus a writable /dev/null, nothing else', () => {

@@ -25,6 +25,7 @@ import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import {
   ApiSessionAgentController,
   ApiSessionCwdConflict,
+  ApiSessionWorkspaceConflict,
   ApiSessionNotFound,
   ApiSessionPresetConflict,
   ApiSessionSubagentOwnership,
@@ -32,6 +33,11 @@ import {
   hasApiSessionSubagentOwner,
   inspectApiSession,
 } from './agent.ts'
+function additionalPathsFromEvents(events: readonly SessionEvent[]): readonly string[] {
+  const roots = events.find(event => event.type === 'workspace/roots')
+  return roots?.type === 'workspace/roots' ? roots.data.additionalPaths : []
+}
+
 import type {
   SessionAttachmentRequest,
   SessionAttachmentValue,
@@ -101,12 +107,11 @@ export class SessionCommandController {
     const cwd = workspace?.path ?? request.cwd ?? this.defaultCwd
     let adopted: Agent
     try {
-      adopted = await this.agents.ensureSession(
-        sessionId,
-        cwd,
-        request.sessionId !== undefined,
-        request.agentPreset,
-      )
+      adopted = workspace === undefined || workspace.additionalPaths.length === 0
+        ? await this.agents.ensureSession(sessionId, cwd, request.sessionId !== undefined, request.agentPreset)
+        : await this.agents.ensureSession(
+          sessionId, cwd, request.sessionId !== undefined, request.agentPreset, workspace.additionalPaths,
+        )
     } catch (error) {
       this.rejectCreation(sessionId, error)
     }
@@ -264,6 +269,9 @@ export class SessionCommandController {
         inheritedEventCount: cut,
         meta: {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
+          ...(additionalPathsFromEvents(source.events).length === 0
+            ? {}
+            : { additionalPaths: [...additionalPathsFromEvents(source.events)] }),
           parentSession: source.header.id,
           isSeeded: true,
           ...(composition.agentPreset === undefined
@@ -530,6 +538,13 @@ export class SessionCommandController {
         sessionId: error.sessionId,
         requestedCwd: error.requestedCwd,
         ...(error.existingCwd === undefined ? {} : { existingCwd: error.existingCwd }),
+      })
+    }
+    if (error instanceof ApiSessionWorkspaceConflict) {
+      throw new RemoteError('session/conflict', error.message, {
+        sessionId: error.sessionId,
+        requestedCwd: '',
+        ...(error.existingPaths === undefined ? {} : { existingCwd: error.existingPaths[0] }),
       })
     }
     if (error instanceof ApiSessionSubagentOwnership) {

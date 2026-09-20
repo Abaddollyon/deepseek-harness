@@ -13,6 +13,7 @@ import type {
   WorkspaceDeleteValue,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
   WorkspaceId,
   WorkspaceView,
@@ -101,6 +102,22 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
   async rename(workspaceId: WorkspaceId, title: string): Promise<RemoteResult<WorkspaceValue>> {
     const frameGeneration = this.viewFrameGeneration
     const result = await this.remote.rename({ workspaceId, title })
+    if (result.ok && frameGeneration === this.viewFrameGeneration) this.upsert(result.value.workspace)
+    return result
+  }
+
+  /**
+   * Replace a Workspace's additional roots and merge the returned row.
+   * @param workspaceId - target Workspace.
+   * @param additionalPaths - requested additional roots.
+   * @returns generated Remote result.
+   */
+  async updatePaths(
+    workspaceId: WorkspaceUpdatePathsRequest['workspaceId'],
+    additionalPaths: WorkspaceUpdatePathsRequest['additionalPaths'],
+  ): Promise<RemoteResult<WorkspaceValue>> {
+    const frameGeneration = this.viewFrameGeneration
+    const result = await this.remote.updatePaths({ workspaceId, additionalPaths })
     if (result.ok && frameGeneration === this.viewFrameGeneration) this.upsert(result.value.workspace)
     return result
   }

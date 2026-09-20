@@ -31,6 +31,7 @@ import type {
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceId,
   WorkspaceValue,
   WorkspaceView,
@@ -84,6 +85,7 @@ const baseline = (id?: string): Extract<WorkspaceFollowFrame, { type: 'baseline'
     items: id === undefined ? [] : [{
       workspaceId: id as never,
       path: `/work/${id}`,
+      additionalPaths: [],
       title: id,
       sessionIds: [],
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -100,6 +102,7 @@ function workspace(id: string, overrides: Partial<WorkspaceView> = {}): Workspac
   return {
     workspaceId: wid(id),
     path: `/work/${id}`,
+    additionalPaths: [],
     title: id,
     sessionIds: [],
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -135,6 +138,10 @@ class ScriptedWorkspaceRemote implements WorkspaceRemote {
   constructor(private readonly generations: readonly Generation[]) {}
 
   create(_request: WorkspaceCreateRequest): Promise<RemoteResult<WorkspaceCreateValue>> {
+    throw new Error('unused')
+  }
+
+  updatePaths(_request: WorkspaceUpdatePathsRequest): Promise<RemoteResult<WorkspaceValue>> {
     throw new Error('unused')
   }
 
@@ -178,6 +185,10 @@ class CommandWorkspaceRemote implements WorkspaceRemote {
   readonly create = vi.fn<WorkspaceRemote['create']>(request => Promise.resolve(remoteOk({
     workspace: workspace('created', { path: request.path }),
     created: true,
+  })))
+
+  readonly updatePaths = vi.fn<WorkspaceRemote['updatePaths']>(request => Promise.resolve(remoteOk({
+    workspace: workspace(String(request.workspaceId), { additionalPaths: [...request.additionalPaths] }),
   })))
 
   readonly rename = vi.fn<WorkspaceRemote['rename']>(request => Promise.resolve(remoteOk({

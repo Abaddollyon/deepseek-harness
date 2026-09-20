@@ -1195,3 +1195,16 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```
 
 来源：[`packages/web/web-search-deepseek/src/provider.ts:83`](../packages/web/web-search-deepseek/src/provider.ts)
+
+### `workspace/*`
+
+<a id="workspaceroots--log-only"></a>
+
+#### `workspace/roots` — log-only
+
+```ts persistence-catalog
+/** Immutable additional workspace roots, recorded only at seq 0 before publication. */
+'workspace/roots': { readonly additionalPaths: readonly string[] }
+```
+
+来源：[`packages/core/session/src/types.ts:273`](../packages/core/session/src/types.ts)

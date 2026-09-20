@@ -99,6 +99,32 @@ describe('WorkspaceController commands', () => {
     })
   })
 
+  it('creates and updates canonical additional roots atomically', async () => {
+    const { controller, root } = await harness()
+    const primary = stageDir(root, 'multi-primary')
+    const first = stageDir(root, 'multi-first')
+    const second = stageDir(root, 'multi-second')
+    const created = await controller.create({ path: primary, additionalPaths: [first, first] })
+    expect(created.workspace.additionalPaths).toEqual([first])
+
+    await expect(controller.updatePaths({
+      workspaceId: created.workspace.workspaceId,
+      additionalPaths: [second, first],
+    })).resolves.toMatchObject({ workspace: { additionalPaths: [second, first] } })
+    await expect(controller.updatePaths({
+      workspaceId: created.workspace.workspaceId,
+      additionalPaths: [join(root, 'missing-additional')],
+    })).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(controller.create({
+      path: primary,
+      additionalPaths: [join(root, 'missing-idempotent')],
+    })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
+    await expect(controller.create({ path: primary })).resolves.toMatchObject({
+      created: false,
+      workspace: { additionalPaths: [second, first] },
+    })
+  })
+
   it('maps invalid paths, blank names, conflicts, and unknown ids to stable failures', async () => {
     const { controller, root } = await harness()
     const first = await controller.create({ path: stageDir(root, 'first') })

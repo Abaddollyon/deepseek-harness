@@ -54,7 +54,8 @@ kind: "package-reference"
 
 ```text
 // Host consumer code, after the composition above is loaded:
-const project = await ctx.workspaceRegistry.create('/path/to/dir', 'My Project')
+const project = await ctx.workspaceRegistry.create('/path/to/dir', 'My Project', ['/path/to/shared-lib'])
+await project.setAdditionalPaths(['/path/to/shared-lib', '/path/to/docs'])
 await project.setTitle('Renamed')
 ctx.workspaceRegistry.list() // shows the project, newest first
 ```
