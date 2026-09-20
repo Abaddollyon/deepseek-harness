@@ -70,11 +70,12 @@ describe('Session creation failures', () => {
 
   it('passes workspace additional roots to session adoption', async () => {
     const ctx = await baseContext()
+    const attachSession = vi.fn(() => Promise.resolve())
     const workspace = {
       id: 'workspace-roots' as WorkspaceId,
       path: '/workspace',
       additionalPaths: ['/shared'],
-      attachSession: vi.fn(() => Promise.resolve()),
+      attachSession,
     } as unknown as Workspace
     ctx.provide('workspaceRegistry', { get: () => workspace, list: () => [workspace] } as never)
     const ensureSession = vi.fn(async (
@@ -91,7 +92,7 @@ describe('Session creation failures', () => {
     const created = await controller.create({ workspaceId: workspace.id })
     expect(created.sessionId).toMatch(/^session-/)
     expect(ensureSession).toHaveBeenCalledWith(created.sessionId, '/workspace', false, undefined, ['/shared'])
-    expect(workspace.attachSession).toHaveBeenCalledWith(created.sessionId)
+    expect(attachSession).toHaveBeenCalledWith(created.sessionId)
     await ctx.fiber.dispose()
   })
 

@@ -335,9 +335,8 @@ describe('ApiSession create or adoption', () => {
     })
 
     await expect(agents.ensureSession(id, cwd, false, undefined, ['/shared'])).resolves.toBe(created)
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({
-      meta: expect.objectContaining({ cwd, additionalPaths: ['/shared'] }),
-    }))
+    expect(create).toHaveBeenCalledOnce()
+    expect(create.mock.calls[0]?.[0].meta).toMatchObject({ cwd, additionalPaths: ['/shared'] })
   })
 
   it('shares one in-flight creation between concurrent callers', async () => {
