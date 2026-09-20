@@ -12,7 +12,7 @@ The terminal buffer appended each callback to one retained string, split it for 
 
 Adapt upstream `cea837e06525384855e3b8b8231c2400bc3cb85b` in the private buffer of [session.ts](../../../../packages/terminal/terminal-bash/src/session.ts), without migrating terminal ownership, sandboxing, or the sidebar. Track byte/newline totals over linked string chunks, coalesce small callbacks up to 4096 UTF-16 units, seal chunks without replacing lone surrogates, and copy an evicted prefix only after half its backing string is discarded. Pair adjacent surrogate halves consistently across chunks. Snapshot and consume still assemble retained text; consume resets its truncation latch and counters.
 
-## Alternatives rejected
+## Alternatives considered
 
 - Keep rescanning the retained string: bounded memory does not bound cumulative append work.
 - One node per callback: tiny writes would make metadata scale with callback count.
