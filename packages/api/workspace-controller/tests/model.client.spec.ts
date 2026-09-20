@@ -349,10 +349,9 @@ describe('ClientWorkspaceModel', () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
     baseline(model)
-    remote.onCreate = () => Promise.resolve(workspaceError(
-      new RemoteError('workspace/rejected', 'denied', {}),
-    ))
-    await expect(model.create({ path: '/denied' })).resolves.toMatchObject({ ok: false })
+    const error = new RemoteError('gateway/internal', 'denied', {})
+    remote.onCreate = () => Promise.resolve(workspaceError(error))
+    await expect(model.create({ path: '/denied' })).resolves.toEqual({ ok: false, error })
     expect(model.getSnapshot().items).toEqual([])
   })
 

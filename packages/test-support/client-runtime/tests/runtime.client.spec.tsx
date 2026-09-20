@@ -482,7 +482,7 @@ describe('workspaces action face', () => {
     expect(registered.path).toBe('/tmp/beta')
     const renamed = await ws.rename('w1' as WorkspaceId, 'Renamed')
     expect(renamed.title).toBe('Renamed')
-    await ws.update((draft) => { draft.items.push({ workspaceId: 'w1', title: 'Renamed', path: '/Renamed', sessionIds: [] } as never) })
+    await ws.update((draft) => { draft.items = [...draft.items, { ...renamed, workspaceId: 'w1' as WorkspaceId }] })
     const paths = await ws.updatePaths('w1' as WorkspaceId, ['/side'])
     expect(paths.additionalPaths).toEqual(['/side'])
     await expect(ws.updatePaths('missing' as WorkspaceId, [])).rejects.toThrow('unknown workspace fixture')

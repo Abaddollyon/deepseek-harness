@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import { WorkspaceController } from '../src/client/service.ts'
 import type { WorkspaceView } from '../src/types.ts'
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 
 const view: WorkspaceView = {
   workspaceId: 'w1' as never,
@@ -16,7 +16,7 @@ const view: WorkspaceView = {
 const ok = <T>(value: T): RemoteResult<T> => ({ ok: true, value })
 const failure = (operation: string): RemoteResult<never> => ({
   ok: false,
-  error: { code: 'workspace/rejected', message: operation + ' denied', details: {} },
+  error: new RemoteError('gateway/internal', operation + ' denied', {}),
 })
 const recovery = { retry: vi.fn(), snapshot: { getSnapshot: () => ({}), subscribe: () => () => {} } }
 
