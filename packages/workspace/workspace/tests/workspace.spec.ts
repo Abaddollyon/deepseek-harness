@@ -390,6 +390,8 @@ describe('WorkspaceRegistry create and lookup', () => {
     expect(registry.list()).toEqual([second, first])
     expect(storedState(pool).workspaceIds).toEqual([second.id, first.id])
     expect(await registry.resolveByPath(alias)).toBe(first)
+    await expect(registry.create(firstDir, 'Ignored', [])).resolves.toBe(first)
+    await expect(registry.create(firstDir, 'Ignored', [await makeDir('different-extra')])).rejects.toThrow(/different additional paths/)
     expect(await registry.resolveByPath(await makeDir('unowned'))).toBeUndefined()
   })
 
@@ -404,6 +406,7 @@ describe('WorkspaceRegistry create and lookup', () => {
 
     expect(workspace.path).toBe(primary)
     expect(workspace.additionalPaths).toEqual([extra])
+    await expect(registry.create(primary, undefined, [extra])).resolves.toBe(workspace)
     expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([extra])
   })
 
@@ -411,14 +414,18 @@ describe('WorkspaceRegistry create and lookup', () => {
     const primary = await makeDir('update-primary')
     const first = await makeDir('update-first')
     const second = await makeDir('update-second')
+    const file = join(base, 'update-file')
+    await writeFile(file, 'file')
     const { registry, pool } = await harness()
     const workspace = await registry.create(primary, undefined, [first])
 
+    await workspace.setAdditionalPaths([second, first])
     await workspace.setAdditionalPaths([second, first])
     expect(workspace.additionalPaths).toEqual([second, first])
     expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([second, first])
 
     await expect(workspace.setAdditionalPaths([join(base, 'missing-additional')])).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(workspace.setAdditionalPaths([file])).rejects.toThrow(/not a directory/)
     expect(workspace.additionalPaths).toEqual([second, first])
     expect(storedRecord(pool, workspace.id).additionalPaths).toEqual([second, first])
   })

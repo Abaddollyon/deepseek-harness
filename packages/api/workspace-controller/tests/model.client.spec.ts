@@ -345,6 +345,25 @@ describe('ClientWorkspaceModel', () => {
     expect(model.getSnapshot().items[0]?.additionalPaths).toEqual(['/new'])
   })
 
+  it('returns a rejected create without adding a phantom row', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model)
+    remote.onCreate = () => Promise.resolve(workspaceError(
+      new RemoteError('workspace/rejected', 'denied', {}),
+    ))
+    await expect(model.create({ path: '/denied' })).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot().items).toEqual([])
+  })
+
+  it('merges a successful update-paths echo when no stream frame supersedes it', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [workspace('one')])
+    await expect(model.updatePaths(wid('one'), ['/side'])).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().items[0]?.additionalPaths).toEqual(['/side'])
+  })
+
   it('keeps a streamed row when a stale unary echo has the same timestamp', async () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
