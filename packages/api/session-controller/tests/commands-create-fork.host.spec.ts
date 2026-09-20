@@ -68,6 +68,33 @@ describe('Session creation failures', () => {
     await ctx.fiber.dispose()
   })
 
+  it('passes workspace additional roots to session adoption', async () => {
+    const ctx = await baseContext()
+    const workspace = {
+      id: 'workspace-roots' as WorkspaceId,
+      path: '/workspace',
+      additionalPaths: ['/shared'],
+      attachSession: vi.fn(() => Promise.resolve()),
+    } as unknown as Workspace
+    ctx.provide('workspaceRegistry', { get: () => workspace, list: () => [workspace] } as never)
+    const ensureSession = vi.fn(async (
+      sessionId: SessionId, cwd: string, _resume: boolean, _preset: string | undefined,
+      additionalPaths?: readonly string[],
+    ) => {
+      const session = ctx.sessions.create(sessionId, {
+        meta: { cwd, ...(additionalPaths === undefined ? {} : { additionalPaths }) },
+      })
+      return { id: sessionId, session } as Agent
+    })
+    const controller = new SessionCommandController(ctx, controllerAgents({ ensureSession }), '/default')
+
+    const created = await controller.create({ workspaceId: workspace.id })
+    expect(created.sessionId).toMatch(/^session-/)
+    expect(ensureSession).toHaveBeenCalledWith(created.sessionId, '/workspace', false, undefined, ['/shared'])
+    expect(workspace.attachSession).toHaveBeenCalledWith(created.sessionId)
+    await ctx.fiber.dispose()
+  })
+
   it('maps missing Workspaces and attachment failures', async () => {
     const missing = await baseContext()
     missing.provide('workspaceRegistry', { get: () => undefined, list: () => [] } as never)
@@ -126,6 +153,10 @@ describe('Session creation failures', () => {
       code: 'session/workspace-conflict',
     },
     {
+      error: new ApiSessionWorkspaceConflict(SessionId('missing-roots'), ['/new'], undefined),
+      code: 'session/workspace-conflict',
+    },
+    {
       error: new Error('factory unavailable'),
       code: 'gateway/internal',
     },
@@ -162,9 +193,10 @@ function completedSession(
   id: string,
   cwd?: string,
   lineage: { parentSession?: SessionId; origin?: 'subagent' } = {},
+  additionalPaths: readonly string[] = [],
 ) {
   const session = ctx.sessions.create(SessionId(id), {
-    meta: { ...(cwd === undefined ? {} : { cwd }), ...lineage },
+    meta: { ...(cwd === undefined ? {} : { cwd }), ...lineage, ...(additionalPaths.length === 0 ? {} : { additionalPaths }) },
   })
   session.append('turn/start', { turn: 1 })
   session.append('user/message', createUserMessage({
@@ -267,6 +299,22 @@ describe('Session fork failures', () => {
     if (options === undefined) throw new Error('Agent creation was not attempted')
     expect(options.meta).not.toHaveProperty('cwd')
     expect(options.meta).not.toHaveProperty('agentPreset')
+    await ctx.fiber.dispose()
+  })
+
+  it('carries immutable additional roots into a forked child', async () => {
+    const ctx = await baseContext()
+    ctx.provide('workspaceRegistry', { list: () => [] } as never)
+    const source = completedSession(ctx, 'roots-source', '/workspace', {}, ['/shared'])
+    const create = vi.spyOn(ctx.agents, 'create').mockImplementation(
+      (options: CreateAgentOptions) => Promise.resolve(resolvedHandle(ctx, options.sessionId)),
+    )
+    const controller = new SessionCommandController(ctx, controllerAgents(), '/default')
+
+    await controller.fork({ sessionId: source.id })
+    const options = create.mock.calls[0]?.[0]
+    if (options === undefined) throw new Error('Agent creation was not attempted')
+    expect(options.meta?.additionalPaths).toEqual(['/shared'])
     await ctx.fiber.dispose()
   })
 

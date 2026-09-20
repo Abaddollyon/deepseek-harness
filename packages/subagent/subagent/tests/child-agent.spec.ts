@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { resolveChildAgentOptions } from '../src/child-agent.ts'
+import { childSessionMeta, resolveChildAgentOptions } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
   const id = SessionId('parent')
@@ -19,6 +19,18 @@ function parentAgent(): Agent {
 }
 
 describe('child Agent options', () => {
+  it('inherits additional workspace roots in child metadata', () => {
+    const base = parentAgent()
+    const session = Session.create(base.id, undefined, undefined, undefined, ['/shared'])
+    const parent = { ...base, session, ctx: { get: () => undefined } } as Agent
+    expect(childSessionMeta(parent, 2, true)).toMatchObject({
+      additionalPaths: ['/shared'],
+      parentSession: base.id,
+      isSeeded: true,
+      delegationDepth: 2,
+    })
+  })
+
   it('inherits the parent effort while the exact route is unchanged', () => {
     expect(resolveChildAgentOptions(parentAgent(), undefined, 1)).toEqual({
       provider: 'parent-provider',

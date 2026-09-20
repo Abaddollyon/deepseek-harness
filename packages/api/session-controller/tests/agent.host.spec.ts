@@ -81,6 +81,8 @@ describe('ApiSession identity failures', () => {
       .toContain('records no cwd')
     expect(new ApiSessionCwdConflict(SessionId('wrong-cwd'), '/wanted', '/existing').message)
       .toContain('belongs to "/existing"')
+    expect(new ApiSessionWorkspaceConflict(SessionId('missing-roots'), ['/wanted'], undefined).message)
+      .toContain('records no additional roots')
   })
 
   it('maps absent and cwd-less point observations to not found', async () => {
@@ -319,6 +321,23 @@ describe('ApiSession create or adoption', () => {
       .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
     expect(resume).not.toHaveBeenCalled()
     expect(cold.ctx.agents.get(meta.id)).toBeUndefined()
+  })
+
+  it('copies non-empty additional roots into a newly created Agent', async () => {
+    const { ctx, agents } = await harness()
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-roots-'))
+    tempDirs.push(cwd)
+    const id = SessionId('created-roots')
+    const meta = { ...header('created-roots', cwd), additionalPaths: ['/shared'] } as SessionHeader
+    const created = agent(ctx, meta)
+    const create = vi.spyOn(ctx.agents, 'create').mockResolvedValue({
+      agent: created, dispose: () => Promise.resolve(),
+    })
+
+    await expect(agents.ensureSession(id, cwd, false, undefined, ['/shared'])).resolves.toBe(created)
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      meta: expect.objectContaining({ cwd, additionalPaths: ['/shared'] }),
+    }))
   })
 
   it('shares one in-flight creation between concurrent callers', async () => {

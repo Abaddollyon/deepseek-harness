@@ -583,7 +583,8 @@ export class Session {
       // `seq = log.length` contract the whole system relies on). Without this,
       // a bad seed would surface only later as a backend rejection or a silent
       // divergence between the live log and disk.
-      let workspaceRootsCount = 0
+      // workspace/roots is required at seq 0 and the seed sequence is contiguous, so
+      // a second workspace/roots event is rejected by the envelope/sequence guards.
       for (const [index, source] of seed.entries()) {
         // The seed is a persistence/replay boundary: validate and detach the
         // complete event in one lossless-JSON pass.
@@ -607,8 +608,6 @@ export class Session {
           validateWorkspaceRoots(snapshot)
           // Unlike opaque restored payloads, this array is exposed as immutable authority.
           Object.freeze(snapshot.data.additionalPaths)
-          workspaceRootsCount += 1
-          if (workspaceRootsCount > 1) throw new Error('session seed contains duplicate workspace/roots events')
         }
         this.log.push(mode === 'snapshot' ? deepFreeze(snapshot) : snapshot)
       }

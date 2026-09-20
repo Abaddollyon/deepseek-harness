@@ -1451,7 +1451,7 @@ describe('SessionStore', () => {
       expect(() => ctx.sessions.prepare(SessionId('replace-roots'), {
         seed: parent.snapshotEvents(), meta: { additionalPaths: ['/changed'] },
       })).toThrow(/cannot replace workspace roots/)
-      for (const data of [{ additionalPaths: ['relative'] }, { additionalPaths: ['/x', '/x'] }, { additionalPaths: [1] }]) {
+      for (const data of [{}, { additionalPaths: ['relative'] }, { additionalPaths: ['/x', '/x'] }, { additionalPaths: [1] }]) {
         expect(() => Session.create(SessionId('malformed-roots'), [{
           type: 'workspace/roots', data, seq: SessionSeq(0), time: 1,
         } as unknown as SessionEvent])).toThrow(/workspace.*roots/)
@@ -1463,6 +1463,9 @@ describe('SessionStore', () => {
         { type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } },
         { ...rootEvent, seq: SessionSeq(1) },
       ])).toThrow(/required at seq 0/)
+      expect(() => Session.create(SessionId('duplicate-roots'), [
+        rootEvent, { ...rootEvent, seq: SessionSeq(0) },
+      ])).toThrow(/seq 0.*expected 1/)
       expect(Session.create(SessionId('legacy-roots')).additionalPaths).toEqual([])
     } finally { await ctx.fiber.dispose() }
   })

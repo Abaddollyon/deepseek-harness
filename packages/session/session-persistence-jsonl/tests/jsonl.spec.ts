@@ -779,6 +779,18 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     })
   })
 
+  it('selects the newest opposite-compression generation before refusing the root', async () => {
+    const persistence = ctx.sessionPersistence as JsonlSessionPersistence
+    const id = SessionId('opposite-multiple')
+    const older = generationLogPath(root, undefined, id, SESSION_FORMAT_VERSION - 1, 'zstd')
+    const newer = generationLogPath(root, undefined, id, SESSION_FORMAT_VERSION, 'zstd')
+    await mkdir(dirname(older), { recursive: true })
+    await writeFile(older, '')
+    await writeFile(newer, '')
+
+    await expect(persistence.stat(id)).rejects.toThrow(newer)
+  })
+
   it('singleflights concurrent historical reads and keeps service flush read-only', async () => {
     const header = meta('released-v0-source-drift', '/work')
     const sourcePath = historicalLogPath(root, header.cwd, header.id)
