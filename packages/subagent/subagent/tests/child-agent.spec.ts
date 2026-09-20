@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -22,7 +23,7 @@ describe('child Agent options', () => {
   it('inherits additional workspace roots in child metadata', () => {
     const base = parentAgent()
     const session = Session.create(base.id, undefined, undefined, undefined, ['/shared'])
-    const parent = { ...base, session, ctx: { get: () => undefined } } as Agent
+    const parent = { ...base, session, ctx: new Context() }
     expect(childSessionMeta(parent, 2, true)).toMatchObject({
       additionalPaths: ['/shared'],
       parentSession: base.id,
