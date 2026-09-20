@@ -12,6 +12,7 @@ interface MetadataInternals {
   readGenerationHeader(...args: unknown[]): Promise<unknown>
   readStableHeader(...args: unknown[]): Promise<SessionPersistenceSnapshot | undefined>
   findOppositeGenerationInDirectory(dir: string): Promise<string | undefined>
+  resolveGenerationInDirectory(...args: unknown[]): Promise<unknown>
 }
 
 async function fixture() {
@@ -85,15 +86,24 @@ describe('V3 metadata reconciliation', () => {
     try {
       await cold.plugin(JsonlSessionPersistence, { root, compression: 'none', listConcurrency: 2 })
       const backend = cold.sessionPersistence as unknown as MetadataInternals
-      const original = backend.findOppositeGenerationInDirectory.bind(backend)
+      const original = backend.resolveGenerationInDirectory.bind(backend)
       const controller = new AbortController()
       const reason = new Error('cancel root metadata read')
-      const probe = vi.spyOn(backend, 'findOppositeGenerationInDirectory').mockImplementation(async (dir) => {
+      const probe = vi.spyOn(backend, 'resolveGenerationInDirectory').mockImplementation(async (...args) => {
         controller.abort(reason)
-        return original(dir)
+        return original(...args)
       })
       await expect(cold.sessionPersistence.list({ signal: controller.signal })).rejects.toBe(reason)
       probe.mockRestore()
+      // A later write must still perform the root-wide check, not trust an
+      // encoding-validation marker cached by the cancelled listing.
+      const rootCheck = vi.spyOn(backend, 'findOppositeGenerationInDirectory')
+      const handle = await cold.sessionPersistence.create({
+        version: SESSION_FORMAT_VERSION, id: SessionId('after-cancel'),
+        createdAt: 10, isSeeded: false, cwd: '/workspace',
+      })
+      try { expect(rootCheck).toHaveBeenCalledTimes(6) } finally { await handle.close() }
+      rootCheck.mockRestore()
       expect(await cold.sessionPersistence.list()).toHaveLength(6)
     } finally {
       await cold.fiber.dispose()
