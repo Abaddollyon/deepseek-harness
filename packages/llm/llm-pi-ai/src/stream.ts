@@ -75,7 +75,14 @@ function classifyPiAiError(message: string): string {
   if ((/\bbridge_previous_response_not_found\b/i.test(message)
     && /upstream websocket closed before response\.completed/i.test(message))
     || /previous response anchor was rejected upstream/i.test(message)
-    || (/\bstream_incomplete\b/i.test(message) && /anchor|previous_response/i.test(message))) return 'TRANSPORT'
+    || (/\bstream_incomplete\b/i.test(message) && /anchor|previous_response/i.test(message))
+    // Codex-LB may preserve only its public error code and the upstream
+    // WebSocket receive failure after a mid-stream close. The code and both
+    // transport fragments together identify a retryable truncation; keep
+    // generic stream_incomplete errors out of the retry loop.
+    || (/\bstream_incomplete\b/i.test(message)
+      && /upstream websocket closed before response\.completed/i.test(message)
+      && /upstream websocket receive failed/i.test(message))) return 'TRANSPORT'
   // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
   // stream ID N; <CODE>; received from peer`. Both fragments are required:
   // bare `stream error` is generic phrasing application-level failures also

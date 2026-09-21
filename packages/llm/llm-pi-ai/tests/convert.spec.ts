@@ -971,6 +971,7 @@ describe('mapStopReason / mapUsage', () => {
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',
+    'stream_incomplete: Upstream websocket closed before response.completed: Upstream websocket receive failed',
     // undici flattens a mid-stream socket drop to this bare word (its SocketError
     // cause is discarded upstream before it reaches us).
     'terminated',
