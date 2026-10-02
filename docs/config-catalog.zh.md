@@ -4116,7 +4116,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-tools`
 
 - `inject`: `systemPrompt`
-- `source`: [`packages/core/tools/src/index.ts:691`](../packages/core/tools/src/index.ts)
+- `source`: [`packages/core/tools/src/index.ts:703`](../packages/core/tools/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: how the registered tools are presented to the model. */
