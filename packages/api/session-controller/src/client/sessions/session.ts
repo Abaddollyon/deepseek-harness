@@ -577,6 +577,15 @@ export class Session implements SessionFace {
     this.notifier.markDirty()
   }
 
+  /**
+   * Host-generation relay: reopen a journal whose follow stream failed
+   * terminally, keeping its window until the replacement snapshot lands.
+   * Live and still-opening streams resume through API Gateway instead.
+   */
+  handleConnected(): void {
+    if (this.openState === 'error') void this.open()
+  }
+
   /** `api-session/removed` relay: flag the snapshot while retaining the resident instance. */
   handleRemoved(): void {
     this.removed = true
