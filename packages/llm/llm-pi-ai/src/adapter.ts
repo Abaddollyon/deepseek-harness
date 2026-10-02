@@ -17,21 +17,19 @@
  * seam and passes it as the request's `apiKey` option, which pi-ai treats as
  * the highest-priority auth override — that is what keeps the fail-loud
  * reference semantics. Everything that override does not cover reaches pi-ai
- * through an attempt-local collection whose credential-store proxy records the
- * exact grant lazy auth supplies. The proxy still delegates every operation to
- * the durable store, while the frozen profile supplies the same provider object
- * as the operation snapshot. A retry can therefore compare the rejected grant
- * under serialized modification without mixing concurrent request identities.
+ * through the collection's own auth: the credential store holds the records a
+ * login wrote and a refresh rotates, and the auth context answers the ambient
+ * questions a provider asks while resolving. Both are stable across snapshots,
+ * so a configuration change rebuilds the collection without forgetting who is
+ * signed in.
  *
  * @module dsh-llm-pi-ai/adapter
  */
 
-import { isDeepStrictEqual } from 'node:util'
-import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
+  AnthropicOptions,
   Api,
   AuthContext,
-  Credential,
   CredentialStore,
   Model,
   Models,
@@ -47,11 +45,9 @@ import {
   LlmError,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import { catalogProvider } from './catalog.ts'
 import type {
   GenerateOptions,
   ImageAttachmentAccess,
-  LlmFailure,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
@@ -64,38 +60,10 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
-import { AUTH_FAILURE_CODE, toStreamChunks } from './stream.ts'
+import { createModels, getSupportedThinkingLevels } from './models.ts'
+import { toStreamChunks } from './stream.ts'
 
 /** One resolution's frozen view: the profiles and the collection built from them. */
-interface AttemptCredentialCapture {
-  credential: Credential | undefined
-}
-
-type CredentialReadOptions = Parameters<CredentialStore['read']>[1]
-type CredentialMutate = Parameters<CredentialStore['modify']>[1]
-type CredentialModifyOptions = Parameters<CredentialStore['modify']>[2]
-
-/** Capture the exact stored credential pi-ai resolves for one lazy request attempt. */
-function capturingCredentialStore(
-  source: CredentialStore,
-  provider: string,
-  capture: AttemptCredentialCapture,
-): CredentialStore {
-  // Request auth only reads and conditionally modifies the route credential.
-  // Do not manufacture list/delete stubs for operations this proxy cannot serve.
-  return {
-    read: (_id: string, options: CredentialReadOptions) => source.read(provider, options).then((credential) => {
-      capture.credential = credential
-      return credential
-    }),
-    modify: (_id: string, mutate: CredentialMutate, options: CredentialModifyOptions) =>
-      source.modify(provider, mutate, options).then((credential) => {
-        capture.credential = credential
-        return credential
-      }),
-  } as unknown as CredentialStore
-}
-
 interface PiAiSnapshot {
   /** The resolved profiles this collection was built from, used as its identity. */
   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
@@ -103,12 +71,10 @@ interface PiAiSnapshot {
   models: Models
 }
 
-/** Constructor options for {@link PiAiAdapter}: resolution and readiness hooks owned by the plugin. */
+/** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
   profiles: () => ReadonlyMap<string, ResolvedPiAiProviderProfile>
-  /** Bounded readiness for unknown IDs only; known models keep their immediate snapshot. */
-  ensureModel?: (provider: string, model: string, signal?: AbortSignal) => Promise<void>
   /**
    * Resolve the credential for one already-resolved profile; called once per
    * stream call and frozen for that call. `undefined` defers to the route's own
@@ -127,11 +93,6 @@ export interface PiAiAdapterOptions {
    * every request no matter how often the human signed in.
    */
   auth: PiAiAuthInjection
-  /**
-   * Observe one pre-content auth-recovery cycle: the stored OAuth credential's
-   * forced refresh outcome before the adapter retries the request.
-   */
-  onAuthRecovery?: (detail: { provider: string; refreshed: boolean; error?: string }) => void
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Bridge one attachment reference into the current model-tool execution world. */
@@ -152,24 +113,32 @@ export interface PiAiAuthInjection {
 }
 
 /**
- * Wait out one auth-recovery delay.
- * @param delayMs - the resolved pre-attempt delay.
- * @param signal - the caller's cancellation.
- * @returns false when the caller aborted before the delay elapsed.
+ * The auth one snapshot's collection resolves through. A proxy route's
+ * gateway owns its provider accounts, so the collection never reads or
+ * refreshes a credential stored under that route's id; every other route
+ * sees the store unchanged.
+ * @param auth - the plugin-wide auth injection.
+ * @param profiles - the snapshot's resolved profiles.
+ * @returns the injection for this snapshot's collection.
  */
-function authRecoveryDelay(delayMs: number, signal: AbortSignal | undefined): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false)
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve(true)
-    }, delayMs)
-    function onAbort(): void {
-      clearTimeout(timer)
-      resolve(false)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
+function snapshotAuth(
+  auth: PiAiAuthInjection,
+  profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+): PiAiAuthInjection {
+  const proxied = new Set([...profiles.values()].flatMap(profile => profile.authMode === 'proxy' ? [profile.provider] : []))
+  if (proxied.size === 0) return auth
+  const { credentials } = auth
+  return {
+    authContext: auth.authContext,
+    credentials: {
+      read: (providerId, options) => proxied.has(providerId) ? Promise.resolve(undefined) : credentials.read(providerId, options),
+      list: options => credentials.list(options),
+      modify: (providerId, mutate, options) => proxied.has(providerId)
+        ? Promise.reject(new LlmError(`llm-pi-ai: proxy route "${providerId}" stores no provider credential`, 'INVALID_CONFIG'))
+        : credentials.modify(providerId, mutate, options),
+      delete: (providerId, options) => credentials.delete(providerId, options),
+    },
+  }
 }
 
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
@@ -177,10 +146,11 @@ function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
   apiKey: string | undefined,
-): SimpleStreamOptions {
+): SimpleStreamOptions & Pick<AnthropicOptions, 'requestMode'> {
   const enabledReasoning: ThinkingLevel | undefined = reasoning === 'off' ? undefined : reasoning
   return {
     ...apiKey === undefined ? {} : { apiKey },
+    ...profile.anthropicRequestMode === 'claude-code' ? { requestMode: 'claude-code' as const } : {},
     ...enabledReasoning === undefined ? {} : { reasoning: enabledReasoning },
     ...profile.thinkingBudgets === undefined ? {} : { thinkingBudgets: profile.thinkingBudgets },
     ...profile.cacheRetention === undefined ? {} : { cacheRetention: profile.cacheRetention },
@@ -193,15 +163,19 @@ function profileOptions(
 }
 
 /**
- * The profile default this exact model can actually take.
+ * The profile default this exact model can actually take, for DESCRIBING it.
  * A configured level the model does not support yields none rather than
- * throwing: the caller did not select an effort, so the exact model's own
- * default applies instead. Explicit request efforts stay strict.
+ * throwing: `resolveModel` builds the model catalog, and a catalog that fails
+ * takes its whole provider out of every picker — so one mis-set profile field
+ * would hide every model on the route, including the ones that support the
+ * level. The request path still refuses, which is where a bad configuration
+ * belongs: describing what a model can do must not fail because a deployment
+ * asked it for something it cannot.
  * @param model - the resolved model descriptor.
  * @param effort - the profile's configured level, if any.
  * @returns the level when this model supports it, otherwise undefined.
  */
-function supportedReasoningDefault(
+function describableReasoningLevel(
   model: Model<Api>,
   effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
 ): ModelThinkingLevel | undefined {
@@ -211,11 +185,12 @@ function supportedReasoningDefault(
     : undefined
 }
 
-/** Validate an explicit Harness request effort without invoking pi-ai's clamp. */
+/** Validate an explicit Harness/profile effort without invoking pi-ai's clamp. */
 function resolveReasoningLevel(
   model: Model<Api>,
-  effort: ReasoningEffortIdType | ModelThinkingLevel,
-): ModelThinkingLevel {
+  effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
+): ModelThinkingLevel | undefined {
+  if (effort === undefined) return undefined
   const supported = getSupportedThinkingLevels(model)
   if (supported.some(level => level === effort)) return effort as ModelThinkingLevel
   throw new LlmError(
@@ -257,6 +232,23 @@ function reasoningInfo(
   }
 }
 
+/**
+ * pi-ai's OpenAI protocols refuse a request that carries neither a key nor an
+ * `Authorization` header. A keyless proxy route hands them this placeholder and
+ * removes the `Authorization` header the OpenAI SDK builds from it, so the
+ * gateway receives no credential and the SDK never reads an ambient key.
+ */
+const KEYLESS_PROXY_KEY = 'keyless-proxy'
+
+/** Protocols whose keyless proxy requests go through {@link KEYLESS_PROXY_KEY}. */
+const KEYLESS_PROXY_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
+
+/** Whether one request is a keyless proxy request on a protocol that needs {@link KEYLESS_PROXY_KEY}. */
+function isKeylessProxyRequest(profile: ResolvedPiAiProviderProfile, model: Model<Api>, apiKey: string | undefined): boolean {
+  return apiKey === undefined && profile.authMode === 'proxy' && KEYLESS_PROXY_APIS.has(model.api)
+    && !Object.keys(profile.headers ?? {}).some(name => name.toLowerCase() === 'authorization')
+}
+
 /** Merge deployment headers while removing case-insensitive attribution collisions. */
 function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
   const attribution = attributionHeaders()
@@ -288,8 +280,10 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels(this.config.auth)
-    for (const profile of profiles.values()) models.setProvider(profile.piProvider)
+    const models: MutableModels = createModels(snapshotAuth(this.config.auth, profiles))
+    for (const profile of profiles.values()) {
+      if (profile.piProvider !== undefined) models.setProvider(profile.piProvider)
+    }
     this.snapshot = { profiles, models }
     return this.snapshot
   }
@@ -305,7 +299,10 @@ export class PiAiAdapter extends LlmAdapter {
 
   /** The configured descriptor for one exact route/model pair within one snapshot. */
   private modelOf(snapshot: PiAiSnapshot, provider: string, model: string): Model<Api> {
-    this.profileOf(snapshot, provider)
+    const profile = this.profileOf(snapshot, provider)
+    const failure = profile.modelErrors.get(model)
+      ?? (profile.piProvider === undefined ? profile.catalogError : undefined)
+    if (failure !== undefined) throw new LlmError(failure, 'INVALID_CONFIG')
     const resolved = snapshot.models.getModel(provider, model)
     if (resolved === undefined) {
       throw new LlmError(`pi-ai provider "${provider}" has no configured model "${model}"`, 'UNKNOWN_MODEL')
@@ -327,7 +324,8 @@ export class PiAiAdapter extends LlmAdapter {
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     return Promise.resolve().then(() => {
       const snapshot = this.current()
-      return this.profileOf(snapshot, provider).selectableModels.map(model => ({
+      this.profileOf(snapshot, provider)
+      return snapshot.models.getModels(provider).map(model => ({
         provider,
         id: model.id,
         name: model.name,
@@ -339,22 +337,18 @@ export class PiAiAdapter extends LlmAdapter {
   override resolveModel(
     provider: string,
     model: string,
-    signal?: AbortSignal,
+    _signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve(this.snapshotForModel(provider, model, signal))
-      .then(snapshot => this.modelInfo(snapshot, provider, model))
-  }
-
-  private snapshotForModel(provider: string, model: string, signal?: AbortSignal): PiAiSnapshot | Promise<PiAiSnapshot> {
-    const snapshot = this.current()
-    if (snapshot.models.getModel(provider, model) !== undefined || this.config.ensureModel === undefined) return snapshot
-    return this.config.ensureModel(provider, model, signal).then(() => this.current())
+    return Promise.resolve().then(() => {
+      const snapshot = this.current()
+      return this.modelInfo(snapshot, provider, model)
+    })
   }
 
   private modelInfo(snapshot: PiAiSnapshot, provider: string, model: string): LlmResolvedModelInfo {
     const profile = this.profileOf(snapshot, provider)
     const resolvedModel = this.modelOf(snapshot, provider, model)
-    const defaultLevel = supportedReasoningDefault(resolvedModel, profile.reasoning)
+    const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
     // Only a cap the deployment configured is a request default; the
     // catalog's `maxTokens` sizes the model and stops there.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
@@ -369,24 +363,16 @@ export class PiAiAdapter extends LlmAdapter {
     }
   }
 
-  override prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
-    const captured = this.snapshotForModel(provider, model, signal)
-    return Promise.resolve(captured).then(snapshot => ({
+  override prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const snapshot = this.current()
+    return Promise.resolve({
       model: this.modelInfo(snapshot, provider, model),
       stream: options => this.streamWithSnapshot(options, snapshot),
-    }))
+    })
   }
 
   stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const snapshot = this.snapshotForModel(options.provider, options.model, options.signal)
-    if (!(snapshot instanceof Promise)) return this.streamWithSnapshot(options, snapshot)
-    // Direct consumers may abandon an iterable without ever entering its generator.
-    void snapshot.catch(() => {})
-    return this.streamWhenReady(options, snapshot)
-  }
-
-  private async * streamWhenReady(options: GenerateOptions, snapshot: Promise<PiAiSnapshot>): AsyncIterable<StreamChunk> {
-    yield * this.streamWithSnapshot(options, await snapshot)
+    return this.streamWithSnapshot(options, this.current())
   }
 
   private async * streamWithSnapshot(
@@ -403,134 +389,14 @@ export class PiAiAdapter extends LlmAdapter {
     // the one it started with and the next call picks up the new one.
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
-    const reasoning = options.reasoningEffort === undefined
-      ? supportedReasoningDefault(model, profile.reasoning)
-      : resolveReasoningLevel(model, options.reasoningEffort)
-    const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    const reasoning = resolveReasoningLevel(
+      model,
+      options.reasoningEffort ?? profile.reasoning,
+    )
+    const resolvedKey = await this.config.resolveApiKey(options.provider, profile)
+    const keyless = isKeylessProxyRequest(profile, model, resolvedKey)
+    const apiKey = keyless ? KEYLESS_PROXY_KEY : resolvedKey
 
-    // Auth recovery replays the whole attempt. A provider credential
-    // rejection (HTTP 401/403) arrives either as the terminal finish chunk of
-    // an otherwise empty stream or as a thrown error during setup; both are
-    // safe to replay only while the caller has received nothing, and both
-    // resolve against the credential store afresh on the next attempt, which
-    // is where the forced refresh below lands its rotated token.
-    let retriesLeft = profile.authRecovery.retries
-    let refreshAttempted = false
-    for (;;) {
-      let emitted = false
-      let heldUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
-      let authFailure: LlmFailure | undefined
-      // Thrown setup failures (aborts, idle timeouts, local credential-store
-      // errors) keep their own classification and propagate; pi-ai delivers
-      // provider rejections as terminal error events, never as throws. The
-      // attempt-local store records the credential lazy auth actually supplied.
-      const attemptCredential: AttemptCredentialCapture = { credential: undefined }
-      for await (const chunk of this.streamAttempt(options, profile, model, reasoning, apiKey, attemptCredential)) {
-        // The terminal `usage` chunk is held back one step: on a
-        // pre-content auth rejection it belongs to the abandoned attempt;
-        // on success or exhausted failure it still precedes `finish`.
-        if (chunk.type === 'usage') {
-          heldUsage = chunk
-          continue
-        }
-        if (!emitted
-          && chunk.type === 'finish'
-          && chunk.reason.kind === 'error'
-          && chunk.reason.failure.code === AUTH_FAILURE_CODE) {
-          authFailure = chunk.reason.failure
-          break
-        }
-        if (heldUsage !== undefined) {
-          emitted = true
-          yield heldUsage
-          heldUsage = undefined
-        }
-        emitted = true
-        yield chunk
-      }
-      if (authFailure === undefined) return
-      if (retriesLeft === 0) {
-        yield heldUsage as Extract<StreamChunk, { type: 'usage' }>
-        yield { type: 'finish', reason: { kind: 'error', failure: authFailure } }
-        return
-      }
-      retriesLeft--
-      if (!refreshAttempted) {
-        refreshAttempted = true
-        let recovery: { refreshed: boolean; error?: string } = { refreshed: false }
-        if (apiKey === undefined) {
-          const timeout = AbortSignal.timeout(profile.streamIdleTimeoutMs)
-          const signal = options.signal === undefined
-            ? timeout
-            : AbortSignal.any([options.signal, timeout])
-          recovery = await this.refreshStoredAuth(options.provider, attemptCredential.credential, signal)
-          if (options.signal?.aborted) {
-            throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
-          }
-          if (timeout.aborted) {
-            throw new LlmError(`pi-ai auth recovery idle timeout after ${profile.streamIdleTimeoutMs}ms`, 'TIMEOUT')
-          }
-        }
-        this.config.onAuthRecovery?.({ provider: options.provider, ...recovery })
-      }
-      if (!await authRecoveryDelay(profile.authRecovery.delayMs, options.signal)) {
-        throw new LlmError('pi-ai request aborted by caller', 'ABORTED')
-      }
-    }
-  }
-
-  /**
-   * Best-effort refresh of the route's stored OAuth credential, run once per
-   * stream call before the first auth-recovery retry. pi-ai's own refresh
-   * path only fires on an expired credential, so a token the provider
-   * rejects early — revoked after another client rotated the shared session,
-   * or dropped in an auth-backend restart — never earns one; this forces the
-   * refresh while the store's `modify` exclusion still serializes it against
-   * pi-ai's own.
-   * @param provider - the route whose catalog OAuth handler performs the refresh.
-   * @param failedCredential - exact stored credential supplied to the rejected request.
-   * @param signal - combined caller and idle-timeout cancellation for lock acquisition and refresh.
-   * @returns the refresh outcome; never throws, because a token-endpoint
-   *   failure says nothing about whether the resource endpoint still rejects
-   *   the stored credential — the retried request answers that definitively.
-   */
-  private async refreshStoredAuth(
-    provider: string,
-    failedCredential: Credential | undefined,
-    signal: AbortSignal,
-  ): Promise<{ refreshed: boolean; error?: string }> {
-    const oauth = catalogProvider(provider)?.auth.oauth
-    if (oauth === undefined) return { refreshed: false }
-    try {
-      // The store answers a declined mutation with the unchanged credential, so
-      // the mutator itself records whether a rotation actually happened.
-      let refreshed = false
-      await this.config.auth.credentials.modify(provider, (current) => {
-        if (current?.type !== 'oauth' || !isDeepStrictEqual(current, failedCredential)) {
-          return Promise.resolve(undefined)
-        }
-        return oauth.refresh(current, signal).then((rotated) => {
-          refreshed = true
-          return rotated
-        })
-      }, { signal })
-      return { refreshed }
-    } catch (refreshError) {
-      return {
-        refreshed: false,
-        error: refreshError instanceof Error ? refreshError.message : String(refreshError),
-      }
-    }
-  }
-
-  private async * streamAttempt(
-    options: GenerateOptions,
-    profile: ResolvedPiAiProviderProfile,
-    model: Model<Api>,
-    reasoning: ModelThinkingLevel | undefined,
-    apiKey: string | undefined,
-    attemptCredential: AttemptCredentialCapture,
-  ): AsyncGenerator<StreamChunk> {
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -561,12 +427,7 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade)
-      const attemptModels = createModels({
-        credentials: capturingCredentialStore(this.config.auth.credentials, options.provider, attemptCredential),
-        authContext: this.config.auth.authContext,
-      })
-      attemptModels.setProvider(profile.piProvider)
-      const events = attemptModels.streamSimple(model, context, {
+      const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
@@ -574,7 +435,7 @@ export class PiAiAdapter extends LlmAdapter {
         signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
         // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: keyless ? { ...requestHeaders(profile.headers), Authorization: null } : requestHeaders(profile.headers),
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
       let exhausted = false

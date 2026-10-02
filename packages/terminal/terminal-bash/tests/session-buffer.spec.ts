@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { PassThrough } from 'node:stream'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessOutcome, SubprocessTerminalHandle } from '@deepseek-ai/dsh-subprocess'
 import type { TerminalReadRequest } from '@deepseek-ai/dsh-terminal'
 import type { ResolvedConfig } from '../src/config.ts'
@@ -22,6 +22,9 @@ class OutputProducer implements SubprocessTerminalHandle {
   }
 
   async write(): Promise<void> {}
+  async resize(): Promise<void> {}
+  async inspectActivity() { return { state: 'unknown' as const, revision: 0 } }
+
   async inspectForeground() { return undefined }
   async signalForeground(): Promise<number> { return this.pid }
   async terminate(): Promise<void> {
@@ -41,7 +44,7 @@ function fixture(overrides: Partial<ResolvedConfig> = {}) {
     backendType: 'shell', shellDialect: 'bash', shellPath: '/bin/bash', shellArgs: [], rows: 24, cols: 80,
     scrollbackLines: 10_000, scrollbackMaxBytes: 4 * 1024 * 1024, maxReadBytes: 256 * 1024,
     pollIntervalMs: 60_000, exactProbeAfterMs: 60_000, idleSilenceMs: 60_000,
-    handoffGraceMs: 60_000, timeoutMs: 60_000, disposeGraceMs: 60_000,
+    handoffGraceMs: 60_000, promptTailGraceMs: 0, timeoutMs: 60_000, disposeGraceMs: 60_000,
     ...overrides,
   }
   const producer = new OutputProducer()
@@ -122,26 +125,6 @@ function deterministicChunks(alphabet: readonly string[], count: number): string
 }
 
 describe('LocalPtySession incremental output compatibility', () => {
-  it('bounds UTF-8 accounting work by appended text rather than retained history', () => {
-    const { session } = fixture()
-    const buffer = session['scrollback']
-    const chunk = 'x'.repeat(32)
-    const count = 2000
-    const byteLength = Buffer.byteLength.bind(Buffer)
-    let scannedUnits = 0
-    const spy = vi.spyOn(Buffer, 'byteLength').mockImplementation((value, ...args) => {
-      if (typeof value === 'string') scannedUnits += value.length
-      return byteLength(value, ...args)
-    })
-    try {
-      for (let index = 0; index < count; index++) buffer.append(chunk)
-    } finally {
-      spy.mockRestore()
-    }
-    expect(buffer.snapshot()).toEqual({ text: chunk.repeat(count), truncated: false })
-    expect(scannedUnits).toBeLessThanOrEqual(count * chunk.length * 2)
-  })
-
   it('retains the exact tail across the default 4 MiB scrollback limit while consuming active output', async () => {
     const limit = 4 * 1024 * 1024
     const { producer, session } = fixture({ maxReadBytes: limit })
@@ -270,7 +253,7 @@ describe('LocalPtySession incremental output compatibility', () => {
     expect(await operation.done).toMatchObject({ viewport: 'fresh', truncated: true, waitReason: 'session_exit' })
   })
 
-  it('preserves split surrogate pairs when sealed coalesced text reaches the eviction head', () => {
+  it('preserves split surrogate pairs when copied coalesced text reaches the eviction head', () => {
     const limit = 4100
     const { session } = fixture({ scrollbackMaxBytes: limit, maxReadBytes: limit })
     // Lone UTF-16 halves cannot pass through the session's TextDecoder unchanged.

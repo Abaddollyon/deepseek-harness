@@ -40,7 +40,18 @@ interface Workspace {
    */
   readonly path: string
 
-  /** Canonical additional directories available to this Workspace, excluding the primary path. */
+  /**
+   * Agent preset whose execution world (for example an SSH host) holds
+   * {@link path} and every additional directory; undefined for the Host.
+   * Sessions created in this workspace use this preset.
+   */
+  readonly agentPreset: string | undefined
+
+  /**
+   * Further canonical directories, excluding {@link path}, that a Session
+   * created in this workspace records as its additional roots. Changing them
+   * never changes an existing Session's roots.
+   */
   readonly additionalPaths: readonly string[]
 
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
@@ -70,9 +81,11 @@ interface Workspace {
   setTitle(title: string): Promise<void>
 
   /**
-   * Replace the additional directory roots durably. Paths are canonicalized,
-   * validated as existing directories, deduplicated, and stored in request order.
-   * @param additionalPaths - Fully qualified existing directories to expose beside {@link path}.
+   * Replace the additional directories durably. Each path must be fully
+   * qualified and resolve to an existing directory; paths are canonicalized
+   * like {@link path}, deduplicated in request order, and the primary path is
+   * dropped. Rejects without writing when any path is invalid.
+   * @param additionalPaths - Complete replacement list; empty removes all.
    * @returns resolution after durability.
    */
   setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>
@@ -128,9 +141,52 @@ interface Workspace {
 
 ## 注册表：`ctx.workspaceRegistry`
 
-`WorkspaceRegistry`（[签名](#ctxworkspaceregistry--workspaceregistry)）拥有注册与解析。`create(path, title?)` 要求完全限定路径并将其规范化，拒绝不存在的路径（原样传出原始 `ENOENT`）或非目录；当规范路径已被拥有时原样返回既有实体；否则创建一条标题为 `title ?? defaultWorkspaceTitle(path)` 的记录并前插到持久的注册表顺序中（不同规范路径可以共享同一显示标题，没有最终路径段时使用根路径拼写）。`get(id)` 与有序的 `list()` 是同步缓存读取；`resolveByPath(path)` 应用同一套完全限定 realpath 规范但不创建。`delete(id)` 只移除注册记录、顺序条目和会话账本——目录、用户文件、实时会话和已持久化日志一概不动，因此这些会话不再属于任何 Workspace（[决策](../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.zh.md)）；未知 id 返回 `false`。create 与 delete 会在其两次写入（记录 + 顺序）可能分叉之前先持久写入一个待定变更标记；启动时恰好解决被标记的那次变更——通过删除被标记的表行：这会补完被中断的 delete，并回滚被中断的 create（注册可以重建，因此回滚是安全方向）——而没有标记的顺序/表不一致则作为损坏大声失败。
+`WorkspaceRegistry`（[签名](#ctxworkspaceregistry--workspaceregistry)）拥有注册与解析。`create(path, title?)` 要求完全限定路径并将其规范化，拒绝不存在的路径（原样传出原始 `ENOENT`）或非目录；当规范路径已被拥有时原样返回既有实体；否则创建一条标题为 `title ?? defaultWorkspaceTitle(path)` 的记录并前插到持久的注册表顺序中（不同规范路径可以共享同一显示标题，没有最终路径段时使用根路径拼写）。`get(id)` 与有序的 `list()` 是同步缓存读取；`resolveByPath(path)` 应用同一套完全限定 realpath 规范但不创建。`delete(id)` 只移除注册记录、顺序条目和会话账本——目录、用户文件、实时会话和已持久化日志一概不动，因此这些会话变为 Ungrouped（[决策](../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.zh.md)）；未知 id 返回 `false`。create 与 delete 会在其两次写入（记录 + 顺序）可能分叉之前先持久写入一个待定变更标记；启动时恰好解决被标记的那次变更——通过删除被标记的表行：这会补完被中断的 delete，并回滚被中断的 create（注册可以重建，因此回滚是安全方向）——而没有标记的顺序/表不一致则作为损坏大声失败。
 
-会话的 cwd 在创建时由创建者赋予，而不是由本注册表赋予——API 网关从所选工作区的 `path` 解析新会话的 cwd（回退到显式或默认 cwd），先创建会话使 cwd 落入其不可变的 [`SessionHeader`](persistence.zh.md#sessionheader--metadata-beside-the-log)，再调用 `attachSession`，后者会把已存储的 header cwd 与工作区路径重新校验一遍。首次成功启动时，注册表仅凭已持久化的 header（`id`、`cwd`、`createdAt`——绝不读事件正文）引导历史：把规范 cwd 有效的会话按目录分组为工作区，最新的排在最前；「已初始化」标记最后写入，因此被中断的引导可以安全续跑。引导只发生这一次：没有 cwd 的历史遗留会话保持不属于任何 Workspace，此后创建的会话只能通过 `attachSession` 加入工作区。
+会话的 cwd 在创建时由创建者赋予，而不是由本注册表赋予——API 网关从所选工作区的 `path` 解析新会话的 cwd（回退到显式或默认 cwd），先创建会话使 cwd 落入其不可变的 [`SessionHeader`](persistence.zh.md#sessionheader--metadata-beside-the-log)，再调用 `attachSession`，后者会把已存储的 header cwd 与工作区路径重新校验一遍。首次成功启动时，注册表仅凭已持久化的 header（`id`、`cwd`、`createdAt`——绝不读事件正文）引导历史：把规范 cwd 有效的会话按目录分组为工作区，最新的排在最前；「已初始化」标记最后写入，因此被中断的引导可以安全续跑。引导只发生这一次：没有 cwd 的历史遗留会话保持 Ungrouped，此后创建的会话只能通过 `attachSession` 加入工作区。
+
+工作区可以位于某个 Agent 预设的执行环境中：`create(path, title, agentPreset)` 通过 Host 以 `setPathWorlds` 安装的环境规范化并检查每个路径（工作区控制器提供各预设自己的 `fs`，例如 SSH 主机）。路径唯一性按环境区分；只有 header 预设指向同一环境的会话才能附加；在该工作区中创建的会话使用其预设。成员索引不会访问远端环境：预设被某条工作区记录引用的会话保留其记录的 cwd 拼写，因此启动时离线的主机仍保持其会话分组。一次性引导只对 Host 目录分组。
+
+## 默认工作区初始化
+
+控制器的 `initializeDefault` 不接受请求参数：它拥有固定目录名 `default-workspace`，解析 Documents 位置，并请求注册表执行一次初始化。注册表接收目录解析器，以所请求目录（而非规范路径）的最后一段作为初始标题，并将登记与持久化身份一起提交。语言不会传到 Host——浏览器消费方通过控制器的 `workspaceDisplayTitle` 为仍保留该自动标题的工作区加标签，因此只有屏幕上的名称跟随读者语言。[首次使用行为与配置](../../packages/api/workspace-controller/README.zh.md#first-use-workspace)说明复用和失败处理。
+
+## 会话置顶
+
+控制器的[传输类型](../../packages/api/workspace-controller/src/types.ts)定义了 `WorkspacePinSessionRequest` 和 `WorkspaceUnpinSessionRequest`，两者都携带一个 `sessionId`。两个操作都返回 `WorkspacePinValue`：完整的会话 id 数组 `pinnedSessionIds`，最近置顶的会话排在前面。置顶要求会话已知且未归档；对未置顶的 id 取消置顶会成功，且不改变集合。归档在同一次持久化写入中移除该会话的置顶，取消归档不会恢复置顶。
+
+## 归档准入
+
+归档是一个注册表全局的持久化集合，注册表拒绝把正在运行的工作藏在它后面。这条规则是本包声明并派发的两个宿主事件之上的能力接缝（[事件](#workspace-events)）：`workspace/session-activity`（waterfall）向已组合的提供方询问某会话还有什么在跑，`workspace/session-stop`（parallel）请它们停止这些工作。每个提供方像任何监听器一样在根上注册，因此本包不认识 agent、job 或 schedule 的词汇；各族是一个可合并扩展的 map 的键。
+
+```ts type-equiv
+/**
+ * Activity families a `workspace/session-activity` listener may report. This
+ * package declares none: each provider merges its own key from a module both
+ * its Host and Client faces import, so a consumer that renders the families
+ * sees exactly the keys its program compiled and falls through to a generic
+ * description for any other. The shipped providers merge `turn` (the Agent
+ * registry), `job` (the job registry seam), `subagent` (the Subagent
+ * runtime), and `schedule` (the Schedule plugin).
+ */
+interface SessionActivityKindMap {}
+```
+
+`SessionActivityKind` 即 `keyof SessionActivityKindMap`，因此一个没有编译任何提供方的程序看不到任何键。随附的键放在各自 client 可导入的类型模块里：`turn` 在 Agent 注册表的 `types.ts`，`job` 在任务注册表接缝的 `view.ts`，`subagent` 在 Subagent runtime 的 `control-types.ts`，`schedule` 在 Schedule 插件的 `types.ts`；渲染各族的消费方为其分支导入这些模块，并为其他任何键保留一条通用文案。提供方通过把自己的 `SessionActivity` 条目前置到 `next()` 的结果来回答 waterfall；注册表最内层的回调返回空列表，因此没有提供方的组合可自由归档。
+
+```ts type-equiv
+/**
+ * One reason a session counts as active for archive admission. Families with
+ * per-item identity list their items so a caller can name what must stop.
+ */
+interface SessionActivity {
+  readonly kind: SessionActivityKind
+  /** Active items of the family; absent for a family without per-item identity (`turn`). */
+  readonly items?: readonly SessionActivityItem[]
+}
+```
+
+`SessionActivityItem` 携带各族自己的 `id`（会话、任务或提醒 id）和可选的展示 `label`。`archiveSession(sessionId)` 在存在性检查之后只询问 waterfall 一次，对非空答案以 `WorkspaceActiveSessionError`（`sessionId`、`activity`）拒绝且不写入；控制器把它映射为 `workspace/session-active` 错误，其 details 携带同样的两个字段。`archiveSession(sessionId, { stopActivity: true })`——`ArchiveSessionOptions` 的这个字段由传输请求以 `stopActivity` 暴露——跳过检查、先写入归档、再派发 `workspace/session-stop`；提供方抛错只记日志，归档保留，被停止的工作从不等待收敛。已归档的 id 既不询问也不停止。随附的提供方、它们停止什么，以及让已归档会话不跑模型步的 `agent/pre-step` 门禁，记录在[注册表包](../../packages/workspace/workspace/README.zh.md#api-behavior)；决策记录见 [archive-stops-running-work Agent Note](../../.agents/notes/implemented/feature/2026-09-21-archive-stops-running-session-work.zh.md)。
 
 ## 消费方
 
@@ -143,58 +199,6 @@ interface Workspace {
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
-
-<a id="ctxdirectorybrowser--directorybrowser-abstract-seam"></a>
-
-### `ctx.directoryBrowser` — `DirectoryBrowser` (abstract seam)
-
-Independent browsing seam used by remote and in-app Workspace pickers.
-
-```ts cordis-catalog
-/**
- * List one bounded directory level without opening operating-system UI.
- * @param path - absolute directory to list; absent lists the provider root.
- * @param signal - caller lifetime used to cancel an in-progress scan.
- * @returns the directory entries and navigable ancestry.
- */
-abstract list(path?: string, signal?: AbortSignal): Promise<DirectoryListing>
-
-/**
- * Create one child directory below an existing parent.
- * @param path - absolute existing parent directory.
- * @param name - single non-blank child path segment.
- * @returns the created directory's canonical absolute path.
- */
-abstract createDirectory(path: string, name: string): Promise<string>
-```
-
-Source: [`packages/host/directory-browser/src/index.ts`](../../packages/host/directory-browser/src/index.ts)
-
-<a id="ctxdirectorybrowsercontroller--directorybrowsercontroller"></a>
-
-### `ctx.directoryBrowserController` — `DirectoryBrowserController`
-
-Host owner of the display-free `ctx.remote.directoryBrowser` namespace.
-
-```ts cordis-catalog
-/**
- * List one bounded directory level for an in-app client.
- * @param path - absolute directory to list; absent lists the provider root.
- * @param signal - caller lifetime used to cancel an in-progress scan.
- * @returns the directory entries and navigable ancestry.
- */
-@Remote('list') async list(path: string | undefined, signal: AbortSignal): Promise<DirectoryListing>
-
-/**
- * Create one child directory for an in-app client.
- * @param path - absolute existing parent directory.
- * @param name - single non-blank child path segment.
- * @returns the created directory's canonical absolute path.
- */
-@Remote('createDirectory') async createDirectory(path: string, name: string): Promise<string>
-```
-
-Source: [`packages/api/workspace-controller/src/directory-browser.ts`](../../packages/api/workspace-controller/src/directory-browser.ts)
 
 <a id="ctxdirectorypicker--directorypicker-abstract-seam"></a>
 
@@ -246,6 +250,106 @@ Host service backing the generated `ctx.remote.directoryPicker` namespace. The s
 
 Source: [`packages/api/workspace-controller/src/directory-picker.ts`](../../packages/api/workspace-controller/src/directory-picker.ts)
 
+<a id="ctxterminalcontroller--terminalcontroller"></a>
+
+### `ctx.terminalController` — `TerminalController`
+
+Typed Remote control of transient Session-owned terminal processes.
+
+```ts cordis-catalog
+/**
+ * Read the Session working directory and terminal limits without resolving a shell.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param signal - request cancellation.
+ * @returns the Session workspace directory and terminal limits.
+ */
+@Remote environment(agent: Agent, signal: AbortSignal): TerminalEnvironment
+
+/**
+ * Discover installed shells in the Session's execution environment.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param signal - request cancellation.
+ * @returns verified profiles, with the configured or system default first.
+ */
+@Remote shells(agent: Agent, signal: AbortSignal): Promise<TerminalShell[]>
+
+/**
+ * List retained terminals without resolving or activating an Agent.
+ * @param sessionId - displayed Session identity, including offline history.
+ * @returns terminals retained for this Host lifetime.
+ */
+@Remote list(sessionId: SessionId): WebTerminalInfo[]
+
+/**
+ * Allocate a user shell once for a caller-generated identity, without Agent sandbox or approval restrictions.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param request - initial dimensions and idempotency identity.
+ * @param signal - allocation cancellation; committed terminals survive disconnection.
+ * @returns the existing or newly committed terminal.
+ */
+@Remote async create(agent: Agent, request: TerminalCreateRequest, signal: AbortSignal): Promise<WebTerminalInfo>
+
+/**
+ * Retain an existing terminal for a window without activating its Agent or taking input control.
+ * @param sessionId - owning Session identity, including an inactive saved layout.
+ * @param id - retained Host terminal identity.
+ * @param signal - physical Remote stream cancellation.
+ * @returns a hold acknowledgement followed by an open lifetime stream.
+ */
+@Remote({ mode: 'stream' }) retain(sessionId: SessionId, id: WebTerminalId, signal: AbortSignal): AsyncIterable<TerminalRetentionFrame>
+
+/**
+ * Attach to a terminal without binding its process lifetime to the transport.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param id - terminal identity.
+ * @param attachmentId - new exclusive input attachment.
+ * @param signal - physical stream cancellation.
+ * @returns screen recovery followed by output and metadata changes.
+ */
+@Remote({ mode: 'stream' }) follow(agent: Agent, id: WebTerminalId, attachmentId: TerminalAttachmentId, signal: AbortSignal): AsyncIterable<TerminalFrame>
+
+/**
+ * Deliver raw input, including Tab completion and control characters.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param id - terminal identity.
+ * @param attachmentId - current writable attachment.
+ * @param data - input bytes represented as UTF-8 text.
+ * @returns after provider input acceptance.
+ */
+@Remote async write(agent: Agent, id: WebTerminalId, attachmentId: TerminalAttachmentId, data: string): Promise<void>
+
+/**
+ * Update the dimensions of the PTY and recovery screen.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param id - terminal identity.
+ * @param attachmentId - current writable attachment.
+ * @param cols - column count.
+ * @param rows - row count.
+ * @returns after the resize completes.
+ */
+@Remote async resize(agent: Agent, id: WebTerminalId, attachmentId: TerminalAttachmentId, cols: number, rows: number): Promise<void>
+
+/**
+ * Rename a terminal without changing its shell.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param id - terminal identity.
+ * @param title - nonempty display title, at most 120 characters.
+ */
+@Remote rename(agent: Agent, id: WebTerminalId, title: string): void
+
+/**
+ * Close an identity to future creation and kill its process range; repeated closes succeed.
+ * @param agent - Session owner supplied by the Gateway.
+ * @param id - terminal identity.
+ * @returns after provider cleanup succeeds. A failure retains the terminal for retry.
+ */
+@Remote async close(agent: Agent, id: WebTerminalId): Promise<void>
+```
+
+Types: [Agent](core.zh.md) · [SessionId](core.zh.md)
+
+Source: [`packages/api/terminal-controller/src/index.ts`](../../packages/api/terminal-controller/src/index.ts)
+
 <a id="ctxworkspacecontroller--workspacecontroller"></a>
 
 ### `ctx.workspaceController` — `WorkspaceController`
@@ -255,10 +359,29 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 ```ts cordis-catalog
 /**
  * Create or idempotently resolve one Workspace over an existing directory.
- * @param request - directory path to register.
+ * Optional additional directories are stored on a new Workspace and must
+ * match an existing one's.
+ * @param request - directory path to register and optional additional directories.
  * @returns the Workspace and whether this call created it.
  */
 @Remote('create') create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue>
+
+/**
+ * List the Agent presets whose own filesystem can hold a new Workspace,
+ * such as SSH hosts; the Host itself is always available and not listed.
+ * @returns usable presets in roster order.
+ */
+@Remote('worlds') async worlds(): Promise<WorkspaceWorldsValue>
+
+/**
+ * Initialize or reuse the default Workspace during first-use startup. The
+ * directory name is fixed, so the Host never renames or relocates an
+ * existing default; its initial title is that same name, which browser
+ * consumers label in the reader's language.
+ * @param signal - caller lifetime; cancels native directory lookup.
+ * @returns the durable Workspace, or undefined when first-use initialization is ineligible; creates no Session or message.
+ */
+@Remote('initializeDefault') async initializeDefault(signal: AbortSignal): Promise<WorkspaceValue | undefined>
 
 /**
  * Rename one Workspace to a unique non-blank title.
@@ -268,8 +391,8 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('rename') rename(request: WorkspaceRenameRequest): Promise<WorkspaceValue>
 
 /**
- * Replace one Workspace's additional directory roots atomically.
- * @param request - Workspace identity and additional roots.
+ * Replace one Workspace's additional directories; existing Sessions keep their recorded roots.
+ * @param request - Workspace identity and complete replacement list.
  * @returns the updated Workspace projection.
  */
 @Remote('updatePaths') updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue>
@@ -303,6 +426,27 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('archiveSession') archiveSession(request: WorkspaceArchiveSessionRequest): Promise<WorkspaceArchiveValue>
 
 /**
+ * Restore one archived Session to Workspace grouping surfaces.
+ * @param request - Session identity to unarchive.
+ * @returns the complete resulting archive set.
+ */
+@Remote('unarchiveSession') unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<WorkspaceArchiveValue>
+
+/**
+ * Surface one known unarchived Session ahead of unpinned Sessions.
+ * @param request - Session identity to pin.
+ * @returns the complete resulting pin set, most recently pinned first.
+ */
+@Remote('pinSession') pinSession(request: WorkspacePinSessionRequest): Promise<WorkspacePinValue>
+
+/**
+ * Remove one Session's pin without changing its saved Session order.
+ * @param request - Session identity to unpin.
+ * @returns the complete resulting pin set, most recently pinned first.
+ */
+@Remote('unpinSession') unpinSession(request: WorkspaceUnpinSessionRequest): Promise<WorkspacePinValue>
+
+/**
  * Stream a complete Workspace baseline followed by ordered increments.
  * @param signal - generation cancellation.
  * @returns baseline followed by ordered Workspace increments.
@@ -316,61 +460,58 @@ Source: [`packages/api/workspace-controller/src/index.ts`](../../packages/api/wo
 
 ### `ctx.workspaceFiles` — `WorkspaceFiles`
 
-Host Remote service over the composed filesystem, confined to one workspace.
+Host Remote file reads and workspace directory observations over the composed filesystem.
 
 ```ts cordis-catalog
 /**
- * Read one page of lines from a UTF-8 text file inside the Agent's workspace.
- * @param agent - target Agent resolved from the Session identity on the wire.
- * @param path - workspace path, absolute or relative to the workspace root.
+ * Read one page of lines from a UTF-8 file readable by the filesystem backend.
+ * @param workspaceFileScope - header-derived workspace root for the Session identity on the wire.
+ * @param path - absolute path or path relative to the workspace root; files outside it are allowed.
  * @param range - the line window; omitted fields take the page defaults.
  * @param signal - caller cancellation.
  * @returns the page, the file's version at the stat before it, and whether it reaches the last line.
  */
-@Remote async read(agent: Agent, path: string, range: WorkspaceFileRange, signal: AbortSignal): Promise<WorkspaceFileText>
+@Remote async read( workspaceFileScope: WorkspaceFileScope, path: string, range: WorkspaceFileRange, signal: AbortSignal, ): Promise<WorkspaceFileText>
 
 /**
- * Read one byte window of a regular file inside the Agent's workspace: raw
- * bytes, no text decoding and no binary rejection.
- * @param agent - target Agent resolved from the Session identity on the wire.
- * @param path - workspace path, absolute or relative to the workspace root.
- * @param range - the byte window; omitted fields take the window defaults.
+ * Read a complete regular file or one byte range without text decoding.
+ * @param workspaceFileScope - header-derived workspace root for the Session identity on the wire.
+ * @param path - target path, absolute or workspace-relative; relative to the base file's directory when provided.
+ * @param options - optional base file and range; without a range the complete-file cap applies.
  * @param signal - caller cancellation.
- * @returns the window in base64, the file's version and size at the stat before it, and whether it reaches the last byte.
+ * @returns native bytes with the file's version and size at the preceding stat, byte offset, and EOF marker.
  */
-@Remote async readBytes(agent: Agent, path: string, range: WorkspaceByteRange, signal: AbortSignal): Promise<WorkspaceFileBytes>
+@Remote async readBytes( workspaceFileScope: WorkspaceFileScope, path: string, options: WorkspaceByteReadOptions, signal: AbortSignal, ): Promise<WorkspaceFileBytes>
 
 /**
  * Report one regular file's identity, version, and size without its content.
- * @param agent - target Agent resolved from the Session identity on the wire.
- * @param path - workspace path, absolute or relative to the workspace root.
+ * @param workspaceFileScope - header-derived workspace root for the Session identity on the wire.
+ * @param path - absolute path or path relative to the workspace root; files outside it are allowed.
  * @param signal - caller cancellation.
  * @returns the file's absolute path, current version, and byte size.
  */
-@Remote async stat(agent: Agent, path: string, signal: AbortSignal): Promise<WorkspaceFileStat>
+@Remote async stat(workspaceFileScope: WorkspaceFileScope, path: string, signal: AbortSignal): Promise<WorkspaceFileStat>
 
 /**
- * List the direct children of one directory inside the Agent's workspace.
- * @param agent - target Agent resolved from the Session identity on the wire.
+ * List the direct children of one directory inside the Session's workspace.
+ * @param workspaceFileScope - header-derived workspace root for the Session identity on the wire.
  * @param path - workspace path, absolute or relative to the workspace root.
  * @param signal - caller cancellation.
  * @returns the directory's children in the backend's stable name order, bounded by the entry cap.
  */
-@Remote async list(agent: Agent, path: string, signal: AbortSignal): Promise<WorkspaceDirectoryListing>
+@Remote async list(workspaceFileScope: WorkspaceFileScope, path: string, signal: AbortSignal): Promise<WorkspaceDirectoryListing>
 
 /**
- * Stream every `fs/observed` observation of a file inside the Agent's
- * workspace. Only Agent filesystem operations report here; the OS is not
- * watched.
- * @param agent - target Agent resolved from the Session identity on the wire.
+ * Watch one file or a directory's direct entries in the Session's filesystem.
+ * Files use the backend's read authority; directories remain workspace-scoped.
+ * @param workspaceFileScope - header-derived workspace root for the Session identity on the wire.
+ * @param path - target path; the Host determines its type and confines directories to the workspace.
  * @param signal - generation cancellation.
- * @returns `ready` once the Host observation queue is active and the workspace
- *   root is resolved, then queued and live observations in emission order.
+ * @returns `ready` once the target watch is active, then current metadata for queued and live invalidations.
+ * @throws RemoteError when watching is unavailable or a directory is outside the workspace.
  */
-@Remote({ mode: 'stream' }) changes(agent: Agent, signal: AbortSignal): AsyncIterable<WorkspaceFileWatchFrame>
+@Remote({ mode: 'stream' }) changes(workspaceFileScope: WorkspaceFileScope, path: string, signal: AbortSignal): AsyncIterable<WorkspaceFileWatchFrame>
 ```
-
-Types: [Agent](core.zh.md)
 
 Source: [`packages/api/workspace-files/src/index.ts`](../../packages/api/workspace-files/src/index.ts)
 
@@ -390,10 +531,33 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
- * @param additionalPaths - Existing directories to canonicalize; supplied roots must match when reusing a workspace.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
  * @returns the existing or newly durable workspace.
  */
-async create(path: string, title?: string, additionalPaths?: readonly string[]): Promise<Workspace>
+async create(path: string, title?: string, agentPreset?: string): Promise<Workspace>
+
+/**
+ * Install the resolver for Workspaces whose paths live in an Agent preset's
+ * execution world. Host Workspaces never consult it.
+ * @param resolve - The preset's world, whose operations reject while it is unavailable,
+ *   or undefined for a preset that is unknown or runs on the Host.
+ * @returns a disposer that removes this resolver.
+ */
+setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void
+
+/**
+ * Initialize the default Workspace only while both the registry and Session
+ * history are empty. Repeated requests reuse its durable identity; deleting
+ * that registration permanently disables automatic creation.
+ * @param resolveDirectory - resolve the absolute directory; called only for
+ * eligible creation, inside the registry mutation queue. Missing directories
+ * are created recursively before registration, and the initial title is the
+ * requested directory's own final segment — not the canonical one, so a
+ * symlink at that path does not retitle the Workspace after its target.
+ * After resolution, caller cancellation does not roll back creation or registration.
+ * @returns the initialized Workspace, or undefined when automatic creation is ineligible.
+ */
+initializeDefault(resolveDirectory: () => Promise<string>): Promise<Workspace | undefined>
 
 /**
  * Look up a workspace by id.
@@ -432,23 +596,117 @@ insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly Workspac
 /**
  * Archive one session durably. The session must exist (live or in session
  * persistence); its workspace accounting — or lack of one — is irrelevant.
- * An already archived id resolves without writing.
+ * Without `stopActivity` the session must also be inactive: the
+ * `workspace/session-activity` waterfall is asked once, and any reported
+ * activity rejects with {@link WorkspaceActiveSessionError} before anything
+ * is written. With `stopActivity` the archive is written without an
+ * activity check, and the `workspace/session-stop` providers are then asked
+ * to stop the session's work: the durable archive set is what a provider's
+ * `agent/pre-step` gate reads, so every wake the stops induce is already
+ * blocked. Archiving drops the session's pin in the same durable write
+ * (pinning and archival are mutually exclusive). An already archived id
+ * resolves without writing, asking, or stopping.
  * @param sessionId - The session to archive.
+ * @param options - Whether running work is stopped instead of refusing.
+ * @returns resolution after durability and, with `stopActivity`, after every stop request was issued.
+ */
+archiveSession(sessionId: SessionId, options: ArchiveSessionOptions = {}): Promise<void>
+
+/**
+ * Unarchive one session durably by dropping it from the registry-global
+ * archive set; the accounting slot was never touched, so the session
+ * returns to its recorded position. Unarchiving runs no session-existence
+ * check because removing an id cannot introduce an unknown one, so an
+ * entry whose session is gone still resolves. An id that is not archived
+ * resolves without writing.
+ * @param sessionId - The session to unarchive.
  * @returns resolution after durability.
  */
-archiveSession(sessionId: SessionId): Promise<void>
+unarchiveSession(sessionId: SessionId): Promise<void>
+
+/**
+ * Pin one session durably, prepending it to the registry-global pin set.
+ * The session must exist (live or in session persistence) and must not be
+ * archived. An already pinned id resolves without writing or reordering.
+ * @param sessionId - The session to pin.
+ * @returns resolution after durability.
+ */
+pinSession(sessionId: SessionId): Promise<void>
+
+/**
+ * Unpin one session durably by dropping it from the registry-global pin
+ * set. Unpinning runs no session-existence check because removing an id
+ * cannot introduce an unknown one, so an entry whose session is gone still
+ * resolves. An id that is not pinned resolves without writing.
+ * @param sessionId - The session to unpin.
+ * @returns resolution after durability.
+ */
+unpinSession(sessionId: SessionId): Promise<void>
 
 /**
  * Resolve by canonical directory path without creating or mutating a
  * workspace. A missing path rejects during `realpath`; an existing unowned
  * directory returns `undefined`.
  * @param path - Existing directory path in a fully qualified spelling.
- * @returns the workspace owning the canonical path, when one exists.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
+ * @returns the workspace owning the canonical path in that world, when one exists.
  */
-async resolveByPath(path: string): Promise<Workspace | undefined>
+async resolveByPath(path: string, agentPreset?: string): Promise<Workspace | undefined>
 ```
 
 Types: [SessionId](core.zh.md)
+
+Source: [`packages/workspace/workspace/src/index.ts`](../../packages/workspace/workspace/src/index.ts)
+
+<a id="workspace-events"></a>
+
+### `workspace/*` events
+
+<a id="workspacesession-activity--waterfall"></a>
+
+#### `workspace/session-activity` — waterfall
+
+Ask the composed providers what still runs for a session before it is archived. A listener prepends its own SessionActivity entries to the result of `next()`; the registry's innermost callback returns an empty list, so a composition without providers archives freely. Any non-empty result refuses the archive without a write.
+
+```ts cordis-catalog
+/**
+ * Ask the composed providers what still runs for a session before it is
+ * archived. A listener prepends its own {@link SessionActivity} entries to
+ * the result of `next()`; the registry's innermost callback returns an
+ * empty list, so a composition without providers archives freely. Any
+ * non-empty result refuses the archive without a write.
+ * @param request - the session about to be archived.
+ * @param next - delegate to the remaining providers.
+ * @mode waterfall
+ */
+'workspace/session-activity'( request: SessionActivityRequest, next: () => Promise<readonly SessionActivity[]>, ): Promise<readonly SessionActivity[]>
+```
+
+Source: [`packages/workspace/workspace/src/index.ts`](../../packages/workspace/workspace/src/index.ts)
+
+<a id="workspacesession-stop--parallel"></a>
+
+#### `workspace/session-stop` — parallel
+
+Stop a session's running work because the caller archived it with `stopActivity`; the archive set is durable when this dispatches. Each provider stops its own families — cancelling a turn, its subagent descendants, owned jobs, or active schedules — through the same cancel paths the user's own stop actions use, so the session log ends every open turn regularly and a later unarchive can continue the conversation. Listeners issue their stop requests without waiting for running work to settle; a listener may await its own durability barrier. A rejection is logged by the registry and does not undo the archive.
+
+```ts cordis-catalog
+/**
+ * Stop a session's running work because the caller archived it with
+ * `stopActivity`; the archive set is durable when this dispatches. Each
+ * provider stops its own families — cancelling a turn, its subagent
+ * descendants, owned jobs, or active schedules — through the same cancel
+ * paths the user's own stop actions use, so the session log ends every
+ * open turn regularly and a later unarchive can continue the
+ * conversation. Listeners issue their stop requests without waiting for
+ * running work to settle; a listener may await its own durability
+ * barrier. A rejection is logged by the registry and does not undo the
+ * archive.
+ * @param request - the session being archived.
+ * @mode parallel
+ */
+'workspace/session-stop'(request: SessionActivityRequest): Promise<void> | void
+```
 
 Source: [`packages/workspace/workspace/src/index.ts`](../../packages/workspace/workspace/src/index.ts)
 <!-- END GENERATED cordis-surface -->

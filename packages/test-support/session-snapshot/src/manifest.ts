@@ -75,19 +75,20 @@ export interface SnapshotSessionReference {
   source: string
 }
 
-/** Historical-format behavior one retained scenario permanently exercises. */
+/** Historical format or retired capability one retained scenario permanently exercises. */
 export type SnapshotSessionFormatCoverage =
   | 'multi-hop'
   | 'packed-row'
   | 'retry-failure'
   | 'shipped-profile'
   | 'adjacent-migration'
+  | 'retired-tools'
 
 /** Explicit historical generation retained by an owning scenario. */
 export interface SnapshotSessionFormatManifest {
   /** Selected fixture generation; absent manifest metadata tracks the current writer. */
   readonly version: number
-  /** Migration behaviors that require this historical fixture. */
+  /** Migration or retired-tool behavior that requires this immutable fixture. */
   readonly coverage: readonly SnapshotSessionFormatCoverage[]
 }
 
@@ -121,8 +122,6 @@ export interface SnapshotManifest {
   session?: SnapshotSessionReference
   /** Historical generation retained by an owner instead of tracking the current writer. */
   sessionFormat?: SnapshotSessionFormatManifest
-  /** Keep current-format replay generations immutable and compare separate native writer output. */
-  writerOracle?: 'separate'
 }
 
 /** Snapshot execution modes that may read or replace committed fixture generations. */
@@ -130,8 +129,8 @@ export type SnapshotSessionWriteMode = 'replay' | 'record' | 'refresh'
 
 /**
  * Whether one run writes current-writer Session fixtures for this scenario.
- * Historical generations and inputs with separate writer oracles remain immutable;
- * refresh may still update their independent expected outputs.
+ * Explicit historical generations remain immutable replay inputs; record and
+ * refresh may still update their non-Session expected outputs.
  *
  * @param manifest - Parsed scenario ownership and retained-generation metadata.
  * @param mode - Snapshot execution mode.
@@ -141,8 +140,7 @@ export function writesCurrentSessionFixtures(
   manifest: SnapshotManifest,
   mode: SnapshotSessionWriteMode,
 ): boolean {
-  return mode !== 'replay' && manifest.session === undefined
-    && manifest.sessionFormat === undefined && manifest.writerOracle === undefined
+  return mode !== 'replay' && manifest.session === undefined && manifest.sessionFormat === undefined
 }
 
 const PROFILES = new Set<SnapshotProfile>(['headless', 'sdk', 'acp', 'web'])
@@ -155,6 +153,7 @@ const SESSION_FORMAT_COVERAGE = new Set<SnapshotSessionFormatCoverage>([
   'retry-failure',
   'shipped-profile',
   'adjacent-migration',
+  'retired-tools',
 ])
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -224,7 +223,6 @@ export function parseSnapshotManifest(source: string, path = 'snapshot.yml'): Sn
       'input',
       'session',
       'sessionFormat',
-      'writerOracle',
     ], 'manifest')
     if (root.version !== 1) throw new Error('manifest.version must equal 1')
     const scenario = root.scenario === undefined ? undefined : name(root.scenario, 'manifest.scenario')
@@ -411,19 +409,8 @@ export function parseSnapshotManifest(source: string, path = 'snapshot.yml'): Sn
       }
     }
 
-    if (root.writerOracle !== undefined) {
-      if (root.writerOracle !== 'separate') throw new Error('manifest.writerOracle must equal separate')
-      if (root.profile !== 'headless' && root.profile !== 'acp') {
-        throw new Error('manifest.writerOracle requires a headless or acp adapter')
-      }
-      if (session !== undefined || sessionFormat !== undefined) {
-        throw new Error('manifest.writerOracle requires owned current-format Session fixtures')
-      }
-    }
-
     return {
       version: 1,
-      ...(root.writerOracle === undefined ? {} : { writerOracle: 'separate' as const }),
       ...(scenario === undefined ? {} : { scenario }),
       profile: root.profile as SnapshotProfile,
       ...(composition === undefined ? {} : { composition }),

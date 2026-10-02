@@ -18,16 +18,22 @@
       "path": "../../../vendor/schemastery"
     },
     {
-      "path": "../../core/agent"
-    },
-    {
       "path": "../../core/session"
     },
     {
       "path": "../../fs/fs"
     },
     {
+      "path": "../../preset/agent-preset-registry"
+    },
+    {
       "path": "../../sandbox/sandbox-policy"
+    },
+    {
+      "path": "../../session-query/session-query"
+    },
+    {
+      "path": "../../session/session-persistence"
     },
     {
       "path": "../../typert/protocol"

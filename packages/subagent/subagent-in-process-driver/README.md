@@ -1,5 +1,5 @@
 ---
-description: "Shared in-process subagent run driver for maintainers and backend authors understanding or extending the spawn and fork run lifecycle."
+description: "Shared in-process subagent run driver for maintainers and backend authors who need to understand or extend the spawn and fork run lifecycle."
 kind: "package-library"
 ---
 
@@ -33,7 +33,7 @@ One call starts and drives one one-shot child. Fulfillment means the child is al
 
 ### The one input
 
-`InProcessRunOptions` is `{ seed?: SessionEvent[] }` — a fork seed of balanced parent events. Spawn omits it; fork supplies the completed-turn prefix and records its length so the result reader never mistakes seeded parent messages for child output.
+`InProcessRunOptions` is `{ seed?: SessionEvent[]; target?: ChildExecutionTarget }`. `seed` is a fork seed of balanced parent events. Spawn omits it; fork supplies the completed-turn prefix and records its length so the result reader never mistakes seeded parent messages for child output. `target` names another Agent preset and an optional cwd in its execution world; the child joins that preset instead of its parent's, and its header records both for cold resume. A target starts the child fresh: `seed` together with `target` is refused, because the seed would carry the parent's workspace roots into the other world.
 
 ### What the child gets
 
@@ -98,11 +98,11 @@ Read these pages when the package-level contract is not enough; they move from t
 
 #### What the model sees
 
-The shared driver sends the task verbatim as the child's user message and, when requested, shadows the persona and restricts global tool schemas, lookup, execution, and PTC mode SDK bindings in the unpublished child's fresh scope; parent restrictions are not inherited, and standalone tool-guidance sections remain. Spawn supplies no history; fork supplies its balanced seed.
+The shared driver sends the task verbatim as the child's user message and, when requested, shadows the persona and restricts global tool schemas, lookup, execution, and PTC mode SDK bindings in the unpublished child's fresh scope; parent restrictions are not inherited. Tool-guidance plugins can use the assembly scope to omit unavailable guidance; arbitrary static sections are not rewritten by the driver. Spawn supplies no history; fork supplies its balanced seed.
 
 #### Token effect
 
-Child input is isolated from the parent and grows through the child's own steps. A persona changes repeated prompt text; filtering changes schema or generated SDK cost but not independently registered guidance.
+Child input is isolated from the parent and grows through the child's own steps. A persona changes repeated prompt text; filtering changes schema or generated SDK cost, and scope-aware guidance changes with the visible capabilities.
 
 #### KV Cache effect
 

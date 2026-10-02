@@ -12,8 +12,7 @@ import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
-import { BasicCompactionEngine, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import ToolResultPruner, { type ToolResultPruneConfig } from '@deepseek-ai/dsh-compaction-tool-result-pruner'
+import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deepseek-ai/dsh-session'
@@ -28,7 +27,7 @@ import { Session, SessionId, type SessionEvent, type SurfaceEvent } from '@deeps
 class ReproCompactionEngine extends BasicCompactionEngine {
   override async summarize(): Promise<{ summary: ContentBlock[]; provider: string; model: string }> {
     return {
-      summary: [{ type: 'text', text: 'S' }],
+      summary: [{ type: 'text', text: 'CHECKPOINT SUMMARY' }],
       provider: 'mock',
       model: 'stub',
     }
@@ -38,10 +37,7 @@ class ReproCompactionEngine extends BasicCompactionEngine {
 /** Each call emits one tool-call until exhausted, then a final text answer. */
 class StepwiseToolAdapter extends LlmAdapter {
   calls = 0
-  constructor(
-    private toolSteps: number,
-    private readonly contextWindow = 1_000,
-  ) {
+  constructor(private toolSteps: number) {
     super()
   }
 
@@ -50,7 +46,7 @@ class StepwiseToolAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: this.contextWindow },
+      context: { contextWindow: 400 },
     })
   }
 
@@ -150,37 +146,30 @@ async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(AgentLoopInvariant)
 }
 
-async function harness(
-  toolSteps: number,
-  config: BasicCompactionConfig = {},
-  contextWindow = 1_000,
-  toolResult = 'work result',
-  prunerConfig?: ToolResultPruneConfig,
-): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
+async function harness(toolSteps: number): Promise<{ ctx: Context; compact: ReproCompactionEngine }> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await mountInvariants(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
-  if (prunerConfig !== undefined) void new ToolResultPruner(ctx, prunerConfig)
-  ctx.llm.registerAdapter(['mock'], new StepwiseToolAdapter(toolSteps, contextWindow))
+  ctx.llm.registerAdapter(['mock'], new StepwiseToolAdapter(toolSteps))
   ctx.tools.register(defineContentToolFixture({
     name: 'work',
     description: 'does work',
     parameters: { i: { type: 'number' } },
     async execute() {
-      return [{ type: 'text', text: toolResult }]
+      return [{ type: 'text', text: 'work result' }]
     },
   }))
   // Small window so several tool steps cross the threshold and compaction
   // fires within the runaway turn after enough history can shrink.
   const compact = new ReproCompactionEngine(ctx, {
     auto: true,
-    thresholdRatio: 0.2,
+    headroomTokens: 0,
+    thresholdRatio: 0.5,
     retainTokens: 50,
-    maxTokens: 64,
+    maxTokens: 8192,
     compactionRetries: 1,
-    ...config,
   })
   return { ctx, compact }
 }
@@ -196,7 +185,7 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
   })
 }
 
-function overflowHistorySeed(): SessionEvent[] {
+function overflowHistorySeed(): readonly SessionEvent[] {
   const session = Session.create(SessionId('overflow-history-seed'))
   for (let turn = 1; turn <= 2; turn += 1) {
     const sentinel = turn === 1 ? 'OLD HISTORY SENTINEL' : 'RECENT HISTORY'
@@ -224,45 +213,10 @@ function overflowHistorySeed(): SessionEvent[] {
     session.append('step/end', { turn, step: 1 })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
   }
-  return [...session.snapshotEvents()]
+  return session.snapshotEvents()
 }
 
 describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', () => {
-  it('gives a tool-call continuation a fresh admission attempt', async () => {
-    const { ctx } = await harness(
-      1,
-      { thresholdRatio: 0.1, retainTokens: 1, maxOverflowRetries: 1 },
-      4_000,
-      'large tool result '.repeat(100),
-      { thresholdChars: 100, headChars: 20, tailChars: 10 },
-    )
-    try {
-      const agent = (await ctx.agents.create({ sessionId: SessionId('tool-call-continuation-admission'), agentOptions: { provider: 'mock', model: 'mock' } })).agent
-      agent.followup(createUserMessage({
-        content: [{ type: 'text', text: 'large first request '.repeat(80) }],
-        source: { kind: 'user' },
-      }))
-      await agent.whenIdle()
-
-      expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message'))
-        .toHaveLength(2)
-      expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/call'))
-        .toHaveLength(1)
-      expect(agent.session.snapshotEvents().filter(event => event.type === 'tool/result')).toHaveLength(2)
-      expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/prune'))
-        .toHaveLength(1)
-      expect(agent.session.snapshotEvents().filter(event => event.type === 'compaction/summary'))
-        .toHaveLength(1)
-      expect(agent.session.surface.replaceGeneration).toBe(2)
-      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
-        type: 'turn/end',
-        data: { reason: { kind: 'completed' } },
-      })
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
-
   it('uses the model actually routed by agent/request for post-step pressure', async () => {
     const { ctx } = await harness(8)
     ctx.on('agent/request', async (_payload, next) => ({
@@ -287,14 +241,14 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
     }
   })
 
-  it('runs automatic pressure after the next step starts but before its request', async () => {
+  it('runs automatic pressure between the completed tool step and the next step', async () => {
     const { ctx } = await harness(8)
     try {
       const agent = await ctx.agentLoop.create(SessionId('post-step-order'), { provider: 'mock', model: 'mock' })
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do tool work' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, agent)
 
-      const events = [...agent.session.snapshotEvents()]
+      const events = agent.session.snapshotEvents()
       const compactStart = events.find(event => event.type === 'compaction/start')
       expect(compactStart).toBeDefined()
       const precedingResult = events.findLast(event =>
@@ -309,16 +263,11 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       const nextStepStart = events.find(event =>
         event.type === 'step/start'
         && event.data.step === precedingResult.data.step + 1
-        && event.seq < compactStart!.seq,
-      )
-      const nextAssistant = events.find(event =>
-        event.type === 'assistant/message'
-        && event.data.step === precedingResult.data.step + 1,
+        && event.seq > compactStart!.seq,
       )
       expect(precedingResult.seq).toBeLessThan(compactStart!.seq)
       expect(precedingStepEnd!.seq).toBeLessThan(compactStart!.seq)
-      expect(nextStepStart!.seq).toBeLessThan(compactStart!.seq)
-      expect(compactStart!.seq).toBeLessThan(nextAssistant!.seq)
+      expect(compactStart!.seq).toBeLessThan(nextStepStart!.seq)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -331,7 +280,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: 'do a long multi-step task' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, agent)
 
-      const events = [...agent.session.snapshotEvents()]
+      const events = agent.session.snapshotEvents()
       // A compaction ran: at least one checkpoint landed on the surface.
       const checkpoints = events.filter(
         (e): e is SurfaceEvent =>
@@ -388,7 +337,7 @@ describe('token pressure after loop-admitted system prompts', () => {
         agent.session.append('system/message', {
           turn,
           step,
-          message: createSystemMessage('retry guidance', '@deepseek-ai/dsh-system-prompt'),
+          message: createSystemMessage('retry guidance'),
         }, { surfaceOp: { op: 'replace', startSeq: node, endSeq: node }, sourceEventSeqs: [node] })
         return { kind: 'retry' }
       })
@@ -448,6 +397,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
         ...await next(), provider: 'mock', model: 'mock',
       }))
       await ctx.plugin(BasicCompactionEngine, {
+        headroomTokens: 0,
         thresholdRatio: 1,
         retainTokens: 100,
         maxTokens: 64,
@@ -456,7 +406,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       })
 
       try {
-        const { agent } = await ctx.agents.create( {
+        const { agent } = await ctx.agentLoop.createAgent(ctx, {
           sessionId: SessionId(`overflow-${delivery}`),
           seed: overflowHistorySeed(),
           agentOptions: {
@@ -480,7 +430,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
         expect(retry).toContain('RECOVERY CHECKPOINT')
         expect(retry).not.toContain('OLD HISTORY SENTINEL')
 
-        const events = [...agent.session.snapshotEvents()]
+        const events = agent.session.snapshotEvents()
         const stepStart = events.find(event =>
           event.type === 'step/start' && event.data.turn === 3 && event.data.step === 1,
         )!
@@ -524,6 +474,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
     await ctx.plugin(TokenMeter)
     ctx.llm.registerAdapter(['mock'], adapter)
     await ctx.plugin(BasicCompactionEngine, {
+      headroomTokens: 0,
       thresholdRatio: 1,
       retainTokens: 100,
       maxTokens: 64,
@@ -532,7 +483,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
     })
 
     try {
-      const { agent } = await ctx.agents.create( {
+      const { agent } = await ctx.agentLoop.createAgent(ctx, {
         sessionId: SessionId('alternating-recovery'),
         seed: overflowHistorySeed(),
         agentOptions: { provider: 'mock', model: 'mock' },

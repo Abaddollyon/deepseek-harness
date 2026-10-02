@@ -2,7 +2,7 @@
 # DeepSeek adapter with replay while preserving the app's one-task admission
 # config and the recorded flash route.
 - id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek'
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
   disabled: true
 
 - id: agent-default-model
@@ -32,13 +32,10 @@
 
 - id: jobs
   name: '@deepseek-ai/dsh-jobs-local'
-  disabled: true
+  config:
+    maxConcurrentJobsPerOwner: 1
 
 - insert:
-    - id: deterministic-jobs
-      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
-      config:
-        maxConcurrentJobsPerOwner: 1
     - id: llm-replay
       name: '@deepseek-ai/dsh-llm-replay'
       config:

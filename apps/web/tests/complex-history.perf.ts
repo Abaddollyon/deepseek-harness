@@ -201,10 +201,7 @@ function appendSystemPrompt(session: Session, turn: number, step: number): void 
   session.append('system/message', {
     turn,
     step,
-    message: createSystemMessage(
-      'Synthetic performance system prompt.',
-      '@deepseek-ai/dsh-system-prompt',
-    ),
+    message: createSystemMessage('Synthetic performance system prompt.'),
   }, { surfaceOp: 'append' })
 }
 
@@ -796,99 +793,6 @@ async function stopUserRenderProbe(
   })
 }
 
-interface ChurnProbeResult {
-  readonly longTasks: number
-  readonly longTaskMs: number
-  readonly worstLongTaskMs: number
-  readonly mutationBatches: number
-  readonly mutationRecords: number
-}
-
-/**
- * Arm a page-side probe over the sidebar tree and the long-task registry:
- * long tasks price main-thread blockage the CDP metric delta samples
- * coarsely, and tree mutations separate real DOM churn from wasted
- * reconciliation (a re-render whose output matches leaves no mutation).
- */
-async function startChurnProbe(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const probe = {
-      longTasks: 0,
-      longTaskMs: 0,
-      worstLongTaskMs: 0,
-      mutationBatches: 0,
-      mutationRecords: 0,
-      longTaskObserver: undefined as PerformanceObserver | undefined,
-      mutationObserver: undefined as MutationObserver | undefined,
-    }
-    const longTaskObserver = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        probe.longTasks += 1
-        probe.longTaskMs += entry.duration
-        probe.worstLongTaskMs = Math.max(probe.worstLongTaskMs, entry.duration)
-      }
-    })
-    longTaskObserver.observe({ entryTypes: ['longtask'] })
-    probe.longTaskObserver = longTaskObserver
-    const target = document.querySelector('[role="tree"]')
-    if (target !== null) {
-      const mutationObserver = new MutationObserver((records) => {
-        probe.mutationBatches += 1
-        probe.mutationRecords += records.length
-      })
-      mutationObserver.observe(target, {
-        attributes: true,
-        characterData: true,
-        childList: true,
-        subtree: true,
-      })
-      probe.mutationObserver = mutationObserver
-    }
-    Reflect.set(globalThis, '__dshPerfChurnProbe', probe)
-  })
-}
-
-async function stopChurnProbe(page: Page): Promise<ChurnProbeResult> {
-  const raw = await page.evaluate(() => {
-    const probe = Reflect.get(globalThis, '__dshPerfChurnProbe') as
-      | {
-        longTasks: number
-        longTaskMs: number
-        worstLongTaskMs: number
-        mutationBatches: number
-        mutationRecords: number
-        longTaskObserver?: PerformanceObserver
-        mutationObserver?: MutationObserver
-      }
-      | undefined
-    if (probe === undefined) throw new Error('churn probe was not started')
-    probe.longTaskObserver?.disconnect()
-    probe.mutationObserver?.disconnect()
-    Reflect.deleteProperty(globalThis, '__dshPerfChurnProbe')
-    return {
-      longTasks: probe.longTasks,
-      longTaskMs: probe.longTaskMs,
-      worstLongTaskMs: probe.worstLongTaskMs,
-      mutationBatches: probe.mutationBatches,
-      mutationRecords: probe.mutationRecords,
-    }
-  })
-  return {
-    ...raw,
-    longTaskMs: rounded(raw.longTaskMs),
-    worstLongTaskMs: rounded(raw.worstLongTaskMs),
-  }
-}
-
-/** Let the click's discrete-lane React render flush inside the measurement window. */
-async function settleRender(page: Page): Promise<void> {
-  await page.evaluate(() => new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => { resolve() })
-    })
-  }))
-}
-
 async function stableCount(
   locator: Locator,
   accepts: (count: number) => boolean,
@@ -1016,23 +920,19 @@ async function closePerformanceWorld(world: PerformanceWorld): Promise<void> {
 
 async function openPerformancePage(
   world: PerformanceWorld,
+  expectedSessions: number,
 ): Promise<Locator> {
   await world.page.goto(world.scaffold.authenticatedUrl, { waitUntil: 'load' })
   await world.page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
   const group = world.page.getByRole('treeitem').first()
-  await group.waitFor({ timeout: 30_000 })
+  await expect.poll(() => group.textContent(), { timeout: 30_000 })
+    .toContain(`${String(expectedSessions)} ${expectedSessions === 1 ? 'session' : 'sessions'}`)
   return group
 }
 
-/** Expand the collapsed sidebar search slot and fill the query. */
-async function fillSidebarSearch(page: Page, query: string): Promise<void> {
-  const toggle = page.getByRole('button', { name: 'Search sessions', exact: true })
-  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click()
-  await page.getByPlaceholder('Search sessions...').fill(query)
-}
-
 async function openLongHistory(page: Page): Promise<number> {
-  await fillSidebarSearch(page, 'LONG_PERF_SENTINEL')
+  await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
+    .fill('LONG_PERF_SENTINEL')
   const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
   await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
   await results.first().click()
@@ -1109,9 +1009,9 @@ async function continueConversation(
       if (toolResult?.type !== 'tool/result') {
         throw new Error(`continued turn ${String(index)} did not log its tool result`)
       }
-      const resultBlock = toolResult.data.message.content.find(block => block.type === 'tool-result')
-      expect(resultBlock?.isError).toBe(false)
-      expect(resultBlock?.content
+      const message = toolResult.data.message
+      expect(message.isError).toBe(false)
+      expect(message.content
         .filter(block => block.type === 'text')
         .map(block => block.text)
         .join('')).toContain(spec.toolResultMarker)
@@ -1313,51 +1213,30 @@ describe('manual web performance: complex workspace and history', () => {
       seedLongHistory: true,
     })
     try {
+      const bootStarted = performance.now()
+      const group = await openPerformancePage(world, SIDEBAR_SESSION_COUNT + 1)
+      const bootReadyMs = performance.now() - bootStarted
       const page = world.page
       const cdp = await page.context().newCDPSession(page)
       await cdp.send('Performance.enable')
-      const treeItems = page.getByRole('treeitem')
-      const totalSessions = SIDEBAR_SESSION_COUNT + 1
-      // Mirrors ui-workspace's COLLAPSED_SESSION_LIMIT (cross-package value
-      // imports are forbidden here); drift shows up as a failed row count.
-      const collapsedGroupRows = 5
-      const showMore = page.getByRole('button', {
-        name: `Show ${String(totalSessions - collapsedGroupRows)} more sessions`,
-        exact: true,
-      })
-
-      // Boot readiness: the collapsed group header carries no count, so the
-      // list's arrival is observable only through the expanded group's
-      // overflow-row label. Expand once to learn it, then collapse again —
-      // both transitions are re-measured below against the loaded list.
-      const bootStarted = performance.now()
-      const group = await openPerformancePage(world)
-      await group.click()
-      await showMore.waitFor({ timeout: 60_000 })
-      const bootReadyMs = performance.now() - bootStarted
       const firstContentfulPaintMs = await page.evaluate(
         () => globalThis.performance.getEntriesByName('first-contentful-paint')[0]?.startTime,
       )
-      await group.click()
-      await expect.poll(() => treeItems.count(), { timeout: 30_000 }).toBe(1)
 
-      const sidebarExpand = await measure(cdp, async () => {
+      const sidebar = await measure(cdp, async () => {
         await group.click()
-        await showMore.waitFor({ timeout: 30_000 })
-        return stableCount(treeItems, count => count === collapsedGroupRows + 1)
+        return stableCount(
+          page.getByRole('treeitem'),
+          count => count === SIDEBAR_SESSION_COUNT + 2,
+        )
       })
-      expect(sidebarExpand.value).toBe(collapsedGroupRows + 1)
-
-      await startChurnProbe(page)
-      const sidebarExpandAll = await measure(cdp, async () => {
-        await showMore.click()
-        return stableCount(treeItems, count => count === totalSessions + 1)
-      })
-      const expandAllChurn = await stopChurnProbe(page)
-      expect(sidebarExpandAll.value).toBe(totalSessions + 1)
+      expect(sidebar.value).toBe(SIDEBAR_SESSION_COUNT + 2)
+      await group.click()
+      await expect.poll(() => page.getByRole('treeitem').count()).toBe(1)
 
       const contentSearch = await measure(cdp, async () => {
-        await fillSidebarSearch(page, 'LONG_PERF_SENTINEL')
+        await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
+          .fill('LONG_PERF_SENTINEL')
         const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
         await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
         await results.first().waitFor({ timeout: 60_000 })
@@ -1370,59 +1249,23 @@ describe('manual web performance: complex workspace and history', () => {
       })
       expect(opened.value).toBe(DEFAULT_HISTORY_TURNS)
 
-      // Equivalent-projection churn: re-opening the current session moves no
-      // list value yet still publishes (the gesture echo), so its cost with
-      // every row mounted prices the expanded sidebar's steady-state publish —
-      // title-warmup and status echoes take the same path.
-      await page.getByRole('button', { name: 'Clear search', exact: true }).click()
-      // The search view unmounts SessionTree, dropping its browser-local
-      // expand-all state; the persisted group expansion survives, so one
-      // overflow click restores the fully mounted tree.
-      await showMore.waitFor({ timeout: 30_000 })
-      await showMore.click()
-      await expect.poll(() => treeItems.count(), { timeout: 30_000 }).toBe(totalSessions + 1)
-      const selectedRow = page.locator('[role="treeitem"][aria-selected="true"]').first()
-      await selectedRow.waitFor({ timeout: 30_000 })
-      await startChurnProbe(page)
-      const republish = await measure(cdp, async () => {
-        await selectedRow.click()
-        await settleRender(page)
-      })
-      const republishChurn = await stopChurnProbe(page)
-
-      const sidebarCollapse = await measure(cdp, async () => {
-        await group.click()
-        return stableCount(treeItems, count => count === 1)
-      })
-      expect(sidebarCollapse.value).toBe(1)
-
-      // The Trajectory ledger is virtualized: aria-rowcount is the logical
-      // row total while mounted tr count stays bounded.
-      const trajectoryTable = page.locator('[data-trajectory-scroll] table')
-      const logicalTrajectoryRows = async (): Promise<number> =>
-        Number(await trajectoryTable.getAttribute('aria-rowcount'))
-      // The cold ledger serves only the loaded history window (the default
-      // tail page), so its logical count is bounded well under the full log.
+      const trajectoryRows = page.getByRole('row')
       const coldTrajectory = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).click()
-        await trajectoryTable.waitFor({ timeout: 30_000 })
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBeGreaterThan(0)
-        return logicalTrajectoryRows()
+        return stableCount(trajectoryRows, count => count === EXPECTED_TRAJECTORY_ROWS)
       })
       expect(coldTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
 
       const collapseTurns = await measure(cdp, async () => {
         await page.getByRole('button', { name: 'Collapse turns', exact: true }).click()
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBe(1)
-        return logicalTrajectoryRows()
+        return stableCount(trajectoryRows, count => count > 0 && count < EXPECTED_TRAJECTORY_ROWS)
       })
-      expect(collapseTurns.value).toBe(1)
+      expect(collapseTurns.value).toBeLessThan(EXPECTED_TRAJECTORY_ROWS)
       const trajectorySearch = await measure(cdp, async () => {
         await page.getByRole('searchbox', { name: 'Search trajectory', exact: true }).fill('turn 499')
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 }).toBe(1)
-        return logicalTrajectoryRows()
+        return stableCount(trajectoryRows, count => count > 0 && count < 20)
       })
-      expect(trajectorySearch.value).toBe(1)
+      expect(trajectorySearch.value).toBeLessThan(20)
 
       await page.getByRole('tab', { name: 'Chat', exact: true }).click()
       const historyPages: { turns: number; measurement: Measurement }[] = []
@@ -1439,13 +1282,9 @@ describe('manual web performance: complex workspace and history', () => {
         historyPages.push({ turns, measurement: older.measurement })
       }
 
-      // The virtualized ledger's aria-rowcount includes one sentinel row
-      // beyond the derived event rows, so assert the floor, not equality.
       const warmTrajectory = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).click()
-        await expect.poll(logicalTrajectoryRows, { timeout: 30_000 })
-          .toBe(EXPECTED_TRAJECTORY_ROWS)
-        return logicalTrajectoryRows()
+        return stableCount(trajectoryRows, count => count === EXPECTED_TRAJECTORY_ROWS)
       })
       expect(warmTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
       const warmConversation = await measure(cdp, async () => {
@@ -1470,10 +1309,7 @@ describe('manual web performance: complex workspace and history', () => {
             ? null
             : rounded(firstContentfulPaintMs),
         },
-        sidebarExpand: sidebarExpand.measurement,
-        sidebarExpandAll: { rows: sidebarExpandAll.value, ...sidebarExpandAll.measurement, churn: expandAllChurn },
-        sidebarRepublish: { ...republish.measurement, churn: republishChurn },
-        sidebarCollapse: sidebarCollapse.measurement,
+        sidebarExpand: sidebar.measurement,
         contentSearch: contentSearch.measurement,
         openLongHistory: { initialTurns: opened.value, ...opened.measurement },
         coldTrajectory: { rows: coldTrajectory.value, ...coldTrajectory.measurement },
@@ -1497,7 +1333,7 @@ describe('manual web performance: complex workspace and history', () => {
       seedLongHistory: true,
     })
     try {
-      await openPerformancePage(world)
+      await openPerformancePage(world, 1)
       const cdp = await world.page.context().newCDPSession(world.page)
       await cdp.send('Performance.enable')
       const opened = await measure(cdp, () => openLongHistory(world.page))
@@ -1530,7 +1366,7 @@ describe('manual web performance: complex workspace and history', () => {
       seedLongHistory: true,
     })
     try {
-      await openPerformancePage(world)
+      await openPerformancePage(world, 1)
       const cdp = await world.page.context().newCDPSession(world.page)
       await cdp.send('Performance.enable')
       expect(await openLongHistory(world.page)).toBe(DEFAULT_HISTORY_TURNS)

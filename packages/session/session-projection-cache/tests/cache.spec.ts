@@ -45,11 +45,13 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'cache-test/count': number
     'cache-test/secret': string
     'cache-test/marks3': MarksState
+    title: string | null
   }
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
     'cache-test/secondary-marks': { marks: string[] }
     'cache-test/marks3': { marks: string[] }
+    title: string | null
   }
 }
 
@@ -108,6 +110,16 @@ const secondaryMarksUnit = {
   stateVersion: 1,
 } satisfies ProjectionDefinition<'cache-test/secondary-marks', MarksState>
 
+/** Mirrors the shipped title unit's storage face (stateVersion 1, bare-string state). */
+const titleUnit = {
+  key: 'title',
+  stateSchema: z.string().nullable(),
+  init: () => null,
+  apply: state => state,
+  wire: { viewSchema: z.string().nullable(), view: state => state },
+  stateVersion: 1,
+} satisfies ProjectionDefinition<'title', string | null>
+
 /** One session's record document on the per-record medium. */
 const recordPath = (root: string, id: Session['id']): string =>
   join(root, projectionCacheDomainSpec.name, 'sessions', `${String(id)}.json`)
@@ -148,6 +160,18 @@ const mark = (session: Session, marks: string[]): SessionEvent =>
 const endTurn = (session: Session): SessionEvent =>
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
+/** Resolve after this Session's next durable cache replacement. */
+function whenWritten(ctx: Context, id: SessionId): Promise<void> {
+  return new Promise((resolve) => {
+    const dispose = ctx.on('domain/changed', (change) => {
+      if (change.domain !== projectionCacheDomainSpec.name
+        || change.table !== 'sessions' || change.key !== id || change.operation !== 'put') return
+      dispose()
+      resolve()
+    })
+  })
+}
+
 /** The stored record for one session id (undefined = absent or unreadable). */
 async function storedRecord(root: string, id: Session['id']): Promise<CheckpointRecord | undefined> {
   try {
@@ -187,95 +211,22 @@ afterEach(async () => {
 })
 
 describe('SessionProjectionCache write policy', () => {
-  it('keeps the newer threshold cut when the creation flush finishes last', async () => {
-    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
-    const release = Promise.withResolvers<undefined>()
-    let flushes = 0
-    ctx.on('session/flush', () => {
-      flushes += 1
-      return flushes === 1 ? release.promise : Promise.resolve(undefined)
-    })
-    const write = vi.spyOn(cache, 'write')
-    const flush = vi.spyOn(ctx.sessions, 'flush')
-    const session = ctx.sessions.create(SessionId('blocked-create'))
-    try {
-      mark(session, ['newer'])
-      expect(flushes).toBe(2)
-      expect(write).toHaveBeenCalledTimes(2)
-      await flush.mock.results[1]?.value
-    } finally {
-      release.resolve(undefined)
-      await Promise.all(write.mock.results.map(async (result) => { await result.value }))
-    }
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['newer'] })
-  })
-
-  it('keeps later writes behind a pending creation even when an intervening flush fails', async () => {
-    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
-    const release = Promise.withResolvers<undefined>()
-    const failure = new Error('intervening flush failed')
-    let flushes = 0
-    ctx.on('session/flush', () => {
-      flushes += 1
-      if (flushes === 1) return release.promise
-      if (flushes === 2) return Promise.reject(failure)
-      return Promise.resolve(undefined)
-    })
-    const write = vi.spyOn(cache, 'write')
-    const flush = vi.spyOn(ctx.sessions, 'flush')
-    const session = ctx.sessions.create(SessionId('queued-failure'))
-    try {
-      mark(session, ['failed'])
-      await expect(flush.mock.results[1]?.value).rejects.toBe(failure)
-      mark(session, ['newest'])
-      expect(flushes).toBe(3)
-      await flush.mock.results[2]?.value
-    } finally {
-      release.resolve(undefined)
-      const results = await Promise.allSettled(write.mock.results.map(async (result) => { await result.value }))
-      expect(results).toEqual([
-        { status: 'fulfilled', value: undefined },
-        { status: 'rejected', reason: failure },
-        { status: 'fulfilled', value: undefined },
-      ])
-    }
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['newest'] })
-  })
-
-  it('keeps the durable cut when a Session flush fails and writes the next cut', async () => {
-    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 1, writeIntervalMs: 60_000 } })
-    const write = vi.spyOn(cache, 'write')
-    const session = ctx.sessions.create(SessionId('flush-failure'))
-    expect(write).toHaveBeenCalledExactlyOnceWith(session)
-    await write.mock.results[0]?.value
-    const failure = new Error('session log flush failed')
-    const stopFailing = ctx.on('session/flush', () => Promise.reject(failure))
-    mark(session, ['unflushed'])
-    expect(write).toHaveBeenCalledTimes(2)
-    await expect(write.mock.results[1]?.value).rejects.toBe(failure)
-    expect((await storedRows(root, session.id))?.['cache-test/marks'])
-      .toEqual({ ver: 1, seq: -1, val: null })
-    stopFailing()
-    mark(session, ['recovered'])
-    expect(write).toHaveBeenCalledTimes(3)
-    await write.mock.results[2]?.value
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['recovered'] })
-  })
-
   it('writes a durable checkpoint at turn/end (mandatory point)', async () => {
     const { ctx, root } = await harness()
-    const session = ctx.sessions.create(SessionId('turn-end'))
+    // The interval cannot substitute for the mandatory turn/end trigger.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const id = SessionId('turn-end')
+    const created = whenWritten(ctx, id)
+    const session = ctx.sessions.create(id)
     mark(session, ['a'])
-    // Creation already wrote the init cut; the mark is throttled, so the
-    // stored row is still the creation-time cut (no marks folded).
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.seq).toBe(-1)
-    }, { timeout: 5_000 })
+    // The mark is throttled, so the creation cut has no marks folded.
+    await created
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.seq).toBe(-1)
+    const written = whenWritten(ctx, id)
     const end = endTurn(session)
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks'])
-        .toEqual({ ver: 1, seq: end.seq, val: { marks: ['a'] } })
-    }, { timeout: 5_000 })
+    await written
+    expect((await storedRows(root, session.id))?.['cache-test/marks'])
+      .toEqual({ ver: 1, seq: end.seq, val: { marks: ['a'] } })
   })
 
   it('writes a checkpoint at session creation, capturing the seed-derived cut', async () => {
@@ -283,53 +234,50 @@ describe('SessionProjectionCache write policy', () => {
     // A forked child seeded with its ancestor's title-like event: no
     // conversation follows, yet the creation write must capture the fold so
     // a crash or a live-held fork still lists the derived value.
-    const session = ctx.sessions.create(SessionId('seeded'), {
+    const id = SessionId('seeded')
+    const created = whenWritten(ctx, id)
+    const session = ctx.sessions.create(id, {
       seed: [{ type: 'cache-test/mark', seq: 0, time: 1, data: { marks: ['seed'] } }] as SessionEvent[],
     })
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val)
-        .toEqual({ marks: ['seed'] })
-    }, { timeout: 5_000 })
+    await created
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val)
+      .toEqual({ marks: ['seed'] })
   })
 
-  it('writes the detached cut even when the creation flush is still pending', async () => {
-    const { ctx, root, cache } = await harness()
-    const release = Promise.withResolvers<undefined>()
-    ctx.on('session/flush', () => release.promise)
-    const write = vi.spyOn(cache, 'write')
+  it('writes at session disposal (detach, the live-to-cold moment)', async () => {
+    const { ctx, root } = await harness()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const id = SessionId('detach')
+    const created = whenWritten(ctx, id)
     // Sessions dispose with their owning fiber: create in a child plugin.
     let session: Session | undefined
     const owner = await ctx.plugin(Object.assign((inner: Context) => {
-      session = inner.sessions.create(SessionId('detach'))
+      session = inner.sessions.create(id)
     }, { inject: ['sessions'] }))
     if (session === undefined) throw new Error('session was not created')
-    try {
-      mark(session, ['live'])
-      await owner.dispose()
-      expect(write).toHaveBeenCalledTimes(2)
-      expect(write).toHaveBeenNthCalledWith(2, session)
-    } finally {
-      release.resolve(undefined)
-      await Promise.all(write.mock.results.map(async (result) => { await result.value }))
-    }
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
+    await created
+    mark(session, ['live'])
+    const written = whenWritten(ctx, id)
+    await owner.dispose()
+    await written
+    expect((await storedRows(root, id))?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
   })
 
   it('flushes when the in-turn event count reaches the configured threshold', async () => {
-    const { ctx, root, cache } = await harness({ config: { writeEveryEvents: 3, writeIntervalMs: 60_000 } })
-    const write = vi.spyOn(cache, 'write')
-    const session = ctx.sessions.create(SessionId('count'))
+    const { ctx, root } = await harness({ config: { writeEveryEvents: 3, writeIntervalMs: 60_000 } })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const id = SessionId('count')
+    const created = whenWritten(ctx, id)
+    const session = ctx.sessions.create(id)
     mark(session, ['1'])
     mark(session, ['2'])
-    expect(write).toHaveBeenCalledExactlyOnceWith(session)
-    await write.mock.results[0]?.value
-    expect((await storedRows(root, session.id))?.['cache-test/marks'])
+    await created
+    expect((await storedRows(root, id))?.['cache-test/marks'])
       .toEqual({ ver: 1, seq: -1, val: null }) // still the creation cut
+    const written = whenWritten(ctx, id)
     mark(session, ['3'])
-    expect(write).toHaveBeenCalledTimes(2)
-    expect(write).toHaveBeenNthCalledWith(2, session)
-    await write.mock.results[1]?.value
-    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
+    await written
+    expect((await storedRows(root, id))?.['cache-test/marks']?.val).toEqual({ marks: ['3'] })
   })
 
   it('flushes on the configured interval when the count threshold is not reached', async () => {
@@ -404,30 +352,30 @@ describe('SessionProjectionCache write policy', () => {
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('turn/end write for "fail-soft" failed'))
     }, { timeout: 5_000 })
-    await vi.waitFor(async () => {
-      expect(await storedRows(root, session.id)).toBeUndefined()
-    }, { timeout: 5_000 })
+    expect(await storedRows(root, session.id)).toBeUndefined()
     // Self-heal: once the blocker clears, the next mandatory point writes.
     await rm(recordPath(root, session.id), { recursive: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     mark(session, ['y'])
+    const written = whenWritten(ctx, session.id)
     endTurn(session)
-    await vi.waitFor(async () => {
-      expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['y'] })
-    }, { timeout: 5_000 })
+    await written
+    expect((await storedRows(root, session.id))?.['cache-test/marks']?.val).toEqual({ marks: ['y'] })
   })
 })
 
 describe('SessionProjectionCache listing read', () => {
-  it('rejects a nonzero inherited cut for an unseeded header', async () => {
+  it('rejects a nonzero inherited cut for an unseeded header on the fold face', async () => {
     const { cache } = await harness()
 
-    expect(() => cache.cachedSnapshot(
+    expect(() => cache.coldSnapshot(
       headerOf(SessionId('invalid-unseeded-cut')),
       SessionLogOffset(1),
+      [],
     )).toThrow('unseeded projection-cache identity inherited event count must be 0')
   })
 
-  it('uses the lowest watermark across every served wire row', async () => {
+  it('serves rows with differing watermarks as one block at the lowest served watermark', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
     await seedRecord(root, 'watermark-lower', {
@@ -441,13 +389,20 @@ describe('SessionProjectionCache listing read', () => {
     const { ctx, cache } = await harness({ root })
     ctx.sessionProjections.register(secondaryMarksUnit)
 
-    expect(cache.cachedSnapshot(headerOf(SessionId('watermark-lower')), SessionLogOffset(0))?.asOfSeq)
-      .toBe(2)
-    expect(cache.cachedSnapshot(headerOf(SessionId('watermark-higher')), SessionLogOffset(0))?.asOfSeq)
-      .toBe(4)
+    // The block carries one watermark: the seq every served value has folded
+    // through at least, so the lower of the two rows names the block.
+    for (const [id, asOfSeq] of [['watermark-lower', 2], ['watermark-higher', 4]] as const) {
+      expect(cache.cachedSnapshot(headerOf(SessionId(id)))).toEqual({
+        asOfSeq,
+        values: {
+          'cache-test/marks': { marks: ['primary'] },
+          'cache-test/secondary-marks': { marks: ['secondary'] },
+        },
+      })
+    }
   })
 
-  it('refuses a checkpoint created for a different inherited cut', async () => {
+  it('serves a seeded lifecycle by header alone while the fold face still refuses another cut', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
     const id = SessionId('cut-identity')
@@ -464,12 +419,54 @@ describe('SessionProjectionCache listing read', () => {
     )
     const { cache } = await harness({ root })
     const seededHeader = { ...headerOf(id), isSeeded: true }
+    const log: SessionEvent[] = [
+      { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
+      { type: 'cache-test/mark', seq: SessionSeq(1), time: 1, data: { marks: ['logged'] } },
+    ]
 
-    expect(cache.cachedSnapshot(seededHeader, SessionLogOffset(2))?.values['cache-test/marks'])
+    // The listing knows only the header: the record's lifecycle matches, so
+    // its rows are viewed without any cut.
+    expect(cache.cachedSnapshot(seededHeader))
+      .toEqual({ asOfSeq: 1, values: { 'cache-test/marks': { marks: ['seed'] } } })
+    // An unseeded header names another lifecycle even though the id matches.
+    expect(cache.cachedSnapshot(headerOf(id))).toBeUndefined()
+    // The fold face holds the exact cut: the matching cut seeds from the row,
+    // another cut refolds the whole log instead of continuing a foreign state.
+    expect(cache.coldSnapshot(seededHeader, SessionLogOffset(2), log).values['cache-test/marks'])
       .toEqual({ marks: ['seed'] })
-    expect(cache.cachedSnapshot(seededHeader, SessionLogOffset(1))).toBeUndefined()
-    expect(() => cache.cachedSnapshot(headerOf(id), SessionLogOffset(1)))
-      .toThrow('unseeded projection-cache identity inherited event count must be 0')
+    expect(cache.coldSnapshot(seededHeader, SessionLogOffset(1), log).values['cache-test/marks'])
+      .toEqual({ marks: ['logged'] })
+  })
+
+  it('serves a seeded lifecycle\'s predecessor title by header alone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const id = SessionId('seeded-predecessor')
+    await seedRecord(
+      root,
+      id,
+      {
+        'cache-test/marks': { ver: 1, seq: SessionSeq(3), val: { marks: ['fork'] } },
+        title: { ver: 1, seq: SessionSeq(3), val: 'forked title' },
+      },
+      {
+        formatVersion: SESSION_FORMAT_VERSION - 1,
+        createdAt: 0,
+        isSeeded: true,
+        inheritedEventCount: SessionLogOffset(5),
+      },
+    )
+    const { ctx, cache } = await harness({ root })
+    ctx.sessionProjections.register(titleUnit)
+    const seededHeader = { ...headerOf(id), isSeeded: true }
+
+    // An older format generation never serves the full block, but its title
+    // survives the format edge, for a seeded lifecycle as for an unseeded one.
+    expect(cache.cachedSnapshot(seededHeader)).toBeUndefined()
+    expect(cache.cachedPredecessorTitle(seededHeader))
+      .toEqual({ asOfSeq: 3, values: { title: 'forked title' } })
+    // An unseeded header names another lifecycle: no title either.
+    expect(cache.cachedPredecessorTitle(headerOf(id))).toBeUndefined()
   })
 
   it('serves a creation-time checkpoint at the before-first-event cursor', async () => {
@@ -480,7 +477,7 @@ describe('SessionProjectionCache listing read', () => {
     })
     const { cache } = await harness({ root })
 
-    expect(cache.cachedSnapshot(headerOf(SessionId('before-first-event')), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(SessionId('before-first-event'))))
       .toEqual({ asOfSeq: -1, values: { 'cache-test/marks': { marks: [] } } })
   })
 
@@ -501,7 +498,7 @@ describe('SessionProjectionCache listing read', () => {
     )
     const { cache } = await harness({ root })
 
-    expect(cache.cachedSnapshot(headerOf(id), SessionLogOffset(0))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(id))).toBeUndefined()
   })
 
   it('keeps host-only checkpoint state out of cached wire snapshots', async () => {
@@ -515,15 +512,15 @@ describe('SessionProjectionCache listing read', () => {
     ctx.sessionProjections.register(secretUnit)
     const header = headerOf(SessionId('host-state'))
 
-    expect(cache.cachedSnapshot(header, SessionLogOffset(0))).toEqual({
+    expect(cache.cachedSnapshot(header)).toEqual({
       asOfSeq: 4,
       values: { 'cache-test/marks': { marks: ['wire'] } },
     })
-    expect(JSON.stringify(cache.cachedSnapshot(header, SessionLogOffset(0))))
+    expect(JSON.stringify(cache.cachedSnapshot(header)))
       .not.toContain('private prompt text')
   })
 
-  it('serves identity-matching rows with the cut watermark and refuses unrelated ones', async () => {
+  it('serves lifecycle-matching rows as a cached block and refuses unrelated ones', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
     await seedRecord(root, 'listed', {
@@ -531,29 +528,26 @@ describe('SessionProjectionCache listing read', () => {
     })
     const { cache } = await harness({ root })
     const id = SessionId('listed')
-    // Matching header: values plus the watermark the client seeds under.
-    expect(cache.cachedSnapshot(headerOf(id), SessionLogOffset(0)))
+    // Matching header: the values at the stored row's own watermark.
+    expect(cache.cachedSnapshot(headerOf(id)))
       .toEqual({ asOfSeq: 4, values: { 'cache-test/marks': { marks: ['t'] } } })
     // A recreated id (different createdAt): the record is unrelated — no block.
-    expect(cache.cachedSnapshot(headerOf(id, 777), SessionLogOffset(0))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(id, 777))).toBeUndefined()
     // Unknown id: no block.
-    expect(cache.cachedSnapshot(headerOf(SessionId('never-cached')), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(SessionId('never-cached'))))
       .toBeUndefined()
   })
 
-  it('carries ONE cut across multiple served rows: the lowest watermark wins', async () => {
+  it('views every served wire row of one record in one cached block', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
     roots.push(root)
-    // Equal watermarks: whichever row is visited second cannot lower the cut,
-    // so the one-cut fold sees both a lowering and a non-lowering row in
-    // every iteration order.
     await seedRecord(root, 'multi-row', {
       'cache-test/marks': { ver: 1, seq: SessionSeq(4), val: { marks: ['a'] } },
       'cache-test/marks3': { ver: 1, seq: SessionSeq(4), val: { marks: ['b'] } },
     })
     const { ctx, cache } = await harness({ root })
     ctx.sessionProjections.register(marks3Unit)
-    const block = cache.cachedSnapshot(headerOf(SessionId('multi-row')), SessionLogOffset(0))
+    const block = cache.cachedSnapshot(headerOf(SessionId('multi-row')))
     expect(block?.values).toEqual({
       'cache-test/marks': { marks: ['a'] },
       'cache-test/marks3': { marks: ['b'] },
@@ -581,7 +575,7 @@ describe('SessionProjectionCache listing read', () => {
       },
     }))
     const { cache } = await harness({ root })
-    expect(cache.cachedSnapshot(headerOf(SessionId('all-stale')), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(SessionId('all-stale'))))
       .toBeUndefined()
   })
 
@@ -602,11 +596,20 @@ describe('SessionProjectionCache listing read', () => {
     const { cache } = await harness({ root })
     const id = SessionId('pre-lineage')
     // Unseeded caller: the absent lineage is exactly its identity — served.
-    expect(cache.cachedSnapshot(headerOf(id), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(id)))
       .toEqual({ asOfSeq: 4, values: { 'cache-test/marks': { marks: ['kept'] } } })
-    // Seeded caller: the lineage-less record cannot vouch for the cut — refused.
-    expect(cache.cachedSnapshot({ ...headerOf(id), isSeeded: true }, SessionLogOffset(2)))
+    // Seeded caller: the lineage-less record cannot vouch for a seeded lifecycle — refused.
+    expect(cache.cachedSnapshot({ ...headerOf(id), isSeeded: true }))
       .toBeUndefined()
+    // The fold face reads the absent lineage as the unseeded cut 0: the
+    // unseeded caller continues from the row, the seeded caller refolds.
+    const log: SessionEvent[] = [0, 1, 2, 3, 4].map(seq => ({
+      type: 'cache-test/mark', seq: SessionSeq(seq), time: seq, data: { marks: [`m${seq}`] },
+    }))
+    expect(cache.coldSnapshot(headerOf(id), SessionLogOffset(0), log).values['cache-test/marks'])
+      .toEqual({ marks: ['kept'] })
+    expect(cache.coldSnapshot({ ...headerOf(id), isSeeded: true }, SessionLogOffset(1), log).values['cache-test/marks'])
+      .toEqual({ marks: ['m4'] })
   })
 
   it('refuses an accepted predecessor record without a Session format generation', async () => {
@@ -624,7 +627,7 @@ describe('SessionProjectionCache listing read', () => {
     }))
     const { cache } = await harness({ root })
 
-    expect(cache.cachedSnapshot(headerOf(id), SessionLogOffset(0))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(id))).toBeUndefined()
   })
 
   it('returns undefined when every stored row is version-mismatched', async () => {
@@ -636,7 +639,7 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/marks': { ver: 99, seq: SessionSeq(4), val: { marks: ['old'] } },
     })
     const { cache } = await harness({ root })
-    expect(cache.cachedSnapshot(headerOf(SessionId('row-stale')), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(SessionId('row-stale'))))
       .toBeUndefined()
   })
 
@@ -654,10 +657,10 @@ describe('SessionProjectionCache listing read', () => {
     })
     const { cache } = await harness({ root })
     const id = SessionId('homed')
-    expect(cache.cachedSnapshot(headerOf(id, 0, '/work'), SessionLogOffset(0))?.values['cache-test/marks'])
+    expect(cache.cachedSnapshot(headerOf(id, 0, '/work'))?.values['cache-test/marks'])
       .toEqual({ marks: ['w'] })
-    expect(cache.cachedSnapshot(headerOf(id, 0, '/elsewhere'), SessionLogOffset(0))).toBeUndefined()
-    expect(cache.cachedSnapshot(headerOf(id, 0), SessionLogOffset(0))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(id, 0, '/elsewhere'))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(id, 0))).toBeUndefined()
   })
 
   it('returns undefined for a malformed record document (refold from the log on the caller side)', async () => {
@@ -667,7 +670,7 @@ describe('SessionProjectionCache listing read', () => {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, 'not json at all')
     const { cache } = await harness({ root })
-    expect(cache.cachedSnapshot(headerOf(SessionId('malformed')), SessionLogOffset(0)))
+    expect(cache.cachedSnapshot(headerOf(SessionId('malformed'))))
       .toBeUndefined()
   })
 })
@@ -749,14 +752,6 @@ describe('SessionProjectionCache cold-read seeding', () => {
     })
     const { cache, ctx } = await harness({ root })
     const apply = vi.fn((_state: number, _event: SessionEvent) => 1)
-    const whenWritten = (id: SessionId): Promise<void> => new Promise((resolve) => {
-      const dispose = ctx.on('domain/changed', (change) => {
-        if (change.domain !== projectionCacheDomainSpec.name
-          || change.table !== 'sessions' || change.key !== id || change.operation !== 'put') return
-        dispose()
-        resolve()
-      })
-    })
     ctx.sessionProjections.register({
       key: 'cache-test/count',
       stateSchema: z.number().int().nonnegative(),
@@ -768,7 +763,7 @@ describe('SessionProjectionCache cold-read seeding', () => {
     const events = Array.from({ length: 5 }, (_, seq) => ({
       type: 'cache-test/mark', seq: SessionSeq(seq), time: seq, data: { marks: [`m${seq}`] },
     })) as SessionEvent[]
-    const refreshed = whenWritten(meta.id)
+    const refreshed = whenWritten(ctx, meta.id)
     const snapshot = cache.coldSnapshot(meta, SessionLogOffset(0), events)
     // The full log was traversed, but the fold applied only seqs 3 and 4.
     expect(apply).toHaveBeenCalledTimes(2)
@@ -782,7 +777,7 @@ describe('SessionProjectionCache cold-read seeding', () => {
     // No cached row yet: the first cold read folds from init over the full
     // log and creates the cache row (the `?? {}` seed path).
     const fresh = headerOf(SessionId('cold-fresh'), 10)
-    const created = whenWritten(fresh.id)
+    const created = whenWritten(ctx, fresh.id)
     cache.coldSnapshot(fresh, SessionLogOffset(0), events)
     expect(apply).toHaveBeenCalledTimes(7) // 2 tail + 5 full
     await created
@@ -812,117 +807,5 @@ describe('SessionProjectionCache cold-read seeding', () => {
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "cold-fail" failed'))
     }, { timeout: 5_000 })
-  })
-})
-describe('SessionProjectionCache cold write-back', () => {
-  const rows = (seq: number, value: string[]): CheckpointRecord['rows'] => ({
-    'cache-test/marks': { ver: 1, seq: SessionSeq(seq), val: { marks: value } },
-  })
-
-  it('creates the record when no row exists for the lifecycle', async () => {
-    const { cache, root } = await harness()
-    const meta = headerOf(SessionId('writeback-create'), 0)
-
-    await cache.writeBack(meta, SessionLogOffset(0), rows(4, ['cold']), {})
-
-    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['cold']))
-  })
-
-  it('replaces the exact cut it restored from, healing a row that claimed the future', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    // A row claiming seq 999 over a log that ends at 4: unusable, and only a
-    // full refold can discard it. The refold's write-back must land.
-    await seedRecord(root, 'writeback-heal', rows(999, ['future']))
-    const { cache } = await harness({ root })
-    const meta = headerOf(SessionId('writeback-heal'), 0)
-
-    await cache.writeBack(meta, SessionLogOffset(0), rows(4, ['healed']), rows(999, ['future']))
-
-    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['healed']))
-  })
-
-  it('never regresses a checkpoint written while the cold read was in flight', async () => {
-    const { cache, ctx, root } = await harness()
-    let session: Session | undefined
-    const owner = await ctx.plugin(Object.assign((inner: Context) => {
-      session = inner.sessions.create(SessionId('writeback-race'))
-    }, { inject: ['sessions'] }))
-    if (session === undefined) throw new Error('session was not created')
-    // The cold read observed no record at all, then a Session attached and
-    // checkpointed a strictly fresher cut before the cold write-back landed.
-    const observed = {}
-    mark(session, ['live'])
-    await cache.write(session)
-    const fresh = await storedRows(root, session.id)
-    expect(fresh?.['cache-test/marks']?.val).toEqual({ marks: ['live'] })
-
-    await cache.writeBack(session.header, SessionLogOffset(0), rows(0, ['stale']), observed)
-
-    expect(await storedRows(root, session.id)).toEqual(fresh)
-    await owner.dispose()
-  })
-
-  it.each([
-    ['projection key', { 'cache-test/secondary-marks': { ver: 1, seq: SessionSeq(4), val: { marks: ['observed'] } } }],
-    ['state version', { 'cache-test/marks': { ver: 2, seq: SessionSeq(4), val: { marks: ['observed'] } } }],
-    ['watermark', { 'cache-test/marks': { ver: 1, seq: SessionSeq(3), val: { marks: ['observed'] } } }],
-  ] satisfies [string, CheckpointRecord['rows']][])('preserves a checkpoint when an equal-sized observed cut differs by %s', async (_label, observed) => {
-    const { cache, root } = await harness()
-    const meta = headerOf(SessionId('writeback-changed-cut'), 0)
-    const committed = rows(4, ['committed'])
-    await cache.writeBack(meta, SessionLogOffset(0), committed, {})
-
-    await cache.writeBack(meta, SessionLogOffset(0), rows(5, ['stale-refold']), observed)
-
-    expect(await storedRows(root, meta.id)).toEqual(committed)
-    expect(cache.checkpointFor(meta, SessionLogOffset(0))).toEqual(committed)
-    expect(cache.cachedSnapshot(meta, SessionLogOffset(0))).toEqual({
-      asOfSeq: 4, values: { 'cache-test/marks': { marks: ['committed'] } },
-    })
-  })
-
-  it('admits only the first of two concurrent write-backs for one session', async () => {
-    const { cache, root } = await harness()
-    const meta = headerOf(SessionId('writeback-concurrent'), 0)
-
-    await Promise.all([
-      cache.writeBack(meta, SessionLogOffset(0), rows(4, ['first']), {}),
-      cache.writeBack(meta, SessionLogOffset(0), rows(4, ['second']), {}),
-    ])
-
-    // Both restored from the empty cut; serialization makes the second observe
-    // the first's record and stand down instead of interleaving read and write.
-    expect(await storedRows(root, meta.id)).toEqual(rows(4, ['first']))
-  })
-
-  it('replaces a record bound to a different lifecycle under the same id', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
-    roots.push(root)
-    await seedRecord(root, 'writeback-relifecycle', rows(7, ['old']), {
-      createdAt: 1, isSeeded: false, inheritedEventCount: SessionLogOffset(0),
-    })
-    const { cache } = await harness({ root })
-    const meta = headerOf(SessionId('writeback-relifecycle'), 2)
-
-    await cache.writeBack(meta, SessionLogOffset(0), rows(1, ['new']), {})
-
-    expect(await storedRecord(root, meta.id)).toEqual({
-      identity: { formatVersion: SESSION_FORMAT_VERSION, createdAt: 2, isSeeded: false, inheritedEventCount: SessionLogOffset(0) },
-      rows: rows(1, ['new']),
-    })
-  })
-
-  it('is fail-soft when the checkpoint identity itself is impossible', async () => {
-    const { cache, ctx, root } = await harness()
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
-    const meta = headerOf(SessionId('writeback-bad-identity'), 0)
-
-    // An unseeded lifecycle cannot inherit events; identityOf refuses it and
-    // the write-back must log rather than throw into the cold read.
-    await expect(cache.writeBack(meta, SessionLogOffset(3), rows(1, ['x']), {})).resolves.toBeUndefined()
-
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "writeback-bad-identity" failed'))
-    expect(await storedRows(root, meta.id)).toBeUndefined()
   })
 })

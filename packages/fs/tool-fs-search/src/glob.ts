@@ -14,7 +14,7 @@ import { sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, SearchResultView, ToolResult } from '@deepseek-ai/dsh-tools'
 import type { SpillRef } from '@deepseek-ai/dsh-spill'
-import { runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
+import { presentText, runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
 import { globSearchMeta, searchViewFromMeta } from './presentation.ts'
 import { acceptedDirectCallValue } from './direct-call.ts'
 
@@ -52,6 +52,8 @@ export interface GlobToolCaps {
   stderrMaxBytes: number
   /** Cooperative tool-call budget (ms) attached as `ToolDefinition.timeoutMs`. */
   timeoutMs: number
+  /** Ripgrep executable in the execution world; omitted selects the packaged binary. */
+  rgPath?: string
 }
 
 /** Validated `glob` arguments. */
@@ -62,16 +64,17 @@ export interface GlobInput {
 
 /**
  * Validate value constraints the schema DSL can't express: a non-blank
- * `pattern`, and a non-blank `path` when given. Throws a plain `Error` (an
- * ordinary tool argument error) otherwise.
+ * `pattern`. A blank `path` counts as omitted, because strict structured
+ * output fills every optional field. Throws a plain `Error` (an ordinary tool
+ * argument error) otherwise.
  *
  * @param args - the schema-validated `glob` arguments.
- * @returns the accepted input, unchanged.
+ * @returns the accepted input without blank optional fields.
  */
 export function parseGlobArgs(args: { pattern: string; path?: string }): GlobInput {
   if (args.pattern.trim().length === 0) throw new Error('pattern must be a non-empty string')
-  if (args.path !== undefined && args.path.trim().length === 0) throw new Error('path must be a non-empty string when given')
-  return { pattern: args.pattern, ...args.path !== undefined ? { path: args.path } : {} }
+  const path = presentText(args.path)
+  return { pattern: args.pattern, ...path !== undefined ? { path } : {} }
 }
 
 /**
@@ -287,32 +290,27 @@ export function presentGlobResult(_args: { pattern: string; path?: string }, res
 }
 
 /**
- * Register the `glob` tool and its system-prompt guidance.
+ * Register the `glob` tool and its scope-aware system-prompt guidance.
  *
  * @param ctx - the plugin context; registrations are effects scoped to it, and
  *   execution uses its `subprocess` service.
  * @param caps - the deployment's resolved glob caps (plugin config after defaulting).
  */
 export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
-  const overCapGuidance = caps.sampleOverCapGlobResults
-    ? 'while a larger one is sampled across top-level entries, so it spans the tree instead of one subtree.'
-    : 'while a larger one keeps the modification-time-ordered head.'
   ctx.systemPrompt.section({
     name: 'tool:glob',
     order: ctx.systemPrompt.getSectionOrder('TOOL_GLOB'),
-    text: 'Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
-      + `Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance}`,
+    text: ({ scope }) => ctx.tools.get('glob', scope) === undefined
+      ? ''
+      : 'Use the glob tool — not shell find — to discover files by path pattern.',
   })
 
-  const overCapDescription = caps.sampleOverCapGlobResults
-    ? `a larger result instead returns ${caps.maxResults} paths sampled across top-level entries`
-    : `a larger result returns the first ${caps.maxResults} paths in modification-time order`
+  const overCapDescription = caps.sampleOverCapGlobResults ? 'is sampled across top-level entries' : 'keeps the first paths'
   const tool = defineTool({
     name: 'glob',
-    description: 'Find files whose paths match a glob pattern. Returns matching file paths — never directories — '
-      + 'including hidden and ignored files (VCS metadata directories are excluded). '
-      + `Up to ${caps.maxResults} paths come back in modification-time order; ${overCapDescription}, `
-      + 'says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.',
+    description: 'Find files, not directories, whose paths match a glob pattern, including hidden and ignored files. '
+      + `Returns up to ${caps.maxResults} paths in modification-time order; a larger result ${overCapDescription} `
+      + 'and reports where the complete list was saved.',
     parameters: {
       pattern: {
         type: 'string',
@@ -340,7 +338,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGlobArgs(args)
-      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
+      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.rgPath)
       const root = input.path === undefined ? '.' : toWorkdirRelative(input.path, run.workdir)
       if (run.noMatches) return { root, paths: [] }
 

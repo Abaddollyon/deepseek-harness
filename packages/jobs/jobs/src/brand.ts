@@ -13,16 +13,14 @@
 import type { Branded } from '@deepseek-ai/dsh-brand'
 
 /**
- * Identifies a background job. The registry generates `<kind>-<uuid>` (or
- * `<kind>-<idHint>` when the producer supplied a stable fragment), so an id is
- * stable across host restarts and never re-minted for different work. Access
- * still relies on owner authorization rather than id secrecy.
+ * Identifies a background job. The registry generates `<kind>-N`; predictable
+ * ids rely on owner authorization rather than secrecy.
  */
 export type JobId = Branded<'JobId'>
 
 /**
  * Brand a string as a {@link JobId}.
- * @param id - the raw job-id string (the registry generates `<kind>-<uuid>`).
+ * @param id - the raw job-id string (the registry generates `<kind>-N`).
  * @returns the same string, branded; no validation is performed.
  */
 export function JobId(id: string): JobId {

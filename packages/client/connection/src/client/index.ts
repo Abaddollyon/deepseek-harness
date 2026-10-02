@@ -8,7 +8,6 @@ import {
   type ConnectionSinks,
   type ConnectionState,
 } from './connection.ts'
-import { createFixtureConnectionRpc } from './fixture.ts'
 import { createWebConnectionRpc, type RpcFetch, type RpcStreamOpen } from './rpc.ts'
 import { isLoopbackHostname } from '../loopback-hostname.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
@@ -72,15 +71,21 @@ export interface ConnectionStateSource {
 export const inject: string[] = []
 
 /**
- * Carrier override installed on the page global before plugin boot. The served
- * web app leaves it unset and gets HTTP + WebSocket; a shell that owns a
- * different physical transport (the worker preview's postMessage tunnel)
- * provides both halves here instead of forking this plugin.
+ * Physical carrier selected when the Connection service is installed. The
+ * served web app omits it and gets HTTP + WebSocket; a shell that owns a
+ * different transport (the worker preview's postMessage tunnel) provides both
+ * halves instead of forking this plugin.
  */
 export interface ClientTransportHooks {
-  /** Transport for generic unary RPC channels (the Typert gateway). */
-  fetch: RpcFetch
-  /** Worker-local Gateway stream carrier; absent when the page uses the Gateway WebSocket. */
+  /**
+   * Already decoded logical RPC carrier. When present it replaces the HTTP
+   * caller outright: no envelopes, no `fetch`, no `openStream` (an in-process
+   * Host such as a test mock plugs in here).
+   */
+  rpc?: ClientConnectionRpc
+  /** Transport for generic unary RPC channels (the Typert gateway); unused when `rpc` is present. */
+  fetch?: RpcFetch
+  /** Worker-local Gateway stream carrier; absent when the page uses the Gateway WebSocket or `rpc` is present. */
   openStream?: RpcStreamOpen
   /**
    * Bundle transport for the module system, present when the carrier also owns
@@ -97,6 +102,8 @@ export interface ClientTransportHooks {
    * transport can set this; served pages never carry the global at all.
    */
   ownsHost?: boolean
+  /** HTTP origin of a shell-owned Host when its WebSocket uses a different page origin. */
+  streamBaseUrl?: string
 }
 
 /** Page global carrying {@link ClientTransportHooks}; absent in the served web app. */
@@ -105,16 +112,30 @@ interface ClientTransportGlobal {
   __DSH_CONNECTION_RECOVERY__?: unknown
 }
 
+/** Browser location fields used to classify loopback authority. */
+export interface ConnectionLocation {
+  readonly hostname: string
+}
+
+/** Instance-local inputs for installing a Connection service. */
+export interface ConnectionInstallOptions {
+  /** Explicit physical carrier; omit for the browser HTTP + WebSocket carrier. */
+  readonly transport?: ClientTransportHooks
+  /** Reconnect timing overrides; omitted fields use controller defaults. */
+  readonly recovery?: ConnectionRecoveryConfig
+  /** Page location; omit for a non-browser composition. */
+  readonly location?: ConnectionLocation
+}
+
 /**
  * The ctx.connection service API. API Gateway supplies generation readiness
  * and reset callbacks; Connection stays independent of downstream domain state.
  */
 export interface ConnectionHandle {
   /**
-   * Whether the privileged surface is reachable. Page-root handles trust a
-   * loopback authority, an inherited transport that owns its Host, or a
-   * non-browser context. Handles over an explicit transport trust only that
-   * transport's {@link ClientTransportHooks.ownsHost} declaration.
+   * Whether the privileged surface is reachable: the page authority is
+   * loopback, the transport declares the page owns the Host
+   * ({@link ClientTransportHooks.ownsHost}), or the context is not a browser.
    */
   readonly isLoopback: boolean
   /** Current Remote event generation and the Host facts carried by its opening frame. */
@@ -140,23 +161,6 @@ export interface ConnectionHandle {
    * @returns lifecycle controls for the loop.
    */
   start(sinks: ConnectionSinks, config?: ConnectionRecoveryConfig): ConnectionLoop
-}
-
-/** Factory for independent Connection handles over caller-owned transports. */
-export interface ConnectionFactory {
-  /**
-   * Create one Connection handle without consulting the page-global transport.
-   * @param transport - carrier hooks owned by the environment runtime.
-   * @returns an independent Connection handle over that transport.
-   */
-  create(transport: ClientTransportHooks): ConnectionHandle
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /** Factory used by independent environment runtimes. */
-    connectionFactory: ConnectionFactory
-  }
 }
 
 /** Controls retained by the sole owner of a running connection loop. */
@@ -194,20 +198,15 @@ function watchBrowserNetwork(controller: ConnectionController): () => void {
 }
 
 /**
- * Create one Connection handle over an explicitly owned transport.
- * @param transportOverride - runtime transport; omission retains the page-global local path.
- * @returns independent Connection handle with its own generation and loop owner.
+ * Install one Context-owned Connection service from explicit composition inputs.
+ * @param ctx - client Cordis context.
+ * @param options - physical carrier, reconnect timing, and page location.
  */
-export function createConnectionHandle(transportOverride?: ClientTransportHooks): ConnectionHandle {
-  const pageLocation = typeof location === 'undefined' ? undefined : location
-  const fixture = pageLocation !== undefined && new URLSearchParams(pageLocation.search).has('fixture')
-  const fixtureRpc = transportOverride === undefined && fixture ? createFixtureConnectionRpc() : undefined
-  const inheritedTransport = transportOverride === undefined
-    ? (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
-    : undefined
-  const transport = transportOverride ?? inheritedTransport
-  const recovery = resolveConnectionConfig((globalThis as ClientTransportGlobal).__DSH_CONNECTION_RECOVERY__)
-  const rpc = fixtureRpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
+export function installConnection(ctx: Context, options: ConnectionInstallOptions = {}): void {
+  const pageLocation = options.location
+  const transport = options.transport
+  const recovery = options.recovery ?? {}
+  const rpc = transport?.rpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
   let generationId = 0
@@ -246,11 +245,7 @@ export function createConnectionHandle(transportOverride?: ClientTransportHooks)
     publishState(undefined)
   }
   const handle: ConnectionHandle = {
-    isLoopback: transportOverride === undefined
-      ? inheritedTransport?.ownsHost === true
-        || pageLocation === undefined
-        || isLoopbackHostname(pageLocation.hostname)
-      : transportOverride.ownsHost === true,
+    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
@@ -312,14 +307,20 @@ export function createConnectionHandle(transportOverride?: ClientTransportHooks)
       }
     },
   }
-  return handle
+  ctx.provide('connection', handle)
 }
 
 /**
- * Client plugin body: create the page's local Connection and provide it on the client root.
- * @param ctx - client cordis context.
+ * Client plugin body: read the page composition and install its Connection service.
+ * @param ctx - client Cordis context.
  */
 export function apply(ctx: Context): void {
-  ctx.provide('connectionFactory', { create: createConnectionHandle })
-  ctx.provide('connection', createConnectionHandle())
+  const globals = globalThis as ClientTransportGlobal
+  const pageLocation = typeof location === 'undefined' ? undefined : location
+  const transport = globals.__DSH_TRANSPORT__
+  installConnection(ctx, {
+    ...(transport === undefined ? {} : { transport }),
+    recovery: resolveConnectionConfig(globals.__DSH_CONNECTION_RECOVERY__),
+    ...(pageLocation === undefined ? {} : { location: pageLocation }),
+  })
 }

@@ -39,7 +39,7 @@
       "path": "../../session/session-projection-cache"
     },
     {
-      "path": "../../util/values"
+      "path": "../../session/session-format-catalog"
     }
   ]
 }

@@ -11,7 +11,7 @@
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock, LlmFailureCode, MessageId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
@@ -113,9 +113,7 @@ export interface SubagentRunEndInfo {
    * {@link SubagentResult.output}; absent on infrastructure rejection or when
    * the child produced none.
    */
-  readonly lastAssistantMessage?: ContentBlock[]
-  /** Structured provider failure facts when available. */
-  readonly failure?: SubagentFailure
+  readonly lastAssistantMessage?: readonly ContentBlock[]
 }
 
 /**
@@ -243,6 +241,22 @@ export interface ContinuableCreateSpec {
    * `CreateAgentOptions.seed`: contiguous from seq 0, lossless JSON, balanced.
    */
   readonly seed?: readonly SessionEvent[]
+  /** Execution coordinates replacing the parent's preset and cwd; absent joins the parent's composition. */
+  readonly target?: ChildExecutionTarget
+}
+
+/**
+ * Where a child runs when it does not join its parent's composition: another
+ * Agent preset (for example one bound to a different SSH host) and a cwd in
+ * that preset's execution world. The child's session header records both, so
+ * cold resume rejoins the same preset. A target starts the child fresh: a
+ * provider that also supplies a seed is refused.
+ */
+export interface ChildExecutionTarget {
+  /** Agent preset the child joins instead of its parent's. */
+  readonly agentPreset: string
+  /** Child cwd in that preset's execution world; omitted keeps the parent's cwd. */
+  readonly cwd?: string
 }
 
 /**
@@ -267,12 +281,6 @@ export interface SubagentStopReasonMap {
 /** The union over {@link SubagentStopReasonMap} — widens automatically as backends merge in variants. */
 export type SubagentStopReason = SubagentStopReasonMap[keyof SubagentStopReasonMap]
 
-/** Typed provider facts safe to expose to a parent agent. */
-export interface SubagentFailure {
-  readonly code: LlmFailureCode
-  readonly retryAfterMs?: number
-}
-
 /**
  * The terminal outcome of a subagent run, resolved by {@link SubagentRun.result}.
  */
@@ -283,7 +291,7 @@ export interface SubagentResult {
    * are skipped. Without a non-empty message, the output is its accumulated
    * assistant text stream, or `[]` when the child produced neither.
    */
-  readonly output: ContentBlock[]
+  readonly output: readonly ContentBlock[]
   /**
    * The structured result after a requested `outputSchema` was successfully
    * satisfied. Requesting a schema does not guarantee presence: a provider can
@@ -300,8 +308,6 @@ export interface SubagentResult {
    * to 4096 UTF-8 bytes. Consumers present it separately from {@link output}.
    */
   readonly diagnostic?: string
-  /** Structured provider failure facts, when safely classified. */
-  readonly failure?: SubagentFailure
   /** Why the run ended. A non-`completed` reason means `output` may be partial. */
   readonly stopReason: SubagentStopReason
 }

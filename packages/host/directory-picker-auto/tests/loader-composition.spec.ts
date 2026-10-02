@@ -12,13 +12,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
-import type { DirectoryBrowser } from '@deepseek-ai/dsh-host-directory-browser'
-import FilesystemDirectoryBrowser from '@deepseek-ai/dsh-host-directory-browser-filesystem'
 import type { DirectoryPicker } from '@deepseek-ai/dsh-host-directory-picker'
 import BrowseDirectoryPicker from '@deepseek-ai/dsh-host-directory-picker-browse'
 import NativeDirectoryPicker from '@deepseek-ai/dsh-host-directory-picker-native'
@@ -51,7 +49,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 })
 
 const AUTO = '@deepseek-ai/dsh-host-directory-picker-auto'
-const DIRECTORY_BROWSER = '@deepseek-ai/dsh-host-directory-browser-filesystem'
 const NATIVE = '@deepseek-ai/dsh-host-directory-picker-native'
 const BROWSE = '@deepseek-ai/dsh-host-directory-picker-browse'
 const NATIVE_SURFACE = '@deepseek-ai/dsh-client-ui-directory-picker-native'
@@ -93,7 +90,7 @@ afterEach(async () => {
   renameControl.remainingFailures = 0
 })
 
-/** Write the webserver, independent browser, and chooser rows, then boot them through the real Loader. */
+/** Write a two-row cordis.yml (webserver + chooser), then boot it through the real Loader. */
 async function loadComposition(
   bindHost: '127.0.0.1' | '0.0.0.0',
   options: { failSurface?: boolean; launchEnvironment?: LaunchEnvironmentSnapshot } = {},
@@ -105,7 +102,6 @@ async function loadComposition(
     '  config:',
     `    host: '${bindHost}'`,
     '    port: 0',
-    `- name: '${DIRECTORY_BROWSER}'`,
     `- name: '${AUTO}'`,
     '',
   ].join('\n'))
@@ -117,7 +113,6 @@ async function loadComposition(
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-host-webserver', HttpServer],
-    [DIRECTORY_BROWSER, FilesystemDirectoryBrowser],
     [AUTO, DirectoryPickerAuto],
     [NATIVE, NativeDirectoryPicker],
     [BROWSE, BrowseDirectoryPicker],
@@ -202,8 +197,6 @@ describe('real Loader composition', () => {
     expect(entryNames(ctx)).not.toContain(BROWSE_SURFACE)
     const picker = ctx.get('directoryPicker') as DirectoryPicker
     expect(picker.capability().kind).toBe('native')
-    const browser = ctx.get('directoryBrowser') as DirectoryBrowser
-    expect((await browser.list(root)).path).toBe(root)
     // The mounted row lives in the Loader's in-memory root tree only — the
     // booted config file must never gain the resolved backend row.
     expect(await readFile(configPath, 'utf8')).not.toContain(NATIVE)
@@ -212,13 +205,24 @@ describe('real Loader composition', () => {
     // and the disposer joins the backend's teardown — the service is gone the
     // moment dispose() settles, with no further loader await.
     const autoEntry = [...ctx.loader.entries()].find(entry => entry.options.name === AUTO)!
-    await autoEntry.fiber!.dispose()
+    const backendEntry = [...ctx.loader.entries()].find(entry => entry.options.name === NATIVE)!
+    const cleanupStarted = Promise.withResolvers<undefined>()
+    const releaseCleanup = Promise.withResolvers<undefined>()
+    onTestFinished(() => { releaseCleanup.resolve(undefined) })
+    backendEntry.fiber!.ctx.effect(() => async () => {
+      cleanupStarted.resolve(undefined)
+      await releaseCleanup.promise
+    })
+    let disposed = false
+    const disposal = autoEntry.fiber!.dispose().then(() => { disposed = true })
+    await cleanupStarted.promise
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    releaseCleanup.resolve(undefined)
+    await disposal
     expect(entryNames(ctx)).not.toContain(NATIVE)
     expect(entryNames(ctx)).not.toContain(NATIVE_SURFACE)
     expect(ctx.get('directoryPicker')).toBeUndefined()
-    const retainedBrowser = ctx.get('directoryBrowser')
-    expect(typeof retainedBrowser?.list).toBe('function')
-    expect((await retainedBrowser!.list(root)).path).toBe(root)
     // Self-disposing an include-tree entry persists `disabled: true` (loader
     // behavior, not the chooser's); await that debounced write so it cannot
     // race the temp-dir removal, and pin that the persisted row is the
@@ -255,7 +259,9 @@ describe('real Loader composition', () => {
 
   it('unmounts the backend when the surface entry fails to load', { timeout: 60_000 }, async () => {
     stubAttendedHost()
-    await expect(loadComposition('127.0.0.1', { failSurface: true })).rejects.toThrow(/surface import failed/)
+    const { ctx } = await loadComposition('127.0.0.1', { failSurface: true })
+    const chooser = [...ctx.loader.entries()].find(entry => entry.options.name === AUTO)!
+    await expect(chooser.fiber!.await()).rejects.toThrow(/directory-picker-auto: failed to load/)
 
     // Setup owns both entries until it returns its disposer, so a failed surface
     // must take the mounted backend with it: otherwise a retry collides with the
@@ -269,7 +275,7 @@ describe('real Loader composition', () => {
     const { ctx, configPath } = await loadComposition('127.0.0.1')
 
     const backendEntry = [...ctx.loader.entries()].find(entry => entry.options.name === NATIVE)!
-    await ctx.loader.remove(backendEntry.id)
+    ctx.loader.remove(backendEntry.id)
     const autoEntry = [...ctx.loader.entries()].find(entry => entry.options.name === AUTO)!
     renameControl.remainingFailures = 1
     await expect(autoEntry.fiber!.dispose()).resolves.not.toThrow()

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
@@ -8,7 +8,7 @@ import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import {
   assertFixtureInventory,
@@ -76,17 +76,14 @@ describe('minimal agent preset', () => {
     if (failures.length > 1) throw new AggregateError(failures, 'minimal preset smoke teardown failed')
   })
 
-  it('sends the exact RL prompt and schemas, then executes the persistent shell and editor', async () => {
+  it('sends the exact RL prompt and shell schema, then executes the persistent shell', async () => {
     const requestHeader = agentHandle.agent.session.requestHeader()
     if (requestHeader === undefined) throw new Error('the minimal agent issued no model request')
     const systemPrompt = systemPromptText(agentHandle.agent.session)
     if (systemPrompt === undefined) throw new Error('the minimal agent issued no system prompt')
     expect(agentHandle.agent.session.snapshotEvents().some(event => event.type === 'user/message'
-      && event.data.source.kind === 'plugin'
-      && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt')).toBe(false)
-    const presetFileSystem = scaffold.ctx.agentPresets.serviceFor(agentHandle.agent, 'fs')
-    expect(presetFileSystem).toBeDefined()
-    expect(presetFileSystem?.sandboxMode).toBeUndefined()
+      && event.data.source.kind === 'runtime-context')).toBe(false)
+    expect(scaffold.ctx.agentPresets.serviceFor(agentHandle.agent, 'fs')).toBeUndefined()
     expect(scaffold.ctx.agentPresets.serviceFor(agentHandle.agent, 'compaction')).toBeUndefined()
 
     const stateDir = join(scaffold.workspaceCwd, 'persistent-state')
@@ -106,16 +103,6 @@ describe('minimal agent preset', () => {
       arguments: { command: 'printf \'%s:%s\n\' "$DSH_MINIMAL_STATE" "$PWD"' },
       agent: agentHandle.agent,
     })
-    const seedPath = join(scaffold.workspaceCwd, 'preset-smoke.txt')
-    await writeFile(seedPath, 'MINIMAL_EDITOR_OK\n')
-    const editor = await scaffold.ctx.tools.execute({
-      signal,
-      callId: ToolCallId('minimal-editor-smoke'),
-      name: 'str_replace_editor',
-      arguments: { command: 'view', path: seedPath },
-      agent: agentHandle.agent,
-    })
-
     const text = (result: typeof bash): string => result.content
       .filter(block => block.type === 'text')
       .map(block => block.text)
@@ -128,18 +115,14 @@ describe('minimal agent preset', () => {
       tools: requestHeader.tools?.map(tool => tool.name),
       goalCommand: scaffold.ctx.commands.find(agentHandle.agent, 'goal') !== undefined,
       bash: text(bash),
-      editor: text(editor),
     }).toMatchInlineSnapshot(`
       {
-        "bash": "PERSISTED:{{cwd}}/persistent-state",
-        "editor": "Here's the content of {{cwd}}/preset-smoke.txt with line numbers (which has a total of 2 lines):
-           1  MINIMAL_EDITOR_OK
-           2",
+        "bash": "PERSISTED:{{cwd}}/persistent-state
+      [Command finished with exit code 0]",
         "goalCommand": false,
         "prompt": "You are a helpful software engineer assistant.",
         "tools": [
           "bash",
-          "str_replace_editor",
         ],
       }
     `)
@@ -169,7 +152,14 @@ describe('minimal agent preset', () => {
     await process.click()
     await expect.poll(() => process.getAttribute('aria-expanded')).toBe('true')
 
-    const row = page.locator('[data-sample="bash"]').first()
+    const group = page.locator('[data-chat-group-key]').filter({ has: page.locator('[data-sample="bash"]') }).first()
+    const groupControl = group.locator('[data-process-activity]')
+    await groupControl.waitFor({ timeout: 15_000 })
+    await expect.poll(() => groupControl.getAttribute('aria-expanded')).toBe('false')
+    const row = group.locator('[data-sample="bash"]').first()
+    expect(await row.isVisible()).toBe(false)
+    await groupControl.click()
+    await expect.poll(() => groupControl.getAttribute('aria-expanded')).toBe('true')
     await row.waitFor({ timeout: 15_000 })
     await expect.poll(() => row.getAttribute('aria-expanded')).toBe('false')
     await row.click()
@@ -178,7 +168,7 @@ describe('minimal agent preset', () => {
     const call = row.locator('xpath=..')
     await call.getByText('IN', { exact: true }).waitFor()
     await call.getByText('OUT', { exact: true }).waitFor()
-    await call.getByText('MINIMAL_BASH_CARD_OK', { exact: true }).waitFor()
+    await call.getByText('MINIMAL_BASH_CARD_OK\n[Command finished with exit code 0]', { exact: true }).waitFor()
     await call.getByText(/"command": "printf 'MINIMAL_BASH_CARD_OK/).waitFor()
 
     const snapshot = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)

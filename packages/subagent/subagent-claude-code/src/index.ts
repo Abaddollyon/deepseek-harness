@@ -26,8 +26,6 @@ import {
   type ClaudeCodePermissionMode,
   type ClaudeCodeRunSpec,
 } from './run.ts'
-export { claudeSpawnSpec, ManagedClaudeCodeProcess, sdkEnvironmentOverlay } from './process.ts'
-export { claudeQueryOptions } from './run.ts'
 
 export const name = 'subagent-claude-code'
 export const inject = ['subagents', 'subprocess']

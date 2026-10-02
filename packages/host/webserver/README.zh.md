@@ -38,9 +38,7 @@ kind: "package-reference"
 
 `host` 只接受两个值：`127.0.0.1`（默认姿态，仅回环）与 `0.0.0.0`（有意向网络开放——服务器自身不携带 TLS、认证或来源策略）。`port` 为 0 时请求 OS 分配端口；之后用 `ctx.webServer.port` 读取正在监听的端口。
 
-载体通过 `compress`（默认 `true`）处理符合条件的 socket-backed 响应，而不改变 route API。它根据 `Accept-Encoding` 协商，优先 Brotli，回退到 gzip；文本与结构化文本媒体类型符合条件，已有编码、`Cache-Control: no-transform`、range 响应、SSE、ZIP 与已打包的 `.gz` Worker image 保持不变。小于 `compressMinBytes`（默认 `1024`）的响应体不压缩；较大的响应体流经所选压缩器。`brotliQuality`（默认 `5`）与 `gzipLevel`（默认 `6`）控制请求期编码。
-
-同一载体会在 route 未设置 `Cache-Control` 时补上缓存指令。只有响应 pathname 位于 `immutablePathPrefixes`（默认 `/assets/`）下时，才会得到 `public, max-age=31536000, immutable`；`?rev=<hash>` 之类的 query 参数不构成依据，而载体对 HTML 的默认指令是 `no-cache`。未带此前缀的 plugin、API、source-map 及其他响应仍使用 `no-cache`，除非 route 自己提供指令；route 提供的 `Cache-Control` 优先。
+设置 `compression: 'gzip'` 可以包装符合条件的 socket-backed 响应，而不改变 route API。客户端必须接受 gzip，且媒体类型必须可压缩或为 `multipart/form-data`；已知长度小于 `compressionThresholdBytes` 的响应保持未压缩，未知长度的流则立即符合条件。已有编码、`Cache-Control: no-transform`、range 响应、SSE（Server-Sent Events）、ZIP 与已打包的 `.gz` Worker image 均保持不变。随附 Web bundle 使用 level 1 与 1024 字节阈值；其他组合默认不压缩。
 
 ### 注册路由
 
@@ -48,9 +46,9 @@ kind: "package-reference"
 
 ### 回退席位
 
-`registerFallback(handler)` 认领所有未被具名 route 命中的请求的唯一个 handler。第二次注册会抛错；没有注册回退时服务器回答 404。在随附的 Web 组合中，[SPA dist 服务器](../frontend-static/README.zh.md)拥有该席位，并对其渲染的每个 index 响应调用 `renderIndex`。
+`registerFallback(handler)` 认领所有未被具名 route 命中的请求的唯一一个 handler。第二次注册会抛错；没有注册回退时服务器回答 404。在随附的 Web 组合中，[SPA dist 服务器](../frontend-static/README.zh.md)拥有该席位，并对其渲染的每个 index 响应调用 `renderIndex`。
 
-index 启动输入分两层。`collectIndexInjections()` 收集一张全新的注入表——每次调用发一次 `webserver/index-inject` 事件，每个订阅方推入其当前行——`renderIndex(html)` 先把这些行渲染进 index.html 正文，再按注册顺序应用原始 `tapIndex(transform)` 转换。行联合类型是封闭的：新增行类型必须新增渲染分支，因此由编译器而非运行时回退检测不支持的类型。渲染器在放置正文行之前始终追加启动就绪脚本，所以正文组永远非空；没有 body 标签的片段使用末尾追加回退，有 body 标签的文档则在该标签之后插入。`script-preload` 行会渲染为 classic script 的提示性 preload 链接。静态部署会在启动 payload 中携带同一批行。`applyIndexTaps(html)` 只应用原始转换；它是任何行都无法表达的标记的逃生口。
+index 启动输入分两层。`collectIndexInjections()` 收集一张全新的注入表——每次调用发一次 `webserver/index-inject` 事件，每个订阅方推入其当前行——`renderIndex(html)` 先把这些行渲染进 index.html 正文，再按注册顺序应用原始 `tapIndex(transform)` 转换。`script-preload` 行会渲染为 classic script 的提示性 preload 链接。静态部署会在启动 payload 中携带同一批行。`applyIndexTaps(html)` 只应用原始转换；它是任何行都无法表达的标记的逃生口。两个 index 方法都接受可选的 `IndexRenderContext`，其 `variant` 会传给每个监听方；index 所有者设置它来渲染另一种 index（例如客户端 surface），忽略它的监听方向每种 index 贡献相同的行。
 
 ### 失败时的行为
 
@@ -66,7 +64,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的�
 
 ### 设计理念
 
-本包是一个不带任何 harness 词汇的普通路由注册表：`WebServer` 继承 Cordis `Service`，持有三张路由表、回退槽位、原始 index 转换列表，以及 index 渲染器经其收集行的 `webserver/index-inject` 事件。index 渲染每次响应组合两层：`renderIndex` 先把包含提示性 `script-preload` 行的全新注入表渲染进正文，再按注册顺序应用原始转换；`applyIndexTaps` 只运行转换。upgrade handler 拥有协议握手与连接内容；webserver 只交付原始 socket 与 request。`host` 与 `port` getter 暴露其他插件据以自适应的组合期事实（例如 directory-picker 选择器）。
+本包是一个不带任何 harness 词汇的普通路由注册表：`WebServer` 继承 Cordis `Service`，持有三张路由表、回退 slot、原始 index 转换列表，以及 index 渲染器经其收集行的 `webserver/index-inject` 事件。index 渲染每次响应组合两层：`renderIndex` 先把包含提示性 `script-preload` 行的全新注入表渲染进正文，再按注册顺序应用原始转换；`applyIndexTaps` 只运行转换。upgrade handler 拥有协议握手与连接内容；webserver 只交付原始 socket 与 request。`host` 与 `port` getter 暴露其他插件据以自适应的组合期事实（例如 directory-picker 选择器）。
 
 ### 匹配与生命周期
 
@@ -77,10 +75,8 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的�
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | `WebServer` 服务：路由表、回退席位、index 渲染、匹配、生命周期 |
-| — | 不发布运行时不变式伴生入口；路由注册与释放通过同一服务修改同一张路由表，register/dispose 探针只会重复执行实现。真实路由与 HMR 测试负责该行为。 |
+| — | 不发布运行时不变式伴生入口；路由注册与释放通过同一服务修改同一张路由表，register/dispose 探针只会重复执行实现。真实路由与 HMR 测试负责验证该行为。 |
 | [`src/injections.ts`](src/injections.ts) | 结构化 `IndexInjection` 行与 `renderIndexInjections` 行渲染 |
-| [`src/response-policy.ts`](src/response-policy.ts) | 每个响应的编码与缓存 header 补丁 |
-| [`src/response-cache.ts`](src/response-cache.ts) / [`src/response-encoding.ts`](src/response-encoding.ts) | 缓存分类与内容编码协商 |
 
 </details>
 

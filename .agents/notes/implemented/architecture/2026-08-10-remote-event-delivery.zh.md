@@ -74,7 +74,7 @@ $on<Event extends TypertRemoteEvent>(event: Event, listener: TypertClientEventLi
 
 物理 mux 断开会让 logical stream 以 `RemoteStreamCarrierError` 结束；Host 返回的 Remote stream error、意外正常结束、非 ready 首项或畸形事件项也会结束当前 generation。Connection 撤回该 generation，在退避后重开 `$events`；Gateway mux 只负责重建物理 WebSocket。转发事件不重放；凡正确性依赖恢复的状态，owner 必须另有查询、cursor 或 opening baseline，不能把 `$on` 当作可靠日志。
 
-Client 以 Remote 实例私有 Cordis key 分发。普通 `emit` 使用 `parallel()` 并隔离 listener 失败；Agent-scoped `waterfall` 在解析出的 Agent Context 上使用 `waterfall()`，允许结果、拒绝或 `next()` 委托。两类注册都归属调用方 fiber，且 Host 事件不会触发 Client 本地同名事件。当隔离 Cordis root 中的 presentation 使用投影的 Remote 服务时，订阅注册到该 Remote 实例所属的事件树，而 disposer 仍附着在 presentation fiber 上。这样，解析出的 Agent Context 与 listener 位于同一分派树中，同时不会延长 runtime 服务的生命周期。
+Client 以 Remote 实例私有 Cordis key 分发。普通 `emit` 使用 `parallel()` 并隔离 listener 失败；Agent-scoped `waterfall` 在解析出的 Agent Context 上使用 `waterfall()`，允许结果、拒绝或 `next()` 委托。两类注册都归属调用方 fiber，且 Host 事件不会触发 Client 本地同名事件。
 
 ### 名单：两个 face 共读的同一份声明
 
@@ -197,3 +197,7 @@ Client 要求首项是带非空 `clientId` 与 `host.home` 的 `ready`；后续 
 - **放弃的能力**：不支持投影或脱敏载荷，不支持 Agent 以外的 Scope，也不为普通通知提供重放。需要可靠恢复的状态必须拥有查询、cursor 或 opening baseline；waterfall 只重放仍处于同一次 Host 调用生命周期内的 pending request。
 - **仍有 client 包留在 host 图里**：12 个工程（`connection`、`runtime`、`ui-slots` 等）经未拆分的 `directory-picker-browse`/`-native` 与 `api/gateway → client/connection` 仍可达 host 图。它们都能编译且不再牵连 api/remotes 的 client face，因此没有阻塞本次改动；拆分那些包能减少几个，但经评估后不做。两个 chat e2e 直接引 `dsh-client-runtime/client` 依赖 `runtime` 本来就在图里——属偶然而非保证。
 - **本包不发布 invariant companion**：早先的修订曾在活事件总线上断言投递形状（`thisArg === null`、`mode === 'emit'`），这让诊断逻辑与名单值耦合，并使 rolldown 把它提成第三个 bundle chunk——而机械推导的发布文件清单并不携带它。Host 面的 `TypertForwardableEventEntry` 断言已在编译期拒绝这些偏离，包 README 也记录了不再存在独立运行时关系的原因。
+
+## 相关
+
+- [Remote 双工流](2026-09-19-remote-duplex-stream.zh.md)：所有 Remote 流在同一逻辑流上承载客户端上行；其「后续」列出的双工 `$events` 落地后取代 unary `$events/result` 路径。

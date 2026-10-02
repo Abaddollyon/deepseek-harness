@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-multi-root-workspace-sessions.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-multi-root-workspace-sessions.md
+/agent-note-sessions-record-additional-workspace-roots-at-creation:
+  en: 1cd584f5c05aee56
+  zh: 6ca9563b3cb32b23
+/agent-note-sessions-record-additional-workspace-roots-at-creation/problem:
+  en: 1e7a1dd31551dce1
+  zh: 769cbe55ed79f702
+/agent-note-sessions-record-additional-workspace-roots-at-creation/decision:
+  en: 5f854e3770891555
+  zh: 886bf8c69b72fe01
+/agent-note-sessions-record-additional-workspace-roots-at-creation/alternatives-considered:
+  en: 72855748c807b36c
+  zh: c7317aa117941044
+/agent-note-sessions-record-additional-workspace-roots-at-creation/consequences:
+  en: c40d20a2cb10f0ea
+  zh: 41b870e9f309eea5

@@ -15,18 +15,17 @@ import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, UserMessage } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import SessionProjectionCache, { projectionCacheDomainSpec } from '@deepseek-ai/dsh-session-projection-cache'
+import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
-import { SessionControlController } from '@deepseek-ai/dsh-api-session-controller/src/control.ts'
 import type { SessionControlFrame, SessionFollowFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 import {
   mountAgentLoopTestDependencies,
@@ -109,8 +108,6 @@ const internalCountUnit = () => ({
   apply: (state: number) => state + 1,
   stateVersion: 1,
 }) satisfies ProjectionDefinition<'test/internal-count', number>
-
-
 
 const privatePromptUnit = () => ({
   key: 'test/private-prompt',
@@ -240,7 +237,10 @@ describe('session.history projections block', () => {
   })
 
   it('reconstructs a cold persisted queue without publishing or resuming an Agent', async () => {
-    const { ctx } = await harness(true)
+    const ctx = new Context()
+    ownedContexts.add(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestHarness(ctx)
     const coldId = SessionId('cold-persisted-queue')
     const meta: SessionHeader = { version: SESSION_FORMAT_VERSION, id: coldId, createdAt: 1, cwd: '/tmp', isSeeded: false }
     const message = createUserMessage({
@@ -546,7 +546,7 @@ describe('session.list projections column', () => {
       cachedSnapshot: (meta: { id: unknown; createdAt: number }) =>
         (meta.id === coldId && meta.createdAt === 5
           ? {
-            asOfSeq: 7,
+            asOfSeq: SessionSeq(7),
             values: {
               'test/last-user': { text: 'cached' },
               sessionListMetadata: { blank: false, lastPromptAt: 6 },
@@ -560,6 +560,7 @@ describe('session.list projections column', () => {
     const row = response.value.items.find(item => item.sessionId === coldId)
     expect(row?.running).toBe(false)
     expect(row?.projections).toEqual({
+      kind: 'cached',
       asOfSeq: 7,
       values: {
         'test/last-user': { text: 'cached' },
@@ -622,6 +623,88 @@ describe('session.list projections column', () => {
     }
   })
 
+  it('lists a forked Session\'s cached title after a Host restart without opening its body', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-api-projcache-'))
+    const id = SessionId('session-cold-fork')
+    /** One Host process over `root`: storage stack, registry with the title unit, and the cache. */
+    const boot = async (): Promise<Context> => {
+      const ctx = new Context()
+      await ctx.plugin(Storage)
+      await ctx.plugin(StorageJson, { root })
+      await ctx.plugin(StorageDomain, { backend: 'json' })
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(SessionProjectionRegistry)
+      ctx.sessionProjections.register(titleProjectionDefinition)
+      await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+      return ctx
+    }
+
+    // First process: a fork inherits its ancestor's prompt and title, the
+    // cache checkpoints the fold, and the process ends without ever listing.
+    const first = await boot()
+    let header: SessionHeader | undefined
+    let lastSeq: number | undefined
+    let promptTime: number | undefined
+    try {
+      remote(first)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      let child: Session | undefined
+      const owner = await first.plugin(Object.assign((sessionCtx: Context) => {
+        const parent = sessionCtx.sessions.create(SessionId('session-cold-fork-parent'), {
+          meta: { createdAt: 5, cwd: '/workspace' },
+        })
+        parent.append('turn/start', { turn: 1 })
+        promptTime = parent.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: 'ancestor prompt' }],
+          source: { kind: 'user' },
+        }), { surfaceOp: 'append' }).time
+        parent.append('session/title', { title: 'Forked title', messageSeqs: [], source: { kind: 'user' } })
+        parent.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+        child = sessionCtx.sessions.fork(parent, undefined, id)
+      }, { inject: ['sessions'] }))
+      if (child === undefined) throw new Error('child was not forked')
+      expect(child.header.isSeeded).toBe(true)
+      expect(child.inheritedEventCount).toBe(4)
+      await first.sessionProjectionCache.write(child)
+      header = child.header
+      lastSeq = child.seq - 1
+      await owner.dispose()
+    } finally {
+      await first.fiber.dispose()
+    }
+    if (header === undefined || lastSeq === undefined || promptTime === undefined) throw new Error('unreachable')
+
+    // Second process: persistence knows the header, the cache holds the
+    // record, and nothing opens the log.
+    const second = await boot()
+    try {
+      const gateway = remote(second)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const load = () => { throw new Error('a cold fork listing must not load the event log') }
+      second.provide('sessionPersistence', testSessionPersistence(second, {
+        list: async () => [header],
+        inspect: load,
+        open: load,
+      }) as never)
+
+      const response = await gateway.list(request({}))
+      if (!response.ok) throw new Error('unreachable')
+      const row = response.value.items.find(item => item.sessionId === id)
+      // Cold recency is the later of the header's creation time and the cached
+      // last prompt; the fork's creation time is wall-clock and may trail the
+      // inherited prompt by a tick.
+      expect(row).toMatchObject({ blank: false, updatedAt: Math.max(header.createdAt, promptTime) })
+      expect(row?.projections).toMatchObject({
+        kind: 'cached',
+        asOfSeq: lastSeq,
+        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: promptTime } },
+      })
+    } finally {
+      await second.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 
   it('cold rows without a cache plugin (or without a stored row) just lack the column', async () => {
     const { ctx } = await harness(true)
@@ -634,81 +717,6 @@ describe('session.list projections column', () => {
     const row = response.value.items.find(item => item.sessionId === coldId)
     expect(row).toBeDefined()
     expect(row !== undefined && 'projections' in row).toBe(false)
-  })
-
-  it('matches the real JSONL cold-tail follow page to a full-restore follow page', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-api-cold-tail-oracle-'))
-    const coldCtx = new Context()
-    const fullCtx = new Context()
-    try {
-      await coldCtx.plugin(Storage)
-      await coldCtx.plugin(StorageJson, { root })
-      await coldCtx.plugin(StorageDomain, { backend: 'json' })
-      await coldCtx.plugin(SessionStore)
-      await coldCtx.plugin(AgentRegistry)
-      await coldCtx.plugin(JsonlSessionPersistence, { root })
-      await coldCtx.plugin(SessionProjectionRegistry)
-      coldCtx.sessionProjections.register(lastUserUnit())
-      await coldCtx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
-      const coldRemote = remote(coldCtx)
-      await new Promise(resolve => setTimeout(resolve, 0))
-
-      const id = SessionId('session-cold-tail-oracle')
-      let session: Session | undefined
-      const owner = await coldCtx.plugin(Object.assign((sessionCtx: Context) => {
-        session = sessionCtx.sessions.create(id, { meta: { createdAt: 5, cwd: '/workspace' } })
-      }, { inject: ['sessions'] }))
-      if (session === undefined) throw new Error('session was not created')
-      seedMessages(session, 2)
-      const writer = await coldCtx.sessionPersistence.create(session.header)
-      await writer.append(session.snapshotEvents())
-      await writer.close()
-      await coldCtx.sessionProjectionCache.write(session)
-      await owner.dispose()
-      expect(coldCtx.sessions.get(id)).toBeUndefined()
-
-      const suffix = [2, 3].map(seq => ({
-        type: 'user/message',
-        seq: SessionSeq(seq),
-        time: seq + 10,
-        data: createUserMessage({
-          content: [{ type: 'text', text: `m${seq}` }],
-          source: { kind: 'user' },
-        }),
-        surfaceOp: 'append',
-      })) as SessionEvent[]
-      const append = await coldCtx.sessionPersistence.open(id, 'write')
-      try {
-        await append.append(suffix)
-      } finally {
-        await append.close()
-      }
-
-      await fullCtx.plugin(SessionStore)
-      await fullCtx.plugin(AgentRegistry)
-      await fullCtx.plugin(JsonlSessionPersistence, { root })
-      await fullCtx.plugin(SessionProjectionRegistry)
-      fullCtx.sessionProjections.register(lastUserUnit())
-      const fullRemote = remote(fullCtx)
-      await new Promise(resolve => setTimeout(resolve, 0))
-
-      const full = await opening(fullRemote, id, 2)
-      const open = vi.spyOn(coldCtx.sessionPersistence, 'open')
-      const cold = await opening(coldRemote, id, 2)
-
-      const readOptions = open.mock.calls.find(([sessionId, access]) => sessionId === id && access === 'read')?.[2]
-      expect(readOptions?.signal).toBeInstanceOf(AbortSignal)
-      expect(open).toHaveBeenCalledWith(id, 'read', { signal: readOptions?.signal })
-      expect(cold).toEqual(full)
-      expect(cold.records.map(record => record.event.seq)).toEqual([2, 3])
-      expect(cold.cursor).toBe(3)
-      expect(cold.hasMore).toBe(true)
-      expect(cold.projections.asOfSeq).toBe(3)
-      expect(cold.projections.values['test/last-user']).toEqual({ text: 'm3' })
-    } finally {
-      await Promise.all([coldCtx.fiber.dispose(), fullCtx.fiber.dispose()])
-      await rm(root, { recursive: true, force: true })
-    }
   })
 
   it('a throwing column read degrades that row, never the listing', async () => {
@@ -744,33 +752,23 @@ describe('Session control projection frames', () => {
     return frames
   }
 
-  /**
-   * Let the open stream drain before the next append. A live agent loop awaits
-   * between committed events, so this is the delivery cadence the per-unit push
-   * contract below is written against; appending several events in one
-   * synchronous run instead exercises the control queue's coalescing, which
-   * control-coalescing.host.spec.ts owns.
-   */
-  const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
-
-  it('broadcasts a frame per changed unit with the causing seq, and none for same-reference applies', async () => {
+  it('broadcasts changed view references with the causing seq and skips same-reference applies', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())
     const proxy = remote(ctx)
     // The controller's onChanged subscription lives in an inject child whose
     // fiber activates asynchronously; yield until it lands before appending.
-    await settle()
+    await new Promise(resolve => setTimeout(resolve, 0))
     const abort = new AbortController()
     const stream = proxy.control(abort.signal)
     const collected = collect(stream, 5, abort)
 
     const now = vi.spyOn(Date, 'now').mockReturnValue(100)
     seedMessages(session, 1)
-    await settle()
     now.mockReturnValue(200)
     session.append('turn/start', { turn: 1 })
-    await settle()
     now.mockReturnValue(300)
+    // The equal payload is a new object, so Object.is still treats its view as changed.
     seedMessages(session, 1)
     now.mockRestore()
 
@@ -794,11 +792,5 @@ describe('Session control projection frames', () => {
     // Frame seq aligns with the tail block's asOfSeq vocabulary (higher-seq-wins compatible).
     const tail = await opening(proxy, session.id)
     expect(tail.projections.asOfSeq).toBe(pushes.at(-1)?.seq)
-  })
-
-  it('rejects control construction when the composition has no registry', async () => {
-    const { ctx } = await harness(false)
-    expect(ctx.get('sessionProjections')).toBeUndefined()
-    expect(() => new SessionControlController(ctx)).toThrow(/onChanged/)
   })
 })

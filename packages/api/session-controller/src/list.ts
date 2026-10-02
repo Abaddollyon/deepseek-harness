@@ -1,12 +1,10 @@
 /** Cold-safe Session list and search projection. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
-import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title'
-import type {} from '@deepseek-ai/dsh-session-projection'
+import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import { SessionQueryError, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -20,18 +18,6 @@ import type {
   SessionSearchValue, SessionSummary,
 } from './types.ts'
 
-/** Default maximum artifact size eligible for one cold projection observation. */
-export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
-
-const COLD_SUMMARY_BATCH_SIZE = 16
-
-interface ColdTitleCacheEntry {
-  readonly createdAt: number
-  readonly cwd: string | undefined
-  settled: boolean
-  warming: boolean
-  title?: SessionTitleSnapshot
-}
 const SEARCH_PROVIDER_CALL_LIMIT = 100
 const SESSION_SEARCH_QUERY_MAX_CHARS = 500
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -88,19 +74,8 @@ export function truncateUnicodeCodePoints(value: string, maximum: number): strin
 
 /** Owns list projection registration, bounded cold summaries, and authorized search. */
 export class ApiSessionList {
-  private readonly coldTitles = new Map<SessionId, ColdTitleCacheEntry>()
-  private readonly warmAbortController = new AbortController()
-  private readonly warmOperations = new Set<Promise<void>>()
-  private disposed = false
-
-  /**
-   * @param ctx - Host context carrying Session, query, persistence, and projection services.
-   * @param coldBlankProbeMaxBytes - maximum physical artifact size eligible for a full observation.
-   */
-  constructor(
-    private readonly ctx: Context,
-    private readonly coldBlankProbeMaxBytes: number = DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
-  ) {
+  /** @param ctx - Host context carrying Session, query, persistence, and projection services. */
+  constructor(private readonly ctx: Context) {
     ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
       stateSchema: sessionListMetadataSchema,
@@ -109,12 +84,6 @@ export class ApiSessionList {
       wire: { viewSchema: sessionListMetadataSchema, view: state => state },
       stateVersion: 1,
     })
-    ctx.effect(() => async () => {
-      this.disposed = true
-      this.warmAbortController.abort()
-      await Promise.allSettled([...this.warmOperations])
-      this.coldTitles.clear()
-    }, 'api-session.list.cold-titles')
     ctx.inject(['attachments'], (attachmentCtx) => {
       ctx.sessionProjections.register<'imageLimits', null>({
         key: 'imageLimits',
@@ -141,6 +110,7 @@ export class ApiSessionList {
     return {
       sessionId: session.id,
       updatedAt: updatedAt(session.header, metadata),
+      agentAvailable: this.ctx.agents.get(session.id)?.session === session,
       running: this.ctx.agents.get(session.id)?.status === 'running',
       blank: metadata?.blank ?? session.seq === 0,
       ...listFields(session.header),
@@ -151,8 +121,7 @@ export class ApiSessionList {
   /**
    * Read every visible attached and persisted Session without activating an Agent.
    * @param signal - optional cancellation for persistence reads.
-   * @returns visible summaries ordered by activity; title observations complete asynchronously
-   * and retry on a later poll after a failed or cancelled batch.
+   * @returns visible Session summaries ordered by activity.
    */
   async list(signal?: AbortSignal): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
@@ -160,174 +129,32 @@ export class ApiSessionList {
     signal?.throwIfAborted()
     const items: SessionSummary[] = []
     const cold: SessionHeader[] = []
-    const titleCandidates: SessionHeader[] = []
     for (const record of records) {
       const live = this.ctx.sessions.get(record.header.id)
       if (live !== undefined) {
-        this.coldTitles.delete(record.header.id)
         items.push(this.summaryFor(live))
         continue
       }
       if (record.header.cwd === undefined) continue
       cold.push(record.header)
     }
-    const visibleColdIds = new Set(cold.map(header => header.id))
-    for (const sessionId of this.coldTitles.keys()) {
-      if (!visibleColdIds.has(sessionId)) this.coldTitles.delete(sessionId)
-    }
-    for (let offset = 0; offset < cold.length; offset += COLD_SUMMARY_BATCH_SIZE) {
-      const settled = await Promise.allSettled(cold.slice(offset, offset + COLD_SUMMARY_BATCH_SIZE)
-        .map(header => this.summarizeCold(header, signal, titleCandidates)))
-      for (const result of settled) {
-        if (result.status === 'rejected') throw result.reason
-        items.push(result.value)
-      }
-    }
-    this.warmColdTitles(titleCandidates, signal)
+    for (const header of cold) items.push(this.summarizeCold(header))
     items.sort((left, right) => right.updatedAt - left.updatedAt)
     return items
   }
 
-  private async summarizeCold(
-    header: SessionHeader,
-    signal: AbortSignal | undefined,
-    titleCandidates: SessionHeader[],
-  ): Promise<SessionSummary> {
-    const cached = this.projectionsFor(header, undefined)
-    const projections = cached?.values.title !== undefined || cached?.values.sessionListMetadata?.blank === false
-      ? cached
-      : await this.probeSmallCold(header, signal) ?? cached
-    const visibleProjections = this.titleProjectionFor(header, projections, titleCandidates)
-    const raced = this.ctx.sessions.get(header.id)
-    if (raced !== undefined) return this.summaryFor(raced)
+  private summarizeCold(header: SessionHeader): SessionSummary {
+    const projections = this.projectionsFor(header, undefined)
     const metadata = projections?.values.sessionListMetadata
     return {
       sessionId: header.id,
       updatedAt: updatedAt(header, metadata),
+      agentAvailable: false,
       running: false,
       // A large, metadata-less, or inaccessible cache miss remains unknown and visible.
       blank: metadata?.blank ?? false,
       ...listFields(header),
-      ...(visibleProjections === undefined ? {} : { projections: visibleProjections }),
-    }
-  }
-
-  /**
-   * Invalidate one cold title when its Session enters the live store.
-   * @param sessionId - Session identity whose cached title must be refreshed.
-   */
-  invalidateColdTitle(sessionId: SessionId): void {
-    this.coldTitles.delete(sessionId)
-  }
-
-  private titleProjectionFor(
-    header: SessionHeader,
-    projections: SessionProjectionHints | undefined,
-    titleCandidates: SessionHeader[],
-  ): SessionProjectionHints | undefined {
-    if (projections?.values.title !== undefined) return projections
-    const query = this.ctx.get('sessionQuery')
-    if (query === undefined) return projections
-    const current = this.coldTitles.get(header.id)
-    if (current !== undefined && (current.createdAt !== header.createdAt || current.cwd !== header.cwd)) this.coldTitles.delete(header.id)
-    const entry = this.coldTitles.get(header.id)
-    if (entry === undefined) {
-      this.coldTitles.set(header.id, {
-        createdAt: header.createdAt,
-        cwd: header.cwd,
-        settled: false,
-        warming: false,
-      })
-      titleCandidates.push(header)
-      return projections
-    }
-    if (!entry.settled || entry.title === undefined) {
-      if (!entry.settled && !entry.warming) titleCandidates.push(header)
-      return projections
-    }
-    return {
-      asOfSeq: projections === undefined ? entry.title.eventSeq : Math.min(projections.asOfSeq, entry.title.eventSeq),
-      values: { ...projections?.values, title: entry.title.title } as SessionProjectionValues,
-    }
-  }
-
-  private warmColdTitles(headers: readonly SessionHeader[], signal: AbortSignal | undefined): void {
-    if (this.disposed || headers.length === 0) return
-    const query = this.ctx.sessionQuery
-    const operationSignal = signal === undefined
-      ? this.warmAbortController.signal
-      : AbortSignal.any([signal, this.warmAbortController.signal])
-    const reserved = new Map<SessionId, { header: SessionHeader; entry: ColdTitleCacheEntry }>()
-    for (const header of headers) {
-      const entry = this.coldTitles.get(header.id)
-      if (entry === undefined || entry.settled || entry.warming
-        || entry.createdAt !== header.createdAt || entry.cwd !== header.cwd) continue
-      const current = { ...entry, warming: true }
-      this.coldTitles.set(header.id, current)
-      reserved.set(header.id, { header, entry: current })
-    }
-    if (reserved.size === 0) return
-    const operation = (async () => {
-      try {
-        // The query provider bounds persisted reads and lists the corpus once per call.
-        const results = await query.readTitleSnapshots([...reserved.keys()], operationSignal)
-        if (operationSignal.aborted) return
-        for (const result of results) {
-          const reservation = reserved.get(result.sessionId)
-          if (reservation === undefined) continue
-          const { header, entry } = reservation
-          if (this.coldTitles.get(result.sessionId) !== entry) continue
-          if (this.ctx.sessions.get(result.sessionId) !== undefined) {
-            this.coldTitles.delete(result.sessionId)
-            continue
-          }
-          if (result.status === 'rejected') continue
-          entry.settled = true
-          if (result.value.session.createdAt === header.createdAt && result.value.session.cwd === header.cwd
-            && result.value.title !== undefined) entry.title = result.value.title
-        }
-      } catch {
-        // Unsettled entries are retried by a later list request after failure or cancellation.
-      } finally {
-        for (const [id, { entry }] of reserved) {
-          if (this.coldTitles.get(id) === entry) entry.warming = false
-        }
-      }
-    })()
-    this.warmOperations.add(operation)
-    void operation.then(() => { this.warmOperations.delete(operation) })
-  }
-
-  private async probeSmallCold(
-    header: SessionHeader,
-    signal: AbortSignal | undefined,
-  ): Promise<SessionProjectionHints | undefined> {
-    if (this.coldBlankProbeMaxBytes === 0) return undefined
-    const persistence = this.ctx.get('sessionPersistence')
-    if (persistence === undefined) return undefined
-    signal?.throwIfAborted()
-    try {
-      const snapshot = await persistence.stat(header.id, signal === undefined ? undefined : { signal })
-      if (snapshot?.sizeBytes === undefined || snapshot.sizeBytes > this.coldBlankProbeMaxBytes) return undefined
-    } catch {
-      signal?.throwIfAborted()
-      return undefined
-    }
-    try {
-      using observation = await this.ctx.sessionQuery.observeSession(header.id, {
-        ...(signal === undefined ? {} : { signal }),
-        projectionMode: 'all',
-      })
-      const block = observation.projections
-      return block === undefined
-        ? undefined
-        : { asOfSeq: block.asOfSeq, values: block.values as SessionProjectionValues }
-    } catch (error: unknown) {
-      signal?.throwIfAborted()
-      this.ctx.logger.warn(
-        `api-session.list: small cold observation for "${header.id}" failed; serving it as visible: ${String(error)}`,
-      )
-      return undefined
+      ...(projections === undefined ? {} : { projections }),
     }
   }
 
@@ -444,21 +271,16 @@ export class ApiSessionList {
     session: Session | undefined,
   ): SessionProjectionHints | undefined {
     try {
+      if (session !== undefined) {
+        // The live registry computed the block for this Session: its watermark
+        // shares the sequence space of the Session's baselines and frames.
+        return hintsOf('sequenced', this.ctx.sessionProjections.cachedSnapshot(session))
+      }
+      // A cold row reads the persisted cache by header alone; the cache serves
+      // seeded and unseeded lifecycles alike because a listing never seeds a
+      // fold. The watermark is the stored record's own.
       const cache = this.ctx.get('sessionProjectionCache')
-      const block = session === undefined
-        ? header.isSeeded
-          ? undefined
-          : cache?.cachedSnapshot(header, SessionLogOffset(0))
-            ?? cache?.cachedPredecessorTitle(header, SessionLogOffset(0))
-        : this.ctx.sessionProjections.cachedSnapshot(session)
-      return block !== undefined && Object.keys(block.values).length > 0
-        ? {
-          asOfSeq: block.asOfSeq,
-          // Listing hints contain every currently cached wire value but remain
-          // partial: missing cells and cache rows are never materialized here.
-          values: block.values as SessionProjectionValues,
-        }
-        : undefined
+      return hintsOf('cached', cache?.cachedSnapshot(header) ?? cache?.cachedPredecessorTitle(header))
     } catch (error) {
       this.ctx.logger.warn(
         `api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`,
@@ -466,6 +288,22 @@ export class ApiSessionList {
       return undefined
     }
   }
+}
+
+/**
+ * Wrap one projection block as Session-list hints of the named sequence space.
+ * @param kind - which sequence space the block's watermark belongs to.
+ * @param block - the block, or `undefined` when no source served one.
+ * @returns the hints, or `undefined` when the block is absent or carries no value.
+ */
+function hintsOf(
+  kind: SessionProjectionHints['kind'],
+  block: ProjectionSnapshot | undefined,
+): SessionProjectionHints | undefined {
+  if (block === undefined || Object.keys(block.values).length === 0) return undefined
+  // Listing hints contain every wire value the source currently holds but
+  // remain partial: missing cells and cache rows are never materialized here.
+  return { kind, asOfSeq: block.asOfSeq, values: block.values as SessionProjectionValues }
 }
 
 function normalizeSearchQuery(query: string): string {

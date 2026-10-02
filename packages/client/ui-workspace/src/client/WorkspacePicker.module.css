@@ -19,21 +19,35 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+/* Manage-folders dialog body. */
 .folders {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.folderLabel {
+  font-weight: 600;
 }
 
 .folderPath {
-  overflow-wrap: anywhere;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.folderHint {
+  color: var(--dsw-alias-label-secondary);
 }
 
 .folderList {
-  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   margin: 0;
   padding: 0;
+  list-style: none;
 }
 
 .folderRow {
@@ -41,5 +55,4 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
 }

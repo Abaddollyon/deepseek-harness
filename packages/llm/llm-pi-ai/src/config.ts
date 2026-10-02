@@ -6,26 +6,29 @@
  * A route key is not required to name an installed pi-ai provider. When it does,
  * that provider's endpoint, protocol, display name, and model catalog are the
  * profile's defaults and the profile overrides them field by field; when it does
- * not, the profile is the whole provider declaration. Resolution therefore ends
- * in a built pi-ai `Provider` per route: everything a request needs is decided
- * once, while the configuration key that made a route unserviceable can still be
- * named in the failure.
+ * not, the profile is the whole provider declaration. Stored reads retain
+ * catalog diagnostics beside serviceable models; writes validate every changed
+ * provider before persistence. Self-contained profile constraints apply to both.
  *
  * @module dsh-llm-pi-ai/config
  */
+import type { Volatile } from '@deepseek-ai/cordis'
 
-import type { Api, CacheRetention, ChatTemplateKwargValue, Model, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
+import type { CacheRetention, ChatTemplateKwargValue, ModelThinkingLevel, Provider, ThinkingBudgets, Transport } from '@earendil-works/pi-ai'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
+import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import {
   CACHE_CONTROL_FORMATS,
+  catalogModels,
   CHAT_TEMPLATE_VARS,
   MAX_TOKENS_FIELDS,
   MODALITIES,
+  PiAiCatalogError,
   resolveRouteModels,
   SUPPORTED_THINKING_FORMATS,
   THINKING_LEVELS,
@@ -37,6 +40,7 @@ import type {
   PiAiModelOverride,
   PiAiModelProfile,
   PiAiReasoningEfforts,
+  RouteCatalog,
 } from './catalog.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
 
@@ -60,15 +64,6 @@ export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
-
-/** Default extra attempts after a provider's pre-content auth rejection. */
-export const DEFAULT_AUTH_RECOVERY_RETRIES = 1
-
-/** Maximum extra attempts permitted by one auth-recovery policy. */
-export const MAX_AUTH_RECOVERY_RETRIES = 8
-
-/** Default delay before an auth-recovery attempt, in milliseconds. */
-export const DEFAULT_AUTH_RECOVERY_DELAY_MS = 1_000
 
 /** Output capability assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_MAX_TOKENS = 32_768
@@ -94,12 +89,51 @@ export type {
   PiAiThinkingFormat,
 } from './catalog.ts'
 
+/** Who authenticates a route's requests: pi-ai's provider-native auth, or a proxy in front of the provider. */
+export type PiAiAuthMode = 'provider' | 'proxy'
+
+/** Anthropic Messages request format: the one the credential selects, or Claude Code's. */
+export type PiAiAnthropicRequestMode = 'provider' | 'claude-code'
+
+/** Listing protocol model discovery uses for a configured route. */
+export type PiAiModelDiscoverySource = 'provider' | 'openai-compatible' | 'anthropic'
+
+/** Model discovery choices for one configured route. */
+export interface PiAiModelDiscoveryProfile {
+  /**
+   * `provider` (default) answers a catalog route from the installed catalog
+   * and lists any other route by its protocol. `openai-compatible` lists
+   * `GET {baseURL}/models` with bearer auth; `anthropic` lists
+   * `GET {root}/v1/models` with `x-api-key`. Both read the route's own
+   * endpoint, headers, and `apiKeyEnv`, independently of its generation API.
+   */
+  source?: PiAiModelDiscoverySource
+}
+
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
-  /** Opt-in live model metadata; explicit models and overrides remain authoritative. */
-  modelDiscovery?: PiAiModelDiscovery
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * `provider` (default) keeps pi-ai's provider-native auth: stored sign-ins,
+   * their refresh, and ambient environment discovery. `proxy` declares a
+   * gateway that owns provider accounts itself: the route never reads,
+   * refreshes, or offers a stored or ambient provider credential, sends the
+   * {@link apiKeyEnv} value when one is configured, and otherwise sends no
+   * credential, which `openai-completions`, `openai-responses`, and
+   * `anthropic-messages` in `claude-code` mode serve. `proxy` requires an
+   * explicit http(s) {@link baseURL} without embedded credentials.
+   */
+  authMode?: PiAiAuthMode
+  /**
+   * `claude-code` sends Anthropic requests in Claude Code format — identity
+   * headers, beta features, system preamble, and tool names — whatever
+   * credential the route carries, and permits a keyless request. Valid only on
+   * a route whose models speak `anthropic-messages`. Default `provider`.
+   */
+  anthropicRequestMode?: PiAiAnthropicRequestMode
+  /** How the configuration surface's model discovery lists this route. */
+  modelDiscovery?: PiAiModelDiscoveryProfile
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -114,7 +148,6 @@ export interface PiAiProviderProfile {
    * This route's model catalog. Omission serves the installed catalog for the
    * route unchanged; an explicit list replaces it, each entry defaulting its
    * unset fields from the installed model of the same id.
-   * With modelDiscovery enabled, live entries extend this list underneath its explicit fields.
    */
   models?: PiAiModelProfile[]
   /**
@@ -189,50 +222,22 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
-  /**
-   * Recovery from a provider auth rejection (HTTP 401/403) that arrives before
-   * any content: the adapter refreshes the route's stored OAuth credential
-   * once, then retries after {@link PiAiAuthRecovery.delayMs}. Only a failure
-   * with nothing emitted is eligible — once content has streamed, the turn
-   * owns recovery. Omission enables one recovery attempt; `retries: 0`
-   * disables it.
-   */
-  authRecovery?: PiAiAuthRecovery
-}
-
-/** Background discovery cadence and total operation timeout for one route. */
-export interface PiAiModelDiscovery {
-  /** Enable startup, credential-change, periodic, and explicit catalog refresh. */
-  enabled?: boolean
-  /** Milliseconds between refreshes; defaults to six hours. */
-  refreshIntervalMs?: number
-  /** Total auth, public version lookup, and metadata request budget; defaults to fifteen seconds. */
-  timeoutMs?: number
-}
-
-/** Adapter-level recovery from a pre-content provider auth rejection. */
-export interface PiAiAuthRecovery {
-  /** Additional attempts after an auth-classified failure (default 1). */
-  retries?: number
-  /** Delay before each additional attempt in milliseconds (default 1000). */
-  delayMs?: number
-}
-
-/** {@link PiAiAuthRecovery} with every default resolved. */
-export interface ResolvedPiAiAuthRecovery {
-  /** Non-negative extra-attempt budget after defaulting. */
-  retries: number
-  /** Non-negative pre-attempt delay after defaulting. */
-  delayMs: number
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'authRecovery'> {
+  extends Omit<PiAiProviderProfile,
+    'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'authMode' | 'anthropicRequestMode' | 'modelDiscovery'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
+  /** Resolved authentication owner. */
+  authMode: PiAiAuthMode
+  /** Resolved Anthropic request format. */
+  anthropicRequestMode: PiAiAnthropicRequestMode
+  /** Resolved model-discovery listing protocol. */
+  modelDiscoverySource: PiAiModelDiscoverySource
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
   /** Positive finite provider-idle interval after defaulting. */
@@ -245,17 +250,15 @@ export interface ResolvedPiAiProviderProfile
   requestImageMaxBytes: number
   /** Immutable retry policy captured with this provider route. */
   retryPolicy: ResolvedRetryPolicy
-  /** Immutable pre-content auth-recovery policy captured with this provider route. */
-  authRecovery: ResolvedPiAiAuthRecovery
   /**
-   * The pi-ai provider this route registers, built from the resolved models.
-   * Construction happens here so an unserviceable protocol or an underspecified
-   * model fails with the rest of resolution, leaving the last good route set
-   * serving requests.
+   * The pi-ai provider containing this route's serviceable models. Absent when
+   * a stored route cannot be constructed; its configuration remains editable.
    */
-  piProvider: Provider
-  /** Selectable catalog projection; piProvider retains descriptors for existing selections. */
-  selectableModels: readonly Model<Api>[]
+  piProvider?: Provider
+  /** First model diagnostic, or the route failure when no model diagnostic is available. */
+  catalogError?: string
+  /** Per-model failures reported before attempting a request. */
+  modelErrors: ReadonlyMap<string, string>
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    * The seam materializes one only into a request that names no cap of its
@@ -271,8 +274,11 @@ export interface Config {
    * the dormant settings-driven posture: the adapter mounts with no routes
    * and registers them the moment a settings section supplies profiles.
    */
-  providers?: Record<string, PiAiProviderProfile>
+  providers: Volatile<Record<string, PiAiProviderProfile>>
 }
+
+/** Plain options accepted by the provider resolver. */
+export type Options = { [K in keyof Config]?: Config[K] extends Volatile<infer T> ? T : never }
 
 const thinkingBudgets = z.object({
   minimal: z.number(),
@@ -342,11 +348,6 @@ const reasoningEfforts = z.dict(
   z.union(THINKING_LEVELS),
 ) as unknown as z<PiAiReasoningEfforts>
 
-const authRecovery: z<PiAiAuthRecovery> = z.object({
-  retries: z.number().step(1).min(0).max(MAX_AUTH_RECOVERY_RETRIES).default(DEFAULT_AUTH_RECOVERY_RETRIES),
-  delayMs: z.number().min(0).max(MAX_TIMER_DELAY_MS).default(DEFAULT_AUTH_RECOVERY_DELAY_MS),
-})
-
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
   name: z.string(),
@@ -372,12 +373,10 @@ const modelProfile: z<PiAiModelProfile> = z.object({
 const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
-  modelDiscovery: z.object({
-    enabled: z.boolean().default(false),
-    refreshIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(21_600_000),
-    timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
-  }),
   apiKeyEnv: z.string().role('credential-ref'),
+  authMode: z.union(['provider', 'proxy']),
+  anthropicRequestMode: z.union(['provider', 'claude-code']),
+  modelDiscovery: z.object({ source: z.union(['provider', 'openai-compatible', 'anthropic']) }),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -394,33 +393,30 @@ const profile = z.object({
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
-  streamIdleTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   maxRequestImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
   requestImagePixelBudget: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_MAX_BYTES),
   retryPolicy: RetryPolicySchema,
-  authRecovery,
 })
 
 /** Runtime schema for {@link Config}. */
-export const Config: z<Config> = z.object({
-  providers: z.dict(profile).default({}),
+export const Config = z.object({
+  providers: z.dict(profile).default({}).volatile(),
 })
 
 /**
- * Reject a section this adapter could not serve. Registered as the settings
- * namespace's validator, so an unserviceable profile is refused where it is
- * *written* — `settings.mutate` answers `settings-rejected` with the offending
- * route and model named — instead of being stored and then quietly disabling
- * every route in the namespace. It stays a validator rather than a schema
- * transform because the schema is also the shape a configuration surface
- * renders and the value an absent section resolves to; wrapping it would break
- * both.
+ * Reject new or changed provider profiles that cannot be served. Unchanged
+ * stored profiles may need repair after a catalog upgrade and do not block
+ * edits to another provider. Removed profiles require no catalog validation.
  * @param config - the resolved section to check.
+ * @param previous - current resolved section; omission checks every provider.
  * @throws Error naming the route and configuration entry that cannot be served.
  */
-export function assertServiceable(config: Config): void {
-  resolveProfiles(config.providers)
+export function assertServiceable(config: Options, previous?: Options): void {
+  const changed = Object.fromEntries(Object.entries(config.providers ?? {}).filter(([provider, profile]) =>
+    !deepEqualJson(profile, previous?.providers?.[provider])))
+  resolveProfiles(changed)
 }
 
 /** Reject removed pre-release profile fields and name their replacements. */
@@ -455,20 +451,35 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
   }
 }
 
+/** Reject a proxy route whose endpoint is missing, not http(s), or carries credentials. */
+function assertProxyEndpoint(provider: string, baseURL: string | undefined): void {
+  const url = baseURL === undefined ? null : URL.parse(baseURL)
+  if (url === null || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.username !== '' || url.password !== '') {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" sets authMode proxy, which needs an explicit http(s) baseURL`
+      + ' without embedded credentials',
+    )
+  }
+}
+
+/** Whether every model the route serves speaks Anthropic Messages. */
+function speaksAnthropicMessages(provider: string, api: string | undefined): boolean {
+  if (api !== undefined) return api === 'anthropic-messages'
+  const installed = [...catalogModels(provider).values()]
+  return installed.length > 0 && installed.every(model => model.api === 'anthropic-messages')
+}
+
 /**
- * Validate profiles and return a detached route-keyed map suitable for
- * per-request reads. This is the one explicit resolve step, so an omitted dict
- * resolves to the empty (dormant) route set here rather than through a hidden
- * fallback, and each route's models and pi-ai provider are materialized once.
+ * Resolve scalar defaults and materialize each route's serviceable models.
+ * Deferred catalog validation retains diagnostics without deleting configured
+ * routes. An omitted dict resolves to the empty, dormant route set.
  * @param providers - configured provider profiles keyed by route.
- * @param discovered - normalized metadata, applied beneath explicit configuration.
- * @param excludedIds - normalized discovery exclusions, scoped to each route's configuration and credential.
+ * @param validation - writes require a complete catalog; stored reads retain catalog diagnostics.
  * @returns validated profiles in configuration order.
  */
 export function resolveProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>> | undefined,
-  discovered: ReadonlyMap<string, readonly PiAiModelProfile[]> = new Map(),
-  excludedIds: ReadonlyMap<string, readonly string[]> = new Map(),
+  validation: 'strict' | 'deferred' = 'strict',
 ): Map<string, ResolvedPiAiProviderProfile> {
   if (Array.isArray(providers)) {
     throw new Error('llm-pi-ai: providers is now a dict keyed by provider route, not an array of profiles')
@@ -477,11 +488,6 @@ export function resolveProfiles(
   const resolved = new Map<string, ResolvedPiAiProviderProfile>()
   for (const [provider, source] of entries) {
     rejectRemovedFields(provider, source)
-    for (const [key, value] of Object.entries(source.modelDiscovery ?? {})) {
-      if (key !== 'enabled' && (!Number.isSafeInteger(value) || Number(value) <= 0 || Number(value) > MAX_TIMER_DELAY_MS)) {
-        throw new Error(`llm-pi-ai: provider "${provider}" modelDiscovery.${key} must be a positive timer interval`)
-      }
-    }
     if (provider.length === 0) throw new Error('llm-pi-ai: provider names must be non-empty')
     if (source.baseURL !== undefined && source.baseURL.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty baseURL`)
@@ -490,12 +496,22 @@ export function resolveProfiles(
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
     assertValidHeaders(provider, source.headers)
+    const authMode = source.authMode ?? 'provider'
+    if (authMode === 'proxy') assertProxyEndpoint(provider, source.baseURL)
+    const anthropicRequestMode = source.anthropicRequestMode ?? 'provider'
+    if (anthropicRequestMode === 'claude-code' && !speaksAnthropicMessages(provider, source.api)) {
+      throw new Error(`llm-pi-ai: provider "${provider}" sets anthropicRequestMode claude-code, which needs api anthropic-messages`)
+    }
+    const modelDiscoverySource = source.modelDiscovery?.source ?? 'provider'
+    if (modelDiscoverySource !== 'provider' && source.baseURL === undefined) {
+      throw new Error(`llm-pi-ai: provider "${provider}" sets modelDiscovery.source ${modelDiscoverySource}, which needs a baseURL`)
+    }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
-    if (!Number.isInteger(streamIdleTimeoutMs)
+    if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
       || streamIdleTimeoutMs > MAX_TIMER_DELAY_MS) {
       throw new Error(
-        `llm-pi-ai: provider "${provider}" streamIdleTimeoutMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}`,
+        `llm-pi-ai: provider "${provider}" streamIdleTimeoutMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`,
       )
     }
     const maxRequestImageBytes = source.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES
@@ -510,18 +526,6 @@ export function resolveProfiles(
     if (!Number.isSafeInteger(requestImageMaxBytes) || requestImageMaxBytes <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" requestImageMaxBytes must be a positive safe integer`)
     }
-    const authRecovery: ResolvedPiAiAuthRecovery = {
-      retries: source.authRecovery?.retries ?? DEFAULT_AUTH_RECOVERY_RETRIES,
-      delayMs: source.authRecovery?.delayMs ?? DEFAULT_AUTH_RECOVERY_DELAY_MS,
-    }
-    if (!Number.isSafeInteger(authRecovery.retries) || authRecovery.retries < 0 || authRecovery.retries > MAX_AUTH_RECOVERY_RETRIES) {
-      throw new Error(`llm-pi-ai: provider "${provider}" authRecovery.retries must be a non-negative integer`)
-    }
-    if (!Number.isFinite(authRecovery.delayMs) || authRecovery.delayMs < 0 || authRecovery.delayMs > MAX_TIMER_DELAY_MS) {
-      throw new Error(
-        `llm-pi-ai: provider "${provider}" authRecovery.delayMs must be a non-negative finite number no greater than ${MAX_TIMER_DELAY_MS}`,
-      )
-    }
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty
     // list here is always one someone typed — and unlike an entry's, nothing
@@ -535,43 +539,58 @@ export function resolveProfiles(
     // always shown route keys, and a catalog route must not silently rename
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
-    const catalog = resolveRouteModels({
-      provider,
-      ...source.modelDiscovery?.enabled !== true ? {} : { discovered: discovered.get(provider) ?? [] },
-      ...source.modelDiscovery?.enabled !== true ? {} : { excludedIds: excludedIds.get(provider) ?? [] },
-      ...source.api === undefined ? {} : { api: source.api },
-      ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
-      ...source.models === undefined ? {} : { models: source.models },
-      ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
-      ...source.compat === undefined ? {} : { compat: source.compat },
-      defaultInput,
-      defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-      defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
-    })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, authRecovery: _authRecovery, ...rest } = source
+    let catalog: RouteCatalog | undefined
+    let piProvider: Provider | undefined
+    let catalogError: string | undefined
+    try {
+      catalog = resolveRouteModels({
+        provider,
+        ...source.api === undefined ? {} : { api: source.api },
+        ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
+        ...source.models === undefined ? {} : { models: source.models },
+        ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
+        ...source.compat === undefined ? {} : { compat: source.compat },
+        defaultInput,
+        defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
+      }, validation)
+      catalogError = catalog.modelErrors.values().next().value
+      piProvider = buildProvider({
+        provider,
+        displayName,
+        ...source.api === undefined ? {} : { api: source.api },
+        ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
+        models: catalog.models,
+        namesCredential: source.apiKeyEnv !== undefined,
+        authMode,
+      })
+    } catch (error) {
+      if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
+      catalogError ??= error.message
+    }
+    const {
+      apiKeyEnv, retryPolicy, models: _models, displayName: _displayName,
+      authMode: _authMode, anthropicRequestMode: _anthropicRequestMode, modelDiscovery: _modelDiscovery, ...rest
+    } = source
     resolved.set(provider, {
       ...rest,
       provider,
       displayName,
+      authMode,
+      anthropicRequestMode,
+      modelDiscoverySource,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       maxRequestImageBytes,
       requestImagePixelBudget,
       requestImageMaxBytes,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
-      authRecovery,
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
-      configuredMaxTokens: catalog.configuredMaxTokens,
-      selectableModels: catalog.selectableModels,
-      piProvider: buildProvider({
-        provider,
-        displayName,
-        ...source.api === undefined ? {} : { api: source.api },
-        ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
-        models: catalog.models,
-        namesCredential: apiKeyEnv !== undefined,
-      }),
+      configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
+      modelErrors: catalog?.modelErrors ?? new Map(),
+      ...piProvider === undefined ? {} : { piProvider },
+      ...catalogError === undefined ? {} : { catalogError },
     })
   }
   return resolved

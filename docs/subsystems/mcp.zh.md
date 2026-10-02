@@ -1,329 +1,115 @@
-# MCP Host 连接
+# MCP
 
 [English](mcp.md) | 中文
 
-[dsh-mcp-client](../../packages/mcp/mcp-client) 的 Host 托管连接 seam 把需要 OAuth 的 MCP 服务器的端点、客户端参数与令牌保留在 Host 上：Host 连接所有者（`ctx.nativeMcpConnections`）持有设置支撑的非机密配置，为每个连接运行一个 OAuth 协议引擎，注册供人完成登录的原生授权流程，并把绑定交给 agent 侧插件实例——绑定给出的传输由引擎的 Host 持有的 fetch 完成认证。grant（授权）保存在 `mcp-connections/<connectionId>` 下的原生凭据记录中，只由引擎通过 `ctx.credentials.modifyRecord` 写入；服务本身绝不存储令牌，所有状态视图都不含令牌。逐 agent 插件配置、工具命名与重连策略仍由包 README 负责；本页所依赖的凭据记录与授权流程词汇见 [credentials.md](credentials.zh.md)。
+## 摘要
 
-来源：[`packages/mcp/mcp-client/src/connections.ts`](../../packages/mcp/mcp-client/src/connections.ts)
+模型上下文协议（Model Context Protocol，MCP）让模型使用外部服务器提供的工具。每个已配置服务器都会提供普通 Harness 工具，支持取消、权限检查、结果记录和受支持的图像输出。调用方作用域中配置了服务器时，共享工具负责发现和读取资源，服务器指令则加入已记录的系统提示词。官方 SDK 协商现代或受支持的旧版协议。本参考页介绍 MCP 包组的职责、作用域和组合选择；服务器配置由[客户端 README](../../packages/mcp/mcp-client/README.zh.md) 维护。
 
-## 连接条目
+## 目录
 
-`mcp-connections` 设置命名空间按连接 id 为每个 Host 托管连接保存一条条目。每个字段都是非机密的——端点与协议引擎所需的 OAuth 客户端参数；授权绝不会出现在这里。schema 接纳条目后，validate 步骤会在写入时拒绝 schema 无法表达的内容：不含 userinfo 的 HTTPS URL，以及凭据记录键所依赖的连接 id 语法。
+- [配置](#configuration)
+- [职责与作用域](#responsibilities-and-scope)
+- [协议与结果](#protocol-and-results)
+- [资源与指令](#resources-and-instructions)
+- [资源提供方类型](#resource-provider-types)
+- [限制](#limits)
+- [延伸阅读](#further-reading)
+
+-----
+
+<a id="configuration"></a>
+## 配置
+
+MCP 服务器需要主动配置。在目标 Cordis 作用域中，为每台服务器配置一个 `@deepseek-ai/dsh-mcp-client` 条目。每个随附 profile 都提供[工具注册表](tools.zh.md)，并统一挂载共享资源服务一次；用户只需配置客户端条目。调用方没有可见的已配置服务器时，在 native 或 PTC 模式下都不会获得 MCP 提示词文本或工具。
+
+| 选择 | 配置维护位置 |
+|---|---|
+| 服务器身份、本地进程或 HTTP 端点、凭据和进程环境 | [客户端配置](../../packages/mcp/mcp-client/README.zh.md#use-this-package) |
+| 工具与资源请求超时、启动失败策略和重连 | [客户端配置](../../packages/mcp/mcp-client/README.zh.md#use-this-package) |
+| 资源发现与读取 | 随附 profile 已包含 [MCP 资源服务](../../packages/mcp/mcp-resources/README.zh.md#use-this-package)；该服务没有配置字段 |
+| 服务器指令大小限制 | 客户端 `maxInstructionBytes`；组合提供[系统提示词装配](system-prompt.zh.md) |
+| 权限决策和受支持的图像输出 | [工具执行](tools.zh.md)和[附件](attachment.zh.md) |
+
+协议协商遵循 SDK 支持的修订版；产品没有强制指定协议修订版的设置。[配置目录](../config-catalog.zh.md#deepseek-aidsh-mcp-client) 列出客户端接受的字段和默认值。
+
+-----
+
+<a id="responsibilities-and-scope"></a>
+## 职责与作用域
+
+客户端是每服务器一个的连接插件，也是 Harness 工具注册表的消费者。它不发布共享的 `ctx.mcp` 服务。外部服务器实现 MCP 操作；SDK 拥有协议交换；客户端将发现的工具适配到 Harness 执行过程。
+
+`mcp-resources` 拥有共享资源工具，并在调用方作用域中选择提供方。每个 MCP 客户端通过自己的连接提供资源操作。作用域中的首个提供方启用本地共享工具，移除最后一个提供方时移除这些工具；继承的提供方仍然可见。服务独立于任何单一客户端拥有这些工具注册。只要可见的客户端条目保持激活，连接失败就不会移除共享资源工具。
+
+配置的 `serverName` 在注册作用域内标识服务器。同一作用域中的两个条目不能占用相同名称；不同 Agent 作用域可以复用该名称。公开工具名包含配置的服务器名称，因此不同服务器的同名工具仍可区分。注册副作用拥有名称和已发现工具；插件释放时关闭连接并移除其贡献。
+
+[原生 Cua Driver 提供方](../../packages/experimental/computer-use-cua-driver-native/README.zh.md) 复用客户端导出的结果适配器，无需打开 MCP 连接。桌面提供方选择属于[计算机使用子系统](computer-use.zh.md)。
+
+-----
+
+<a id="protocol-and-results"></a>
+## 协议与结果
+
+stdio 和 Streamable HTTP 都使用官方 SDK 的协商、发现、协议校验和取消机制。工具列表变化通过旧版通知或现代订阅触发发现。刷新失败时保留上一代工具；连接恢复遵循[客户端生命周期](../../packages/mcp/mcp-client/README.zh.md#use-this-package)。
+
+结果适配器为程序化调用方保留规范 MCP JSON，并准备普通工具内容。受支持的图像使用附件系统；不受支持的富内容产生明确的文本诊断。工具注册表仍决定策略失败和结果替换。[工具契约](tools.zh.md) 维护记录和最终呈现规则；[客户端结果参考](../../packages/mcp/mcp-client/README.zh.md#use-this-package) 维护 MCP 特有的投影细节。
+
+-----
+
+<a id="resources-and-instructions"></a>
+## 资源与指令
+
+资源调用必须显式指定配置的服务器名称。系统提示词组装服务可用时，资源服务从派发所用的同一注册表列出调用方可见的名称，包括没有工具或指令的服务器。共享注册表在分发前，于调用 Agent 的作用域中解析该名称；不可用的服务器会在发出网络请求前失败。发现和读取均按需执行，也支持只提供资源而不提供工具的服务器。[资源包](../../packages/mcp/mcp-resources/README.zh.md) 维护分页和内容渲染规则；其生成的工具 schema 位于[工具目录](../tool-catalog.zh.md#deepseek-aidsh-mcp-resources)。
+
+资源提供方仍由连接拥有。作用域释放时移除注册；MCP 客户端控制取消和恢复。规范结果为程序化调用方保留完整 JSON，文本投影则以描述替换二进制 blob。返回的文本进入普通工具历史；服务器连接本身不会触发内容读取。
+
+组合包含系统提示词装配时，客户端将非空白的服务器指令发布为带服务器归属的作用域章节。指令保持字面文本，并在发布前通过配置的大小限制。替换连接仅在发现成功后发布指令；缺少指令时不添加章节。[系统提示词子系统](system-prompt.zh.md) 维护装配与记录规则。
+
+-----
+
+<a id="resource-provider-types"></a>
+## 资源提供方类型
+
+连接提供方接收一个操作与原始工具执行对象，其中包含调用方和取消信号。
 
 ```ts type-equiv
-/**
- * One host-managed MCP connection as the settings document stores it. Every
- * field is nonsecret: the endpoint and the OAuth client parameters the
- * protocol engine needs. Grants never appear here.
- */
-interface McpConnectionEntry {
-  /** User-facing name for pickers; defaults to the connection id. */
-  label?: string
-  /** MCP endpoint URL; HTTPS without userinfo (validate enforces). */
-  url: string
-  /** Expected OAuth issuer URL; HTTPS. */
-  issuerUrl: string
-  /** Protected-resource URL; defaults to the MCP endpoint when absent. */
-  resourceUrl?: string
-  /** Completion page the human pastes the callback URL from; HTTPS. */
-  redirectUri: string
-  /** OAuth scopes to request; empty lets the server choose. */
-  scopes: string[]
-  /** Pre-registered public client id; omission lets the engine register dynamically (RFC 7591). */
-  clientId?: string
-  /** Client name sent with dynamic registration. */
-  clientName: string
-  /** Wall-clock bound for each OAuth protocol request including its body, in milliseconds. */
-  requestTimeoutMs: number
-  /** Byte ceiling on each OAuth protocol response body. */
-  responseByteLimit: number
-  /** Refresh this long before the access token's advertised expiry, in milliseconds. */
-  refreshLeewayMs: number
-}
+/** One supported resource operation, with server-owned cursors and URIs. */
+type McpResourceRequest =
+  | { method: 'resources/list' | 'resources/templates/list'; cursor?: string }
+  | { method: 'resources/read'; uri: string }
 ```
 
 ```ts type-equiv
-/** Resolved value of the `mcp-connections` settings namespace, keyed by connection id. */
-type McpConnectionsSettings = Record<string, McpConnectionEntry>
-```
-
-## 解析出的 spec
-
-`resolveSpec()` 是从设置条目到引擎与传输实际运行的冻结 spec 的唯一显式解析步骤；默认值在这里物化，绝不在消费方内部补默认。跨配置变化的授权复用由引擎自己的授权绑定——server、issuer、resource、redirect、client、scopes——隔离，已存储的授权必须与之精确匹配；不需要服务侧的世代计数。
-
-```ts type-equiv
-/**
- * Frozen connection identity and bounds handed to the engine and transport.
- * Grant reuse across configuration changes is fenced by the engine's own
- * grant binding (server, issuer, resource, redirect, client, scopes), which
- * a stored grant must match exactly; no service-side generation is needed.
- */
-interface ResolvedMcpConnectionSpec {
-  /** MCP endpoint URL (HTTPS, userinfo-free). */
-  url: string
-  /** Expected OAuth issuer URL. */
-  issuerUrl: string
-  /** Protected-resource URL (defaults resolved: the MCP endpoint itself). */
-  resourceUrl: string
-  /** Callback completion page. */
-  redirectUri: string
-  /** OAuth scopes to request. */
-  scopes: readonly string[]
-  /** Pre-registered public client id, when configured. */
-  clientId?: string
-  /** Client name sent with dynamic registration. */
-  clientName: string
-  /** Wall-clock bound for each OAuth protocol request including its body, in milliseconds. */
-  requestTimeoutMs: number
-  /** Byte ceiling on each OAuth protocol response body. */
-  responseByteLimit: number
-  /** Refresh this long before the access token's advertised expiry, in milliseconds. */
-  refreshLeewayMs: number
-}
-```
-
-## 引擎 seam
-
-每个连接一个协议引擎，由服务持有。所有令牌流动——包括刷新——都留在引擎自己的串行操作队列内，桥接层绝不读取授权载荷。默认工厂构造 `src/oauth.ts` 的 OAuth 引擎；部署方与测试可以替换自己的实现。引擎构造或授权流程注册失败会让连接保持已配置但不可用且不泄漏任何资源，日志只记录标明失败类别的 token。
-
-```ts type-equiv
-/**
- * The protocol engine surface the Host bridge relies on. One instance per
- * connection, owned by this service. All token movement — refresh included —
- * stays inside the engine's own serialized operation queue; the bridge never
- * reads grant payloads.
- */
-interface McpConnectionEngine {
+/** One configured server's resource access, owned by its MCP connection plugin. */
+interface McpResourceProvider {
   /**
-   * Token-free lifecycle facts for status views.
-   * @returns the current authorization state, in-flight operation, grant facts, and record epoch.
+   * Run an operation against one live connection generation.
+   * @param request - MCP resource method and parameters.
+   * @param exec - caller identity and cancellation for this invocation.
+   * @returns the protocol result as lossless JSON.
    */
-  status(): Promise<McpConnectionEngineStatus>
-  /**
-   * Run one interactive authorization attempt through the native
-   * authorization session (notices carry the sign-in URL; the callback URL
-   * comes back through a `secret` prompt). Commits the grant through
-   * `ctx.credentials.modifyRecord` before resolving.
-   * @param session - the attempt the AuthorizationService is running.
-   */
-  authorize(session: AuthorizationSession): Promise<void>
-  /**
-   * The Host-owned fetch for this connection's MCP endpoint: attaches the
-   * current bearer token, accepts only the configured endpoint, rejects
-   * caller-supplied credential headers, disables redirects, and answers 401
-   * with one shared forced refresh plus one retry before invalidating. MCP
-   * bodies and SSE stay streaming.
-   * @param signal - aborted when the owning generation is superseded.
-   * @returns the fetch the Streamable HTTP transport issues every request through.
-   */
-  authenticatedFetch(signal: AbortSignal): FetchLike
-  /**
-   * The record identities this engine vouches for at this instant — what it
-   * last stored plus writes inside the store right now — as a classifier the
-   * service captures synchronously on every `credentials/record-updated` for
-   * the connection's key and applies to the record its asynchronous read
-   * returns. The engine's own commits are already reported through
-   * `onChange`, so only a record it did not write — an external edit, a
-   * deletion, another process's write — withdraws consumers as a change of
-   * authority, and a write the engine makes after the event cannot hide it.
-   * @returns a classifier over the bounded identities captured now.
-   */
-  captureOwnership(): (record: CredentialRecord | undefined) => boolean
-  /**
-   * Refuse locally and notify consumers before awaiting storage. Commit the
-   * tombstone before any bounded remote attempt. A failed write leaves this engine refused.
-   * @returns the committed local outcome and the bounded remote outcome.
-   */
-  revoke(): Promise<McpOAuthRevocation>
-  /** Abort owned work and await quiescence. */
-  dispose(): Promise<void>
+  request(request: McpResourceRequest, exec: ToolExecution): Promise<JsonValue>
 }
 ```
 
-```ts type-equiv
-/** Inputs the service hands the engine factory for one connection. */
-interface McpConnectionEngineInit {
-  /** Host context, for the credential seam and logger. */
-  ctx: Context
-  /** The grant record this engine alone writes. */
-  credentialKey: CredentialKey
-  /** Frozen connection identity and network bounds from settings. */
-  spec: ResolvedMcpConnectionSpec
-  /**
-   * Observer of engine authority transitions. Committed changes carry their
-   * epoch and effective scope; local revocation arrives before persistence,
-   * without an epoch. The service invalidates consumers; the engine contains observer failures.
-   * @param event - the authority transition and its committed or local facts.
-   */
-  onChange: (event: McpOAuthChangeEvent) => void
-}
-```
+-----
 
-```ts type-equiv
-/**
- * Construct the protocol engine for one connection. Injectable so tests
- * substitute engines without touching OAuth; production uses the default.
- */
-type McpConnectionEngineFactory = (init: McpConnectionEngineInit) => McpConnectionEngine
-```
+<a id="limits"></a>
+## 限制
 
-已提交的变迁是携带本次提交自身事实的事件——记录 epoch 与生效的授予 scope——因此服务根据操作自身的数据判断一次刷新的 scope 变化，绝不依赖可能已被另一次提交超越的事后状态读取。本地撤销是唯一在持久化之前报告的变迁：它不携带 epoch，因为消费方必须立即停止。连接键上的 `credentials/record-updated` 通过在事件发生时同步捕获的 `captureOwnership` 分类器判定，并应用于异步读取所返回的记录：它为引擎当时最后存储的内容以及正在进行的写入作证；引擎自己的提交已经经由 `onChange` 上报，只有不是它写入的记录——外部编辑、删除、另一个进程的写入——才会作为权威变化使消费方失效，而引擎在事件之后做出的写入无法掩盖这一点。
+不支持 MCP 提示词模板、人工输入征询、基于任务的执行和资源订阅。资源工具需要调用方可见的已配置服务器；二进制资源保留为程序化数据，模型接收其文本描述。没有工具能力的服务器以空工具集连接。连接和发现超时遵循 SDK；客户端没有对应的独立设置。
 
-引擎的生命周期状态就是 OAuth 引擎的无令牌状态视图：授权当前能否服务请求、不能服务时的原因、进行中的操作，以及可安全呈现在状态界面上的授权事实。
+-----
 
-```ts type-equiv
-/** Token-free engine lifecycle facts; the UI vocabulary the Host may repeat. */
-type McpConnectionEngineStatus = McpOAuthStatus
-```
+<a id="further-reading"></a>
+## 延伸阅读
 
-```ts type-equiv
-/** Token-free lifecycle facts for status surfaces. */
-interface McpOAuthStatus {
-  /** Whether a grant can currently serve requests. */
-  state: 'auth-required' | 'authorized' | 'revoked' | 'disposed'
-  /** Why no grant serves, while `state` is `auth-required`. */
-  reason?: 'no-grant' | 'record-invalid' | 'binding-changed' | 'grant-invalidated'
-  /** The engine operation running now, if any. */
-  inFlight: 'authorize' | 'refresh' | undefined
-  /** Whether the stored grant can be refreshed without the human. */
-  hasRefreshToken: boolean
-  /** Advertised access-token expiry as epoch milliseconds; absent when the server advertised none. */
-  accessTokenExpiresAt: number | undefined
-  /** Effective granted scope: the server's `scope` response, else the scope the grant already had (RFC 6749 §5.1, §6). */
-  grantedScope: string | undefined
-  /** Record epoch; absent while nothing valid is stored, and while locally revoked, when the store is not consulted. */
-  epoch: number | undefined
-}
-```
-
-刷新通常对消费方不可见，除非它提交的 scope 集合与消费方连接时的 scope 不同；授权与失效在提交后使消费方失效，撤销在第一个同步步骤——墓碑记录写入存储之前——使消费方失效；来自连接已不再运行的引擎的变迁会被忽略：使其退役的路径已经用它自己的原因完成过失效。
-
-```ts type-equiv
-/**
- * Transitions the engine reports; the bridge resyncs or drops tools on them.
- * All but `revoked` and `disposed` are reported once committed; `revoked` is
- * reported at the first synchronous step of revocation, before its tombstone
- * is stored, because consumers must stop at once.
- */
-type McpOAuthChange = 'authorized' | 'refreshed' | 'invalidated' | 'revoked' | 'disposed'
-```
-
-```ts type-equiv
-/**
- * One authority transition. Committed changes carry their own epoch and
- * effective scope, not a later status read another commit may have overtaken.
- * A `revoked` event reports immediate local refusal, not a durable-write acknowledgement.
- */
-interface McpOAuthChangeEvent {
-  /** The transition. */
-  kind: McpOAuthChange
-  /**
-   * Record epoch the commit wrote; absent for `disposed`, which writes
-   * nothing, and for `revoked`, which is reported before its tombstone is stored.
-   */
-  epoch: number | undefined
-  /** Effective granted scope of the committed grant; absent unless `authorized` or `refreshed`. */
-  grantedScope: string | undefined
-}
-```
-
-## 状态视图
-
-`describe()` 与 `list()` 以无令牌的事实回答配置界面：已配置的连接，以及被移除但仍有消费方绑定的连接——移除会让引擎与授权流程退役，但在没有任何绑定之前保持连接可达，因此之后的重新添加能到达同一批消费方，而不是把它们遗弃。`state` 是引擎的授权生命周期——引擎无法构造或连接不再被配置时为 `unavailable`——它不说明工具可发现性，后者只有消费方 agent 的监督器知道。Host 已闩锁的拒绝由 Host 自己的围栏直接报告为 `revoked`，不查询存储——挂起或失败的存储绝不能拖延或掩盖它——每次引擎读取也都会对照读取期间到达的拒绝重新判定。
-
-```ts type-equiv
-/**
- * Token-free facts about one connection for configuration UIs. `state` is
- * the engine's authorization lifecycle (or `unavailable` while no engine
- * could be constructed or the connection is no longer configured); it says
- * nothing about tool discoverability, which only the consuming agent's
- * supervisor knows.
- */
-interface McpConnectionStatusView {
-  /** The settings key addressing this connection. */
-  id: string
-  /** User-facing name. */
-  label: string
-  /** MCP endpoint URL (validated userinfo-free). */
-  url: string
-  /** Whether the connection is declared in settings; a removed connection stays visible while consumers still bind it. */
-  configured: boolean
-  /** Authorization lifecycle state. */
-  state: McpConnectionEngineStatus['state'] | 'unavailable'
-  /** Whether an authorization attempt is running for this connection's flow. */
-  inFlightAuth: boolean
-  /** `serverName`s of the agent-side instances currently bound. */
-  consumers: string[]
-  /** Invalidation counter consumers compare against their supervisor state. */
-  epoch: number
-}
-```
-
-## 绑定
-
-`acquire()` 把一个 agent 侧消费方绑定到一个已配置的连接，遇到未知或已移除的 id 会明确报错。绑定就是 mcp-client 监督器运行的连接来源：监督器在每个世代开始时重新求值 `connect`，绝不会跨失效缓存其结果，因此被撤销或被移除的连接不会交出传输，也没有新的权威信号就无法复活。传输层中断绝不会以失效的形式出现——它们留在普通重连路径上。
-
-```ts type-equiv
-/**
- * External authority over one connection's transport availability, supplied
- * by the Host connection owner for `host-connection` configs. The supervisor
- * re-evaluates {@link connect} fresh at every generation start and never
- * caches its result across an invalidation, so a revoked or removed
- * connection hands no transport and cannot resurrect on its own.
- */
-interface ConnectionSource {
-  /**
-   * Resolve the transport for the NEXT generation.
-   * @param signal - aborted when this attempt is superseded (an invalidation or disposal).
-   * @returns a fresh transport, or `undefined` while the authority holds the
-   *   connection down (unauthorized, revoked, unavailable, or removed).
-   */
-  connect(signal: AbortSignal): Promise<Transport | undefined>
-  /**
-   * Subscribe to authority changes: revocation, scope or config changes,
-   * re-authorization, removal.
-   * @param listener - invoked synchronously with the withdrawal reason.
-   * @returns the unsubscriber.
-   */
-  onInvalidate(listener: (reason: ConnectionInvalidation) => void): () => void
-}
-```
-
-```ts type-equiv
-/**
- * Why the authority over a host-managed connection told consumers to
- * re-evaluate it. Transport-level outages never appear here — they stay on
- * the ordinary reconnect path.
- */
-type ConnectionInvalidation = 'revoked' | 'invalid-grant' | 'stale' | 'config-changed' | 'reauthorized' | 'removed'
-```
-
-```ts type-equiv
-/**
- * One agent-side consumer's handle on a host connection: the
- * {@link ConnectionSource} the mcp-client supervisor runs, plus the release
- * that unregisters the consumer.
- */
-interface McpConnectionBinding extends ConnectionSource {
-  /** Authority epoch of the connection; bumped on every invalidation. */
-  readonly epoch: number
-  /** Unregister this consumer; idempotent. */
-  release(): void
-}
-```
-
-## 撤销
-
-撤销先在本地拒绝，再做持久化：引擎闩锁本地撤销、中止进行中的托管请求与正在运行的操作，并在第一次存储 await 之前报告 `revoked`，因此在墓碑写入待定期间——或写入失败之后——到达的请求都会被拒绝，而不是从存储仍持有的记录继续服务；只有显式的重新授权才能解除该闩锁。`revoked` 事件因此报告的是立即的本地拒绝，而不是持久写入确认。墓碑记录必须先提交，然后才有任何有界的远程撤销尝试；写入未获确认会抛出 `STORE`——此时存储状态未知，不进行任何远程尝试，授权服务器侧的令牌可能仍然有效；远程结果如实报告，绝不臆断。Host 把被拒绝的凭据键围栏在任何连接状态之外，因此该拒绝比闩锁它的引擎更长寿——配置替换会在同一存储之上构造新引擎——也比连接的移除与重新添加更长寿，即使重新添加的是指向不同端点的同名连接（围栏以凭据记录为键，而非配置），同样比消费方剪枝更长寿；只有在最近一次闩锁的撤销之后进入并成功提交的新显式授权才能解除围栏，仅仅更早进入的尝试会在其开始处与发布处被拒绝。围栏仅存于内存：Host 重启会遗忘它；当墓碑写入失败时，之后只有持久记录起决定作用——而它可能仍持有授权。`removeGrant()` 直接删除授权记录——即“遗忘”操作——由于没有任何引擎写入过这次删除，记录更新判定会自行使消费方失效。
-
-```ts type-equiv
-/** Outcome of {@link McpOAuthConnection.revoke}; the local tombstone is committed before any remote attempt. */
-interface McpOAuthRevocation {
-  local: 'revoked'
-  /** `no-grant` when nothing was stored, `unsupported` when the server advertises no revocation endpoint. */
-  remote: 'no-grant' | 'unsupported' | 'succeeded' | 'failed'
-}
-```
+- [MCP 包组](../../packages/mcp/README.zh.md) — 包入口。
+- [MCP 资源](../../packages/mcp/mcp-resources/README.zh.md) — 共享工具与资源提供方语义。
+- [资源可见性决策](../../.agents/notes/implemented/feature/2026-09-13-mcp-resources-in-profiles.zh.md) — profile 统一挂载及由已配置服务器决定的可见性。
+- [第三方记忆服务器](../user/guide/mcp-memory.zh.md) — 产品配置指南。
+- [协议协商决策](../../.agents/notes/implemented/feature/2026-09-12-mcp-sdk-protocol-negotiation.zh.md) — SDK 职责与兼容性决策。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -333,66 +119,21 @@ interface McpOAuthRevocation {
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
-<a id="ctxnativemcpconnections--nativemcpconnectionsservice"></a>
+<a id="ctxmcpresources--mcpresourceruntime"></a>
 
-### `ctx.nativeMcpConnections` — `NativeMcpConnectionsService`
+### `ctx.mcpResources` — `McpResourceRuntime`
 
-`ctx.nativeMcpConnections`: the Host connection owner. Settings changes reconcile engines, flows, and bindings live; engine transitions and external credential changes invalidate consumers immediately; a revoked or removed connection hands no transport and cannot resurrect without a new authority signal.
-
-Mounts only in the Host composition: an agent-scoped context is refused at construction, and Cordis refuses a second registration of the service name, so one engine per connection exists per Host.
+Scoped resource access plus three tools shared by configured MCP servers.
 
 ```ts cordis-catalog
 /**
- * Bind one agent-side consumer to a configured connection.
- * @param id - the settings key of the connection to consume.
- * @param consumer - the consumer's public tool namespace, for status bookkeeping.
- * @returns the binding the mcp-client supervisor runs as its connection source.
- * @throws when no connection with this id is configured.
+ * Register one server and expose resource tools while that scope has providers.
+ * @param server - configured server name, unique in this scope.
+ * @param provider - connection-owned resource operations.
+ * @returns the effect disposer for this exact registration.
  */
-acquire(id: string, consumer: { serverName: string }): McpConnectionBinding
-
-/**
- * Token-free facts about one connection: configured, or removed from
- * settings while consumers still bind it.
- * @param id - the connection to describe.
- * @returns the status view, or undefined when the service knows no such connection.
- */
-async describe(id: string): Promise<McpConnectionStatusView | undefined>
-
-/**
- * Token-free facts about every known connection, in settings order:
- * configured ones, then removed ones that consumers still bind.
- * @returns one status view per connection.
- */
-async list(): Promise<McpConnectionStatusView[]>
-
-/**
- * The grant record key a surface needs to drive this connection's
- * authorization flow through `ctx.authorization`.
- * @param id - the connection whose flow key is asked.
- * @returns the credential record key.
- */
-recordKeyFor(id: string): CredentialKey
-
-/**
- * Revoke one connection's grant: the engine refuses locally and its
- * synchronous `revoked` transition invalidates consumers before storage is
- * awaited. The tombstone must commit before any remote revocation attempt.
- * @param id - the connection to revoke.
- * @returns the local outcome and the bounded remote outcome.
- */
-async revoke(id: string): Promise<McpOAuthRevocation>
-
-/**
- * Delete one connection's grant record outright (the "forget" operation).
- * The record-updated event invalidates consumers on its own: no engine
- * wrote that deletion.
- * @param id - the connection whose grant is removed.
- */
-async removeGrant(id: string): Promise<void>
+register(server: string, provider: McpResourceProvider): () => void
 ```
 
-Types: [CredentialKey](credentials.zh.md)
-
-Source: [`packages/mcp/mcp-client/src/connections.ts`](../../packages/mcp/mcp-client/src/connections.ts)
+Source: [`packages/mcp/mcp-resources/src/index.ts`](../../packages/mcp/mcp-resources/src/index.ts)
 <!-- END GENERATED cordis-surface -->

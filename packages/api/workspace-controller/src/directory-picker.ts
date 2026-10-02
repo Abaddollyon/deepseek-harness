@@ -9,7 +9,6 @@ import { DirectoryPickerError } from '@deepseek-ai/dsh-host-directory-picker'
 import type {
   DirectoryPickerCapabilities, DirectoryPickerErrorCode,
 } from '@deepseek-ai/dsh-host-directory-picker'
-import type {} from '@deepseek-ai/dsh-host-directory-browser'
 // The seam owns the listing declaration; the generator requires the reference
 // site to name that package rather than this package's re-export of it.
 import type { DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
@@ -40,7 +39,7 @@ declare module '@deepseek-ai/cordis' {
  * serve is refused rather than approximated.
  */
 export class DirectoryPickerController extends TypertRemoteService {
-  static inject = ['directoryPicker', 'directoryBrowser']
+  static inject = ['directoryPicker']
 
   /** @param ctx - Host context carrying the composed directory-picking backend. */
   constructor(ctx: Context) {
@@ -71,8 +70,9 @@ export class DirectoryPickerController extends TypertRemoteService {
    */
   @Remote('list')
   async list(path: string | undefined, signal: AbortSignal): Promise<DirectoryListing> {
+    const capability = this.requireCapability('browse', 'list')
     try {
-      return await this.ctx.directoryBrowser.list(path, signal)
+      return await capability.list(path, signal)
     } catch (error: unknown) {
       throw cancellableFailure(error, signal, 'directory listing was aborted')
     }
@@ -94,8 +94,9 @@ export class DirectoryPickerController extends TypertRemoteService {
         { issues: request.error.issues },
       )
     }
+    const capability = this.requireCapability('browse', 'createDirectory')
     try {
-      return await this.ctx.directoryBrowser.createDirectory(request.data.path, request.data.name)
+      return await capability.createDirectory(request.data.path, request.data.name)
     } catch (error: unknown) {
       throw browseFailure(error)
     }

@@ -6,18 +6,23 @@
  */
 
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { SessionActivity, WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 
 export type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+export type {
+  SessionActivity, SessionActivityItem, SessionActivityKind, SessionActivityKindMap,
+} from '@deepseek-ai/dsh-workspace/types'
 export type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-directory-picker/types'
 
 /** One durable Workspace projected for browser consumers. */
 export interface WorkspaceView {
   readonly workspaceId: WorkspaceId
-  /** Canonical host directory path. */
+  /** Canonical directory path in the Workspace's execution world. */
   readonly path: string
-  /** Canonical additional directories available to this Workspace. */
-  readonly additionalPaths: readonly string[]
+  /** Agent preset whose execution world (for example an SSH host) holds every path; omitted for the Host. */
+  readonly agentPreset?: string
+  /** Further canonical directories new Sessions in this Workspace record beside `path`; omitted when there are none. */
+  readonly additionalPaths?: readonly string[]
   /** User-visible title. */
   readonly title: string
   /** Sessions accounted to this Workspace in manual order. */
@@ -34,6 +39,15 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'workspace/invalid-path': { readonly path: string }
     /** Another Workspace already uses the requested name. */
     'workspace/name-conflict': { readonly name: string }
+    /**
+     * The Session still has running work — its own turn, a subagent, a
+     * background job, or an active schedule — so archiving was refused
+     * without a write; `activity` names what must stop first.
+     */
+    'workspace/session-active': {
+      readonly sessionId: SessionId
+      readonly activity: readonly SessionActivity[]
+    }
     /** The Session or its anchor is not in the Workspace's manual order. */
     'workspace/move-invalid': {
       readonly workspaceId: WorkspaceId
@@ -54,19 +68,42 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 /** Existing directory requested for Workspace adoption. */
 export interface WorkspaceCreateRequest {
   readonly path: string
+  /**
+   * Agent preset whose own filesystem holds `path` and the additional
+   * directories, for a Workspace on another execution host; omitted selects
+   * the Host. Sessions created in the Workspace use this preset.
+   */
+  readonly agentPreset?: string
+  /**
+   * Existing directories new Sessions also record. A new Workspace stores
+   * them; an existing one must already hold the same canonical set.
+   */
   readonly additionalPaths?: readonly string[]
 }
 
-/** Additional directory roots mutation. */
-export interface WorkspaceUpdatePathsRequest {
-  readonly workspaceId: WorkspaceId
-  readonly additionalPaths: readonly string[]
+/** An Agent preset whose own filesystem can hold Workspaces. */
+export interface WorkspaceWorld {
+  readonly agentPreset: string
+  /** The preset's display name, when it declares one. */
+  readonly name?: string
+}
+
+/** Execution worlds available for new Workspaces besides the Host. */
+export interface WorkspaceWorldsValue {
+  readonly worlds: readonly WorkspaceWorld[]
 }
 
 /** Created or previously registered Workspace. */
 export interface WorkspaceCreateValue {
   readonly workspace: WorkspaceView
   readonly created: boolean
+}
+
+/** Complete replacement of a Workspace's additional directories. */
+export interface WorkspaceUpdatePathsRequest {
+  readonly workspaceId: WorkspaceId
+  /** Existing directories; empty removes all. Existing Sessions keep the roots they recorded. */
+  readonly additionalPaths: readonly string[]
 }
 
 /** Workspace title mutation. */
@@ -111,6 +148,19 @@ export interface WorkspaceInsertSessionBeforeRequest {
 /** Session requested for archival from Workspace grouping surfaces. */
 export interface WorkspaceArchiveSessionRequest {
   readonly sessionId: SessionId
+  /**
+   * Stop the Session's running work — its turn, subagent descendants, owned
+   * background jobs, and active schedules — instead of refusing the archive
+   * as `workspace/session-active`. The stops are requested before the
+   * archive write and are not awaited; the response arrives once the archive
+   * set is durable.
+   */
+  readonly stopActivity?: boolean
+}
+
+/** Session requested for restoration from the archived Session list. */
+export interface WorkspaceUnarchiveSessionRequest {
+  readonly sessionId: SessionId
 }
 
 /** Complete archived Session set after a mutation. */
@@ -118,10 +168,27 @@ export interface WorkspaceArchiveValue {
   readonly archivedSessionIds: readonly SessionId[]
 }
 
+/** Session requested for pinning ahead of unpinned Sessions on grouping surfaces. */
+export interface WorkspacePinSessionRequest {
+  readonly sessionId: SessionId
+}
+
+/** Session requested for removal from the pin set. */
+export interface WorkspaceUnpinSessionRequest {
+  readonly sessionId: SessionId
+}
+
+/** Complete pinned Session set after a mutation, most recently pinned first. */
+export interface WorkspacePinValue {
+  readonly pinnedSessionIds: readonly SessionId[]
+}
+
 /** Complete reconnect baseline for Workspace browser state. */
 export interface WorkspaceBaseline {
   readonly items: readonly WorkspaceView[]
   readonly archivedSessionIds: readonly SessionId[]
+  /** Registry-global pin set, most recently pinned first. */
+  readonly pinnedSessionIds: readonly SessionId[]
 }
 
 /** One ordered Workspace change after a generation's baseline. */
@@ -130,6 +197,7 @@ export type WorkspaceFollowIncrement =
   | { readonly type: 'remove'; readonly workspaceId: WorkspaceId }
   | { readonly type: 'order'; readonly workspaceIds: readonly WorkspaceId[] }
   | { readonly type: 'archived'; readonly archivedSessionIds: readonly SessionId[] }
+  | { readonly type: 'pinned'; readonly pinnedSessionIds: readonly SessionId[] }
 
 /** Workspace state stream; every generation starts with exactly one baseline. */
 export type WorkspaceFollowFrame =

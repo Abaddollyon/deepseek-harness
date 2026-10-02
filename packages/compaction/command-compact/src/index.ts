@@ -4,9 +4,9 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
-import { SessionSeq } from '@deepseek-ai/dsh-session'
 
 export const name = 'command-compact'
 export const inject = ['commands', 'compaction']
@@ -33,12 +33,12 @@ function expectedFailure(error: ManualCompactionError): CommandResult {
     case 'changed':
       return {
         kind: 'error',
-        text: 'The history selected for compaction changed before it could be replaced. The conversation is unchanged; the attempt is recorded in the session log.',
+        text: 'The history selected for compaction changed before it could be replaced. The attempt is recorded in the session log.',
       }
     case 'summary':
       return {
         kind: 'error',
-        text: 'Compaction could not produce a useful summary. The conversation is unchanged; the attempt is recorded in the session log.',
+        text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.',
       }
     case 'commit':
       return {
@@ -69,7 +69,7 @@ async function executeCompact(
     return {
       kind: 'success',
       text: `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`,
-      sourceEventSeq: SessionSeq(result.summarySeq),
+      sourceEventSeq: result.summarySeq,
     }
   } catch (error: unknown) {
     if (invocation.signal.aborted) return { kind: 'error', text: 'Compaction cancelled.' }
@@ -99,6 +99,7 @@ export function apply(ctx: Context): void {
     // invocation can enter while already-started handler promises quiesce.
     yield async () => { await Promise.allSettled(active) }
     yield ctx.commands.register({
+      definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-compact'),
       name: 'compact',
       description: 'Compact older conversation history',
       handler,

@@ -26,7 +26,7 @@ import type {
 import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
 
 class EmptySandbox extends SandboxProvider {
-  confine(_argv: readonly string[], _policy: SandboxPolicy): ConfinedArgv {
+  async confine(_argv: readonly string[], _policy: SandboxPolicy): Promise<ConfinedArgv> {
     return { argv: [], enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
   }
 }
@@ -34,7 +34,7 @@ class EmptySandbox extends SandboxProvider {
 class RecordingSandbox extends SandboxProvider {
   calls: { argv: readonly string[]; policy: SandboxPolicy }[] = []
 
-  confine(argv: readonly string[], policy: SandboxPolicy): ConfinedArgv {
+  async confine(argv: readonly string[], policy: SandboxPolicy): Promise<ConfinedArgv> {
     this.calls.push({ argv, policy })
     return { argv: ['/sandbox', '--', ...argv], enforcement: 'full', denialSignatures: [], runnerFailureRules: [] }
   }
@@ -44,7 +44,7 @@ function config(): ResolvedConfig {
   return {
     backendType: 'shell', shellDialect: 'bash', shellPath: '/bin/bash', shellArgs: [], rows: 24, cols: 80,
     scrollbackLines: 10, scrollbackMaxBytes: 100, maxReadBytes: 50,
-    pollIntervalMs: 10, exactProbeAfterMs: 20, idleSilenceMs: 50, handoffGraceMs: 10, timeoutMs: 100,
+    pollIntervalMs: 10, exactProbeAfterMs: 20, idleSilenceMs: 50, handoffGraceMs: 10, promptTailGraceMs: 0, timeoutMs: 100,
     disposeGraceMs: 10,
   }
 }
@@ -55,7 +55,7 @@ function agent(ctx: Context, cwd?: string): Agent {
     version: SESSION_FORMAT_VERSION, id, createdAt: 0, isSeeded: false, ...cwd === undefined ? {} : { cwd },
   })
   return {
-    id, options: {}, hasExecutionBudget: false, session, inbox: unsupportedInbox(),
+    id, options: {}, session, inbox: unsupportedInbox(),
     status: 'idle',
     ctx,
     send: () => {},
@@ -72,6 +72,8 @@ function terminalHandle(): SubprocessTerminalHandle {
     output,
     done: Promise.resolve({ exitCode: 0, signal: null }),
     write: async () => {},
+    resize: async () => {},
+    inspectActivity: async () => ({ state: 'unknown' as const, revision: 0 }),
     inspectForeground: async () => ({ processGroupId: 123, inputWaiting: true }),
     signalForeground: async () => 123,
     terminate: async () => { output.end() },
@@ -79,12 +81,11 @@ function terminalHandle(): SubprocessTerminalHandle {
 }
 
 class StubSubprocessRuntime extends SubprocessRuntime {
+  async terminalEnvironment() { return { platform: 'posix' as const } }
   async resolveExecutable(command: string): Promise<string> { return command }
   spawn(_spec: SubprocessSpawnSpec): SubprocessHandle { throw new Error('unused') }
   async spawnTerminal(_spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
-    const terminal = terminalHandle()
-    queueMicrotask(() => { (terminal.output as PassThrough).write(Buffer.from('\x1b]133;D;0\x07dsh> ')) })
-    return terminal
+    return terminalHandle()
   }
 }
 
@@ -158,6 +159,41 @@ describe('BashTerminalBackend startup rollback', () => {
     } satisfies Partial<TerminalBackendCleanupError>))
   })
 
+  it('awaits terminal cleanup when session construction fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: '/tmp' })
+    const quiescent = Promise.withResolvers<undefined>()
+    const terminal = {
+      ...terminalHandle(),
+      terminate: vi.fn(() => quiescent.promise),
+    }
+    const constructionStarted = Promise.withResolvers<undefined>()
+    const failure = new Error('terminal emulator unavailable')
+    const backend = new BashTerminalBackend(
+      ctx,
+      config(),
+      async () => terminal,
+      () => {
+        constructionStarted.resolve(undefined)
+        throw failure
+      },
+    )
+
+    const spawning = backend.spawn(spec(agent(ctx)))
+    await constructionStarted.promise
+    expect(terminal.terminate).toHaveBeenCalledOnce()
+    let settled = false
+    void spawning.then(
+      () => { settled = true },
+      () => { settled = true },
+    )
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    quiescent.resolve(undefined)
+    await expect(spawning).rejects.toBe(failure)
+  })
+
   it('starts startup rollback when cancellation wins a stalled initialization', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionProjectionRegistry)
@@ -183,6 +219,29 @@ describe('BashTerminalBackend startup rollback', () => {
     await expect(spawning).rejects.toBe(reason)
     expect(close).toHaveBeenCalledWith('PTY startup failed')
     initialization.resolve(undefined)
+  })
+
+  it('does not allocate a terminal when confinement resolves after cancellation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(RecordingSandbox)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: '/workspace' })
+    const entered = Promise.withResolvers<AbortSignal>()
+    const response = Promise.withResolvers<ConfinedArgv>()
+    vi.spyOn(ctx.sandbox, 'confine').mockImplementation((_argv, _policy, signal) => {
+      entered.resolve(signal!)
+      return response.promise
+    })
+    const spawnTerminal = vi.fn(async () => terminalHandle())
+    const backend = new BashTerminalBackend(ctx, config(), spawnTerminal)
+    const controller = new AbortController()
+    const spawning = backend.spawn(spec(agent(ctx), controller.signal))
+    const signal = await entered.promise
+    controller.abort(new Error('cancel confinement'))
+    expect(signal.aborted).toBe(true)
+    response.resolve({ argv: ['bash'], enforcement: 'full', denialSignatures: [], runnerFailureRules: [] })
+    await expect(spawning).rejects.toThrow('cancel confinement')
+    expect(spawnTerminal).not.toHaveBeenCalled()
   })
 
   it('wraps confined argv, scrubs the environment, and returns initialized sessions', async () => {
@@ -338,6 +397,8 @@ describe('BashTerminalBackend startup rollback', () => {
       output,
       done: outcome.promise,
       write: async () => {},
+      resize: async () => {},
+      inspectActivity: async () => ({ state: 'unknown' as const, revision: 0 }),
       inspectForeground: async () => ({ processGroupId: 123, inputWaiting: true }),
       signalForeground: async () => 123,
       async terminate() {
@@ -565,21 +626,7 @@ describe('terminal-bash plugin shape', () => {
     expect(ctx.terminals.listBackends()).toEqual([])
   })
 
-  it('exercises the default provider and session constructor path', async () => {
-    const ctx = new Context()
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(TerminalSessionService)
-    await ctx.plugin(EmptySandbox)
-    await ctx.plugin(SessionProjectionRegistry)
-    await ctx.plugin(SandboxPolicyService, { mode: 'danger-full-access', workspaceRoot: '/tmp' })
-    await ctx.plugin(StubSubprocessRuntime)
-    const backend = new BashTerminalBackend(ctx, config())
-    const session = await backend.spawn(spec(agent(ctx)))
-    expect(session.motd).toBe('dsh> ')
-    await session.close('test complete')
-  })
-
-  it('ignores unrelated session events and mode changes without a live owner', async () =>{
+  it('ignores unrelated session events and mode changes without a live owner', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
@@ -610,7 +657,7 @@ describe('terminal-bash plugin shape', () => {
     const session = ctx.sessions.create(SessionId('mode-owner'))
     const ownerFiber = await ctx.plugin(() => {})
     const owner: Agent = {
-      id: session.id, options: {}, hasExecutionBudget: false, session, inbox: unsupportedInbox(),
+      id: session.id, options: {}, session, inbox: unsupportedInbox(),
       status: 'idle',
       ctx: ownerFiber.ctx,
       send: () => {},
@@ -618,7 +665,7 @@ describe('terminal-bash plugin shape', () => {
       runMaintenance: task => task(new AbortController().signal),
       whenIdle: () => Promise.resolve(),
     }
-    ctx.agents.register(owner)
+    await ctx.agents.register(owner)
     const providerFiber = await registerStubLocalBackend(ctx, () => stubLocalSession())
     const created = await ctx.terminals.spawn(owner, { type: 'stub' })
 
@@ -660,7 +707,7 @@ describe('terminal-bash plugin shape', () => {
     const session = ctx.sessions.create(SessionId('pending-mode-owner'))
     const ownerFiber = await ctx.plugin(() => {})
     const owner: Agent = {
-      id: session.id, options: {}, hasExecutionBudget: false, session, inbox: unsupportedInbox(),
+      id: session.id, options: {}, session, inbox: unsupportedInbox(),
       status: 'idle',
       ctx: ownerFiber.ctx,
       send: () => {},
@@ -668,7 +715,7 @@ describe('terminal-bash plugin shape', () => {
       runMaintenance: task => task(new AbortController().signal),
       whenIdle: () => Promise.resolve(),
     }
-    ctx.agents.register(owner)
+    await ctx.agents.register(owner)
     const gate = Promise.withResolvers<undefined>()
     await registerStubLocalBackend(ctx, () => stubLocalSession(() => gate.promise))
     const spawning = ctx.terminals.spawn(owner, { type: 'stub' })

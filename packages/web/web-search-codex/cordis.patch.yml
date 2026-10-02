@@ -1,4 +1,0 @@
-- insert:
-    - id: web-search-codex
-      name: '@deepseek-ai/dsh-web-search-codex'
-      inject: [web, subprocess]

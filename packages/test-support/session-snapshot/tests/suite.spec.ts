@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -35,6 +35,7 @@ import {
   parseSystemPromptSnapshot,
   parseToolSchemasSnapshot,
   refreshFixtureReplacements,
+  reconcileCatalogCreationTimes,
   scenarioSkipped,
   restorePinnedToolSchemas,
   type SharedSnapshotClaim,
@@ -136,61 +137,13 @@ if (!BOOTSTRAP) {
   rmSync(join(recordDir, 'rec-pin', 'session.jsonl'))
   rmSync(join(recordDir, 'rec-pin', 'session.v3.jsonl'))
   writeFileSync(join(recordDir, 'rec-child', 'session.2.v3.jsonl'), retiredChildFixture)
-  rmSync(join(recordDir, 'rec-child', 'session.v3.jsonl'))
-  rmSync(join(recordDir, 'rec-child', 'session.1.v3.jsonl'))
 }
-/** Refresh publishes a missing successor rather than replacing an existing generation. */
-function removeCurrentGenerations(dir: string, scenarios: readonly Scenario[]): void {
-  for (const scenario of scenarios) {
-    if (scenario.writerOracle === 'separate') continue
-    const scenarioDir = join(dir, scenario.name)
-    for (const name of readdirSync(scenarioDir)) {
-      if (parseSessionFixtureName(name)?.version === 3) rmSync(join(scenarioDir, name))
-    }
-  }
-}
-
 const refreshDir = mkdtempSync(join(tmpdir(), 'acp-snap-refresh-suite-'))
 cpSync(REPLAY_DIR, refreshDir, { recursive: true })
-removeCurrentGenerations(refreshDir, REPLAY_SCENARIOS)
 staleRefreshFixtures(refreshDir)
-const writerReplayDir = mkdtempSync(join(tmpdir(), 'acp-snap-writer-replay-'))
-const writerRefreshDir = mkdtempSync(join(tmpdir(), 'acp-snap-writer-refresh-'))
-const writerScenarios = REPLAY_SCENARIOS.map(scenario => ['pin-turn', 'plain-turn'].includes(scenario.name)
-  ? { ...scenario, writerOracle: 'separate' as const, comparesLog: false }
-  : scenario)
-const immutableWriterInputs = new Map<string, string>()
-const immutableWriterInventories = new Map<string, string[]>()
-for (const dir of [writerReplayDir, writerRefreshDir]) {
-  cpSync(REPLAY_DIR, dir, { recursive: true })
-  for (const name of ['pin-turn', 'plain-turn']) {
-    const scenarioDir = join(dir, name)
-    const manifestPath = join(scenarioDir, 'snapshot.yml')
-    writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8') + 'writerOracle: separate\n')
-    for (const index of name === 'plain-turn' ? [0, 1] : [0]) {
-      const file = join(scenarioDir, sessionFixtureName(index, 3))
-      const current = readFileSync(file, 'utf8')
-      const immutable = current.replace('"texts":["hi"]', '"texts":["immutable reader input"]')
-      writeFileSync(file, immutable)
-      if (dir === writerRefreshDir && index === 1) continue
-      writeFileSync(join(scenarioDir, writerSnapshotName(index)), dir === writerRefreshDir
-        ? current.replace('"texts":["hi"]', '"texts":["stale writer output"]')
-        : current)
-    }
-    const generations = readdirSync(scenarioDir).filter(file => parseSessionFixtureName(file) !== undefined).sort()
-    immutableWriterInventories.set(scenarioDir, generations)
-    for (const generation of generations) {
-      const file = join(scenarioDir, generation)
-      immutableWriterInputs.set(file, readFileSync(file, 'utf8'))
-    }
-  }
-  if (dir === writerRefreshDir) removeCurrentGenerations(dir, writerScenarios)
-}
 afterAll(async () => {
   if (!BOOTSTRAP) await rm(recordDir, { recursive: true, force: true })
   await rm(refreshDir, { recursive: true, force: true })
-  await rm(writerReplayDir, { recursive: true, force: true })
-  await rm(writerRefreshDir, { recursive: true, force: true })
 })
 
 function staleRefreshFixtures(dir: string): void {
@@ -229,38 +182,6 @@ describe('defineAcpSnapshotSuite: record mode', () => {
 
 describe('defineAcpSnapshotSuite: refresh mode', () => {
   defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: refreshDir, scenarios: REPLAY_SCENARIOS, mode: 'refresh' })
-})
-
-describe('defineAcpSnapshotSuite: separate writer replay', () => {
-  defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: writerReplayDir, scenarios: writerScenarios, mode: 'replay' })
-})
-
-describe('defineAcpSnapshotSuite: separate writer refresh', () => {
-  defineAcpSnapshotSuite({ agent: AGENT, snapshotsDir: writerRefreshDir, scenarios: writerScenarios, mode: 'refresh' })
-})
-
-describe('defineAcpSnapshotSuite: immutable replay generations', () => {
-  it('compares dedicated writer output even when comparesLog is false and refreshes missing child oracles without changing inputs', () => {
-    for (const [dir, generations] of immutableWriterInventories) {
-      expect(readdirSync(dir).filter(file => parseSessionFixtureName(file) !== undefined).sort()).toEqual(generations)
-      expect(generations).toContain('session.jsonl')
-      expect(generations).toContain('session.v2.jsonl')
-      expect(generations).toContain('session.v3.jsonl')
-    }
-    for (const [file, immutable] of immutableWriterInputs) {
-      expect(readFileSync(file, 'utf8')).toBe(immutable)
-    }
-    for (const dir of [writerReplayDir, writerRefreshDir]) {
-      const scenarioDir = join(dir, 'plain-turn')
-      const input = readFileSync(join(scenarioDir, 'session.v3.jsonl'), 'utf8')
-      const output = readFileSync(join(scenarioDir, writerSnapshotName(0)), 'utf8')
-      expect(input).toContain('immutable reader input')
-      expect(output).not.toContain('immutable reader input')
-      expect(output).not.toContain('stale writer output')
-      expect(output).toContain('"texts":["hi"]')
-      expect(readFileSync(join(scenarioDir, writerSnapshotName(1)), 'utf8')).toContain('"version":3')
-    }
-  })
 })
 
 describe('defineAcpSnapshotSuite: refresh write-back', () => {
@@ -972,6 +893,17 @@ describe('tool-schema snapshots', () => {
       .toEqual({ system: '{{system}}', tools: snapshot.initial })
   })
 
+  it('restores ordered tool names only when they match the sidecar', () => {
+    const schemas = [{ name: 'read' }, { name: 'write' }]
+    expect(restorePinnedToolSchemas({ tools: ['read', 'write'] }, schemas)).toEqual({ tools: schemas })
+    for (const tools of [['write', 'read'], ['read'], ['read', 'missing'], [1, 'write']]) {
+      expect(() => restorePinnedToolSchemas({ tools }, schemas)).toThrow(/must equal/)
+    }
+    for (const schema of [null, 'read', {}, { name: 'other' }]) {
+      expect(() => restorePinnedToolSchemas({ tools: ['read'] }, [schema])).toThrow(/must equal/)
+    }
+  })
+
   it('rejects invalid headers and a missing tool token', () => {
     expect(() => restorePinnedToolSchemas(null, snapshot.initial)).toThrow(/must be an object/)
     expect(() => restorePinnedToolSchemas('invalid', snapshot.initial)).toThrow(/must be an object/)
@@ -1023,6 +955,15 @@ describe('stabilizeFixtureMessageIds', () => {
       expect(fixture).toContain(`"id":"${existingId}"`)
       expect(fixture).not.toContain(freshId)
     }
+  })
+
+  it('stabilizes developer message identities through their explicit surface case', () => {
+    const freshId = '11111111-1111-4111-8111-111111111111'
+    const oldId = '22222222-2222-4222-8222-222222222222'
+    const log = (id: string) => JSON.stringify({ type: 'developer/message', data: { turn: 1, step: 1, message: {
+      id, role: 'developer', source: { kind: 'tool-registry' }, content: [{ type: 'tool-addition', toolName: 'search' }],
+    } } }) + '\n'
+    expect(stabilizeFixtureMessageIds([log(freshId)], [log(oldId)])).toEqual([log(oldId)])
   })
 
   it('rewrites only complete messages carried by surface events or durable inbox splices', () => {
@@ -1647,5 +1588,31 @@ describe('stabilizeRefreshLog', () => {
     const outputIds = stabilize(log(freshNames), log(existingNames)).trim().split('\n').slice(1)
       .map(line => (JSON.parse(line) as { data: { id: string } }).data.id)
     expect(outputIds).toEqual(freshNames.map(name => ids[name as keyof typeof ids]))
+  })
+})
+
+
+describe('raw parent and child catalog clocks', () => {
+  const child = '{"type":"session","id":"child","createdAt":100}\n'
+  const parent = (time: number) => [
+    { type: 'session', id: 'parent', createdAt: 1 },
+    { type: 'subagent/catalog', seq: 0, time: 2, data: { version: 0, childId: 'child', childCreatedAt: time, mode: 'one-shot' } },
+  ].map(row => JSON.stringify(row) + '\n').join('')
+
+  it('rejects mismatched raw clocks before normalization can erase them', () => {
+    expect(() => reconcileCatalogCreationTimes([parent(200), child], 'validate')).toThrow('creation time 200 disagrees with child header 100')
+    expect(reconcileCatalogCreationTimes([parent(100), child], 'validate')).toEqual([parent(100), child])
+  })
+
+  it('keeps retained child clocks in newly generated catalog fixtures', () => {
+    const output = reconcileCatalogCreationTimes([parent(200), child], 'preserve-headers')
+    expect(output).toEqual([parent(100), child])
+    expect(reconcileCatalogCreationTimes(output, 'validate')).toEqual(output)
+    expect(reconcileCatalogCreationTimes(output, 'preserve-headers')).toEqual(output)
+  })
+
+  it('preserves partial corpora and unrelated rows verbatim', () => {
+    const partial = parent(200) + '{"type":"feedback/record","data":null}\n'
+    expect(reconcileCatalogCreationTimes([partial], 'validate')).toEqual([partial])
   })
 })

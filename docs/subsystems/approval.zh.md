@@ -50,7 +50,7 @@ type ApprovalPolicy = 'ask' | 'never'
 
 ## 审批请求
 
-`ApprovalRequest` 以足够精确的方式标识 agent 和工具操作，以便路由和审计该问题。它有意省略工具参数：应答者通过 `callId` 将提示附加到已流式输出的工具调用上，而非渲染另一份可能漂移的副本。
+`ApprovalRequest` 以足够精确的方式标识 agent 和工具操作，以便路由和审计该问题。它有意省略工具参数：应答者通过 `callId` 将提示附加到已流式输出的工具调用上，而非渲染另一份可能漂移的副本。可选的 `displayReason` 向界面传递请求方提供的本地化字符串；`reason` 仍是审计文本。
 
 ```ts type-equiv
 /**
@@ -142,36 +142,6 @@ overrideOf(session: Session): ApprovalPolicy | undefined
 Types: [Agent](core.zh.md) · [Session](session.zh.md)
 
 Source: [`packages/interaction/user-approval/src/index.ts`](../../packages/interaction/user-approval/src/index.ts)
-
-<a id="ctxpendinginteractions--pendinginteractionregistry"></a>
-
-### `ctx.pendingInteractions` — `PendingInteractionRegistry`
-
-Host registry of current pending interactions and their revisioned lifecycle.
-
-```ts cordis-catalog
-/**
- * Begin one content-free lifecycle.
- * @param input - interaction kind and optional owning agent.
- * @returns the idempotent end capability.
- */
-begin(input: PendingInteractionBegin): () => void
-
-/**
- * Read the current immutable baseline; historical ended interactions are absent.
- * @returns epoch, revision, and current pending records.
- */
-snapshot(): PendingInteractionSnapshot
-
-/**
- * Subscribe to future deltas; callers obtain history through snapshot().
- * @param listener - failure-contained consumer of future lifecycle changes.
- * @returns synchronous unsubscribe capability.
- */
-onChange(listener: (change: PendingInteractionChange) => void | Promise<void>): () => void
-```
-
-Source: [`packages/interaction/pending-interactions/src/index.ts`](../../packages/interaction/pending-interactions/src/index.ts)
 
 <a id="approval-events"></a>
 

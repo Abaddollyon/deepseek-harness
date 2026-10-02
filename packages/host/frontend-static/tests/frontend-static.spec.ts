@@ -16,6 +16,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
+import type { ClientSurfaceDefinition, ClientSurfaceRegistry } from '@deepseek-ai/dsh-client-modules'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
 import * as FrontendStatic from '../src/index.ts'
 
@@ -30,7 +31,7 @@ afterEach(async () => {
 })
 
 /** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
-async function loadComposition(withSurface = false): Promise<Context> {
+async function loadComposition(surface?: ClientSurfaceDefinition): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-frontend-static-'))
   const dist = join(root, 'dist')
   await mkdir(dist)
@@ -60,17 +61,11 @@ async function loadComposition(withSurface = false): Promise<Context> {
 
   context = new Context()
   context.baseUrl = pathToFileURL(root).href + '/'
-  if (withSurface) {
-    const definition = {
-      id: 'companion',
-      path: '/companion',
-      roots: [] as string[],
-      rootPlugin: '@fixture/companion',
+  if (surface !== undefined) {
+    const surfaces: Pick<ClientSurfaceRegistry, 'findByPath'> = {
+      findByPath: path => path === surface.path ? surface : undefined,
     }
-    context.provide('clientSurfaces', {
-      get: (id: string) => id === definition.id ? definition : undefined,
-      findByPath: (path: string) => path === definition.path ? definition : undefined,
-    } as never)
+    context.provide('clientSurfaces', surfaces)
   }
   await context.plugin(Loader)
   context.loader.builtins.include = Include
@@ -106,34 +101,26 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
 }
 
 describe('real Loader composition', () => {
-  it('serves a registered surface through exact token exchange and a clean redirect', { timeout: 60_000 }, async () => {
-    const loaded = await loadComposition(true)
-    let renderedVariant: string | undefined
-    loaded.on('webserver/index-inject', (table, renderContext) => {
-      renderedVariant = renderContext?.variant
-      table.push({ kind: 'global', name: '__FIXTURE_SURFACE__', value: renderContext?.variant })
+  it('serves a registered client surface path as an index with its own token exchange and variant', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
+    loaded.on('webserver/index-inject', (rows, renderContext) => {
+      rows.push({ kind: 'global', name: '__VARIANT__', value: renderContext?.variant ?? 'ordinary' })
     })
     const port = loaded.webServer.port
-    const launch = new URL(loaded.connection.authenticatedUrl(
-      `http://127.0.0.1:${String(port)}/ignored?return=/wrong#fragment`,
-      'companion',
-    ))
-    expect(launch.pathname).toBe('/companion')
-    expect([...launch.searchParams.keys()]).toEqual(['token'])
-    expect(launch.hash).toBe('')
-
+    const launch = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}/companion`)
     const exchange = await fetch(launch, { redirect: 'manual' })
     expect(exchange.status).toBe(303)
-    expect(exchange.headers.get('location')).toBe('/companion')
-    const setCookie = exchange.headers.get('set-cookie')
-    if (setCookie === null) throw new Error('surface exchange did not set a cookie')
-    const page = await request(port, '/companion', {
-      headers: { cookie: setCookie.split(';', 1)[0]! },
-    })
+    expect(exchange.headers.get('location')).toBe('./companion')
+    const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
+    if (cookie === undefined) throw new Error('surface exchange did not set a cookie')
+
+    expect((await request(port, '/companion')).status).toBe(401)
+    const page = await request(port, '/companion', { headers: { cookie } })
     expect(page).toMatchObject({ status: 200, type: 'text/html; charset=utf-8' })
-    expect(page.body).toContain('__FIXTURE_SURFACE__')
-    expect(renderedVariant).toBe('companion')
-    expect((await request(port, '/unregistered')).status).toBe(404)
+    expect(page.body).toContain('globalThis["__VARIANT__"] = "companion"')
+    expect(page.body).toContain('<base href="./">')
+    expect((await request(port, '/', { headers: { cookie } })).body).toContain('globalThis["__VARIANT__"] = "ordinary"')
+    expect((await request(port, '/other', { headers: { cookie } })).status).toBe(404)
   })
 
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
@@ -147,7 +134,7 @@ describe('real Loader composition', () => {
     const launchUrl = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}`)
     const exchange = await fetch(launchUrl, { redirect: 'manual' })
     expect(exchange.status).toBe(303)
-    expect(exchange.headers.get('location')).toBe('/')
+    expect(exchange.headers.get('location')).toBe('./')
     const setCookie = exchange.headers.get('set-cookie')
     if (setCookie === null) throw new Error('authenticated frontend did not set a cookie')
     const cookie = setCookie.split(';', 1)[0]!
@@ -183,13 +170,26 @@ describe('real Loader composition', () => {
 
     // Only the root and index path render index.html through registered taps.
     const untap = server.tapIndex(html => html.replace('<head>', '<head><script>window.__T__=1</script>'))
-    for (const path of ['/', '/index.html', '/?fixture']) {
+    // A plugin row stands in for the Host's plugin-resource rows: the base the
+    // shell inserts must precede it, not merely exist.
+    const offRows = loaded.on('webserver/index-inject', (rows) => {
+      rows.push({ kind: 'script-preload', src: 'plugins/boot.js' })
+    })
+    for (const path of ['/', '/index.html', '/?view=test']) {
       const got = await request(port, path, authenticated())
       expect(got.status).toBe(200)
       expect(got.type).toBe('text/html; charset=utf-8')
       expect(got.body).toContain('__T__')
       expect(got.body).toContain('shell')
+      // The served document carries the entry-directory base exactly once, and
+      // it precedes every injected row and tap markup, so the shell's
+      // app-owned routes and the Host's resource rows resolve under one mount.
+      expect(got.body.match(/<base\b/g)).toHaveLength(1)
+      const base = got.body.indexOf('<base href="./">')
+      expect(base).toBeLessThan(got.body.indexOf('<link rel="preload" as="script" href="plugins/boot.js">'))
+      expect(base).toBeLessThan(got.body.indexOf('<script>window.__T__=1</script>'))
     }
+    offRows()
     expect(await request(port, '/', authenticated({ method: 'HEAD' }))).toEqual({
       status: 200,
       type: 'text/html; charset=utf-8',

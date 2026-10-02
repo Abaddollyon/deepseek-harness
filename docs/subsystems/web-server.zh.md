@@ -2,7 +2,7 @@
 
 [English](web-server.md) | 中文
 
-[dsh-host-webserver](../../packages/host/webserver) 是 GUI Host 的浏览器 HTTP 载体：它是一个提供 `ctx.webServer` 的 `node:http` 插件，包含具名路由注册表、协商 Brotli/gzip 响应压缩、由载体负责的响应缓存、index.html 转换回调，以及一个可由插件认领的回退处理器。它不属于 agent loop（智能体循环），也不是能力 seam；它不了解任何 harness 概念。其他插件负责注册所有功能路由，包括 `/api` 桥接、插件 bundle 和 HMR（热模块替换）事件流（[分层说明](../../.agents/notes/implemented/architecture/2026-07-24-web-config-tree-boot-and-transport-layering.zh.md)）。该服务器只服务浏览器：Electron 通过 `file://` 加载已构建文件，并经 IPC 桥接发送 fetch 请求，不使用本服务器。
+[dsh-host-webserver](../../packages/host/webserver) 是 GUI Host 的浏览器 HTTP 载体：它是一个提供 `ctx.webServer` 的 `node:http` 插件，包含具名路由注册表、可选的 gzip 响应压缩、index.html 转换回调，以及一个可由插件认领的回退处理器。它不属于 agent loop（智能体循环），也不是能力 seam；它不了解任何 harness 概念。其他插件负责注册所有功能路由，包括 `/api` 桥接、插件 bundle 和 HMR（热模块替换）事件流（[分层说明](../../.agents/notes/implemented/architecture/2026-07-24-web-config-tree-boot-and-transport-layering.zh.md)）。该服务器只服务浏览器：Electron 通过 `file://` 加载已构建文件，并经 IPC 桥接发送 fetch 请求，不使用本服务器。
 
 源码：[`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
 
@@ -29,32 +29,26 @@ interface WebRoute {
 ## 配置
 
 ```ts type-equiv
-/** Gateway config: the listen address plus the response-policy knobs. */
+/** Web server listen and response-compression config. */
 interface Config {
   /** Listen host; the two supported values are loopback and all-interfaces. */
   host: '127.0.0.1' | '0.0.0.0'
   /** Listen port; zero requests an OS-assigned port. */
   port: number
-  /** Whether responses are compressed at all. */
-  compress?: boolean
-  /** Smallest body the carrier encodes. */
-  compressMinBytes?: number
-  /** Brotli quality, 0-11. */
-  brotliQuality?: number
-  /** Deflate level for gzip, 0-9. */
-  gzipLevel?: number
-  /** Content-hashed asset pathname prefixes. */
-  immutablePathPrefixes?: string[]
-  /** Lifetime for immutable responses, in seconds. */
-  immutableMaxAgeSeconds?: number
+  /** Response compression for socket-backed HTTP requests. @default 'none' */
+  compression?: 'none' | 'gzip'
+  /** Gzip DEFLATE level from 0 through 9. @default 1 */
+  compressionLevel?: number
+  /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
+  compressionThresholdBytes?: number
 }
 ```
 
-`compress` 默认启用。源码默认值是 1024 字节阈值、Brotli quality 5 和 gzip level 6；随附 Web artifact 设置 Brotli quality 5、gzip level 1，使用 `/assets/` 作为 immutable pathname 前缀，immutable 生命周期为一年。载体优先协商 Brotli，再回退到 gzip；低于阈值的正文保持未压缩；route 未设置 `Cache-Control` 时由载体补上 `no-cache`。只有位于配置的 immutable pathname 前缀下的响应才获得 `public, max-age=..., immutable`；像 `?rev=<hash>` 这样的 query 不是内容寻址证据，而 route 自己提供的指令优先。`host` 只接受 `127.0.0.1`（默认姿态）和 `0.0.0.0`（刻意的网络暴露）。载体本身不拥有 TLS、认证或 Origin 策略，因此绑定到非回环地址会暴露服务器，除非组合层提供这些控制。随附的 `dsh web` 命令选择 loopback 并拒绝 `--host 0.0.0.0`；其 Connection 插件为每个 Host API route 与 stream 提供 Host/Origin 校验和浏览器会话认证。其他组合自行拥有绑定与路由认证策略。dist 位置是认领席位的前端插件的组装事实。
+`host` 只接受 `127.0.0.1`（默认姿态）和 `0.0.0.0`（刻意的网络暴露）。载体本身不拥有 TLS、认证或 Origin 策略，因此绑定到非回环地址会暴露服务器，除非组合层提供这些控制。`compression` 默认为 `none`；随附的 Web 组合选择 gzip level 1 和 1024 字节阈值。随附的 `dsh web` 命令选择 loopback 并拒绝 `--host 0.0.0.0`；其 Connection 插件为每个 Host API route 与 stream 提供 Host/Origin 校验和浏览器会话认证。其他组合自行拥有绑定与路由认证策略。dist 位置是认领席位的前端插件的组装事实。
 
 ## 服务
 
-`WebServer`（`ctx.webServer`）在激活时立即监听；监听失败（EADDRINUSE 等）会使初始化被拒绝，启动进程会报告失败的 fiber。`register(route)` 添加一条具名路由并返回其 disposer；重复的 `(kind, path)` 抛出异常，因为路由模式是组合层约定，冲突即配置错误。Brotli 或 gzip 在服务器内部包装符合条件且基于 socket 的响应，因此 route handler 继续直接持有 `ServerResponse`，服务也不新增响应写出 API。已有内容编码、`Cache-Control: no-transform`、范围响应、SSE、ZIP 与打包后的 `.gz` Worker 镜像均保持 identity 响应。`collectIndexInjections()` 经一次 `webserver/index-inject` emit 收集结构化 `IndexInjection` 行，`renderIndex(html)` 把它们渲染进成功的根路径和配置 index 响应，随后再按注册顺序应用原始的 `tapIndex(transform)` 逃生口转换；[dsh-client-modules](../../packages/client/modules) 以启动 manifest（元数据清单）行回应该事件。`port` 读取监听端口，包括 `config.port` 为 0 时操作系统分配的端口。
+`WebServer`（`ctx.webServer`）在激活时立即监听；监听失败（EADDRINUSE 等）会使初始化被拒绝，启动进程会报告失败的 fiber。`register(route)` 添加一条具名路由并返回其 disposer；重复的 `(kind, path)` 抛出异常，因为路由模式是组合层约定，冲突即配置错误。Gzip 在服务器内部包装符合条件且基于 socket 的响应，因此 route handler 继续直接持有 `ServerResponse`，服务也不新增响应写出 API。已有内容编码、`Cache-Control: no-transform`、范围响应、SSE、ZIP 与打包后的 `.gz` Worker 镜像均保持 identity 响应。`collectIndexInjections()` 经一次 `webserver/index-inject` emit 收集结构化 `IndexInjection` 行，`renderIndex(html)` 把它们渲染进成功的根路径和配置 index 响应，随后再按注册顺序应用原始的 `tapIndex(transform)` 逃生口转换；[dsh-client-modules](../../packages/client/modules) 以启动 manifest（元数据清单）行回应该事件。`port` 读取监听端口，包括 `config.port` 为 0 时操作系统分配的端口。
 
 处理过程中抛出异常的请求（畸形的 % 转义撞上 `decodeURIComponent`、客户端在请求体中途断开）会记录为警告并应答 400（响应头已发出时则销毁 socket），绝不导致进程退出。dispose（资源释放）把 `close()` 与 `closeAllConnections()` 配对使用，因为处理器可能像 SSE（Server-Sent Events）那样保持响应打开，而这类连接永远不会自行结束；没有强制关闭，拆卸就会挂起。该包从不打印输出：URL 行归 shell 所有。逐包运维细节（含开发模式的 bundle 监视流水线）留在 [README](../../packages/host/webserver/README.zh.md) 中。
 
@@ -65,6 +59,55 @@ interface Config {
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxconnection--hostconnectionhandle"></a>
+
+### `ctx.connection` — `HostConnectionHandle`
+
+Host `ctx.connection` members consumed by transport-independent adapters.
+
+```ts cordis-catalog
+/**
+ * Compose exact Fetch routes and the shared-channel RPC interceptor.
+ * @param channel - shared channel mounted by Connection.
+ * @returns Fetch handler for trusted, authenticated requests.
+ */
+createSharedFetchHandler(channel: '/api'): ConnectionFetchHandler
+
+/**
+ * Apply Connection's Host/Origin checks and browser authentication to
+ * another Web route.
+ * @param request - request headers from the HTTP or upgrade request.
+ * @returns rejection status, or undefined when the route may accept the request.
+ */
+requestRejection(request: ConnectionTrustRequest): ConnectionRequestRejection
+
+/**
+ * Admit one request: it passes {@link requestRejection} and speaks for the
+ * operator, or it is refused with that status.
+ * @param request - request headers from the HTTP or upgrade request.
+ * @returns the operator Peer, or the rejection status.
+ */
+admit(request: ConnectionTrustRequest): PeerAdmission
+
+/**
+ * Authenticate one frontend index request, owning a token redirect or 401.
+ * @param request - root or configured-index HTTP request.
+ * @param response - response owned when the result is false.
+ * @param exchangePath - exact pathname that accepts the launch token, such as a client surface path; defaults to `/`.
+ * @returns true only when the frontend may serve index.html.
+ */
+authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, exchangePath?: string): boolean
+
+/**
+ * Add the fresh process token to an ordinary Web application URL.
+ * @param baseUrl - clean application URL whose authority and mount are preserved.
+ * @returns tokenized URL for initial login; a mount proxy strips its prefix before {@link authorizeIndex}.
+ */
+authenticatedUrl(baseUrl: string): string
+```
+
+Source: [`packages/client/connection/src/rpc.ts`](../../packages/client/connection/src/rpc.ts)
 
 <a id="ctxwebserver--webserver"></a>
 
@@ -120,7 +163,7 @@ applyIndexTaps(html: string): string
  * Gather the structured injection table: one `webserver/index-inject` emit,
  * every subscriber pushes its current rows. Fresh per call, so subscribers
  * read live state (module graph, theme preference) at emit time.
- * @param context - optional variant supplied to injection contributors.
+ * @param context - index selection passed to every listener.
  * @returns rows in subscriber activation order.
  */
 collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]
@@ -129,13 +172,37 @@ collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]
  * Render one index.html body: the structured injection table first, then
  * the raw `tapIndex` transforms over the result.
  * @param html - the raw index.html body.
- * @param context - optional variant supplied to injection contributors.
+ * @param context - index selection passed to injection listeners.
  * @returns the transformed body.
  */
 renderIndex(html: string, context: IndexRenderContext = {}): string
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
+
+<a id="connection-events"></a>
+
+### `connection/*` events
+
+<a id="connectionrequest--waterfall"></a>
+
+#### `connection/request` — waterfall
+
+Admit or wrap an authenticated shared API request, including body transfer. Existing requests continue when a listener refuses subsequent requests.
+
+```ts cordis-catalog
+/**
+ * Admit or wrap an authenticated shared API request, including body transfer.
+ * Existing requests continue when a listener refuses subsequent requests.
+ * @param request - Authenticated incoming HTTP request.
+ * @param response - Response owned until the delegated bridge settles.
+ * @param next - Delegate to the next listener or the shared API bridge.
+ * @mode waterfall
+ */
+'connection/request'(request: IncomingMessage, response: ServerResponse, next: () => Promise<void>): Promise<void>
+```
+
+Source: [`packages/client/connection/src/index.ts`](../../packages/client/connection/src/index.ts)
 
 <a id="webserver-events"></a>
 
@@ -153,7 +220,7 @@ Collect the structured index injection table. Emitted on every index render and 
  * render and every worker boot-payload request; listeners push their
  * current rows, so a row's data is read fresh at emit time.
  * @param table - Mutable row table; listeners append in activation order.
- * @param context - Optional index-render variant selected by the index owner.
+ * @param context - Index selected by the rendering owner; absent selects the ordinary index.
  * @mode emit
  */
 'webserver/index-inject'(table: IndexInjection[], context?: IndexRenderContext): void

@@ -39,7 +39,7 @@ export {
 } from './launcher.ts'
 export {
   extractSnapshotSpillPaths,
-  normalizeSessionFormatProvenance,
+  normalizeSessionFormatMetadata,
   normalizeSessionLog,
   normalizeSessionSnapshot,
   normalizeSessionSnapshots,
@@ -74,7 +74,6 @@ export {
 export {
   assertPersistedSessionVersion,
   assertSessionFixtureVersion,
-  assertSnapshotWriterOracles,
   latestPersistedSessionPaths,
   parsePersistedSessionFilename,
   parseSessionFixtureName,
@@ -99,6 +98,7 @@ export {
   parseSystemPromptSnapshot,
   parseToolSchemasSnapshot,
   refreshFixtureReplacements,
+  reconcileCatalogCreationTimes,
   restorePinnedToolSchemas,
   stabilizeFixtureMessageIds,
   stabilizeRefreshLog,

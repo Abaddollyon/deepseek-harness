@@ -71,7 +71,7 @@ async function openSeed(page: Page): Promise<void> {
   // Search collapsed into a header action; expand it before filling.
   const searchButton = page.getByRole('button', { name: 'Search sessions' })
   if (await searchButton.getAttribute('aria-expanded') !== 'true') await searchButton.click()
-  const search = page.getByRole('textbox', { name: 'Search sessions...', exact: true })
+  const search = page.getByRole('textbox', { name: 'Search session names', exact: true })
   await search.fill(FIXTURE.markers.user(1))
   const result = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
   await expect.poll(() => result.count(), { timeout: 60_000 }).toBe(1)
@@ -206,7 +206,7 @@ describe('web e2e: Trajectory virtualization over tail-paged history', () => {
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     // The compact layout dropped group session counts; the seeded baseline is
-    // the Chats bucket once cold summaries load.
+    // the Ungrouped bucket once cold summaries load.
     await page.getByText('Chats', { exact: true }).waitFor({ timeout: 30_000 })
   }, 120_000)
 

@@ -1,0 +1,117 @@
+import { resolve } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type SessionHeader } from '@deepseek-ai/dsh-session'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import { describe, expect, it, vi } from 'vitest'
+import WorkspaceFiles from '../src/index.ts'
+
+const CAPS = {
+  maxBytes: 1024,
+  maxFileBytes: 1024,
+  maxLines: 100,
+  maxEntries: 100,
+}
+
+function header(id: SessionId, cwd?: string): SessionHeader {
+  return {
+    version: SESSION_FORMAT_VERSION,
+    id,
+    createdAt: 1,
+    isSeeded: false,
+    origin: 'subagent',
+    ...cwd === undefined ? {} : { cwd },
+  }
+}
+
+describe('Workspace Files Session scope lookup', () => {
+  it('uses live or stored headers without an Agent and leaves with its plugin', async () => {
+    const liveId = SessionId('live-subagent')
+    const coldId = SessionId('cold-subagent')
+    const fallbackId = SessionId('cold-without-cwd')
+    const missingId = SessionId('missing')
+    const liveRoot = resolve('live-workspace')
+    const coldRoot = resolve('cold-workspace')
+    const fallbackRoot = resolve('fallback-workspace')
+    const stat = vi.fn(async (id: SessionId) => {
+      if (id === coldId) return { header: header(coldId, coldRoot) }
+      if (id === fallbackId) return { header: header(fallbackId) }
+      return undefined
+    })
+    const ctx = new Context()
+    const fs = {}
+    ctx.provide('fs', fs as never)
+    ctx.provide('sandboxPolicy', { workspaceRoot: fallbackRoot } as never)
+    ctx.provide('sessionPersistence', { stat } as never)
+    const sessions = await ctx.plugin(SessionStore)
+    const typert = await ctx.plugin(TypertRegistry)
+    const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
+
+    try {
+      ctx.sessions.create(liveId, { meta: { cwd: liveRoot, origin: 'subagent' } })
+      expect(ctx.get('agents')).toBeUndefined()
+      const lookup = ctx.typert.lookups.get('workspaceFileScope')
+      expect(lookup).toMatchObject({
+        parameter: 'workspaceFileScope',
+        wire: 'workspaceFileScopeId',
+        hostTypeSymbol: '@deepseek-ai/dsh-api-workspace-files#WorkspaceFileScope',
+        wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
+      })
+      if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
+
+      await expect(lookup.resolve(liveId)).resolves.toEqual({ sessionId: liveId, workspaceRoot: liveRoot, fs })
+      expect(stat).not.toHaveBeenCalled()
+      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot, fs })
+      await expect(lookup.resolve(fallbackId)).resolves.toEqual({ sessionId: fallbackId, workspaceRoot: fallbackRoot, fs })
+      await expect(lookup.resolve(missingId)).resolves.toBeUndefined()
+      expect(stat.mock.calls.map(([id]) => id)).toEqual([coldId, fallbackId, missingId])
+
+      await workspaceFiles.dispose()
+      expect(ctx.typert.lookups.get('workspaceFileScope')).toBeUndefined()
+    } finally {
+      await workspaceFiles.dispose()
+      await sessions.dispose()
+      await typert.dispose()
+    }
+  })
+
+  it('selects the filesystem of the Agent preset the Session projection names', async () => {
+    const switched = SessionId('switched-blank')
+    const local = SessionId('local')
+    const offline = SessionId('offline')
+    const plain = SessionId('plain')
+    const hostFs = {}
+    const remoteFs = {}
+    const ctx = new Context()
+    ctx.provide('fs', hostFs as never)
+    ctx.provide('sandboxPolicy', { workspaceRoot: resolve('fallback') } as never)
+    ctx.provide('agentPresets', {
+      serviceForPreset: (id: string, name: string) => id === 'remote' && name === 'fs' ? remoteFs : undefined,
+      ownsWorld: (id: string) => id !== 'standard',
+    } as never)
+    const presetOf: Record<string, string> = { [switched]: 'remote', [local]: 'standard', [offline]: 'host-offline' }
+    ctx.provide('sessionQuery', {
+      observeSession: (id: SessionId) => Promise.resolve({
+        projections: { values: { agentPreset: presetOf[id] } },
+        [Symbol.dispose]: () => {},
+      }),
+    } as never)
+    const sessions = await ctx.plugin(SessionStore)
+    const typert = await ctx.plugin(TypertRegistry)
+    const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
+    try {
+      for (const id of [switched, local, offline]) ctx.sessions.create(id, { meta: { cwd: resolve('cwd'), agentPreset: 'standard' } })
+      ctx.sessions.create(plain, { meta: { cwd: resolve('cwd') } })
+      const lookup = ctx.typert.lookups.get('workspaceFileScope')
+      if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
+      await expect(lookup.resolve(switched)).resolves.toMatchObject({ fs: remoteFs })
+      await expect(lookup.resolve(local)).resolves.toMatchObject({ fs: hostFs })
+      await expect(lookup.resolve(plain)).resolves.toMatchObject({ fs: hostFs })
+      // An owned world without its filesystem never falls back to the Host files.
+      await expect(lookup.resolve(offline)).rejects.toThrow('agent preset "host-offline" is not available')
+    } finally {
+      await workspaceFiles.dispose()
+      await sessions.dispose()
+      await typert.dispose()
+    }
+  })
+})

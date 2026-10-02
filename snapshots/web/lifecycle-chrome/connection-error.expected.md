@@ -1,5 +1,2 @@
-- button "Environments"
-- button "Settings":
-  - img
-  - text: Settings
-- button "Reconnecting automatically, reconnect now": Reconnect now
+- button "Settings"
+- button "Reconnecting, reconnect now": Reconnecting

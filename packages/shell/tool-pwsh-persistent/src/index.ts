@@ -9,7 +9,8 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { TerminalReadResult, TerminalSendResult, TerminalSessionId } from '@deepseek-ai/dsh-terminal'
+import { truncateWithoutSplittingSurrogatePair } from '@deepseek-ai/dsh-output-retention'
+import type { TerminalReadResult, TerminalSessionId } from '@deepseek-ai/dsh-terminal'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -17,19 +18,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const TRUNCATED_MESSAGE = '<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with Select-String in order to find the line numbers of what you are looking for.</NOTE>'
 const LOST_PREFIX_MESSAGE = '<response clipped><NOTE>The beginning of this command output was dropped by the terminal scrollback limit. The following text is the earliest retained output.</NOTE>\n'
 const SHELL_RESET_MESSAGE = 'The persistent pwsh shell was reset; the next pwsh call starts from the workspace with a fresh current directory and environment.'
-const SHELL_PROMPT = '__DSH_PERSISTENT_PWSH_PROMPT__ '
 const TIMEOUT_CODE = 'PERSISTENT_PWSH_TIMEOUT'
-// Fallback retention framing: the prompt function emits one OSC 133;D sequence
-// (ESC ] 133;D; <status> BEL) before the printable prompt, and a polling delta
-// can carry that emission on either side of the wrapped command. The status is
-// a 32-bit integer; the slack covers the line breaks between the framed lines.
-const STATUS_CODE_MAX_CHARS = 11
-const PROMPT_EMISSION_MAX_CHARS = '\x1b]133;D;\x07'.length + STATUS_CODE_MAX_CHARS + SHELL_PROMPT.length
-const FALLBACK_FRAMING_SLACK = 16
 // One page is enough to find a just-emitted completion marker; the full
 // scrollback is assembled only when a command settles or needs partial output.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
+
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
 
 interface ResolvedConfig {
@@ -64,7 +58,7 @@ function maybeTruncate(content: string, maxOutputChars: number, incomplete = fal
   if (content.length <= maxOutputChars && !incomplete) return content
   return content.length <= maxOutputChars
     ? content + TRUNCATED_MESSAGE
-    : content.slice(0, maxOutputChars) + TRUNCATED_MESSAGE
+    : truncateWithoutSplittingSurrogatePair(content, maxOutputChars) + TRUNCATED_MESSAGE
 }
 
 function markers(): CommandMarkers {
@@ -80,7 +74,7 @@ function markers(): CommandMarkers {
  * Backtick escapes keep every character literal: backtick first so the
  * escapes this function inserts are never re-escaped, `$` so no expansion
  * happens at wrapper construction, and `\r\n`/ESC so multi-line commands and
- * raw control bytes ride one submitted input line without PSReadLine mangling.
+ * raw control bytes ride one physical input line without PSReadLine mangling.
  * @param value - the model's PowerShell command text.
  * @returns the escaped double-quoted-string body.
  */
@@ -95,6 +89,8 @@ function quoteForPwsh(value: string): string {
 }
 
 function wrapCommand(command: string, marker: CommandMarkers): string {
+  // Keep the wrapper on one physical line: PSReadLine renders the echoed
+  // input, and a wrapped line would split the echo the extraction strips.
   // The echoed END nonce can never fabricate completion because the status
   // regex needs digits immediately after it and the echo continues with
   // quote characters.
@@ -102,30 +98,8 @@ function wrapCommand(command: string, marker: CommandMarkers): string {
   return `Write-Output '${marker.start}'; $LASTEXITCODE = $null; $__s = 1; try { Invoke-Expression "${body}"; $__ok = $? } catch { $__ok = $false }; if ($null -ne $LASTEXITCODE) { $__s = [int]$LASTEXITCODE } else { $__s = if ($__ok) { 0 } else { 1 } }; Write-Output ('${marker.end}' + $__s)`
 }
 
-function stripPrompt(text: string): string {
-  let result = text.replace(/\r?\n$/, '')
-  while (result.endsWith(SHELL_PROMPT)) {
-    result = result.slice(0, -SHELL_PROMPT.length)
-  }
-  return result.endsWith('\n') ? result.slice(0, -1) : result
-}
-
-function stripInputEcho(text: string, wrapper: string): string {
-  const projected: string[] = []
-  const rawOffsets: number[] = []
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]
-    if (character === '\n' || character === '\r') continue
-    projected.push(character as string)
-    rawOffsets.push(index)
-  }
-  const projectedStart = projected.join('').indexOf(wrapper)
-  if (projectedStart < 0) return text
-  const rawStart = rawOffsets[projectedStart] as number
-  const rawEnd = rawOffsets[projectedStart + wrapper.length - 1] as number
-  // PowerShell's line editor inserts display-width line breaks into the echo;
-  // matching only the exact submitted source keeps command-output lines intact.
-  return text.slice(0, rawStart) + text.slice(rawEnd + 1)
+function trimTrailingNewline(text: string): string {
+  return text.replace(/\r?\n$/, '')
 }
 
 function commandOutput(
@@ -133,13 +107,19 @@ function commandOutput(
   marker: CommandMarkers,
   wrapper: string,
 ): CapturedOutput | undefined {
-  const text = stripInputEcho(snapshot.text, wrapper)
+  const text = snapshot.text
   const end = text.lastIndexOf(marker.end)
-  const status = /^(\d+)\r?\n/.exec(text.slice(end + marker.end.length))?.[1]
+  // Terminal padding belongs to the status line, not to captured command output.
+  const status = /^(\d+) *\r?\n/.exec(text.slice(end + marker.end.length))?.[1]
   if (status === undefined) return undefined
   const startMarker = text.lastIndexOf(marker.start, end)
   const start = startMarker < 0 ? 0 : startMarker + marker.start.length
-  const captured = text.slice(start, end)
+  let captured = text.slice(start, end)
+  // The PSReadLine echo carries the wrapper source (including both marker
+  // nonces) before the real markers; anchor on the real markers excludes it,
+  // and stripping the wrapper covers the rare case where the real START
+  // scrolled out and extraction fell back to the echoed copy.
+  captured = captured.replaceAll(wrapper, '')
   return {
     text: captured.replace(/^\r?\n/, '').replace(/\r?\n$/, ''),
     incomplete: startMarker < 0,
@@ -147,36 +127,29 @@ function commandOutput(
   }
 }
 
-function promptCompleted(result: TerminalSendResult): boolean {
-  return result.viewport.endsWith(SHELL_PROMPT)
-    || result.viewport.endsWith(`${SHELL_PROMPT}\r\n`)
-    || result.viewport.endsWith(`${SHELL_PROMPT}\n`)
-}
-
 function partialOutput(
   snapshot: RetainedOutput,
   marker: CommandMarkers,
   wrapper: string,
   fallback: string,
+  fallbackTruncated = false,
 ): CapturedOutput {
-  const text = stripInputEcho(snapshot.text, wrapper)
-  const startMarker = text.lastIndexOf(marker.start)
+  const startMarker = snapshot.text.lastIndexOf(marker.start)
   if (startMarker >= 0) {
     return {
-      text: stripPrompt(text.slice(startMarker + marker.start.length).replace(/^\r?\n/, '')),
+      text: trimTrailingNewline(snapshot.text.slice(startMarker + marker.start.length).replace(/^\r?\n/, '')),
       incomplete: false,
     }
   }
-  const fallbackText = stripInputEcho(fallback, wrapper)
-  const fallbackStart = fallbackText.lastIndexOf(marker.start)
+  const fallbackStart = fallback.lastIndexOf(marker.start)
   const afterStart = fallbackStart < 0
-    ? fallbackText
-    : fallbackText.slice(fallbackStart + marker.start.length).replace(/^\r?\n/, '')
+    ? fallback
+    : fallback.slice(fallbackStart + marker.start.length).replace(/^\r?\n/, '')
   const fallbackEnd = afterStart.lastIndexOf(marker.end)
   const beforeEnd = fallbackEnd < 0 ? afterStart : afterStart.slice(0, fallbackEnd)
   return {
-    text: stripPrompt(beforeEnd.replaceAll(SHELL_PROMPT, '')),
-    incomplete: fallbackStart < 0,
+    text: trimTrailingNewline(beforeEnd.replaceAll(wrapper, '')),
+    incomplete: fallbackTruncated || fallbackStart < 0,
   }
 }
 
@@ -255,28 +228,20 @@ async function respondToSessionExit(
   marker: CommandMarkers,
   wrapped: string,
   fallback: string,
+  fallbackTruncated: boolean,
   config: ResolvedConfig,
 ): Promise<string> {
   const snapshot = retainedScrollback(ctx, owner, id)
   await shells.reset(owner, 'persistent pwsh shell exited')
   return [
     renderShellExitStatus(
-      renderCaptured(partialOutput(snapshot, marker, wrapped, fallback), config.maxOutputChars),
+      renderCaptured(partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated), config.maxOutputChars),
       status.exitCode,
       status.signal,
     ),
     SHELL_RESET_MESSAGE,
   ].filter(part => part.length > 0).join('\n')
 }
-
-/**
- * The pwsh prompt function that overrides the backend bootstrap value with
- * this tool's own prompt. `[char]27`/`[char]7` build the OSC bytes at runtime
- * because raw ESC characters in submitted input are unreliable under
- * PSReadLine.
- */
-const PWSH_PROMPT_SETUP =
-  "function prompt { [Console]::Write([char]27 + ']133;D;' + [int]$LASTEXITCODE + [char]7); '" + SHELL_PROMPT + "' }"
 
 function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShells {
   const pending = new WeakMap<Agent, Promise<TerminalSessionId>>()
@@ -324,21 +289,6 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
             live.delete(owner)
           }, 'tool-pwsh-persistent owner cache cleanup')
         }
-        let first = true
-        for (;;) {
-          const setup = ctx.terminals.startSend(owner, spawned.sessionId, {
-            text: first ? PWSH_PROMPT_SETUP : '',
-            submit: first,
-            signal: combinedSignal,
-          })
-          first = false
-          const result = await setup.done
-          if (result.sessionStatus.kind === 'exited' || result.waitReason === 'timeout') {
-            throw new Error('persistent pwsh shell did not accept initialization')
-          }
-          if (result.waitReason === 'stdin_read' || (result.waitReason === 'inferred_idle' && promptCompleted(result))) break
-          await pause()
-        }
         return spawned.sessionId
       } catch (error: unknown) {
         await reset(owner, 'persistent pwsh initialization failed')
@@ -365,23 +315,19 @@ async function executeCommand(
   upstream: AbortSignal,
 ): Promise<string> {
   using commandDeadline = deadline(upstream, config.timeoutMs, TIMEOUT_CODE)
-  const id = await shells.get(owner, commandDeadline.signal)
+  let id: TerminalSessionId
+  try {
+    id = await shells.get(owner, commandDeadline.signal)
+  } catch (error: unknown) {
+    // Initialization owns rollback; only this caller's cancellation becomes ABORTED.
+    if (upstream.aborted && error === upstream.reason) return ''
+    throw error
+  }
   const marker = markers()
   const wrapped = wrapCommand(command, marker)
-  // The normalized budget retains the complete marker framing around the
-  // output budget — both prompt emissions a delta can carry, the real START
-  // marker, the END marker, and its status digits — so size capping cannot cut
-  // the real START marker before partialOutput, and an in-budget command keeps
-  // its full framing instead of reading as truncated. The raw budget adds the
-  // echoed wrapper, which a degenerate one-column terminal doubles with
-  // physical line breaks.
-  const normalizedFallbackLimit = 2 * PROMPT_EMISSION_MAX_CHARS
-    + marker.start.length + config.maxOutputChars + marker.end.length
-    + STATUS_CODE_MAX_CHARS + FALLBACK_FRAMING_SLACK
-  const rawFallbackLimit = 2 * wrapped.length + normalizedFallbackLimit
   let first = true
   let fallback = ''
-  let fallbackHasNormalizedEcho = false
+  let fallbackTruncated = false
 
   while (true) {
     // The shell may flip to exited between iterations (a fast `exit` can
@@ -391,7 +337,7 @@ async function executeCommand(
     const status = ctx.terminals.list(owner).find(session => session.sessionId === id)?.status
     if (status?.kind === 'exited') {
       return await respondToSessionExit(
-        ctx, shells, owner, id, status, marker, wrapped, fallback, config,
+        ctx, shells, owner, id, status, marker, wrapped, fallback, fallbackTruncated, config,
       )
     }
     let operation
@@ -409,23 +355,14 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    const rawFallback = fallback + incremental.delta
-    const normalizedFallback = stripInputEcho(rawFallback, wrapped)
-    fallbackHasNormalizedEcho ||= normalizedFallback !== rawFallback
-    const fallbackLimit = fallbackHasNormalizedEcho ? normalizedFallbackLimit : rawFallbackLimit
-    const start = normalizedFallback.lastIndexOf(marker.start)
-    // Once the real marker arrives, retain it as the structural anchor and
-    // bound only the command data that follows it. Before that, retain the
-    // stream head so a marker split across polling deltas can still arrive.
-    fallback = start >= 0
-      ? normalizedFallback.slice(start, start + fallbackLimit)
-      : normalizedFallback.slice(0, fallbackLimit)
+    fallback = incremental.delta.length > 0 ? fallback + incremental.delta : result.viewport
+    fallbackTruncated ||= incremental.truncated || result.truncated
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
       const partial = renderCaptured(
-        partialOutput(snapshot, marker, wrapped, fallback),
+        partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated),
         config.maxOutputChars,
       )
       await shells.reset(owner, 'persistent pwsh command timed out')
@@ -438,7 +375,8 @@ async function executeCommand(
     }
     if (commandDeadline.signal.aborted) {
       await shells.reset(owner, 'persistent pwsh command aborted')
-      commandDeadline.signal.throwIfAborted()
+      // ToolRuntime publishes ABORTED after this cancelled invocation settles.
+      return ''
     }
     if (latest.text.includes(marker.end)) {
       const complete = commandOutput(retainedScrollback(ctx, owner, id, latest), marker, wrapped)
@@ -446,22 +384,19 @@ async function executeCommand(
     }
     if (result.sessionStatus.kind === 'exited') {
       return await respondToSessionExit(
-        ctx, shells, owner, id, result.sessionStatus, marker, wrapped, fallback, config,
+        ctx, shells, owner, id, result.sessionStatus, marker, wrapped, fallback, fallbackTruncated, config,
       )
     }
-    if (promptCompleted(result)) {
+    // The shell reads stdin again (its prompt, or a foreground child's own
+    // read) without having printed the end marker — an interrupt, a replaced
+    // shell, or an interactive child. Return what was captured instead of
+    // spinning until the command deadline.
+    if (result.waitReason === 'stdin_read') {
       const snapshot = retainedScrollback(ctx, owner, id, latest)
-      const captured = partialOutput(snapshot, marker, wrapped, fallback)
-      // An idle prompt proves the PTY is waiting, which is equally true before a
-      // freshly started shell has echoed anything. Reporting that as a result
-      // renders nothing as clipped output, telling the model its result was
-      // truncated when no output existed to truncate. A result whose prefix
-      // merely scrolled out of the retained buffer still carries text and is
-      // reported as before; only the empty-and-incomplete case keeps polling,
-      // where the deadline remains the bound.
-      if (captured.text.length > 0 || !captured.incomplete) {
-        return renderCaptured(captured, config.maxOutputChars)
-      }
+      return renderCaptured(
+        partialOutput(snapshot, marker, wrapped, fallback, fallbackTruncated),
+        config.maxOutputChars,
+      )
     }
     await pause()
   }
@@ -507,7 +442,7 @@ function registerPersistentPwsh(ctx: Context, config: ResolvedConfig): void {
       const owner = exec.agent
       if (owner === undefined) throw new Error('pwsh requires an owning agent session')
       return serialized(owner, async () => {
-        exec.signal.throwIfAborted()
+        if (exec.signal.aborted) return '' // ToolRuntime publishes ABORTED after settlement.
         return executeCommand(ctx, shells, owner, args.command, config, exec.signal)
       })
     },

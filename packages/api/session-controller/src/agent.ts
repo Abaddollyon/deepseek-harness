@@ -1,25 +1,22 @@
 /** Agent activation, composition, and model-selection policy owned by API Session. */
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {
   Agent, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection, ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPresetDefaults } from '@deepseek-ai/dsh-agent-preset-registry'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-permission-presets'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import { resolveModelSelection } from './catalog.ts'
 import type { ModelSelection } from './types.ts'
-
-function additionalPathsFromEvents(events: readonly SessionEvent[]): readonly string[] {
-  const roots = events[0]
-  return roots?.type === 'workspace/roots' ? roots.data.additionalPaths : []
-}
 
 /** Cold Session identity absent from persistence. */
 export class ApiSessionNotFound extends Error {}
@@ -47,21 +44,6 @@ export class ApiSessionCwdConflict extends Error {
   }
 }
 
-/** Explicit-id creation attempted to adopt a Session under another root snapshot. */
-export class ApiSessionWorkspaceConflict extends Error {
-  constructor(
-    readonly sessionId: SessionId,
-    readonly requestedPaths: readonly string[],
-    readonly existingPaths: readonly string[] | undefined,
-  ) {
-    super(
-      existingPaths === undefined
-        ? `session "${sessionId}" records no additional roots and cannot be adopted with additional roots`
-        : `session "${sessionId}" has a different additional-root snapshot`,
-    )
-  }
-}
-
 /** Explicit-id creation attempted to adopt a Session under another preset. */
 export class ApiSessionPresetConflict extends Error {
   constructor(
@@ -78,12 +60,18 @@ export class ApiSessionPresetConflict extends Error {
 }
 
 /** Failures produced while resolving one ordinary Session identity to its live Agent. */
-export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/agent-busy' | 'gateway/internal'>
+export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/agent-busy' | 'session/writer-held' | 'gateway/internal'>
 
 /** Result of resolving one ordinary Session identity to its live Agent. */
 export type ApiSessionAgentResult =
   | { readonly agent: Agent }
   | { readonly error: ApiSessionAgentError }
+
+/** Preset defaults that passed validation; an omitted field leaves the Host default in place. */
+interface InitialChoices {
+  readonly model?: AgentModelSelection
+  readonly permission?: string
+}
 
 type InstalledSelection = ModelSelectionRef & {
   current: AgentModelSelection
@@ -162,6 +150,8 @@ export class ApiSessionAgentController {
   private readonly creations = new Map<SessionId, Promise<Agent>>()
   private readonly selections = new WeakMap<Agent, InstalledSelection>()
   private readonly imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /** Preset each Agent composed here was last bound to, so a blank-Session switch knows the replaced defaults. */
+  private readonly boundPresets = new WeakMap<Agent, string>()
 
   /** @param ctx - Host context carrying Agent, model, persistence, and Typert services. */
   constructor(private readonly ctx: Context) {
@@ -179,6 +169,16 @@ export class ApiSessionAgentController {
       const found = await this.resolveAgent(sessionId)
       if ('error' in found) throw found.error
       return found.agent.ctx
+    })
+    ctx.on('agent-preset/selected', (sessionId, agentPreset) => {
+      const agent = ctx.agents.get(sessionId)
+      const previous = agent === undefined ? undefined : this.boundPresets.get(agent)
+      if (agent === undefined || previous === undefined || previous === agentPreset) return
+      this.boundPresets.set(agent, agentPreset)
+      void this.serializeImageAdmission(agent, () => this.switchInitialChoices(agent, previous, agentPreset))
+        .catch((error: unknown) => {
+          ctx.logger.warn(`session-controller: agent preset "${agentPreset}" defaults were not applied to session "${sessionId}": ${String(error)}`)
+        })
     })
   }
 
@@ -217,7 +217,11 @@ export class ApiSessionAgentController {
       this.resumes.set(sessionId, resume)
     }
     try {
-      return { agent: await resume }
+      const agent = await resume
+      // A shared resume can publish an identity that subagent routing adopts
+      // before every waiter observes it; apply the live ownership policy again.
+      const published = this.liveAgent(sessionId)
+      return published ?? { agent }
     } catch (error: unknown) {
       if (error instanceof ApiSessionNotFound) {
         return { error: new RemoteError('session/not-found', error.message, { sessionId }) }
@@ -230,6 +234,9 @@ export class ApiSessionAgentController {
       const racedSession = this.ctx.sessions.get(sessionId)
       if (racedSession !== undefined && hasApiSessionSubagentOwner(this.ctx, racedSession, undefined)) {
         return { error: apiSessionSubagentOwnershipError(sessionId) }
+      }
+      if (error instanceof Error && error.name === 'SessionAlreadyOwnedError') {
+        return { error: new RemoteError('session/writer-held', error.message, { sessionId }) }
       }
       return {
         error: new RemoteError(
@@ -247,7 +254,8 @@ export class ApiSessionAgentController {
    * @param cwd - directory the Session must own.
    * @param checkPersistedIdentity - whether to inspect a cold identity before creation.
    * @param presetId - optional Agent preset the Session must own.
-   * @param additionalPaths - immutable additional roots the Session must own.
+   * @param additionalPaths - existing directories a newly created Session records beside `cwd`;
+   *   an adopted Session keeps the roots it recorded at creation.
    * @returns the matching live ordinary Agent.
    */
   async ensureSession(
@@ -286,9 +294,6 @@ export class ApiSessionAgentController {
     }
     if (agent.session.header.cwd !== cwd) {
       throw new ApiSessionCwdConflict(sessionId, cwd, agent.session.header.cwd)
-    }
-    if (!samePaths(agent.session.additionalPaths, additionalPaths)) {
-      throw new ApiSessionWorkspaceConflict(sessionId, additionalPaths, agent.session.additionalPaths)
     }
     return agent
   }
@@ -380,7 +385,7 @@ export class ApiSessionAgentController {
   }
 
   /**
-   * Serialize image admission and model selection for one Agent.
+   * Serialize prompt admission, model selection, and preset-default switches for one Agent.
    * @param agent - live Agent that owns the serialization chain.
    * @param operation - asynchronous operation admitted after prior work settles.
    * @returns the operation result or rejection.
@@ -410,6 +415,7 @@ export class ApiSessionAgentController {
       setup: async (agentCtx, agent) => {
         this.installSelection(agent)
         await presets.mount(agentCtx, resolvedId)
+        this.boundPresets.set(agent, resolvedId)
       },
     }
   }
@@ -482,9 +488,6 @@ export class ApiSessionAgentController {
         if (observation.header.cwd !== cwd) {
           throw new ApiSessionCwdConflict(sessionId, cwd, observation.header.cwd)
         }
-        if (!samePaths(additionalPathsFromEvents(observation.events), additionalPaths)) {
-          throw new ApiSessionWorkspaceConflict(sessionId, additionalPaths, additionalPathsFromEvents(observation.events))
-        }
         const storedPreset = this.presetForObservation(observation)
         this.assertPresetUnchanged(sessionId, presetId, storedPreset)
         const composition = await this.composeAgent(storedPreset)
@@ -499,27 +502,130 @@ export class ApiSessionAgentController {
       }
     }
 
-    try {
-      await mkdir(cwd, { recursive: true })
-    } catch (error: unknown) {
-      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
-    }
     const composition = await this.composeAgent(presetId)
-    return (await this.ctx.agents.create({
+    await this.ensureProjectDirectories(cwd, additionalPaths, composition.agentPreset)
+    const initial = await this.initialChoices(composition.agentPreset)
+    const { agent } = await this.ctx.agents.create({
       sessionId,
-      agentOptions: this.agentOptions(),
+      agentOptions: this.agentOptions(initial.model),
       meta: {
         cwd,
-        ...(additionalPaths.length === 0 ? {} : { additionalPaths: [...additionalPaths] }),
+        ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
-    })).agent
+    })
+    if (initial.model !== undefined || initial.permission !== undefined) this.applyInitialChoices(agent, initial, {})
+    return agent
   }
 
-  private agentOptions(): AgentOptions {
-    const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
+  /**
+   * Ensure a new Session's directories in the execution world its preset
+   * selects. A preset that owns its world (for example over SSH) checks the
+   * cwd through that world's `fs`, refuses while that provider is missing, and
+   * never creates anything on the Host. Otherwise the Host cwd is created when
+   * missing. Additional roots are recorded permanently, so each must already
+   * be a directory in that world.
+   * @param cwd - requested project directory.
+   * @param additionalPaths - additional workspace roots recorded beside `cwd`.
+   * @param agentPreset - resolved preset identity, when presets are configured.
+   */
+  private async ensureProjectDirectories(
+    cwd: string,
+    additionalPaths: readonly string[],
+    agentPreset: string | undefined,
+  ): Promise<void> {
+    const presets = this.ctx.get('agentPresets')
+    const fs = agentPreset === undefined ? undefined : presets?.serviceForPreset(agentPreset, 'fs')
+    if (fs === undefined && agentPreset !== undefined && presets?.ownsWorld(agentPreset) === true) {
+      throw new Error(`failed to ensure project directory "${cwd}": the execution world of agent preset "${agentPreset}" is not available`)
+    }
+    const isDirectory = async (path: string): Promise<boolean> => fs === undefined
+      ? (await stat(path)).isDirectory()
+      : (await fs.stat(await fs.resolve(path)))?.type === 'directory'
+    try {
+      if (fs === undefined) await mkdir(cwd, { recursive: true })
+      else if (!await isDirectory(cwd)) throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
+    } catch (error: unknown) {
+      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
+    }
+    for (const path of additionalPaths) {
+      let directory: boolean
+      try {
+        directory = await isDirectory(path)
+      } catch (error: unknown) {
+        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
+    }
+  }
+
+  private agentOptions(route = this.ctx.agentDefaultModel.currentSelection()): AgentOptions {
+    const { provider, model } = route
     return { provider, model }
+  }
+
+  /**
+   * Validate one preset's declared Session defaults against the current catalog
+   * and permission table. An unusable value is logged without provider error
+   * text and omitted, so the Host default applies and creation never fails.
+   * @param presetId - preset whose declaration is read; undefined without a roster.
+   * @returns the usable defaults.
+   */
+  private async initialChoices(presetId: string | undefined): Promise<InitialChoices> {
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined || presetId === undefined) return {}
+    let defaults: AgentPresetDefaults | undefined
+    try {
+      defaults = (await presets.resolve(presetId)).defaults
+    } catch {
+      // A preset removed since the Session bound it declares nothing any more.
+      return {}
+    }
+    let model: AgentModelSelection | undefined
+    if (defaults?.model !== undefined) {
+      try {
+        model = await resolveModelSelection(this.ctx, defaults.model)
+      } catch {
+        this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default model "${defaults.model.provider}/${defaults.model.model}" is unavailable or rejects its effort; using the Host default model`)
+      }
+    }
+    const permission = defaults?.permission
+    const known = permission !== undefined && this.ctx.get('permissionPresets')?.names.includes(permission) === true
+    if (permission !== undefined && !known) {
+      this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default permission "${permission}" is not an available permission preset; using the Host default`)
+    }
+    return { ...(model === undefined ? {} : { model }), ...(known ? { permission } : {}) }
+  }
+
+  /**
+   * Move a blank Session's model and permission to `next` wherever each still
+   * equals what `replaced` chose, so an explicit `/model` or permission choice
+   * stays. Changes are recorded through the same events those commands append.
+   * @param agent - live blank Agent.
+   * @param next - defaults now in force; an omitted field means the Host default.
+   * @param replaced - defaults the Session was created or last switched under.
+   */
+  private applyInitialChoices(agent: Agent, next: InitialChoices, replaced: InitialChoices): void {
+    const pending = this.ctx.sessionProjections.stateOf(agent.session, 'modelSelection')?.pending ?? null
+    const model = next.model
+      ?? (replaced.model === undefined ? undefined : this.ctx.agentDefaultModel.currentSelection())
+    if (model !== undefined && sameSelection(pending, replaced.model) && !sameSelection(pending, model)) {
+      this.selectForNextRequest(agent, model)
+    }
+    const permissions = this.ctx.get('permissionPresets')
+    if (permissions === undefined) return
+    const current = permissions.current(agent.session)
+    const permission = next.permission ?? permissions.defaultPreset
+    if (current !== permission && current === (replaced.permission ?? permissions.defaultPreset)) {
+      permissions.set(agent.session, permission)
+    }
+  }
+
+  private async switchInitialChoices(agent: Agent, previous: string, next: string): Promise<void> {
+    const [replaced, chosen] = await Promise.all([this.initialChoices(previous), this.initialChoices(next)])
+    if (this.ctx.sessionProjections.stateOf(agent.session, 'sessionListMetadata')?.blank !== true) return
+    this.applyInitialChoices(agent, chosen, replaced)
   }
 
   private installSelection(agent: Agent): void {
@@ -548,8 +654,10 @@ export class ApiSessionAgentController {
   }
 }
 
-function samePaths(left: readonly string[] | undefined, right: readonly string[]): boolean {
-  return (left ?? []).length === right.length && (left ?? []).every((value, index) => value === right[index])
+function sameSelection(left: ModelSelection | null, right: ModelSelection | undefined): boolean {
+  return left === null
+    ? right === undefined
+    : left.provider === right?.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort
 }
 
 function agentModelSelection(selection: ModelSelection): AgentModelSelection {

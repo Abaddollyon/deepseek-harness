@@ -8,7 +8,7 @@ kind: "package-reference"
 
 ## 概述
 
-`@deepseek-ai/dsh-api-workspace-controller` 拥有 Host 的 `ctx.workspaceController` 服务和生成的 Client `ctx.remote.workspace` namespace。它的 Remote 方法负责创建带主路径及可选附加根目录的 Workspace、以原子方式更新这些根目录、重命名、移除和重排 Workspace，在 Workspace 内重排 Session，从 Workspace 导航中归档 Session，以及跟随完整的 Workspace 投影。当 Client 必须修改或跟随 Workspace 导航时，请通过 API Gateway 使用它。本包同时拥有用于交互式选择的 `ctx.directoryPickerController` / `ctx.remote.directoryPicker`，以及用于无需显示界面的列举与创建的 `ctx.directoryBrowserController` / `ctx.remote.directoryBrowser`。两个 namespace 分离后，远程客户端可以浏览，而 Host 的本地 picker 仍保持原生。
+`@deepseek-ai/dsh-api-workspace-controller` 拥有 Host 的 `ctx.workspaceController` 服务和生成的 Client `ctx.remote.workspace` namespace。它的 Remote 方法负责创建、重命名、移除和重排 Workspace，在 Workspace 内重排 Session，归档与取消归档 Session，以及跟随完整的 Workspace 投影。当 Client 必须修改或跟随 Workspace 导航时，请通过 API 网关使用它。本包同时拥有 `ctx.directoryPickerController` 与生成的 `ctx.remote.directoryPicker` namespace，因为它承载的选目录 seam 是抽象的，自身从不作为 Loader entry。
 
 ## 目录
 
@@ -22,16 +22,34 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-Host 控制器接受 create({ path, additionalPaths? }) 和 updatePaths({ workspaceId, additionalPaths })；所有根目录都在 Host 上规范化、校验为目录并去重。更新根目录会改变新建 Session 使用的 Workspace 快照，但不会悄悄扩大已活动 Session 的权限。Host 控制器会串行执行正确性取决于当前 registry 状态的变更，并为预期失败抛出带稳定 `workspace/*` 或 `directory-picker/*` 码的 `RemoteError`。它的 `follow()` 流会同步订阅持久 Workspace 变更，先发出一份完整 baseline，再按顺序发出 `upsert`、`remove`、`order` 和 `archived` 增量。重连会以替换 baseline 开始新一代，因此消费方不依赖收到断线期间的每个增量。
+Host 控制器会串行执行正确性取决于当前注册表状态的变更，并为预期失败抛出带有稳定错误码的 `RemoteError`。它的 `follow()` 流会同步订阅持久 Workspace 变更，先发出一份完整 baseline，再按顺序发出 `upsert`、`remove`、`order`、`archived` 和 `pinned` 增量。归档与置顶集合都是会话 id 数组，置顶数组把最近置顶的 id 放在前面。重连会以替换 baseline 开始新一代，因此消费方不依赖收到断线期间的每个增量。不带 `stopActivity` 的 `archiveSession` 会以 `workspace/session-active` 拒绝仍有工作在跑的会话，其 details 按族（`turn`、`subagent`、`job`、`schedule`）列出这些工作及各项的 id 与名称；带 `stopActivity: true` 时注册表的提供方先停止这些工作，归档集合持久化后即返回响应，停止在后台收敛。
 
-Client 入口提供 `ClientWorkspaceModel` 和 `createWorkspaceStateStream()`。该模型拥有 Workspace 行、registry 顺序、已归档 Session id、一元变更回声，以及流与一元调用的竞态处理。较新的 Host 行按 `updatedAt` 获胜；变更期间收到的流行、归档集合或顺序优先于其延迟的一元回声，包括时间戳相同的行；已经移除的 Workspace id 不会被延迟数据复活。该包公开与框架无关的快照和订阅，把导航策略与 React hook 留给 UI owner。Feed 恢复使用 Gateway 的有序清理生命周期；dispose 失败会阻止替换流，并在所有者仍活动时发布为清理失败。
+Workspace 可以在路径之外列出附加目录。`create({ path, additionalPaths })` 会在写入新 Workspace 前校验这些目录，并要求已存在的 Workspace 已持有相同的规范化集合；`updatePaths({ workspaceId, additionalPaths })` 替换整个列表，目录不可用时以 `workspace/invalid-path` 失败。列表为空时省略 `WorkspaceView.additionalPaths`。会话保留各自记录的目录，只有之后创建的会话使用修改后的列表。Client 服务以 `updatePaths(workspaceId, additionalPaths)` 提供同一操作。`create({ path, agentPreset })` 在某个 Agent 预设自己的文件系统（例如 SSH 主机）中注册 Workspace：每个路径都在该处规范化并检查，`WorkspaceView.agentPreset` 指明该预设，在该 Workspace 中创建的会话使用它。`worlds()`（Client 为 `workspaces.worlds()`）列出挂载了自己文件系统的可用预设。
+
+Client 入口提供 `ClientWorkspaceModel` 和 `createWorkspaceStateStream()`。该模型拥有 Workspace 行、registry 顺序、归档与置顶会话身份、一元变更回显，以及流与一元调用的竞态处理。较新的 Host 行按 `updatedAt` 获胜；已提交的流顺序优先于较旧的一元响应；已经移除的 Workspace id 不会被延迟数据复活。置顶快照仅在会话身份或顺序变化时更新。该包公开与框架无关的快照和订阅，把导航策略与 React 钩子留给 UI owner。`WorkspaceController.archiveSession(sessionId, { stopActivity })` 抛出携带 Host `rpcError` 的 `WorkspaceArchiveError`，界面因此能区分"仍有工作在跑"的拒绝与会话缺失或载体故障，并提议停止这些工作。
+
+<a id="first-use-workspace"></a>
+### 首次使用工作区
+
+`workspace.initializeDefault()` 返回持久化的默认工作区；Client service 通过 `workspaces.initializeDefault(signal?)` 提供该操作。它不接受请求参数：固定目录名 `default-workspace` 由 Host 拥有，注册表也以同一路径片段作为初始标题，因此任何语言下同一安装环境都只有一个磁盘路径和一个存储标题。Host 将目录放在其账户的 `<Documents>/deepseek-harness` 下，远程 Web Host 也遵循此规则。操作系统的文件名限制同样适用。Linux 系统查询要求存在 `xdg-user-dir` 且启用了 Documents 目录；不具备该条件的 Host 必须配置 `documentsDirectory` 或使用文件夹选择器。
+
+[Workspace 注册表](../../workspace/workspace/README.zh.md#first-use-workspace)负责资格判断、目录创建和持久化初始化。已有默认工作区直接返回，不再查询 Documents，也不会被重命名或迁移。不满足首次使用条件时返回 `undefined`，启动流程可将目录选择留给用户。查询和创建失败遵循标准 Remote 错误处理。初始化不创建 Session，也不发送消息。
+
+`./default-workspace` 为浏览器消费方导出 `DEFAULT_WORKSPACE_DIRECTORY` 与 `workspaceDisplayTitle(title, localizedDefault)`：仍保留自动标题的工作区按读者语言显示默认名称，其他标题一律原样显示。被用户重命名为 `default-workspace` 的工作区，或从选择器采用的同名文件夹，也会按默认工作区显示；除显示之外没有其他行为依赖该判断。
+
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `documentsDirectory` | 系统 Documents 目录 | 完全限定的 Host 目录覆盖值 |
+| `documentsLookupTimeoutMs` | `10000` | 操作系统目录查询的正数最大时长，单位为毫秒 |
+
+Documents 查询占用注册表变更队列，因此其他 Workspace 变更（包括登记已选目录）最多可能等待 `documentsLookupTimeoutMs`。取消可以停止查询；解析成功后，取消不会回滚创建或登记。
 
 -----
 
 <a id="model-experience"></a>
 ## 模型体验
 
-无，因为 Workspace 组织属于浏览器与 Host 控制状态，并且不注册提示词、工具或会话事件。
+无，因为 Workspace 组织属于浏览器和 Host 的控制状态，并且不注册提示词、工具或会话事件。
 
 #### KV Cache 影响
 
@@ -42,7 +60,7 @@ Client 入口提供 `ClientWorkspaceModel` 和 `createWorkspaceStateStream()`。
 <a id="known-limitations-and-deferred-work"></a>
 
 - `follow()` 在重连后替换完整投影，不提供持久 cursor 或增量追赶协议。
-- 进程本地删除标记只会在 Client 模型生命周期内阻止延迟数据复活已移除的 Workspace。
+- 进程内删除标记只会在 Client 模型生命周期内阻止延迟数据复活已移除的 Workspace。
 
 
 <a id="dev-note"></a>
@@ -55,4 +73,4 @@ Client 入口提供 `ClientWorkspaceModel` 和 `createWorkspaceStateStream()`。
 
 </details>
 
-**运行时不变式：** 不发布伴生入口。Workspace Registry 负责持久化，每次流生成都是完整投影。
+**运行时不变式：** 不发布伴生入口。Workspace 注册表负责持久化，每次流生成都是完整投影。

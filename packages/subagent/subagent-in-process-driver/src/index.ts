@@ -26,11 +26,11 @@ import {
   captureDelegatedPolicyOverrides,
   childSessionMeta,
   finalAssistantOutput,
-  subagentFailureFromUnknown,
   resolveChildAgentOptions,
   resolveChildDepth,
 } from '@deepseek-ai/dsh-subagent'
 import type {
+  ChildExecutionTarget,
   ResolvedSubagentStartRequest,
   SubagentDescriptorData,
   SubagentResult,
@@ -71,6 +71,8 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
 export interface InProcessRunOptions {
   /** Completed-turn seed for fork, or undefined for a fresh spawn. */
   readonly seed?: readonly SessionEvent[]
+  /** Preset and cwd replacing the parent's, for a child that runs in another execution world. */
+  readonly target?: ChildExecutionTarget
 }
 
 /** Error used when cancellation wins before the child publication boundary. */
@@ -99,7 +101,7 @@ function attachDescriptorAppend(childCtx: Context, descriptor: SubagentDescripto
  * publishing a child. Every start appends its resolved descriptor inside the
  * child's initial turn.
  * @param request - the trusted typed start request, including its required signal.
- * @param options - the optional fork seed.
+ * @param options - the optional fork seed and execution target.
  * @returns a published holder-owned run.
  */
 export async function startInProcessRun(
@@ -118,15 +120,14 @@ export async function startInProcessRun(
   // Capture before the first await: a later parent switch belongs to the
   // parent's future.
   const inherited = captureDelegatedPolicyOverrides(parent)
-  const childAgentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
 
   let structured: StructuredAttachment | undefined
-  const setup = (childCtx: Context, child: Agent): void => {
+  const setup = async (childCtx: Context, child: Agent): Promise<void> => {
     appendDelegatedPolicyOverrides(child.session, inherited)
-    applyChildComposition(childCtx, parent, {
+    await applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
-    })
+    }, child)
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
     }
@@ -136,10 +137,10 @@ export async function startInProcessRun(
   const handle = await parent.ctx.agents.create({
     sessionId: childId,
     parentAgent: parent,
-    meta: childSessionMeta(parent, childDepth, seed !== undefined),
+    meta: childSessionMeta(parent, childDepth, seed !== undefined, options.target),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
-    agentOptions: childAgentOptions,
+    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
     signal: request.signal,
     setup,
   })
@@ -217,6 +218,7 @@ function readResult(
   cancelled: boolean,
   structured?: { captured?: { value: unknown } | undefined },
 ): SubagentResult {
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   const own = child.session.snapshotEvents(boundary)
   // `droppedUnrun` is deliberately unread: a one-shot prompt is claimed by its
   // awaited first turn almost immediately, and the owner's own teardown is the
@@ -224,20 +226,16 @@ function readResult(
   // `error` through `toStopReason(undefined)`, which never overstates success.
   const lastEnd = foldConsumedWork(own).end
   // The seam's canonical selection rule; a partial answer survives cancel and truncation.
-  const output: ContentBlock[] = finalAssistantOutput(own) ?? []
+  const output: readonly ContentBlock[] = finalAssistantOutput(own) ?? []
   const recorded = toStopReason(lastEnd?.data.reason)
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.
   const stopReason: SubagentStopReason = cancelled && recorded !== 'completed' ? 'aborted' : recorded
-  const failure = lastEnd?.data.reason.kind === 'error'
-    ? subagentFailureFromUnknown(lastEnd.data.reason.error)
-    : undefined
   if (structured !== undefined) {
     if (structured.captured !== undefined) {
-      // A committed capture concludes the turn; every later error path rolls it back.
       return { output, structured: structured.captured.value, stopReason }
     }
     if (stopReason === 'completed') return { output, stopReason: cancelled ? 'aborted' : 'error' }
   }
-  return { output, stopReason, ...failure === undefined ? {} : { failure } }
+  return { output, stopReason }
 }

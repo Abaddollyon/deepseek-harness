@@ -67,7 +67,7 @@ interface ProjectionDefinition<
 }
 ```
 
-全量值事件规则是承重结构：携带状态的日志事件携带的是变更后的完整状态，绝不是裸增量——这让每次状态转移始终足够廉价，也让每个被供给的值自描述（对消费方即 last-wins）。
+每个对外投影值都是完整读模型。源事件可以携带完整值，也可以携带领域拥有的操作；单元的确定性 `apply` 负责回放，checkpoint 加前向 tail replay 会重建出同一状态。
 
 ## 快照与变更流
 
@@ -120,29 +120,26 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.
 
 ```ts cordis-catalog
-/** Return identity-checked rows for a cold reader.
- * @param meta - stored session header used as lifecycle identity witness.
- * @param inheritedEventCount - exact inherited prefix in the stored lifecycle.
- * @returns matching rows, or undefined when no row exists.
- */
-checkpointFor(meta: SessionHeader, inheritedEventCount: SessionLogOffset): ProjectionCheckpoint | undefined
-
 /**
  * The zero-I/O listing read: whole values viewed straight from the stored
- * rows (version-matching keys only), each cut carried with its watermark so
- * a client value store can seed under its higher-seq-wins rule — as stale
- * as the last durable checkpoint but never wrong, and never from an
- * unrelated log (the caller's header is the identity witness). Fresher
- * paths (the history tail baseline) supersede these values whenever a
- * session is actually opened.
+ * rows (version-matching keys only) of the record bound to the caller's
+ * lifecycle. The header is the only identity witness a listing holds, so
+ * this face matches the lifecycle identity (`formatVersion`, `createdAt`,
+ * `cwd`, `isSeeded`) and not the inherited cut: within one format
+ * generation the cut is fixed at fork time, so it distinguishes no
+ * lifecycle the other fields do not, and a viewed value never seeds a fold.
+ * The view is as stale as the last durable checkpoint but never wrong and
+ * never from an unrelated log. Its `asOfSeq` is the lowest watermark among
+ * the served rows: the stored record's own position, which the header
+ * cannot relate to the log the caller later opens. The Session list
+ * therefore labels the block as cached, and the client lets every value the
+ * connected Session produces supersede it whatever this number says.
  * @param meta - the listed session's header (identity witness; no log read).
- * @param inheritedEventCount - exact inherited prefix length that completes
- * the checkpoint identity.
  * @param keys - optional projection keys required by the caller's audience.
- * @returns the cut (`asOfSeq` = lowest served-row watermark), or
- *   `undefined` when no usable row exists for this lifecycle.
+ * @returns the viewed block, or `undefined` when no usable row exists for
+ *   this lifecycle at the current Session format.
  */
-cachedSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined
+cachedSnapshot( meta: SessionHeader, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined
 
 /**
  * Read only a predecessor checkpoint's title as a zero-I/O listing hint.
@@ -153,15 +150,13 @@ cachedSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, keys
  * fact from this Session. The registry still requires the current title
  * projection's row version and schema. No other predecessor projection is
  * exposed: format normalization can change their current meaning, and the
- * strict {@link cachedSnapshot} / hydration paths continue to reject them.
+ * {@link cachedSnapshot} / hydration paths continue to reject them.
  * @param meta - authoritative listed Session header.
- * @param inheritedEventCount - exact inherited cut completing the lifecycle identity.
- * @returns a title-only checkpoint view with `asOfSeq: -1`, or `undefined`
- *   when the record is current, newer, unrelated, missing, or incompatible
- *   with the title unit. The sentinel avoids reusing a sequence that a
- *   cardinality-changing Session migration may have remapped.
+ * @returns a title-only block at the stored title row's watermark, or
+ *   `undefined` when the record is current, newer, unrelated, missing, or
+ *   incompatible with the title unit.
  */
-cachedPredecessorTitle( meta: SessionHeader, inheritedEventCount: SessionLogOffset, ): ProjectionSnapshot | undefined
+cachedPredecessorTitle(meta: SessionHeader): ProjectionSnapshot | undefined
 
 /**
  * Hydrate projection cells for an already-prepared Session without another
@@ -175,12 +170,12 @@ cachedPredecessorTitle( meta: SessionHeader, inheritedEventCount: SessionLogOffs
 hydratePrepared( session: Session, events: readonly SessionEvent[], ): ProjectionSnapshot
 
 /**
- * Durably checkpoint one Session (all mandatory points call this; tests and
- * carriers may too). The registry returns detached rows at invocation.
- * Writes enter the per-session queue before waiting for log durability,
- * preserving snapshot order even when flushes finish out of order.
- * NOT fail-soft — callers on the fail-soft paths contain it.
- * @param session - the live or just-detached Session to checkpoint.
+ * Durably checkpoint one live session NOW (all mandatory points call
+ * this; tests and carriers may too). The registry cut is snapshotted at
+ * this boundary (states are live references), then the session's record is
+ * replaced on the domain's write chain. NOT fail-soft — callers on the
+ * fail-soft paths contain it.
+ * @param session - the live session to checkpoint.
  * @returns resolution after durability and event emission.
  */
 async write(session: Session): Promise<void>
@@ -199,27 +194,6 @@ async write(session: Session): Promise<void>
  * @returns the projection cut at the log end.
  */
 coldSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, events: readonly SessionEvent[], ): ProjectionSnapshot
-
-/**
- * Persist a cold restore result before its first frame is published, without
- * ever regressing a fresher checkpoint.
- *
- * Cold reads are slow and their result is old the moment the log moves, so
- * the write is a compare-and-set rather than a replacement: it lands only
- * while the stored record is still the exact cut the cold read restored from
- * — or is absent, or belongs to another lifecycle. A checkpoint written by a
- * Session that attached during the read therefore wins, while the stale or
- * future row the cold read itself discarded is healed (that row IS the cut
- * this call restored from). Writes for one session are serialized so
- * concurrent write-backs cannot interleave their read-modify-write.
- * Fail-soft: a lost write only costs a longer tail replay next time.
- * @param meta - the stored session header (identity witness).
- * @param inheritedEventCount - exact inherited prefix length completing the identity.
- * @param checkpoint - the refreshed rows at the restored cut.
- * @param restoredFrom - the exact rows this restore was seeded from.
- * @returns resolution after the write attempt settles.
- */
-async writeBack( meta: SessionHeader, inheritedEventCount: SessionLogOffset, checkpoint: ProjectionCheckpoint, restoredFrom: ProjectionCheckpoint, ): Promise<void>
 ```
 
 Types: [Session](session.zh.md) · [SessionEvent](session.zh.md) · [SessionHeader](persistence.zh.md) · [SessionLogOffset](session.zh.md)

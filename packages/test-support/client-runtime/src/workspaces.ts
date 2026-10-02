@@ -1,7 +1,7 @@
 /** Test-owned workspaces face: the renderer standard-kit observable plus recorded actions. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
-  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceFeedSnapshot,
+  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceWorld,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -31,14 +31,6 @@ type WorkspaceStub<Key extends WorkspaceAction> = (
 export class TestWorkspaces implements IWorkspaces {
   /** The useWorkspaces standard feed. */
   readonly list: SnapshotStore<WorkspaceFixtureSnapshot>
-
-  /** Writable resource readiness for mounted UI tests. */
-  readonly feed = createSnapshotStore<WorkspaceFeedSnapshot>({ endpoint: 'workspace/follow', state: 'ready', attempt: 0, generation: 1, hasBaseline: true, lastSuccessfulAt: 1, failure: null, canRetry: false })
-
-  retryFeed(): void {
-    this.calls.push({ method: 'retryFeed', args: [] })
-    this.stubs.get('retryFeed')?.()
-  }
 
   /** Calls observed on the action face, newest last. */
   readonly calls: { method: string; args: unknown[] }[] = []
@@ -76,7 +68,7 @@ export class TestWorkspaces implements IWorkspaces {
    * @param input - the Host create payload.
    * @returns the created Workspace view.
    */
-  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
+  async create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     this.calls.push({ method: 'create', args: [input] })
     const stub = this.stubs.get('create')
     if (stub !== undefined) return await (stub(input) as Promise<WorkspaceView>)
@@ -84,9 +76,45 @@ export class TestWorkspaces implements IWorkspaces {
       workspaceId: `ws-${input.path}` as WorkspaceId,
       title: input.path,
       path: input.path,
-      additionalPaths: input.additionalPaths ?? [],
       sessionIds: [],
     } as unknown as WorkspaceView
+  }
+
+  /**
+   * List other execution hosts (recorded). The default offers none.
+   * @returns the stubbed hosts, or an empty list.
+   */
+  async worlds(): Promise<readonly WorkspaceWorld[]> {
+    this.calls.push({ method: 'worlds', args: [] })
+    const stub = this.stubs.get('worlds')
+    return stub === undefined ? [] : await (stub() as Promise<readonly WorkspaceWorld[]>)
+  }
+
+  /**
+   * Replace a Workspace's additional directories (recorded). The default
+   * echoes the listed fixture row with the new list.
+   * @param workspaceId - target workspace; must be in the fixture list unless stubbed.
+   * @param additionalPaths - complete replacement list.
+   * @returns the updated view.
+   */
+  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    this.calls.push({ method: 'updatePaths', args: [workspaceId, additionalPaths] })
+    const stub = this.stubs.get('updatePaths')
+    if (stub !== undefined) return await (stub(workspaceId, additionalPaths) as Promise<WorkspaceView>)
+    const workspace = this.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+    if (workspace === undefined) throw new Error(`unknown fixture workspace ${workspaceId}`)
+    return { ...workspace, additionalPaths }
+  }
+
+  /**
+   * Initialize the default Workspace through a test stub; defaults to an ineligible first use.
+   * @param signal - caller lifetime.
+   * @returns the stubbed Workspace, or undefined when initialization is ineligible.
+   */
+  async initializeDefault(signal?: AbortSignal): Promise<WorkspaceView | undefined> {
+    this.calls.push({ method: 'initializeDefault', args: [signal] })
+    const stub = this.stubs.get('initializeDefault')
+    return await (stub?.(signal) as Promise<WorkspaceView | undefined> | undefined)
   }
 
   /**
@@ -100,21 +128,6 @@ export class TestWorkspaces implements IWorkspaces {
     const stub = this.stubs.get('rename')
     if (stub !== undefined) return await (stub(workspaceId, title) as Promise<WorkspaceView>)
     return { workspaceId, title, path: `/${title}`, sessionIds: [] } as unknown as WorkspaceView
-  }
-
-  /**
-   * Update a Workspace's sidepaths (recorded).
-   * @param workspaceId - target Workspace.
-   * @param additionalPaths - explicit sidepaths for new Sessions.
-   * @returns the updated fixture view.
-   */
-  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
-    this.calls.push({ method: 'updatePaths', args: [workspaceId, additionalPaths] })
-    const stub = this.stubs.get('updatePaths')
-    if (stub !== undefined) return await (stub(workspaceId, additionalPaths) as Promise<WorkspaceView>)
-    const workspace = this.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
-    if (workspace === undefined) throw new Error('unknown workspace fixture')
-    return { ...workspace, additionalPaths }
   }
 
   /**
@@ -164,6 +177,60 @@ export class TestWorkspaces implements IWorkspaces {
     }
     await this.update((draft) => {
       draft.archivedSessionIds = [...draft.archivedSessionIds, sessionId]
+    })
+  }
+
+  /**
+   * Unarchive a session (recorded). The default mirrors the production face's
+   * observable effect: the id leaves the list state's archive set.
+   * @param sessionId - session to unarchive.
+   */
+  async unarchiveSession(sessionId: SessionId): Promise<void> {
+    this.calls.push({ method: 'unarchiveSession', args: [sessionId] })
+    const stub = this.stubs.get('unarchiveSession')
+    if (stub !== undefined) {
+      await (stub(sessionId) as Promise<void>)
+      return
+    }
+    await this.update((draft) => {
+      draft.archivedSessionIds = draft.archivedSessionIds.filter(id => id !== sessionId)
+    })
+  }
+
+  /**
+   * Pin a session (recorded). The default mirrors the production face's
+   * observable effect: the id leads the list state's pin set.
+   * @param sessionId - session to pin.
+   */
+  async pinSession(sessionId: SessionId): Promise<void> {
+    this.calls.push({ method: 'pinSession', args: [sessionId] })
+    const stub = this.stubs.get('pinSession')
+    if (stub !== undefined) {
+      await (stub(sessionId) as Promise<void>)
+      return
+    }
+    await this.update((draft) => {
+      draft.pinnedSessionIds = [
+        sessionId,
+        ...draft.pinnedSessionIds.filter(id => id !== sessionId),
+      ]
+    })
+  }
+
+  /**
+   * Unpin a session (recorded). The default mirrors the production face's
+   * observable effect: the id leaves the list state's pin set.
+   * @param sessionId - session to unpin.
+   */
+  async unpinSession(sessionId: SessionId): Promise<void> {
+    this.calls.push({ method: 'unpinSession', args: [sessionId] })
+    const stub = this.stubs.get('unpinSession')
+    if (stub !== undefined) {
+      await (stub(sessionId) as Promise<void>)
+      return
+    }
+    await this.update((draft) => {
+      draft.pinnedSessionIds = draft.pinnedSessionIds.filter(id => id !== sessionId)
     })
   }
 }

@@ -15,23 +15,6 @@ import type {
   ActionsDecl, BakedActions, ObservableSnapshot, StoreHandle, StoreInstance, StoreSpec,
 } from './contract.ts'
 
-/** Move a browser-local persisted value once when its namespaced key is introduced.
- * @param legacyKey - unscoped persisted key.
- * @param nextKey - environment-scoped replacement key.
- */
-export function migrateLocalStorageKey(legacyKey: string, nextKey: string): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    if (localStorage.getItem(nextKey) !== null) return
-    const legacy = localStorage.getItem(legacyKey)
-    if (legacy === null) return
-    localStorage.setItem(nextKey, legacy)
-    localStorage.removeItem(legacyKey)
-  } catch {
-    // Persistence remains best-effort for denied or unavailable browser storage.
-  }
-}
-
 // Store contract types are ui-slots authority; re-exported beside the engine
 // so store consumers get one import path.
 export type {
@@ -239,9 +222,6 @@ export function defineStore<T, A extends ActionsDecl<T>>(
       const persistKey = decl.persist === undefined
         ? undefined
         : scopeKey === undefined ? decl.persist : `${decl.persist}.${scopeKey}`
-      if (decl.persist !== undefined && scopeKey !== undefined && persistKey !== undefined) {
-        migrateLocalCompoundScope(decl.persist, scopeKey, persistKey)
-      }
       const store = createSnapshotStore<T>(
         decl.init(),
         persistKey !== undefined ? { persist: { name: persistKey } } : undefined)
@@ -266,28 +246,5 @@ export function defineStore<T, A extends ActionsDecl<T>>(
         },
       }
     },
-  }
-}
-
-/** Move pre-environment local Session state into its compound Host key once. */
-function migrateLocalCompoundScope(baseKey: string, scopeKey: string, nextKey: string): void {
-  if (typeof localStorage === 'undefined') return
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(scopeKey) as unknown
-  } catch {
-    return
-  }
-  if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== 'local'
-    || typeof parsed[1] !== 'string') return
-  try {
-    if (localStorage.getItem(nextKey) !== null) return
-    const legacyKey = `${baseKey}.${parsed[1]}`
-    const legacy = localStorage.getItem(legacyKey)
-    if (legacy === null) return
-    localStorage.setItem(nextKey, legacy)
-    localStorage.removeItem(legacyKey)
-  } catch {
-    // Persistence remains best-effort, matching attachPersistence.
   }
 }

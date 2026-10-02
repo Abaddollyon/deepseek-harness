@@ -9,10 +9,16 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'user-approval': { kind: 'user-approval' } & ContextFormed
+  }
+}
+
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-pending-interactions'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
 declare module '@deepseek-ai/cordis' {
@@ -77,6 +83,7 @@ const ASK_SENTENCE = 'Approval policy: ask. Operations that require approval may
  */
 function hasOpenTurn(session: Session): boolean {
   for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const type = session.eventAt(SessionSeq(seq))?.type
     if (type === 'turn/start') return true
     if (type === 'turn/end') return false
@@ -183,7 +190,7 @@ export class ApprovalService extends Service {
         type: 'text',
         text: `The approval policy changed from "${previous}" to "${policy}" (changed by the user).`,
       }],
-      source: { kind: 'plugin', plugin: 'user-approval' },
+      source: { kind: 'user-approval' },
     }))
   }
 
@@ -244,6 +251,7 @@ export class ApprovalService extends Service {
    */
   overrideOf(session: Session): ApprovalPolicy | undefined {
     for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = session.eventAt(SessionSeq(seq))
       if (event?.type === 'approval/policy') return event.data.policy
     }
@@ -265,10 +273,6 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
-    const endPending = this.ctx.get('pendingInteractions')?.begin({
-      kind: 'approval',
-      agent: req.agent,
-    })
     // Enter the promise chain BEFORE dispatching: a listener that throws
     // SYNCHRONOUSLY (before its first await) must land in the same rejection
     // path as an async one — `Promise.resolve(call())` would let it escape
@@ -286,24 +290,20 @@ export class ApprovalService extends Service {
       // tool call open — the seam contains its callbacks.
       () => 'unavailable',
     )
-    try {
-      if (signal === undefined) return await answer
-      return await new Promise<ApprovalOutcome>((resolve) => {
-        const onAbort = () => {
-          signal.removeEventListener('abort', onAbort)
-          resolve('cancelled')
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-        void answer.then((outcome) => {
-          signal.removeEventListener('abort', onAbort)
-          // After an abort won the race this resolve is a settled-promise no-op:
-          // the late answer is discarded by construction.
-          resolve(outcome)
-        })
+    if (signal === undefined) return answer
+    return await new Promise<ApprovalOutcome>((resolve) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort)
+        resolve('cancelled')
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      void answer.then((outcome) => {
+        signal.removeEventListener('abort', onAbort)
+        // After an abort won the race this resolve is a settled-promise no-op:
+        // the late answer is discarded by construction.
+        resolve(outcome)
       })
-    } finally {
-      endPending?.()
-    }
+    })
   }
 }
 

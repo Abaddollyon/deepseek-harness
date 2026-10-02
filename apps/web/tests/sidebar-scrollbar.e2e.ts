@@ -83,7 +83,7 @@ function measureList(page: Page): Promise<ListMetrics> {
       })
       .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule)
       .filter(rule => rule.selectorText === '::-webkit-scrollbar-thumb:hover')
-      .map(rule => rule.style.getPropertyValue('background'))
+      .map(rule => rule.style.getPropertyValue('background-color'))
     const style = getComputedStyle(list)
     const pseudoWidth = getComputedStyle(list, '::-webkit-scrollbar').width
     const barWidth = pseudoWidth === 'auto' ? 15 : Number.parseFloat(pseudoWidth)
@@ -246,7 +246,7 @@ async function pointAt(page: Page, where: 'list' | 'away'): Promise<void> {
 
 /**
  * Reveal the seeded rows: every seeded session is unattached, so they all sit
- * in the collapsed Chats bucket. Open the bucket, then use its transient
+ * in the collapsed Ungrouped bucket. Open the bucket, then use its transient
  * Show-more control because an open group intentionally renders only five
  * rows by default. Hand-rolled polling because
  * `expect.poll` is test-scoped and this runs in `beforeAll`.
@@ -269,7 +269,7 @@ async function expandSeededSessions(page: Page): Promise<void> {
     }
     if (await bucket.getAttribute('aria-expanded') === 'true' && await rows.count() > SEED_COUNT / 2) return
     if (Date.now() > deadline) {
-      throw new Error(`Chats bucket never revealed more than ${SEED_COUNT / 2} rows`)
+      throw new Error(`Ungrouped bucket never revealed more than ${SEED_COUNT / 2} rows`)
     }
     await page.waitForTimeout(200)
   }
@@ -376,9 +376,9 @@ describe('web e2e: sidebar session list scrollbar (reserved gutter / themed thum
     // the hover token included.
     expect(light.standardWidth).toBe('auto')
     expect(light.standardColor).toBe('auto')
-    // The pseudo-element path is the one in force: the sheet's own 8px sizing
+    // The pseudo-element path is the one in force: the sheet's own 5px sizing
     // and transparent track reached a container it never names.
-    expect(light.width).toBe('8px')
+    expect(light.width).toBe('5px')
     expect(light.track).toBe('rgba(0, 0, 0, 0)')
     // The resting and the hover rule each read the rebindable indirection, and
     // the two resolve to DIFFERENT colours on this list: the l1 pair arrived

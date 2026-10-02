@@ -15,15 +15,15 @@
  * @module
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { Client, type Transport } from '@modelcontextprotocol/client'
 import type { Context } from '@deepseek-ai/cordis'
+import { assertNever, type JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { ServerContext } from './server-context.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
-import type { Config, StdioConfig, StreamableHttpConfig } from './index.ts'
+import type { Config } from './index.ts'
 
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
@@ -44,6 +44,9 @@ export const RECONNECT_DEFAULTS: Required<ReconnectConfig> = Object.freeze({
   maxDelayMs: 30_000,
   maxAttempts: 10,
 })
+
+/** Default UTF-8 byte limit for attributed server instructions. */
+export const DEFAULT_MAX_INSTRUCTION_BYTES = 32_768
 
 // The SDK's stdio transport owns two two-second termination grace periods.
 // Keep one additional second for the process-close event that proves the old
@@ -96,39 +99,8 @@ export interface ConnectionOutcome {
   error?: unknown
 }
 
-/**
- * Why the authority over a host-managed connection told consumers to
- * re-evaluate it. Transport-level outages never appear here — they stay on
- * the ordinary reconnect path.
- */
-export type ConnectionInvalidation = 'revoked' | 'invalid-grant' | 'stale' | 'config-changed' | 'reauthorized' | 'removed'
-
-/**
- * External authority over one connection's transport availability, supplied
- * by the Host connection owner for `host-connection` configs. The supervisor
- * re-evaluates {@link connect} fresh at every generation start and never
- * caches its result across an invalidation, so a revoked or removed
- * connection hands no transport and cannot resurrect on its own.
- */
-export interface ConnectionSource {
-  /**
-   * Resolve the transport for the NEXT generation.
-   * @param signal - aborted when this attempt is superseded (an invalidation or disposal).
-   * @returns a fresh transport, or `undefined` while the authority holds the
-   *   connection down (unauthorized, revoked, unavailable, or removed).
-   */
-  connect(signal: AbortSignal): Promise<Transport | undefined>
-  /**
-   * Subscribe to authority changes: revocation, scope or config changes,
-   * re-authorization, removal.
-   * @param listener - invoked synchronously with the withdrawal reason.
-   * @returns the unsubscriber.
-   */
-  onInvalidate(listener: (reason: ConnectionInvalidation) => void): () => void
-}
-
 /** Handle for one plugin instance's supervised connection. */
-export interface ConnectionHandle {
+export interface ConnectionHandle extends ServerContext {
   /**
    * Settles when the first connection attempt completes (success or failure).
    * The supervisor enters its reconnect loop regardless; the caller decides
@@ -136,9 +108,9 @@ export interface ConnectionHandle {
    */
   ready: Promise<ConnectionOutcome>
   /**
-   * Stop reconnection, close the live client, wait for the in-flight attempt
-   * and queued tool syncs to quiesce, then unregister every tool this server
-   * still owns.
+   * Stop reconnection, close the negotiating transport or live client, wait
+   * for the in-flight attempt and queued tool syncs to quiesce, then
+   * unregister every tool this server still owns.
    */
   dispose(): Promise<void>
 }
@@ -150,16 +122,11 @@ export interface ConnectionHandle {
  * @param ctx - Cordis context providing the `tools` registry and logger.
  * @param config - Resolved plugin config selecting the transport and server identity.
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
- * @param source - Host connection authority for `host-connection` configs; omission keeps the legacy static/stdio behavior.
  * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
  */
-export function startConnection(
-  ctx: Context, config: Config, policy: ResolvedReconnectPolicy, source?: ConnectionSource,
-): ConnectionHandle {
-  if (source === undefined && config.transport === 'host-connection') {
-    throw new Error(`mcp-client(${config.serverName}): host-connection config requires a connection source from the Host connection owner`)
-  }
+export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  const incompleteDisposalMessage = `${label}: transport closure could not be confirmed during disposal — server shutdown may be incomplete`
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
@@ -173,12 +140,12 @@ export function startConnection(
     : opts
 
   let disposed = false
-  /** A close timeout permanently fences re-establishment for this handle, including queued authority bounces. */
-  let closeBarrierFailed = false
+  const maxInstructionBytes = config.maxInstructionBytes ?? DEFAULT_MAX_INSTRUCTION_BYTES
+  let serverInstructions = ''
   /** Current generation: the connecting or connected client; undefined during backoff waits and after final failure. */
   let client: Client | undefined
-  /** Close signal paired with {@link client}; captured by dispose before current ownership is cleared. */
-  let clientClosed: Promise<void> | undefined
+  /** Transport-aware close operation paired with {@link client}. */
+  let closeClient: (() => Promise<boolean>) | undefined
   /** Live tool registrations owned by this server; only {@link enqueueSync} and dispose swap it. */
   let disposers: ToolDisposers = new Map()
   let reconnectTimer: NodeJS.Timeout | undefined
@@ -188,12 +155,6 @@ export function startConnection(
   let connectedAt: number | undefined
   /** The real error from the first connection attempt, for startup-await diagnostics. */
   let firstAttemptError: unknown
-  /** Abort handle for the in-flight attempt; authority bounces and disposal cancel source work through it. */
-  let attemptController: AbortController | undefined
-  /** Whether the current authority-down hold was already logged, so repeats stay quiet. */
-  let holdLogged = false
-  /** Settled tail serializing authority bounces the way syncChain serializes tool syncs. */
-  let bounceChain: Promise<void> = Promise.resolve()
 
   /** A generation may act only while it is the current one on a live plugin. */
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
@@ -215,114 +176,36 @@ export function startConnection(
     return run
   }
 
-  /**
-   * Withdraw every tool this server still owns through the sync chain. The
-   * drop rides the chain (never a direct dispose) because an in-flight sync's
-   * phase-2 swap owns the same map — disposing here directly is the
-   * double-dispose the chain exists to prevent. When the chain is idle the
-   * drop runs on the next microtask, so registration withdrawal still
-   * precedes any close-barrier wait.
-   */
-  function enqueueToolDrop(): void {
-    syncChain = syncChain.then(() => {
-      for (const dispose of disposers.values()) dispose()
-      disposers = new Map()
-    })
-  }
-
   /** One disconnect decision per generation: the isCurrent guard makes racing close/error signals idempotent. */
   function generationDown(generation: Client): void {
     if (!isCurrent(generation)) return
     client = undefined
-    clientClosed = undefined
+    closeClient = undefined
     scheduleReconnect()
+  }
+
+  /** Decide retry ownership after a failed connection's close barrier settles. */
+  function settleFailedGeneration(generation: Client, quiesced: boolean): void {
+    if (!isCurrent(generation)) return
+    if (!quiesced) {
+      client = undefined
+      closeClient = undefined
+      ctx.logger.error(`${label}: failed generation could not confirm transport closure — reconnect stopped to avoid overlapping server processes; reload the plugin or restart the Host to retry`)
+      return
+    }
+    generationDown(generation)
   }
 
   /** Wait for the transport-owned close signal without letting a broken transport wedge teardown forever. */
   function waitForClose(closed: Promise<void>): Promise<boolean> {
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        closeBarrierFailed = true
-        resolve(false)
-      }, GENERATION_CLOSE_TIMEOUT_MS)
+      const timeout = setTimeout(() => { resolve(false) }, GENERATION_CLOSE_TIMEOUT_MS)
       timeout.unref()
       void closed.then(() => {
         clearTimeout(timeout)
         resolve(true)
       })
     })
-  }
-
-  /**
-   * Authority withdrawal (revocation, scope/config change, reauthorization,
-   * removal). The synchronous half fences the live generation — late
-   * connect/close/sync signals from it can no longer act, no retry is armed,
-   * and in-flight source work is cancelled — then withdraws the tool
-   * registration before any asynchronous waiting. The async half closes the
-   * fenced generation behind the same close barrier disposal uses and only
-   * then re-evaluates the authority fresh, so a new transport never overlaps
-   * the old one. Not an outage: the attempt budget is reset, because the
-   * authority (like HMR for legacy configs) is the recovery path from the
-   * attempt-budget give-up state. A close-barrier timeout remains terminal
-   * for this handle, but authority withdrawal still fences work and drops tools.
-   */
-  function onSourceInvalidate(reason: ConnectionInvalidation): void {
-    if (disposed) return
-    failedAttempts = 0
-    holdLogged = false
-    if (reconnectTimer !== undefined) {
-      clearTimeout(reconnectTimer)
-      reconnectTimer = undefined
-    }
-    const current = client
-    const currentClosed = clientClosed
-    client = undefined
-    clientClosed = undefined
-    attemptController?.abort()
-    connectedAt = undefined
-    enqueueToolDrop()
-    if (closeBarrierFailed) return
-    ctx.logger.info(`${label}: host connection invalidated (${reason}); re-establishing`)
-    const bounced = bounceChain.then(async () => {
-      // A previous bounce's attempt may still be connecting: fence and close
-      // whatever it produced before this bounce replaces it, or its transport
-      // would leak (a fenced attempt is never closed by anyone else).
-      const stale = client ?? current
-      const staleClosed = client !== undefined ? clientClosed : currentClosed
-      client = undefined
-      clientClosed = undefined
-      attemptController?.abort()
-      if (stale !== undefined) {
-        try { await stale.close() } catch { /* transport already gone */ }
-        if (staleClosed !== undefined && !await waitForClose(staleClosed)) {
-          ctx.logger.error(`${label}: generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms during a host bounce — re-establishment stopped to avoid overlapping server processes; reload the plugin or restart the Host to retry`)
-          return
-        }
-      }
-      if (disposed || closeBarrierFailed) return
-      // Awaited, not just assigned: the next queued bounce starts only after
-      // this attempt settled, so two attempts never overlap.
-      settling = connectGeneration(false)
-      await settling
-    })
-    bounceChain = bounced.catch(() => {})
-  }
-
-  /**
-   * The authority holds the connection down (unauthorized, revoked,
-   * unavailable, or removed): settle startup-await, stay quiescent, and wait
-   * for the next invalidation instead of arming the reconnect loop.
-   * @param startup - whether this is the plugin's activation attempt.
-   */
-  function holdConnection(startup: boolean): void {
-    if (startup) {
-      firstAttemptError ??= new Error(`${label}: host connection is not available (unauthorized, revoked, unavailable, or removed)`)
-    }
-    connectedAt = undefined
-    if (!holdLogged) {
-      holdLogged = true
-      ctx.logger.info(`${label}: host connection is holding (not authorized); waiting for the host to signal a change`)
-    }
   }
 
   function scheduleReconnect(): void {
@@ -342,7 +225,11 @@ export function startConnection(
     if (failedAttempts > policy.maxAttempts) {
       // Enqueue the give-up disposal so it cannot race an in-flight sync's
       // phase-2 swap (which checks isCurrent inside the queue).
-      enqueueToolDrop()
+      syncChain = syncChain.then(() => {
+        for (const dispose of disposers.values()) dispose()
+        disposers = new Map()
+        serverInstructions = ''
+      })
       ctx.logger.error(`${label}: giving up after ${policy.maxAttempts} consecutive failed reconnect attempts — tools unregistered; reload the plugin or restart the Host to reconnect`)
       return
     }
@@ -368,44 +255,27 @@ export function startConnection(
    * @param startup - Whether this is the plugin's activation attempt.
    */
   async function connectGeneration(startup: boolean): Promise<void> {
-    const attempt = new AbortController()
-    attemptController = attempt
-    // Transport resolution is fresh at every generation start: an authority
-    // that went down since the last attempt yields no transport and the
-    // supervisor holds; an unstarted transport owns nothing yet, so the
-    // superseded-after-resolution branch simply discards it.
-    let transport: Transport | undefined
-    if (source !== undefined) {
-      try {
-        transport = await source.connect(attempt.signal)
-      } catch (error) {
-        if (firstAttemptError === undefined) {
-          firstAttemptError = new Error(`${label}: host connection transport resolution failed (${errorToken(error)})`)
-        }
-        if (disposed || attempt.signal.aborted) return
-        ctx.logger.warn(`${label}: host connection transport resolution failed (${errorToken(error)}); retrying per the reconnect policy`)
-        scheduleReconnect()
-        return
-      }
-      if (transport === undefined) {
-        holdConnection(startup)
-        return
-      }
-      if (disposed || attempt.signal.aborted) return
-      holdLogged = false
-    } else {
-      transport = createTransport(config as StdioConfig | StreamableHttpConfig)
-    }
     const generation = new Client(
       { name: 'dsh-mcp-client', version: '0.0.1' },
-      { capabilities: {} },
+      {
+        capabilities: {},
+        versionNegotiation: { mode: 'auto' },
+        listChanged: {
+          tools: {
+            autoRefresh: false,
+            debounceMs: 0,
+            onChanged: () => { void refreshTools() },
+          },
+        },
+      },
     )
     const closed: PromiseWithResolvers<void> = Promise.withResolvers()
     let attemptSettled = false
     let closeObserved = false
+    let transport: Transport | undefined
     const hasClosed = (): boolean => closeObserved
     client = generation
-    clientClosed = closed.promise
+    closeClient = closeGeneration
     generation.onclose = () => {
       closeObserved = true
       closed.resolve()
@@ -413,51 +283,52 @@ export function startConnection(
       // established generation can transition down directly from this signal.
       if (attemptSettled) generationDown(generation)
     }
-    // Registered before connect so a list change during the initial sync is
-    // queued behind it rather than dropped.
-    generation.setNotificationHandler(
-      ToolListChangedNotificationSchema,
-      async () => {
-        if (!isCurrent(generation)) return
-        ctx.logger.info(`${label}: tool list changed, re-syncing`)
-        try {
-          await enqueueSync(generation)
-        } catch (error) {
-          // Fetch-phase failure: the previous generation is still registered
-          // and `disposers` still owns it — keep serving the last good list.
-          if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
-        }
-      },
-    )
+    /** Unattached probes close through their transport; attached clients must also report transport closure. */
+    async function closeGeneration(): Promise<boolean> {
+      const attached = generation.transport !== undefined
+      try {
+        await (attached ? generation.close() : transport?.close())
+      } catch (_error) {
+        if (!attached) return hasClosed()
+      }
+      return !attached || hasClosed() || await waitForClose(closed.promise)
+    }
+    async function refreshTools(): Promise<void> {
+      if (!isCurrent(generation)) return
+      ctx.logger.info(`${label}: tool list changed, re-syncing`)
+      try {
+        await enqueueSync(generation)
+      } catch (error) {
+        if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
+      }
+    }
+    let instructions: string
     try {
+      transport = createTransport(config)
       await generation.connect(transport)
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)
         return
       }
+      if (!isCurrent(generation)) {
+        if (!await closeGeneration()) ctx.logger.error(incompleteDisposalMessage)
+        return
+      }
+      const serverText = generation.getInstructions()?.trimEnd() ?? ''
+      instructions = serverText ? `### MCP server: ${config.serverName}\n\n${serverText}` : ''
+      if (Buffer.byteLength(instructions) > maxInstructionBytes) {
+        throw new Error(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`)
+      }
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
       if (firstAttemptError === undefined) firstAttemptError = error
       // Disposal clears current ownership before it closes the generation, so
-      // only a live supervisor reports an attempt failure. Source-driven
-      // attempts report the fixed-vocabulary token: SDK/provider error
-      // messages can embed server payload and must never reach the log.
-      if (isCurrent(generation)) {
-        ctx.logger.warn(`${label}: connection attempt failed: ${source === undefined ? String(error) : `(${errorToken(error)})`}`)
-      }
-      try { await generation.close() } catch { /* transport already gone */ }
-      let quiesced = hasClosed()
-      if (!quiesced) quiesced = await waitForClose(closed.promise)
+      // only a live supervisor reports an attempt failure.
+      if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
+      const quiesced = await closeGeneration()
       attemptSettled = true
-      if (!isCurrent(generation)) return
-      if (!quiesced) {
-        client = undefined
-        clientClosed = undefined
-        ctx.logger.error(`${label}: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms — reconnect stopped to avoid overlapping server processes; reload the plugin or restart the Host to retry`)
-        return
-      }
-      generationDown(generation)
+      settleFailedGeneration(generation, quiesced)
       return
     }
     attemptSettled = true
@@ -466,14 +337,10 @@ export function startConnection(
       return
     }
     if (!isCurrent(generation)) return
+    serverInstructions = instructions
     connectedAt = Date.now()
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
   }
-
-  // Subscribe before the first attempt so an invalidation racing startup is
-  // never missed; the disposed fence makes late callbacks after teardown no-ops.
-  let unsubscribeSource: (() => void) | undefined
-  if (source !== undefined) unsubscribeSource = source.onInvalidate(onSourceInvalidate)
 
   /** The in-flight (or last settled) connection attempt; dispose awaits it for quiescence. */
   let settling = connectGeneration(true)
@@ -495,27 +362,41 @@ export function startConnection(
 
   return {
     ready,
+    instructions: () => serverInstructions,
+    resources: {
+      async request(request, exec): Promise<JsonValue> {
+        const generation = client
+        if (!generation || connectedAt === undefined) throw new Error(`${label}: server is disconnected`)
+        const options = { signal: exec.signal, timeout: config.toolCallTimeoutMs }
+        switch (request.method) {
+          case 'resources/list':
+            return await generation.listResources(
+              request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
+            ) as JsonValue
+          case 'resources/templates/list':
+            return await generation.listResourceTemplates(
+              request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
+            ) as JsonValue
+          case 'resources/read':
+            return await generation.readResource({ uri: request.uri }, options) as JsonValue
+          /* v8 ignore next 2 -- resource requests are the closed, typed tool operation union */
+          default:
+            return assertNever(request)
+        }
+      },
+    },
     async dispose(): Promise<void> {
       disposed = true
-      // Unsubscribe and cancel source work before anything else: after
-      // disposal starts, no invalidation may fence, close, or re-establish a
-      // generation.
-      unsubscribeSource?.()
-      unsubscribeSource = undefined
-      attemptController?.abort()
+      serverInstructions = ''
       if (reconnectTimer !== undefined) {
         clearTimeout(reconnectTimer)
         reconnectTimer = undefined
       }
-      const current = client
-      const currentClosed = clientClosed
+      const close = closeClient
       client = undefined
-      clientClosed = undefined
-      if (current !== undefined) {
-        try { await current.close() } catch { /* transport already gone */ }
-        if (currentClosed !== undefined && !await waitForClose(currentClosed)) {
-          ctx.logger.error(`${label}: generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms during disposal — server shutdown may be incomplete`)
-        }
+      closeClient = undefined
+      if (close !== undefined && !await close()) {
+        ctx.logger.error(incompleteDisposalMessage)
       }
       // Quiesce, don't just request it: the in-flight attempt enqueues its
       // sync before settling, so awaiting both leaves `disposers` final.
@@ -525,18 +406,4 @@ export function startConnection(
       disposers = new Map()
     },
   }
-}
-
-/**
- * Fixed-vocabulary failure token for logs and wrapped errors: an own string
- * `code`, else the error's class name — never the message, which external
- * SDK/provider errors can fill with server payload.
- * @param error - the failure to name.
- * @returns the safe token.
- */
-export function errorToken(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code
-  if (typeof code === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(code)) return code
-  if (error instanceof Error) return error.name
-  return 'unknown-error'
 }

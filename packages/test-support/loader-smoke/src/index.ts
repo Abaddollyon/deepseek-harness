@@ -12,7 +12,7 @@
  */
 
 import { clearedProxyEnv } from '@deepseek-ai/dsh-http-proxy'
-import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -27,35 +27,6 @@ const DEFAULT_PROCESS_TIMEOUT_MS = 30_000
 
 /** Vitest deadline that leaves room for the subprocess-owned 30-second diagnostic timeout. */
 export const LOADER_SMOKE_TEST_TIMEOUT_MS = DEFAULT_PROCESS_TIMEOUT_MS + 15_000
-
-/** Project-root marker used to stop upward workspace discovery at an owned cwd. */
-export const ISOLATED_PROJECT_ROOT_MARKER = '.git'
-
-/**
- * Anchor Loader discovery at a harness-owned cwd so ancestor worktrees cannot
- * contribute instructions or skills. Creates the marker when absent and keeps an
- * existing real marker directory. Any other pre-existing entry fails loud: a
- * symlinked or file marker would alias project state the harness does not own.
- * @param cwd - isolated process cwd.
- * @param stat - filesystem stat function, injectable for deterministic error-path tests.
- */
-export async function isolateWorkspaceProjectRoot(
-  cwd: string,
-  stat: typeof lstat = lstat,
-): Promise<void> {
-  const marker = join(cwd, ISOLATED_PROJECT_ROOT_MARKER)
-  const existing = await stat(marker).catch((error: unknown): undefined => {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    return undefined
-  })
-  if (existing === undefined) {
-    await mkdir(marker)
-    return
-  }
-  if (existing.isDirectory()) return
-  const kind = existing.isSymbolicLink() ? 'a symbolic link' : 'a non-directory entry'
-  throw new Error(`isolateWorkspaceProjectRoot: ${marker} already exists as ${kind}; an owned cwd must not alias foreign project state.`)
-}
 
 /** Which artifact an example bin is booted from: unbuilt `src` via tsx, or built `lib` via plain Node. */
 export type ExampleMode = 'src' | 'lib'
@@ -159,14 +130,10 @@ export function resolveExampleLaunch(options: ExampleLaunchOptions): ExampleLaun
   return { command: process.execPath, args: [options.libBin ?? toLibBin(options.srcBin), ...configArgs], env }
 }
 
-/** Inputs that vary between real-Loader example smokes. */
-export interface LoaderSmokeOptions {
+/** Inputs every real-Loader example smoke supplies. */
+interface LoaderSmokeBaseOptions {
   /** Human-readable example name used in failure diagnostics. */
   readonly label: string
-  /** Prefix for the isolated temporary process cwd. */
-  readonly tempDirPrefix: string
-  /** Existing parent for the generated cwd; defaults to the platform temporary directory. */
-  readonly tempDirParent?: string
   /** Absolute app-bin source path (`<pkg>/src/bin.ts`); the `lib` bin is derived from it. */
   readonly binScript: string
   /** Explicit plain-Node entry for `lib` mode; intended for test fixtures outside a package `src/` tree. */
@@ -179,6 +146,8 @@ export interface LoaderSmokeOptions {
   readonly tsconfigPath: string
   /** Boot from source via tsx (`src`) or built lib via plain Node (`lib`); defaults to the environment's mode. */
   readonly mode?: ExampleMode
+  /** Source hook selection; see {@link ExampleLaunchOptions.sourceImport}. */
+  readonly sourceImport?: 'tsx/esm'
   /** Environment overrides layered over the parent and isolated DSH homes. */
   readonly env?: Readonly<NodeJS.ProcessEnv>
   /** Process deadline override for harness tests. */
@@ -196,6 +165,27 @@ export interface LoaderSmokeOptions {
   readonly expectedExitCode?: number
 }
 
+/**
+ * Inputs that vary between real-Loader example smokes. The cwd is either one
+ * the harness expands from a prefix and owns, or a caller-provided directory it
+ * reuses and leaves in place; the two cannot be combined.
+ */
+export type LoaderSmokeOptions = LoaderSmokeBaseOptions & (
+  | {
+    /** Prefix for the isolated temporary process cwd. */
+    readonly tempDirPrefix: string
+    /** Existing parent for the generated cwd; defaults to the platform temporary directory. */
+    readonly tempDirParent?: string
+    readonly cwd?: never
+  }
+  | {
+    /** Existing directory to use as the process cwd; the caller owns its cleanup. */
+    readonly cwd: string
+    readonly tempDirPrefix?: never
+    readonly tempDirParent?: never
+  }
+)
+
 /** Captured output from a Loader smoke that exited successfully. */
 export interface LoaderSmokeResult {
   /** Complete stdout after clean exit. */
@@ -204,24 +194,36 @@ export interface LoaderSmokeResult {
   readonly stderr: string
 }
 
+/** Whether the options supply the cwd instead of a prefix the harness expands. */
+function hasProvidedCwd(
+  options: LoaderSmokeOptions,
+): options is LoaderSmokeBaseOptions & { readonly cwd: string } {
+  return options.cwd !== undefined
+}
+
 /**
  * Boot one real Loader tree from an isolated cwd, close stdin immediately, and
- * await a clean exit. The helper owns process kill and temp-directory cleanup on
- * every outcome, and picks src/lib via {@link resolveExampleLaunch}.
+ * await a clean exit. The helper owns process kill on every outcome and removes
+ * the temporary directory it created; a caller-provided cwd is left in place so
+ * consecutive smokes can share one world. It picks src/lib via
+ * {@link resolveExampleLaunch}.
  * @param options - example paths, mode, environment, and diagnostic identity.
  * @returns captured stdout and stderr after a zero exit.
  */
 export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<LoaderSmokeResult> {
-  const cwd = await mkdtemp(join(options.tempDirParent ?? tmpdir(), options.tempDirPrefix))
+  const providedCwd = hasProvidedCwd(options)
+  const cwd = providedCwd
+    ? options.cwd
+    : await mkdtemp(join(options.tempDirParent ?? tmpdir(), options.tempDirPrefix))
   const processTimeoutMs = options.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS
   try {
     await options.prepare?.(cwd)
-    await isolateWorkspaceProjectRoot(cwd)
     const launch = resolveExampleLaunch({
       srcBin: options.binScript,
       libBin: options.libBinScript,
       configArgs: options.binArgs ?? [options.configPath],
       ...options.mode !== undefined ? { mode: options.mode } : {},
+      ...options.sourceImport !== undefined ? { sourceImport: options.sourceImport } : {},
       tsconfigPath: options.tsconfigPath,
       env: {
         DSH_HOME: join(cwd, '.dsh'),
@@ -252,6 +254,6 @@ export async function runLoaderSmoke(options: LoaderSmokeOptions): Promise<Loade
     await options.inspect?.(cwd)
     return { stdout: result.stdout, stderr: result.stderr }
   } finally {
-    await rm(cwd, { recursive: true, force: true })
+    if (!providedCwd) await rm(cwd, { recursive: true, force: true })
   }
 }

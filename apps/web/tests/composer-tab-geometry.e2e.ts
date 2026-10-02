@@ -192,7 +192,7 @@ async function openSeededSession(page: Page): Promise<void> {
   // Search collapsed into a header action; expand it before filling.
   const searchButton = page.getByRole('button', { name: 'Search sessions' })
   if (await searchButton.getAttribute('aria-expanded') !== 'true') await searchButton.click()
-  const search = page.getByRole('textbox', { name: 'Search sessions...', exact: true })
+  const search = page.getByRole('textbox', { name: 'Search session names', exact: true })
   await search.fill(FIXTURE.markers.user(1))
   const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
   const deadline = Date.now() + 60_000
@@ -282,10 +282,11 @@ describe('web e2e: input card position across view tabs', () => {
     // width. The seat compensates instead, which the next test asserts.
     expect(comparison.trajectory.gutter).toBe('auto')
     expect(comparison.trajectory.band).toBe(0)
-    // Feature views own a bounded viewport and their own scrollers; the outer
-    // transcript container must not carry its retained scroll position into it.
-    expect(comparison.trajectory.overflowY).toBe('clip')
-    expect(comparison.trajectory.overflowX).toBe('clip')
+    // Declared as a scroll container on both axes rather than left to compute:
+    // `overflow: hidden` would drop any reservation in WebKit, and a `visible`
+    // horizontal axis computes to `auto` beside a scrolling one.
+    expect(comparison.trajectory.overflowY).toBe('auto')
+    expect(comparison.trajectory.overflowX).toBe('hidden')
     // Only Chat scrolls this box; the Trajectory view owns its own scrollers.
     expect(comparison.trajectory.scrolls).toBe(false)
     expect(tripwire.pageErrors).toEqual([])

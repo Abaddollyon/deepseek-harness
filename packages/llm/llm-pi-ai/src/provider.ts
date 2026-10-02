@@ -19,12 +19,12 @@
  * @module dsh-llm-pi-ai/provider
  */
 
-import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, ApiKeyAuth, Model, Provider, ProviderStreams } from '@earendil-works/pi-ai'
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy'
-import { catalogProvider } from './catalog.ts'
+import { catalogProvider, PiAiCatalogError } from './catalog.ts'
+import { createProvider } from './models.ts'
 
 /**
  * Wire protocols a configured route may name, mapped to pi-ai's lazily loaded
@@ -104,6 +104,12 @@ export interface ProviderSpec {
    * request, never at construction.
    */
   namesCredential: boolean
+  /**
+   * `proxy` authenticates with the harness-resolved route key alone, so no
+   * provider-native method — stored OAuth, ambient environment — is offered.
+   * Absent means `provider`.
+   */
+  authMode?: 'provider' | 'proxy'
 }
 
 /**
@@ -124,12 +130,16 @@ export interface ProviderSpec {
  * method beside the provider's own restores that route. A keyless profile adds
  * nothing and still reports the honest refusal, because this adapter resolves
  * credentials through its own seam and holds no OAuth store to fall back on.
+ *
+ * A proxy route takes the harness method alone, catalog or not: the gateway
+ * owns provider accounts, so the catalog's OAuth and ambient methods must
+ * never resolve its requests.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.
  */
 function routeAuth(spec: ProviderSpec, catalog: Provider | undefined): Provider['auth'] {
-  if (catalog === undefined) return { apiKey: harnessApiKeyAuth(spec.displayName) }
+  if (catalog === undefined || spec.authMode === 'proxy') return { apiKey: harnessApiKeyAuth(spec.displayName) }
   if (catalog.auth.apiKey !== undefined || !spec.namesCredential) return catalog.auth
   return { ...catalog.auth, apiKey: harnessApiKeyAuth(spec.displayName) }
 }
@@ -176,7 +186,7 @@ export function buildProvider(spec: ProviderSpec): Provider {
   // replaces each catalog model's own. So the route has a single API.
   const factory = spec.api === undefined ? undefined : PROTOCOLS[spec.api]
   if (factory === undefined) {
-    throw new Error(
+    throw new PiAiCatalogError(
       `llm-pi-ai: provider "${spec.provider}" names api "${spec.api}", which this build cannot serve;`
       + ` supported protocols are ${supportedProtocols().join(', ')}`,
     )

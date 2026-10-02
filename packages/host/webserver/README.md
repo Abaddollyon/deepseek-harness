@@ -38,9 +38,7 @@ Compose the webserver as the HTTP transport of a browser-facing host, then let t
 
 `host` accepts exactly two values: `127.0.0.1` (default posture, loopback only) and `0.0.0.0` (deliberate network exposure — the server carries no TLS, authentication, or origin policy of its own). `port` 0 requests an OS-assigned port; `ctx.webServer.port` reads the listening port afterwards.
 
-The carrier applies `compress` (default `true`) to eligible socket-backed responses without changing route APIs. It negotiates Brotli first and gzip fallback from `Accept-Encoding`; text and structured-text media are eligible, while existing encodings, `Cache-Control: no-transform`, range responses, SSE, ZIP, and the packaged `.gz` Worker image remain unchanged. Bodies below `compressMinBytes` (default `1024`) remain uncompressed; larger bodies stream through the selected compressor. `brotliQuality` (default `5`) and `gzipLevel` (default `6`) control request-time encoding.
-
-The same carrier supplies `Cache-Control` when a route leaves it unset. Only response paths under `immutablePathPrefixes` (default `/assets/`) receive `public, max-age=31536000, immutable`; query parameters such as `?rev=<hash>` do not qualify, and the carrier's default for HTML is `no-cache`. Unprefixed plugin, API, source-map, and other responses remain `no-cache` unless the route supplies its own directive; a route-provided `Cache-Control` wins.
+Set `compression: 'gzip'` to wrap eligible socket-backed responses without changing route APIs. The client must accept gzip and the media type must be compressible or `multipart/form-data`; known response lengths below `compressionThresholdBytes` remain uncompressed, while unknown-length streams are eligible immediately. Existing encodings, `Cache-Control: no-transform`, range responses, SSE, ZIP, and the packaged `.gz` Worker image remain unchanged. The shipped Web bundle uses compression level 1 with a 1024-byte threshold; other compositions default to no compression.
 
 ### Registering routes
 
@@ -50,7 +48,7 @@ The same carrier supplies `Cache-Control` when a route leaves it unset. Only res
 
 `registerFallback(handler)` claims the one handler for every request no named route matches. A second registration throws; while no fallback is registered the server answers 404. In the shipped Web composition the [SPA dist server](../frontend-static/README.md) owns the seat and calls `renderIndex` on every index response it renders.
 
-Index startup inputs are two layers. `collectIndexInjections()` gathers a fresh injection table — one `webserver/index-inject` emit per call, each subscriber pushing its current rows — and `renderIndex(html)` renders those rows into the index.html body before applying the raw `tapIndex(transform)` transforms in registration order. The row union is closed: adding a row kind requires a renderer case, so the compiler—not a runtime fallback—detects an unsupported kind. Rendering always appends the boot-readiness script before placing body rows, so the body group is never empty; body-less fragments use the append fallback, while documents with a body tag use insertion after that tag. A `script-preload` row renders an advisory classic-script preload link. Static deployments carry the same rows in their boot payload. `applyIndexTaps(html)` applies only the raw transforms; it is the escape hatch for markup no row expresses.
+Index startup inputs are two layers. `collectIndexInjections()` gathers a fresh injection table — one `webserver/index-inject` emit per call, each subscriber pushing its current rows — and `renderIndex(html)` renders those rows into the index.html body before applying the raw `tapIndex(transform)` transforms in registration order. A `script-preload` row renders an advisory classic-script preload link. Static deployments carry the same rows in their boot payload. `applyIndexTaps(html)` applies only the raw transforms; it is the escape hatch for markup no row expresses. Both index methods take an optional `IndexRenderContext` whose `variant` reaches every listener; an index owner sets it to render an alternative index such as a client surface, and listeners that ignore it contribute the same rows to every index.
 
 ### Behavior under failure
 
@@ -79,8 +77,6 @@ The package is a plain route registry with no harness vocabulary: `WebServer` ex
 | [`src/index.ts`](src/index.ts) | `WebServer` service: route tables, fallback seat, index rendering, matching, lifecycle |
 | — | No runtime invariant companion is published; route registration and disposal mutate one route table through the same service, so a register/dispose probe only re-executes the implementation. Real routing and HMR tests own the behavior. |
 | [`src/injections.ts`](src/injections.ts) | Structured `IndexInjection` rows and `renderIndexInjections` row rendering |
-| [`src/response-policy.ts`](src/response-policy.ts) | Per-response encoding and cache-header patch |
-| [`src/response-cache.ts`](src/response-cache.ts) / [`src/response-encoding.ts`](src/response-encoding.ts) | Cache classification and content-coding negotiation |
 
 </details>
 

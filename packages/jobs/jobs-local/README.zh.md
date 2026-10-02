@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它以进程本地实时状态和全新快照实现 `dsh-jobs` 约定。启用 `persist: true` 并挂载 `ctx.jobStore` 后，记录可跨宿主重启，用于诚实结算或由生产方控制的重新采用；生产方执行本身仍是进程本地的。
+`dsh-jobs-local` 在 agent（智能体）继续推进时，于 harness 进程内运行后台任务。拥有任务的 agent 可以读取、等待、列出和取消任务；同时挂载 `dsh-tool-jobs` 时，还会收到会话内完成通知。可配置的并发与输出保留上限约束资源使用。生产方可以提供供定期读取的输出，也可以直接追加；用户可以观察保留的输出，而不消耗 agent 尚未读取的内容。任务在拥有者或 harness 关闭时结束。
 
 ## 目录
 
@@ -29,11 +29,11 @@ kind: "package-reference"
 
 ### 何时选择
 
-当生产方在进程本地运行时选择它；若需要重启核算，可再配合持久记录 store 与运行监督器。当需要跨进程延续的是生产方执行本身，而不只是记录与恢复载荷时，应使用其他 provider。
+当任务应存活于 harness 进程内、并随进程终止时选择它。当工作必须跨重启存活或跨进程存在时避免它：记录保存在内存中，持久或跨进程后端必须以不同方式实现同一约定。
 
 ### 最小配置
 
-加载插件会注册 `ctx.jobs`。持久注册要求启用 `persist: true` 并挂载 `ctx.jobStore`；普通任务不需要这两项。
+加载插件即注册 `ctx.jobs`；每个字段都是可选的。
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -41,11 +41,10 @@ kind: "package-reference"
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享无所有者桶中，`running` 加 `stopping` 任务的最大数量。 |
-| `persist` | `false` | 将记录镜像到已挂载的 `ctx.jobStore`，并启用有确认的持久启动。 |
-| `maxSettledJobs` | `100` | 每个所有者保留的已报告终态记录；未报告记录不会因容量压力被逐出。 |
-| `teardownGraceMs` | `10000` | teardown 中等待生产方释放以及最终持久镜像落位的界限。 |
-| `maxPersistedOutputBytes` | `65536` | 持久输出的 UTF-8 字节预算；工作流结构化 JSON 标记会保留 `originalChars` 与 `spillPath`，只缩短 `preview`（必要元数据可能超过极小预算）。原始流生产者保留既有尾部截断语义，其流级截断元数据仍对调用者可见。 |
+| `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享的无主桶中，`running` 加 `stopping` 任务的最大数量 |
+| `retainBytes` | `262144` | 每个任务输出环的运行期保留量，UTF-8 字节 |
+| `settledRetainBytes` | `16384` | 任务结算后保留的环容量，UTF-8 字节；模型尚未读取的字节保留到它的首次终态读取 |
+| `pumpPollMs` | `150` | 任务拉取源的轮询间隔，毫秒 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
 
@@ -73,10 +72,11 @@ kind: "package-reference"
 
 ### 设计理念
 
-- **内存记录，全新快照。** `LocalJobRegistry` 为每个任务保存一条 `TrackedTask`，每次调用都投影出新的只读快照；调用方永远不会拿到实时状态。
-- **按所有者分层，一个进程级注册表。** 控制器、完成监听器与变更观察者归档到注册方所在的 scope（`ScopedLayers`），读取把全局层与所有者的 scope 链求并集——因此某个 preset 的任务控制绝不会为自身组合未加载任何控制器的 agent 保持 `start()` 可用，一次结算也只会抵达其所有者所属组合注册的监听器。
+- **内存记录、全新投影。** `LocalJobRegistry` 为每个任务保存一份 `TrackedJob`——生命周期状态、输出环与模型游标——每次调用都投影新的只读视图或块副本；调用方永远拿不到实时状态。
+- **环的保留量有界。** 追加超出运行期上限时丢弃最老的保留块（单个超限块保留其 UTF-8 安全尾部）；低于保留窗口的读取得到 lossy 结果而非错误。结算时裁剪到结算上限，但绝不低于模型游标尚未消费的字节数，因此在首次 `job_output` 之前结束的任务会交出运行期上限保留的全部输出；那次终态读取之后才裁剪到结算上限。
+- **按所有者分层，一个进程级注册表。** 控制器与 `{ owners: 'scope' }` 订阅归档到注册方所在的 scope（`ScopedLayers`），读取把全局层与所有者的 scope 链求并集——因此某个 preset 的任务控制绝不会为自身组合未加载任何控制器的 agent 保持 `start()` 可用，一次带 scope 的结算也只会抵达其所有者所属组合注册的监听器。
 - **启动前先预检。** `start()` 在调用生产方之前检查控制器服务、spec 有效性、仍存活的所有权与容量，因此拒绝不会留下 job id 或执行资源；注册一旦提交，后续不再有可失败步骤。
-- **结算首次优先，完成最后。** 最早的终止结果只记录一次，释放等待方，并只通知监听器一次，各监听器故障单独隔离；完成在记录提交且可见集变更发布之后才宣布，因为报告方可能同步开启一个模型轮次。
+- **结算首次优先，事件最后。** 最早的终止结果只记录一次，等待泵的最后一次排干，裁剪环，释放等待方，然后投递一次带逐监听器隔离的 `settled` 事件，再跟上环的最终 `output` 信号。
 - **销毁永不死锁。** 抛出的取消会强制失败记录并报告可能的孤立工作，而不是让释放停滞。
 
 ### 源码地图
@@ -84,19 +84,22 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、`LocalJobRegistry`、准入、生命周期、销毁 |
-| — | 不发布运行时不变式伴生入口；快照检查位于 `dsh-jobs/invariant`。 |
+| [`src/events.ts`](src/events.ts) | 按 scope 分层的事件路由：`{ owner }`、`{ owners: 'all' }` 与 `{ owners: 'scope' }` 订阅 |
+| [`src/ring.ts`](src/ring.ts) | 每个任务的有界输出环：追加、保留裁剪、按偏移读取 |
+| [`src/pump.ts`](src/pump.ts) | 注册表拥有的拉取泵：每个任务一个定时器，结算前最后一次排干 |
+| — | 不发布运行时不变式伴生入口；事件协议与事件对读取的检查位于 `@deepseek-ai/dsh-jobs/invariant`。此提供方的准入决策使用私有配置，并且必须在后端启动器运行前失败；当前生产方由 `LocalJobRegistry.start()` 同步执行该决策。发布后再重复聚合只会向 companion 暴露私有配置，也无法验证失败发生在启动前。 |
 
 ### scope 分层
 
-`attachController`、`onJobDone` 与 `onJobsChanged` 注册到调用上下文所在的 scope 层。控制器问题（`servesOwner`）与监听器投递（`listenersFor`、`changedFor`）走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。`onJobAdopted` 是宿主范围的，因为重启核算跨越会话。resumer 返回延迟生产方计划：registry 先提交采用标记并等待观察者，账目接受所有权后才启动生产方。观察者返回 `true` 确认其持久账目后，registry 会丢弃内存中的标记，防止后续报告与结算镜像复活 supervisor 已清除的证明；若只有观察性监听器，则保留标记。store 缺失、标记写入被拒或观察者显式否决时，生产方工作因此不会启动；多次重启之间，最早尚未核算的标记继续保持权威。
+`attachController` 与 `{ owners: 'scope' }` 订阅注册到调用上下文所在的 scope 层；`{ owner }` 与 `{ owners: 'all' }` 订阅不带 scope。控制器问题（`servesOwner`）与带 scope 的投递走同一条链：先是全局层，再沿所有者的链逐层。注册是无名 token，因此重复标签仍可独立释放。
 
 ### 准入与结算
 
-`activeTaskCount` 按精确所有者或共享无主桶统计权威记录。`settle` 在存在挂起等待方时把任务标为已报告，解析每个等待方，记录终止快照，宣布可见集变更，然后通知完成监听器。挂起的等待会在监听器运行前把任务标为已报告，因此完成报告方不会重复通知；销毁时的取消出于同样理由标记——面向正在被销毁的所有者的通知不会有人读到。
+`activeJobCount` 按精确所有者或共享无主桶统计权威记录。`settle` 只记录一次终止结果（把记录下来的 kill 原因合并进 `killed` 的 detail），清除进度行，把环裁剪到结算保留量（保留模型游标尚未消费的全部字节），解析每个等待方，然后发出带原因的 `settled` 与环的最终 `output` 信号。原因在 `JobRegistry.kill` 之后为 `kill`，在所有者或服务取消之后为 `teardown`，否则为 `producer`；`dsh-tool-jobs` 据此跳过没人能读的通知。
 
 ### 销毁
 
-所有者释放（`disposeOwned`）会取消该所有者的任务、等待其结算、移除其记录，并宣布移除——这是任何逐任务记录都无法表达的可见集变更。服务释放（`disposeAll`）会关闭监听器、取消所有存活任务、等待结算、清空存储、向不同的所有者宣布清空，然后分离跨 fiber 的所有者清理 effect。
+所有者释放（`disposeOwned`）会取消该所有者的任务、等待其结算、移除其记录，并逐条宣布移除——这是任何逐任务记录都无法表达的可见集变更。服务释放（`disposeAll`）会取消所有存活任务、等待结算、移除每条记录（逐条宣布移除，让挂载在服务之外的订阅者丢掉它的行），然后分离跨 fiber 的所有者清理 effect。
 
 </details>
 
@@ -107,7 +110,7 @@ kind: "package-reference"
 
 当包级约定不够用时阅读以下页面。它们从注册表约定逐步进入模型侧控制与设计记录。
 
-- [后台任务运行时子系统](../../../docs/subsystems/jobs.zh.md)——任务类型、快照字段与 `ctx.jobs` 的 cordis 接口面。
+- [后台任务运行时子系统](../../../docs/subsystems/jobs.zh.md)——任务类型、投影字段与 `ctx.jobs` 的 Cordis 接口面。
 - [jobs 组映射](../README.zh.md)——同级组页面及其包表格。
 - [注册表约定](../jobs/README.zh.md)——本包实现的抽象 `ctx.jobs` 服务。
 - [模型侧任务控制](../tool-jobs/README.zh.md)——`job_output`、`job_list` 与 `job_kill` 工具及完成通知。
@@ -132,7 +135,7 @@ kind: "package-reference"
 
 这些限制说明注册表何时不合适。它们是当前包约束，不是任务积压。
 
-- **生产方执行是进程本地的**——持久化保留记录和恢复载荷，而不是运行中的 JavaScript 生产方；可恢复种类必须提供幂等的延迟 resumer。
+- **任务只存在于进程本地**——记录会随 harness 进程终止而消失；持久或跨重启执行需要一个单独实现该 seam 的后端。
 - **静默无效的取消可能使销毁停滞并持续占用容量**——如果 `cancel` 返回后始终未结算 `done`，注册表就无法将其与缓慢停止区分开；该任务会在服务剩余生命周期内持续占用一个桶名额，只有显式抛出异常才能安全地强制标为失败。
 
 <a id="dev-note"></a>

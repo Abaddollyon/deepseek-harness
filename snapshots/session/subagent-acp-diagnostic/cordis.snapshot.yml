@@ -1,16 +1,10 @@
 # Keyless twin of subagent-acp-diagnostic.cordis.yml: keep the real ACP child
 # permission-denial path and replace only the external parent model adapter.
 - id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek'
-  disabled: true
-
-- id: jobs
-  name: '@deepseek-ai/dsh-jobs-local'
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
   disabled: true
 
 - insert:
-    - id: deterministic-jobs
-      name: '../../../apps/cli/tests/profiles/sdk/fixtures/deterministic-jobs.ts'
     - id: acp-diagnostic-release-on-job-output
       name: './release-on-job-output.mjs'
     - id: llm-replay
@@ -41,3 +35,6 @@
         toolName: subagent_acp
         backgroundMode: one-shot
         maxDepth: provider-managed
+
+- id: plugin-package-inventory-deepseek
+  disabled: true

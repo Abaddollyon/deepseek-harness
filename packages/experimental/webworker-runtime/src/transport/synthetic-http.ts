@@ -4,18 +4,14 @@
  * request listener; the tunnel feeds that listener these pairs, so the real
  * route table, its trust fences, and every handler run unchanged.
  *
- * Headers and lifecycle support the Web carrier's response policy; event
- * semantics come from readable-stream. The sink accepts writes synchronously
- * without socket backpressure. Successful callbacks run before finish/close;
- * cancellation closes once and prevents later writes from emitting frames.
+ * Synthesized members are exactly the ones the route handlers read; anything
+ * else is absent on purpose so a new consumer
+ * fails loud instead of silently reading a stub.
  * @module @deepseek-ai/dsh-experimental-webworker-runtime/src/transport/synthetic-http
  */
-import { Buffer } from 'buffer'
-import { Stream } from 'readable-stream'
 import type { TunnelRequestFrame } from './frames.ts'
 
-type HeaderValue = string | number | readonly string[]
-type ResponseCallback = (error?: Error) => void
+const encoder = new TextEncoder()
 
 /** Where a synthesized response writes to. */
 export interface ResponseSink {
@@ -46,35 +42,29 @@ export interface SyntheticExchange {
  * Build the request/response pair for one tunnel request.
  *
  * `res.end()` is the settle point: the captured listener returns void, so the
- * response object itself reports completion. Accepted writes return true;
- * writes after end or cancellation return false without emitting frames.
+ * response object itself reports completion. `write()` always returns true,
+ * which skips backpressure waiting the tunnel cannot observe anyway.
  * @param frame - Validated request frame.
  * @param sink - Frame emitter for the response.
  * @returns The pair handed to the captured request listener.
  */
 export function createSyntheticExchange(frame: TunnelRequestFrame, sink: ResponseSink): SyntheticExchange {
-  const headers = new Map<string, HeaderValue>()
+  const listeners = new Map<string, Set<() => void>>()
+  let status = 200
+  let headers: Record<string, string> = {}
   let streaming = false
-  let ended = false
   let finished = false
   let aborted = false
-  let failure: Error | undefined
 
-  const wireHeaders = (): Record<string, string> => Object.fromEntries(
-    [...headers].map(([name, value]) => [name, Array.isArray(value) ? value.join(', ') : String(value)]),
-  )
-  const bytes = (chunk: string | Uint8Array, encoding?: BufferEncoding): Uint8Array => (
-    typeof chunk === 'string' ? Buffer.from(chunk, encoding) : chunk
-  )
-  const accepted = (callback: ResponseCallback | undefined): void => {
-    if (callback !== undefined) queueMicrotask(() => { callback(failure) })
+  const emit = (event: string): void => {
+    for (const callback of [...(listeners.get(event) ?? [])]) callback()
   }
 
   const req = {
     url: frame.url,
     method: frame.method,
     headers: frame.headers,
-    destroy: (): void => { abort() },
+    destroy: (): void => { aborted = true },
     async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
       if (frame.body === undefined) return
       if (frame.body instanceof Blob) {
@@ -99,104 +89,70 @@ export function createSyntheticExchange(frame: TunnelRequestFrame, sink: Respons
     },
   }
 
-  const res = Object.assign(new Stream(), {
-    statusCode: 200,
-    statusMessage: 'OK',
-    getHeader: (name: string): HeaderValue | undefined => headers.get(name.toLowerCase()),
-    getHeaders: (): Record<string, HeaderValue> => Object.fromEntries(headers),
-    setHeader: (name: string, value: HeaderValue): unknown => {
-      headers.set(name.toLowerCase(), value)
-      return res
-    },
-    removeHeader: (name: string): void => { headers.delete(name.toLowerCase()) },
-    appendHeader: (name: string, value: HeaderValue): unknown => {
-      const key = name.toLowerCase()
-      const previous = headers.get(key)
-      headers.set(key, previous === undefined ? value : [
-        ...typeof previous === 'object' ? previous : [String(previous)],
-        ...typeof value === 'object' ? value : [String(value)],
-      ])
-      return res
-    },
-    writeHead: (
-      nextStatus: number, messageOrHeaders?: string | Record<string, HeaderValue>, provided?: Record<string, HeaderValue>,
-    ): unknown => {
-      res.statusCode = nextStatus
-      if (typeof messageOrHeaders === 'string') res.statusMessage = messageOrHeaders
-      const nextHeaders = typeof messageOrHeaders === 'string' ? provided : messageOrHeaders
+  const res: Record<string, unknown> = {
+    writeHead: (nextStatus: number, nextHeaders?: Record<string, string | number>): unknown => {
+      status = nextStatus
       if (nextHeaders !== undefined) {
-        for (const [key, value] of Object.entries(nextHeaders)) headers.set(key.toLowerCase(), value)
+        headers = {}
+        for (const [key, value] of Object.entries(nextHeaders)) headers[key.toLowerCase()] = String(value)
       }
       return res
     },
-    flushHeaders: (): void => {
-      if (streaming || ended || failure !== undefined) return
-      streaming = true
-      sink.head(res.statusCode, wireHeaders())
-    },
-    write: (chunk: string | Uint8Array, encoding?: BufferEncoding | ResponseCallback, callback?: ResponseCallback): boolean => {
-      accepted(typeof encoding === 'function' ? encoding : callback)
-      if (ended || failure !== undefined) return false
+    write: (chunk: string | Uint8Array): boolean => {
+      if (finished || aborted) return false
       if (!streaming) {
         streaming = true
-        sink.head(res.statusCode, wireHeaders())
+        sink.head(status, headers)
       }
-      sink.chunk(bytes(chunk, typeof encoding === 'string' ? encoding : undefined))
+      sink.chunk(typeof chunk === 'string' ? encoder.encode(chunk) : chunk)
       return true
     },
-    end: (
-      body?: string | Uint8Array | ResponseCallback, encoding?: BufferEncoding | ResponseCallback, callback?: ResponseCallback,
-    ): unknown => {
-      const done = typeof body === 'function' ? body : typeof encoding === 'function' ? encoding : callback
-      if (ended || failure !== undefined) {
-        accepted(done)
-        return res
-      }
-      ended = true
-      const payload = body === undefined || typeof body === 'function'
-        ? undefined
-        : bytes(body, typeof encoding === 'string' ? encoding : undefined)
+    end: (body?: string | Uint8Array): unknown => {
+      if (finished) return res
+      finished = true
+      const bytes = body === undefined ? undefined : typeof body === 'string' ? encoder.encode(body) : body
       if (streaming) {
-        if (payload !== undefined) sink.chunk(payload)
+        if (bytes !== undefined) sink.chunk(bytes)
         sink.end()
       } else {
-        sink.end({ status: res.statusCode, headers: wireHeaders(), body: payload })
+        sink.end({ status, headers, body: bytes })
       }
-      queueMicrotask(() => {
-        done?.(failure)
-        if (failure !== undefined) return
-        finished = true
-        res.emit('finish')
-        res.emit('close')
-      })
+      emit('close')
       return res
     },
-    destroy: (error?: Error): unknown => {
-      if (finished || failure !== undefined) return res
-      failure = error ?? new Error(`response destroyed for ${frame.method} ${frame.url}`)
-      if (!ended) sink.fail(failure.message)
-      res.emit('close')
+    destroy: (): void => {
+      if (finished) return
+      finished = true
+      sink.fail(`response destroyed for ${frame.method} ${frame.url}`)
+      emit('close')
+    },
+    on: (event: string, callback: () => void): unknown => {
+      const set = listeners.get(event) ?? new Set<() => void>()
+      set.add(callback)
+      listeners.set(event, set)
       return res
     },
-  })
-  Object.defineProperty(res, 'headersSent', { configurable: true, get: () => streaming })
-  Object.defineProperty(res, 'writableEnded', { configurable: true, get: () => ended })
-  Object.defineProperty(res, 'writableFinished', { configurable: true, get: () => finished })
-  Object.defineProperty(res, 'destroyed', { get: () => failure !== undefined })
-
-  const abort = (): void => {
-    if (finished || failure !== undefined) return
-    aborted = true
-    failure = new Error(`request aborted for ${frame.method} ${frame.url}`)
-    res.emit('aborted')
-    res.emit('close')
+    off: (event: string, callback: () => void): unknown => {
+      listeners.get(event)?.delete(callback)
+      return res
+    },
   }
+  res.once = res.on
+  Object.defineProperty(res, 'headersSent', { get: () => streaming })
+  Object.defineProperty(res, 'writableEnded', { get: () => finished })
+
   return {
     req,
     res,
     get aborted(): boolean {
       return aborted
     },
-    abort,
+    abort: (): void => {
+      if (finished) return
+      aborted = true
+      finished = true
+      emit('aborted')
+      emit('close')
+    },
   }
 }

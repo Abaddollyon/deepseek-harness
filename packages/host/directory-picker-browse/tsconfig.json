@@ -19,9 +19,6 @@
     },
     {
       "path": "../directory-picker"
-    },
-    {
-      "path": "../directory-browser"
     }
   ]
 }

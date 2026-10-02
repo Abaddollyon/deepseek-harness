@@ -5,6 +5,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-compaction-image-offload/projection'
 import z from '@deepseek-ai/schemastery'
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm'
 import type { LlmImageRequestPricing, LlmRuntime, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -30,7 +31,6 @@ import type {
   TokenMeterConfig,
 } from './types.ts'
 import { contextBreakdownProjectionDefinition } from './breakdown-projection.ts'
-import { modelRouteProjectionDefinition } from './route-projection.ts'
 import { contextPressureProjectionDefinition, tokenUsageProjectionDefinition } from './usage-projection.ts'
 import { estimateContent, estimateMessage, estimateToolsTokens, ROLE_OVERHEAD } from './estimate.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
@@ -114,7 +114,6 @@ export class TokenMeter extends Service {
     ctx.sessionProjections.register(tokenUsageProjectionDefinition)
     ctx.sessionProjections.register(contextPressureProjectionDefinition)
     ctx.sessionProjections.register(contextBreakdownProjectionDefinition)
-    ctx.sessionProjections.register(modelRouteProjectionDefinition)
 
     // Readers catch up independently, while eager observation bounds ordinary
     // read latency without creating state for sessions no consumer has read.
@@ -191,16 +190,6 @@ export class TokenMeter extends Service {
     }))
   }
 
-  /**
-   * Estimate tool-schema tokens in one canonical request envelope.
-   * System messages are priced separately as surface nodes.
-   * @param header - canonical request envelope, when one is available.
-   * @returns estimated tool-schema tokens.
-   */
-  estimateHeader(header: EpochHeader | undefined): number {
-    return estimateToolsTokens(header)
-  }
-
   /** Resolve the routed model's image pricing, when the llm service and route declare one. */
   private _routeImagePricing(header: EpochHeader | undefined): LlmImageRequestPricing | undefined {
     const config = header?.config
@@ -241,7 +230,8 @@ export class TokenMeter extends Service {
     }
 
     while (state.consumedEvents < session.seq) {
-      // oxlint-disable-next-line typescript/no-non-null-assertion -- contiguous session seqs index the durable log
+      // Contiguous session seqs index the durable log; existing Session history read, migration deferred.
+      // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
       const event = session.eventAt(SessionSeq(state.consumedEvents))!
       this._foldEvent(state, event)
       state.consumedEvents = SessionLogOffset(state.consumedEvents + 1)
@@ -260,6 +250,18 @@ export class TokenMeter extends Service {
     let nextAnchor = state.anchor
 
     switch (event.type) {
+      case 'image/offload': {
+        const offloaded = new Map(event.data.targets.map(target => [target.seq, new Set(target.imageIndexes)]))
+        state.surface = state.surface.map((node) => {
+          const indexes = offloaded.get(node.seq)
+          if (indexes === undefined) return node
+          return {
+            ...node,
+            images: node.images.map((image, index) => (indexes.has(index) ? { ...image, offloaded: true as const } : image)),
+          }
+        })
+        break
+      }
       case 'request/header':
         nextHeader = canonicalHeader(event.data.header)
         break

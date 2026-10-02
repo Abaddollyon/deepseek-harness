@@ -14,16 +14,22 @@ import type { WorkspaceId } from './types.ts'
 /** Workspace id schema at the durable boundary; branding has no runtime representation. */
 const workspaceId = z.string().transform(value => value as WorkspaceId)
 
+const sessionId = z.string().transform(value => brandString<SessionId>(value))
+
 /**
  * Durable shape of one workspace record. `path` is the `fs.realpath` canon
- * stamped at create; `sessionIds` is the ordered ownership account (array
- * order is display order); timestamps are ISO-8601 strings.
+ * stamped at create; `agentPreset` names the preset whose execution world
+ * holds every path (absent for the Host); `additionalPaths` lists further
+ * canonical directories offered to new Sessions (absent until first set); `sessionIds` is the
+ * ordered ownership account (array order is display order); timestamps are
+ * ISO-8601 strings.
  */
 export const workspaceRecord = z.object({
   path: z.string(),
-  additionalPaths: z.array(z.string()).default([]),
+  agentPreset: z.string().optional(),
+  additionalPaths: z.array(z.string()).optional(),
   title: z.string(),
-  sessionIds: z.array(z.string().transform(value => brandString<SessionId>(value))),
+  sessionIds: z.array(sessionId),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -48,12 +54,18 @@ const workspacePendingMutation = z.discriminatedUnion('operation', [
  * the registry-global archive set layered over workspace accounting: an
  * archived session keeps its `sessionIds` slot (unarchiving must restore the
  * position), so the set never participates in the one-owner accounting
- * invariant. Defaulted so records written before the field parse unchanged.
+ * invariant. `pinnedSessionIds` is the registry-global pin set in pin order
+ * (most recently pinned first); pinning and archival are mutually
+ * exclusive, so archiving drops the session's pin. Both session sets are
+ * defaulted so records written before the fields parse unchanged.
  */
 export const workspaceDomainState = z.object({
   initialized: z.boolean(),
+  /** First-use Workspace identity, retained after its registration is deleted. */
+  defaultWorkspaceId: workspaceId.optional(),
   workspaceIds: z.array(workspaceId),
-  archivedSessionIds: z.array(z.string().transform(value => brandString<SessionId>(value))).default([]),
+  archivedSessionIds: z.array(sessionId).default([]),
+  pinnedSessionIds: z.array(sessionId).default([]),
   pendingMutation: workspacePendingMutation.optional(),
 })
 
@@ -71,7 +83,7 @@ export const workspaceDomainSpec = defineDomain({
   version: 2,
   global: {
     schema: workspaceDomainState,
-    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [] },
+    initial: { initialized: false, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] },
   },
   tables: { workspaces: domainTable<WorkspaceId, WorkspaceRecord>(workspaceRecord) },
 })

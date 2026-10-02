@@ -20,27 +20,29 @@
  * @module @deepseek-ai/dsh-sandbox-policy
  */
 
-import { resolve as resolvePath } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { z as zod } from 'zod'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent'
-import { canonicalPath, type SandboxExecutionPolicy, type SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
 export { SANDBOX_MODES, setSandboxMode } from './session-mode.ts'
 
-/** Resolve filesystem identity before lexical normalization can erase symlink-sensitive components. */
+/** Preserve execution-world spelling; enforcing providers resolve filesystem identity on their host. */
 function resolveWorkspaceRoot(path: string): string {
-  return resolvePath(canonicalPath(path))
+  if (!isAbsolute(path)) throw new Error('sandbox-policy: workspace root must be an absolute execution-world path')
+  return path
 }
 
 /** Render the policy without claiming which capabilities are mounted. */
 function renderPolicyContext(policy: SandboxExecutionPolicy): string {
-  const roots = [policy.workspaceRoot, ...(policy.additionalRoots ?? [])]
-  const inventory = roots.length > 1 ? ` Workspace roots for this session: ${JSON.stringify(roots)}.` : ''
+  const roots = [policy.workspaceRoot, ...policy.additionalRoots ?? []]
+  // Single-root text stays unchanged; additional roots are listed in every mode.
+  const inventory = roots.length === 1 ? '' : ` Workspace roots for this session: ${JSON.stringify(roots)}.`
   switch (policy.mode) {
     case 'read-only':
       return `Current DSH file policy: read-only.${inventory} Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.`
@@ -75,7 +77,7 @@ export interface Config {
   /** File-sandbox mode a session starts from (default: `read-only`). */
   mode?: SandboxMode
   /**
-   * Fallback root for agentless calls and sessions without a cwd (default:
+   * Absolute fallback root for agentless calls and sessions without a cwd (default:
    * `process.cwd()`). Normal agent calls use their session cwd instead.
    */
   workspaceRoot?: string
@@ -158,20 +160,20 @@ export class SandboxPolicyService extends Service {
   /**
    * Resolve the complete policy for one capability call. An approved explicit
    * mode outranks the session's last `sandbox/mode` event, which outranks the
-   * deployment default. A session cwd is its workspace-write boundary; the
-   * configured root is the fallback for agentless calls and sessions without a
-   * cwd.
+   * deployment default. A session cwd and the session's recorded additional
+   * paths are its workspace-write boundary; the configured root is the
+   * fallback for agentless calls and sessions without a cwd.
    * @param request - optional session and approved mode override.
-   * @returns the fully resolved per-call mode and absolute workspace root.
+   * @returns the fully resolved per-call mode, absolute workspace root, and any additional roots.
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
+    // Structural Session doubles that predate multi-root workspaces carry no additionalPaths.
+    const additionalRoots = (session?.additionalPaths ?? []).map(resolveWorkspaceRoot)
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
       workspaceRoot: resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot),
-      ...session?.additionalPaths === undefined || session.additionalPaths.length === 0
-        ? {}
-        : { additionalRoots: session.additionalPaths.map(resolveWorkspaceRoot) },
+      ...additionalRoots.length === 0 ? {} : { additionalRoots },
       ...session === undefined ? {} : { sessionId: session.id },
     }
   }

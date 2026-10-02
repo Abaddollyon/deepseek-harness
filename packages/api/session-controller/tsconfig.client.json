@@ -12,7 +12,6 @@
   ],
   "references": [
     { "path": "../../../vendor/cordis" },
-    { "path": "../../../vendor/schemastery" },
     { "path": "../gateway/tsconfig.client.json" },
     { "path": "../../attachment/attachment" },
     { "path": "../../client/connection/tsconfig.client.json" },
@@ -29,6 +28,7 @@
     { "path": "../../util/crypto" },
     { "path": "../../util/workspace-path" },
     { "path": "../../workspace/workspace" },
-    { "path": "../../typert/protocol" }
+    { "path": "../../typert/protocol" },
+    { "path": "../../util/native-command" }
   ]
 }

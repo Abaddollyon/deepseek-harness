@@ -9,6 +9,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import {
+  createSessionFormatCatalogWithChildren,
   SessionFormatUnsupportedMigrationError,
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
@@ -17,7 +18,7 @@ import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:f
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   SessionPersistence, SessionPersistenceRevision, SessionFormatUnsupportedError,
   SessionPersistenceCorruptionError,
@@ -44,6 +45,7 @@ import {
 } from './zstd.ts'
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 import { verifyCurrentGenerationInWorker } from './migration-verifier.ts'
+import { prepareCatalogFacts } from './catalog-migration.ts'
 import {
   JsonlGenerationSourceChangedError,
   JsonlGenerationUnsupportedMigrationError,
@@ -64,7 +66,6 @@ export type { JsonlCompression } from './format.ts'
 const COLD_LOG_MEMO_MAX_ENTRIES = 2
 
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
-const DEFAULT_LIST_CONCURRENCY = 32
 /**
  * Internal scheduling constant, not deployment configuration: balance
  * frame-boundary event-loop yields against `setImmediate` overhead. One frame
@@ -97,8 +98,6 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
-  /** Maximum simultaneous metadata probes in one listing or root-encoding check. */
-  listConcurrency?: number
 }
 
 /** One stored event graph whose producer has established immutable sharing. */
@@ -125,6 +124,7 @@ interface CurrentStoredLog extends StoredLogBase {
 /** A migrated historical generation retained until an explicit write open publishes it. */
 interface PreparedStoredLog extends StoredLogBase {
   readonly status: 'prepared'
+  readonly validateRelatedSources: () => Promise<void>
   readonly publication: {
     readonly source: ResolvedJsonlGeneration
     readonly value: PreparedJsonlMigration
@@ -134,7 +134,7 @@ interface PreparedStoredLog extends StoredLogBase {
 /** A validated logical log, either durable current state or prepared historical state. */
 type StoredLog = CurrentStoredLog | PreparedStoredLog
 
-/** Deep-freeze one acyclic stored JSON event without recursive calls. */
+/** Deep-freeze acyclic stored JSON; its arrays contain only indexed JSON values. */
 function freezeStoredEvent(event: SessionEvent): void {
   const pending: object[] = [event]
   while (pending.length > 0) {
@@ -142,9 +142,16 @@ function freezeStoredEvent(event: SessionEvent): void {
     // oxlint-disable-next-line typescript/no-non-null-assertion
     const current = pending.pop()!
     Object.freeze(current)
-    for (const key in current) {
-      const child = (current as Record<string, unknown>)[key]
-      if (child !== null && typeof child === 'object') pending.push(child)
+    if (Array.isArray(current)) {
+      for (let index = 0; index < current.length; index += 1) {
+        const child: unknown = current[index]
+        if (child !== null && typeof child === 'object') pending.push(child)
+      }
+    } else {
+      for (const key in current) {
+        const child = (current as Record<string, unknown>)[key]
+        if (child !== null && typeof child === 'object') pending.push(child)
+      }
     }
   }
 }
@@ -239,7 +246,6 @@ class JsonlSessionPersistence extends SessionPersistence {
   static Config: z<Config> = z.object({
     root: z.string().required(),
     compression: JsonlCompressionSchema,
-    listConcurrency: z.number().step(1).min(1).default(DEFAULT_LIST_CONCURRENCY),
   })
 
   /** Backend label for diagnostics and effects; shadows `Service.name` without changing the service key. */
@@ -247,10 +253,9 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   private root: string
   private compression: JsonlCompression
-  private rootEncodingChecked = false
-  private readonly listConcurrency: number
+  private rootEncodingCheck: Promise<void> | undefined
   private readonly tracker = new JsonlBackendTracker(this.name)
-  private readonly generationFormat: JsonlGenerationFormatAdapter
+  private readonly generationFormat: Omit<JsonlGenerationFormatAdapter, 'createRestore'>
   /**
    * Bounded LRU of parsed, validated stored logs keyed by session id and
    * guarded by the stat-derived revision, so an immediate cold-read handoff
@@ -274,13 +279,8 @@ class JsonlSessionPersistence extends SessionPersistence {
     // Resolve once so later process.cwd() changes cannot split one backend across roots.
     this.root = resolve(config.root)
     this.compression = config.compression ?? DEFAULT_COMPRESSION
-    this.listConcurrency = config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY
     this.generationFormat = {
       currentVersion: sessionFormatCatalog.currentVersion,
-      createRestore: header => sessionFormatCatalog.createRestore(header, {
-        recovery: 'recoverable',
-        validation: 'transformed',
-      }),
       encodeHeader: (header, inheritedEventCount) =>
         sessionFormatCatalog.encodeCurrentHeader(header, inheritedEventCount),
       encodeEvent: event => sessionFormatCatalog.encodeCurrentEvent(event),
@@ -318,7 +318,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     // line encoder enforces at materialization.
     toHeaderLine(snapshot, options?.inheritedEventCount)
     const inheritedEventCount = SessionLogOffset(options?.inheritedEventCount ?? 0)
-    await this.ensureRootEncoding(options?.signal)
+    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     if (this.tracker.hasPending(snapshot.id) || await this.findLog(snapshot.id, options?.signal) !== undefined) {
       throw new SessionAlreadyExistsError(snapshot.id)
@@ -341,14 +341,20 @@ class JsonlSessionPersistence extends SessionPersistence {
    */
   async open(id: SessionId, access: SessionAccess, options?: SessionPersistenceOpenOptions): Promise<SessionHandle> {
     options?.signal?.throwIfAborted()
-    await this.ensureRootEncoding(options?.signal)
+    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     const pending = this.tracker.pendingOf(id)
     if (access === 'read') {
       if (pending !== undefined) {
         return this.tracker.adopt(new JsonlSessionHandle(this, id, pending.header, 'read', { cursor: 0, materialized: false, inheritedEventCount: pending.inheritedEventCount }))
       }
-      const stored = await this.requireStoredLog(id, options?.signal)
+      let stored: StoredLog
+      try {
+        stored = await this.requireStoredLog(id, options?.signal)
+      } catch (error: unknown) {
+        if (!(error instanceof JsonlGenerationSourceChangedError)) throw error
+        stored = await this.requireStoredLog(id, options?.signal)
+      }
       let state: StorageHandleState
       if (stored.status === 'prepared') {
         state = {
@@ -433,7 +439,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     options?: SessionPersistenceStatOptions,
   ): Promise<SessionPersistenceSnapshot | undefined> {
     options?.signal?.throwIfAborted()
-    await this.ensureRootEncoding(options?.signal)
+    await this.ensureRootEncoding()
     options?.signal?.throwIfAborted()
     const pending = this.tracker.pendingOf(id)
     if (pending !== undefined) {
@@ -441,28 +447,20 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     const selected = await this.findLog(id, options?.signal)
     if (selected === undefined) return undefined
-    return this.readStableHeader(selected, id, options?.signal)
-  }
-
-  /** Pair a header and revision only when both describe the same physical file state. */
-  private async readStableHeader(
-    selected: ResolvedJsonlGeneration,
-    expectedId?: SessionId,
-    signal?: AbortSignal,
-  ): Promise<SessionPersistenceSnapshot | undefined> {
+    const header = await this.readGenerationHeader(selected, id, options?.signal)
+    if (header === undefined) return undefined
     try {
-      for (;;) {
-        signal?.throwIfAborted()
-        const before = fileRevision(await stat(selected.sourcePath, { bigint: true }))
-        const header = await this.readGenerationHeader(selected, expectedId, signal)
-        if (header === undefined) return undefined
-        const identity = await stat(selected.sourcePath, { bigint: true })
-        signal?.throwIfAborted()
-        const revision = fileRevision(identity)
-        if (before === revision) return { header, revision, sizeBytes: Number(identity.size) }
+      const identity = await stat(selected.sourcePath, { bigint: true })
+      options?.signal?.throwIfAborted()
+      return {
+        header,
+        revision: selected.sourceVersion < SESSION_FORMAT_VERSION
+          ? SessionPersistenceRevision(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`)
+          : fileRevision(identity),
+        sizeBytes: Number(identity.size),
       }
     } catch (error: unknown) {
-      signal?.throwIfAborted()
+      options?.signal?.throwIfAborted()
       if (isENOENT(error)) return undefined
       throw error
     }
@@ -482,9 +480,26 @@ class JsonlSessionPersistence extends SessionPersistence {
     // append lands mid-scan is then still in this snapshot (its artifact may
     // predate the scan), so create-to-list visibility never has a hole.
     const pending = [...this.tracker.pendingEntries()]
-    for (const snapshot of await this.listArtifacts(signal)) {
-      listed.add(snapshot.header.id)
-      snapshots.push(snapshot)
+    const artifacts = await this.listArtifacts(signal)
+    const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
+      ? await this.historicalCorpusRevision(signal) : undefined
+    for (const artifact of artifacts) {
+      signal?.throwIfAborted()
+      try {
+        const identity = await stat(artifact.path, { bigint: true })
+        signal?.throwIfAborted()
+        listed.add(artifact.header.id)
+        snapshots.push({
+          header: artifact.header,
+          revision: artifact.sourceVersion < SESSION_FORMAT_VERSION
+            ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`)
+            : fileRevision(identity),
+          sizeBytes: Number(identity.size),
+        })
+      } catch (error: unknown) {
+        signal?.throwIfAborted()
+        if (!isENOENT(error)) throw error
+      }
     }
     for (const [id, entry] of pending) {
       if (!listed.has(id)) snapshots.push({ header: entry.header, revision: entry.revision })
@@ -571,6 +586,12 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal.throwIfAborted()
     const memoized = this.coldLogMemo.get(id)
     if (memoized?.status === 'prepared' && memoized.revision === sourceRevision) {
+      try {
+        await memoized.validateRelatedSources()
+      } catch (error: unknown) {
+        this.coldLogMemo.delete(id)
+        throw this.generationFailure(id, selected, error)
+      }
       this.coldLogMemo.delete(id)
       this.coldLogMemo.set(id, memoized)
       return memoized
@@ -606,13 +627,36 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal: AbortSignal,
   ): Promise<PreparedStoredLog> {
     let prepared: Awaited<ReturnType<typeof prepareJsonlMigration>>
+    let validateRelatedSources: () => Promise<void>
     try {
+      const children = async () => (await this.listArtifacts(signal))
+        .filter(source => source.header.origin === 'subagent' && source.header.parentSession === id)
+      const sources = await children()
+      const related = await prepareCatalogFacts(id, sources, this.compression, signal)
+      for (const failure of related.failures) {
+        this.ctx.logger.warn(`${this.name}: session "${id}" catalog retained a child with unknown descriptor (raw log: ${failure.path}): ${String(failure.error)}`)
+      }
+      const membership = sources.map(source => source.path).sort()
+      validateRelatedSources = async () => {
+        const current = (await children()).map(source => source.path).sort()
+        const before = new Set(membership)
+        const after = new Set(current)
+        const changed = current.find(path => !before.has(path)) ?? membership.find(path => !after.has(path))
+        if (changed !== undefined) throw new JsonlGenerationSourceChangedError(changed)
+        await related.validate()
+      }
       prepared = await prepareJsonlMigration({
         sourcePath: selected.sourcePath,
         sourceVersion: selected.sourceVersion,
         currentPath: selected.currentPath,
         compression: this.compression,
-        format: this.generationFormat,
+        format: {
+          ...this.generationFormat,
+          createRestore: header => createSessionFormatCatalogWithChildren(related.facts).createRestore(header, {
+            recovery: 'recoverable', validation: 'transformed',
+          }),
+        },
+        validateRelatedSources,
         verifyCurrentFile: verifyCurrentGenerationInWorker,
         validateHistoricalHeader: headerValue => this.validateSourceIdentity(
           selected,
@@ -631,6 +675,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     validateStoredEvents(meta, events, { kind: 'jsonl', path: selected.sourcePath })
     const stored: PreparedStoredLog = {
       status: 'prepared',
+      validateRelatedSources,
       meta,
       ...freezeStoredEvents(events),
       tornTruncateTo: undefined,
@@ -788,7 +833,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @returns the current artifact path, or `undefined` while only a historical generation exists.
    */
   async resolveCurrentLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined> {
-    await this.ensureRootEncoding(signal)
+    await this.ensureRootEncoding()
     signal?.throwIfAborted()
     const selected = await this.findLog(id, signal)
     if (selected === undefined) return undefined
@@ -976,37 +1021,66 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  private async listArtifacts(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
-    signal?.throwIfAborted()
-    // Generation resolution below validates encoding while discovering each
-    // session; avoid enumerating every project and session directory twice.
-    const dirs = await mapConcurrent(
-      await this.listProjectDirs(signal), this.listConcurrency,
-      project => this.listSessionDirs(project, signal), signal,
-    )
-    const discovered = await mapConcurrent(dirs.flat(), this.listConcurrency, async (dir) => {
-      const selected = await this.resolveGenerationInDirectory(dir, signal)
-      if (selected === undefined) return undefined
+  /** Enumerate selected physical generations without interpreting their headers or bodies. */
+  private async listGenerations(signal?: AbortSignal): Promise<ResolvedJsonlGeneration[]> {
+    const sources: ResolvedJsonlGeneration[] = []
+    for (const project of await this.listProjectDirs(signal)) {
+      for (const dir of await this.listSessionDirs(project, signal)) {
+        signal?.throwIfAborted()
+        const selected = await this.resolveGenerationInDirectory(dir, signal)
+        if (selected !== undefined) sources.push(selected)
+      }
+    }
+    return sources
+  }
+
+  /** Historical logical events depend on the corpus, including members with unreadable headers. */
+  private async historicalCorpusRevision(signal?: AbortSignal): Promise<string> {
+    const paths = (await this.listGenerations(signal)).map(source => source.sourcePath).sort()
+    const hash = createHash('sha256')
+    for (const path of paths) {
+      signal?.throwIfAborted()
+      let revision: string
       try {
-        return await this.readStableHeader(selected, undefined, signal)
+        revision = fileRevision(await stat(path, { bigint: true }))
       } catch (error: unknown) {
-        // Foreign formats remain visible only through a targeted refusal, not the list.
-        if (error instanceof SessionFormatUnsupportedError) return undefined
+        if (!isENOENT(error)) throw error
+        revision = 'missing'
+      }
+      hash.update(JSON.stringify([path, revision]))
+    }
+    signal?.throwIfAborted()
+    return hash.digest('hex')
+  }
+
+  private async listArtifacts(
+    signal?: AbortSignal,
+  ): Promise<Array<{ header: SessionHeader; path: string; sourceVersion: number }>> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const artifacts: Array<{ header: SessionHeader; path: string; sourceVersion: number }> = []
+    const ids = new Set<SessionId>()
+    for (const selected of await this.listGenerations(signal)) {
+      signal?.throwIfAborted()
+      let header: SessionHeader | undefined
+      try {
+        header = await this.readGenerationHeader(selected, undefined, signal)
+      } catch (error: unknown) {
+        if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) continue
         throw error
       }
-    }, signal)
-    const snapshots = discovered.filter(item => item !== undefined)
-    const ids = new Set<SessionId>()
-    for (const snapshot of snapshots) {
-      if (ids.has(snapshot.header.id)) {
-        throw new Error(`duplicate JSONL session id "${snapshot.header.id}" appears in multiple project directories`)
+      if (header === undefined) {
+        continue
       }
-      ids.add(snapshot.header.id)
+      if (ids.has(header.id)) {
+        throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
+      }
+      ids.add(header.id)
+      artifacts.push({ header, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
     }
-    // Cache only a completed validation; a failed or cancelled listing must not
-    // let a later write skip the root-wide encoding guard.
-    this.rootEncodingChecked = true
-    return snapshots
+    signal?.throwIfAborted()
+    return artifacts
   }
 
   /** Read and translate one selected generation header without inspecting its body. */
@@ -1332,7 +1406,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  /** Read and validate only the independently compressed header frame. */
+  /** Read only the header frame; compression failures reject as corruption, while I/O and cancellation propagate. */
   private async readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined> {
     signal?.throwIfAborted()
     const handle = await open(path, 'r')
@@ -1348,21 +1422,21 @@ class JsonlSessionPersistence extends SessionPersistence {
         signal?.throwIfAborted()
         content = Buffer.concat([content, chunk.subarray(0, bytesRead)])
         signal?.throwIfAborted()
-        const first = scanZstdFrames(content, 1).frames[0]
-        signal?.throwIfAborted()
-        if (first === undefined) continue
-        let plaintext: Buffer
         try {
+          const first = scanZstdFrames(content, 1).frames[0]
+          if (first === undefined) continue
+          const plaintext = await decompressZstdFrame(content.subarray(first.start, first.end))
           signal?.throwIfAborted()
-          plaintext = await decompressZstdFrame(content.subarray(first.start, first.end))
+          assertZstdHeaderFrame(plaintext)
+          return plaintext.subarray(0, -1).toString('utf8')
         } catch (error) {
           /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
           if (signal?.aborted) signal.throwIfAborted()
-          throw new Error('corrupt Zstandard session log: header frame failed validation', { cause: error })
+          throw new SessionPersistenceCorruptionError(
+            `corrupt Zstandard session log: header frame failed validation: ${String(error)} (raw log: ${path})`,
+            { cause: error },
+          )
         }
-        signal?.throwIfAborted()
-        assertZstdHeaderFrame(plaintext)
-        return plaintext.subarray(0, -1).toString('utf8')
       }
     } finally {
       await handle.close()
@@ -1384,20 +1458,18 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     signal?.throwIfAborted()
     const generations: Array<{ readonly path: string; readonly version: number }> = []
-    const opposite: Array<{ readonly path: string; readonly version: number }> = []
+    const opposite: string[] = []
     for (const entry of entries) {
       const version = parseGenerationLogFilename(entry.name, this.compression)
       if (version !== undefined) {
         generations.push({ path: join(dir, entry.name), version })
         continue
       }
-      const oppositeVersion = parseGenerationLogFilename(entry.name, this.oppositeCompression())
-      if (oppositeVersion !== undefined) {
-        opposite.push({ path: join(dir, entry.name), version: oppositeVersion })
+      if (parseGenerationLogFilename(entry.name, this.oppositeCompression()) !== undefined) {
+        opposite.push(join(dir, entry.name))
       }
     }
-    const oppositeLatest = opposite.sort((left, right) => right.version - left.version)[0]
-    if (oppositeLatest !== undefined) throw this.encodingMismatch(oppositeLatest.path)
+    if (opposite.length > 0) throw this.encodingMismatch(opposite[0] as string)
     const latest = generations.sort((left, right) => right.version - left.version)[0]
     if (latest === undefined) return undefined
     return {
@@ -1512,7 +1584,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       signal?.throwIfAborted()
       const entries = await readdir(this.root, { withFileTypes: true })
       signal?.throwIfAborted()
-      return entries.filter(e => e.isDirectory()).map(e => join(this.root, e.name)).sort()
+      return entries.filter(e => e.isDirectory()).map(e => join(this.root, e.name))
     } catch (error) {
       // Only an absent root means no sessions; rethrow every other I/O failure.
       if (isENOENT(error)) return []
@@ -1528,24 +1600,22 @@ class JsonlSessionPersistence extends SessionPersistence {
     const legacy = entries.find(entry =>
       entry.isFile() && (entry.name.endsWith('.jsonl') || entry.name.endsWith('.jsonl.zstd')))
     if (legacy !== undefined) throw this.legacyLayout(join(project, legacy.name))
-    return entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name)).sort()
+    return entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name))
   }
 
   /** Reject a root that already belongs to the other physical encoding. */
-  private async ensureRootEncoding(signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted()
-    if (this.rootEncodingChecked) return
-    const dirs = await mapConcurrent(
-      await this.listProjectDirs(signal), this.listConcurrency,
-      project => this.listSessionDirs(project, signal), signal,
-    )
-    await mapConcurrent(dirs.flat(), this.listConcurrency, async (dir) => {
-      signal?.throwIfAborted()
-      const incompatible = await this.findOppositeGenerationInDirectory(dir)
-      signal?.throwIfAborted()
-      if (incompatible !== undefined) throw this.encodingMismatch(incompatible)
-    }, signal)
-    this.rootEncodingChecked = true
+  private ensureRootEncoding(): Promise<void> {
+    this.rootEncodingCheck ??= this.checkRootEncoding()
+    return this.rootEncodingCheck
+  }
+
+  private async checkRootEncoding(): Promise<void> {
+    for (const project of await this.listProjectDirs()) {
+      for (const dir of await this.listSessionDirs(project)) {
+        const incompatible = await this.findOppositeGenerationInDirectory(dir)
+        if (incompatible !== undefined) throw this.encodingMismatch(incompatible)
+      }
+    }
   }
 
   private async rejectLegacyFlatArtifact(
@@ -1653,33 +1723,3 @@ class JsonlSessionPersistence extends SessionPersistence {
  */
 
 export default JsonlSessionPersistence
-
-/** Map independent metadata probes under a bound; report the first failure in input order. */
-async function mapConcurrent<T, R>(
-  items: readonly T[],
-  concurrency: number,
-  read: (item: T) => Promise<R>,
-  signal?: AbortSignal,
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  const failures: Array<{ index: number; error: unknown }> = []
-  let next = 0
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      signal?.throwIfAborted()
-      const index = next++
-      try {
-        results[index] = await read(items[index] as T)
-      } catch (error: unknown) {
-        signal?.throwIfAborted()
-        failures.push({ index, error })
-      }
-    }
-  }
-  await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, worker))
-  signal?.throwIfAborted()
-  if (failures.length > 0) {
-    throw failures.reduce((first, item) => item.index < first.index ? item : first).error
-  }
-  return results
-}

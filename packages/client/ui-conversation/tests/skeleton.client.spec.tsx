@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
+import type { GlobalStandardProps, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ComponentProps, ReactNode } from 'react'
+import { createContext, useContext, type ReactNode } from 'react'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionListState, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -11,9 +11,8 @@ import {
   bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot as sessionFixture,
 } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SessionPendingInteractionSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
-import type { ConversationRootProps } from '../src/client/skeleton/ConversationRoot.tsx'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { EMPTY_CONVERSATION_SNAPSHOT } from '../src/client/contract/snapshot.ts'
@@ -21,20 +20,33 @@ import type { ConversationSnapshot } from '../src/client/contract/snapshot.ts'
 import { createConversationStore } from '../src/client/stores.ts'
 import { SessionInputShell } from '../src/client/input/facade.ts'
 import { en, zh } from '../src/client/locales.ts'
-import { ConversationRoot } from '../src/client/skeleton/ConversationRoot.tsx'
+import { ConversationContent } from '../src/client/skeleton/ConversationContent.tsx'
+import { ConversationHeader } from '../src/client/skeleton/ConversationHeader.tsx'
+import { ConversationMainPanel } from '../src/client/skeleton/ConversationMainPanel.tsx'
 import { ConversationSession, ConversationSessionHeader } from '../src/client/skeleton/ConversationSession.tsx'
 import { conversationPhase } from '../src/client/contract/snapshot.ts'
 import { HeroShell } from '../src/client/skeleton/EmptyHero.tsx'
 import type { HeroShellProps } from '../src/client/skeleton/EmptyHero.tsx'
+import './control-row-dom.ts'
 import { InputBar } from '../src/client/skeleton/InputBar.tsx'
 import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
 import type {
-  ComposerBarOwnerProps, ConversationHeaderLineageOwnerProps,
+  ComposerBarOwnerProps, ConversationContentInputProps, ConversationContentProps,
+  ConversationHeaderLineageOwnerProps, ConversationSessionHeaderSlotProps, ConversationSessionSlotProps, ConversationSlotProps,
+  ConversationViewsProps,
 } from '../src/client/contract/slots.ts'
 import type { ViewTab } from '../src/client/contract/views.ts'
 
 // Every session-scope fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
-const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined, reload: () => {} })) as GlobalStandardProps['useResource']
+const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined })) as GlobalStandardProps['useResource']
+
+const FactoryViewsTestContext = createContext<ConversationViewsProps | undefined>(undefined)
+
+function StableConversationViews() {
+  const props = useContext(FactoryViewsTestContext)
+  if (props === undefined) throw new Error('Factory views test context is missing')
+  return <>{props.renderSlot('conversation.session', {})}</>
+}
 
 // jsdom implements no Range geometry (Lexical's scroll-into-view measures the
 // caret with one once the surface is genuinely contenteditable).
@@ -81,26 +93,26 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 })
 
-const t: ConversationRootProps['t'] = makeTranslate(zh, commonZh)
+const t: ConversationContentProps['t'] = makeTranslate(zh, commonZh)
 
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
 const SID = sid('s1')
 
-type SessionSlotProps = ComponentProps<typeof ConversationSession>
+type SessionSlotProps = ConversationSessionSlotProps
 
 const useChat: SessionSlotProps['useChat'] = () => { throw new Error('unused') }
 const useTrajectory: SessionSlotProps['useTrajectory'] = () => { throw new Error('unused') }
 
 function workspace(id = 'w1'): WorkspaceView {
   return {
-    workspaceId: wid(id), path: `/projects/${id}`, additionalPaths: [], title: id, sessionIds: [],
+    workspaceId: wid(id), path: `/projects/${id}`, title: id, sessionIds: [],
     createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
 
 const workspaceState = (items: readonly WorkspaceView[]): WorkspaceSnapshot => ({
-  items, archivedSessionIds: [], state: 'idle', phase: 'ready', error: null,
+  items, archivedSessionIds: [], pinnedSessionIds: [], state: 'idle', phase: 'ready', error: null,
 })
 
 function sessionSnapshotOf(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
@@ -112,6 +124,8 @@ function mount(
   workspaceRows: WorkspaceView[] = [{ ...workspace('one'), sessionIds: [SID] }],
   retargetWorkspace = vi.fn(async (_workspaceId: WorkspaceId) => {}),
   options: {
+    /** Explicit undefined exercises the shell before a Session is selected. */
+    sessionId?: SessionId | undefined
     /** When true, mimic overlay:true chain siblings (hidden fallback + takeover). */
     overlayTakeover?: boolean
     /** The session list summary's `blank` flag — independent of the snapshot's. */
@@ -128,16 +142,17 @@ function mount(
     viewTabs?: ViewTab[]
   } = {},
 ) {
+  const sessionId = 'sessionId' in options ? options.sessionId : SID
   const root = sid('root')
   const parent = sid('parent')
-  const rootRow = { id: root, displayTitle: 'Root', running: false, blank: false, updatedAt: 1 }
+  const rootRow = { id: root, displayTitle: 'Root', running: false, retainedBy: {}, blank: false, updatedAt: 1 }
   const parentRow = {
     id: parent, displayTitle: 'Parent', parentId: root, origin: 'subagent' as const,
-    running: false, blank: false, updatedAt: 2,
+    running: false, retainedBy: {}, blank: false, updatedAt: 2,
   }
   const childRow = {
     id: SID, displayTitle: 'Child', parentId: options.nestedSubagent === true ? parent : root,
-    cwd: '/projects/one', running: false, blank: options.summaryBlank ?? false, updatedAt: 3,
+    cwd: '/projects/one', running: false, retainedBy: { mainView: 1 }, blank: options.summaryBlank ?? false, updatedAt: 3,
     ...(options.summaryOrigin === undefined ? {} : { origin: options.summaryOrigin }),
   }
   const listed = options.omitSummaryRow !== true
@@ -150,16 +165,15 @@ function mount(
       ...listed && options.nestedSubagent === true && { [parent]: parentRow },
       ...listed && { [SID]: childRow },
     },
-    current: SID,
-    phase: 'ready', subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
+    phase: 'ready', projectionsBySession: {},
   })
   const workspaces = createSnapshotStore<WorkspaceSnapshot>(workspaceState(workspaceRows))
   const session = createSnapshotStore<SessionSnapshot>(snapshot)
   const useSession = bindSnapshotSelector(session)
   const conversation = createSnapshotStore<ConversationSnapshot>(EMPTY_CONVERSATION_SNAPSHOT)
   const useConversation = bindSnapshotSelector(conversation)
-  const useSessionPendingInteraction = bindSnapshotSelector(
-    createSnapshotStore<SessionPendingInteractionSnapshot>(new Map()),
+  const useSessionStatus = bindSnapshotSelector(
+    createSnapshotStore<SessionStatusSnapshot>(new Map()),
   )
   const store = createConversationStore().create()
   store.actions.setDraft('ordinary draft')
@@ -188,9 +202,13 @@ function mount(
       lineageOwners.push(owner as ConversationHeaderLineageOwnerProps)
       return opts?.fallback ?? null
     }
+    if (key === 'conversation.header') {
+      return <ConversationHeader {...runtimeProps} renderSlot={renderSlot as never} />
+    }
     if (key === 'conversation.session.header') {
       return (
         <ConversationSessionHeader
+          hideChrome={(owner as Pick<ConversationSessionHeaderSlotProps, 'hideChrome'>).hideChrome}
           sessionId={SID}
           SessionProvider={({ children }) => children}
           useSession={useSession}
@@ -199,8 +217,10 @@ function mount(
           useChat={useChat}
           useTrajectory={useTrajectory}
           useSessions={props.useSessions}
+          usePanelInfo={props.usePanelInfo}
           useResource={useResource}
-          useSessionPendingInteraction={useSessionPendingInteraction}
+          useSessionStatus={useSessionStatus}
+          useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
           useProjection={(() => undefined)}
           useInput={useInput}
@@ -222,11 +242,14 @@ function mount(
           useSession={useSession}
           useConversation={useConversation}
           useConversationViews={useConversationViews}
+          useInspectCall={selector => selector(undefined)}
           useChat={useChat}
           useTrajectory={useTrajectory}
           useSessions={props.useSessions}
+          usePanelInfo={props.usePanelInfo}
           useResource={useResource}
-          useSessionPendingInteraction={useSessionPendingInteraction}
+          useSessionStatus={useSessionStatus}
+          useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
           useProjection={(() => undefined)}
           useInput={useInput}
@@ -251,7 +274,9 @@ function mount(
           useSession={useSession}
           useConversation={useConversation}
           useSessions={props.useSessions}
-          useSessionPendingInteraction={useSessionPendingInteraction}
+          usePanelInfo={props.usePanelInfo}
+          useSessionStatus={useSessionStatus}
+          useSessionRetainInfo={() => undefined}
           useWorkspaces={props.useWorkspaces}
           useProjection={(() => undefined)}
           useInput={useInput}
@@ -264,11 +289,11 @@ function mount(
           resolveDraftAttachments={() => []}
           toggleCommandMenu={vi.fn()}
           useBusyEnter={bindSnapshotSelector(createSnapshotStore<'queue' | 'steer'>('queue'))}
+          useStopShortcut={bindSnapshotSelector(createSnapshotStore<readonly string[]>([]))}
           useNotices={bindSnapshotSelector(wiring.notices)}
           useLexicon={bindSnapshotSelector(wiring.lexicon)}
           useMenuLauncher={bindSnapshotSelector(createSnapshotStore<string | null>(null))}
           stop={stop}
-          command={() => Promise.resolve(true)}
           t={t}
           renderSlot={((key: string, seatOwner: object) => {
             // The bar's own seats: recorded so a case can assert what share
@@ -281,7 +306,7 @@ function mount(
       )
     }
     return <div data-testid={`view-${opts?.only ?? key}`} />
-  }) as ConversationRootProps['renderSlot']
+  }) as ConversationContentProps['renderSlot']
   const renderSlotChain = ((_key, _owner, opts) => (
     options.overlayTakeover === true
       ? (
@@ -293,33 +318,64 @@ function mount(
         </>
       )
       : (opts?.fallback ?? null)
-  )) as ConversationRootProps['renderSlotChain']
-  const props: ConversationRootProps = {
-    sessionId: SID,
-    SessionProvider: ({ children }) => children,
-    useSession,
-    useConversation,
+  )) as ConversationContentProps['renderSlotChain']
+  const SessionProvider: ConversationContentProps['SessionProvider'] = ({ children }) => children
+  const renderFactorySlot = ((_name: string, input: ConversationContentInputProps, factoryOptions?: {
+    slots?: Record<string, (props: never) => ReactNode>
+  }) => {
+    const common: ConversationViewsProps = {
+      sessionId: SID,
+      SessionProvider,
+      useSession,
+      useConversation,
+      useChat,
+      useTrajectory,
+      useSessions: bindSnapshotSelector(sessions),
+      usePanelInfo: selector => selector({ activePanelId: null }),
+      useResource,
+      useSessionStatus,
+      useSessionRetainInfo: () => undefined,
+      useWorkspaces: bindSnapshotSelector(workspaces),
+      useProjection: (() => undefined),
+      useComposerBlock: select => select(options.composerBlock),
+      useInput,
+      inputActions,
+      renderSlot,
+      renderSlotChain,
+      renderFactorySlot,
+      selectWorkspace: retargetWorkspace,
+      t,
+    }
+    const useFactorySlot = ((name: string, fallback: (props: never) => ReactNode) => (
+      name === 'views' ? StableConversationViews : factoryOptions?.slots?.[name] ?? fallback
+    )) as ConversationContentProps['useFactorySlot']
+    return (
+      <FactoryViewsTestContext.Provider value={common}>
+        <ConversationContent {...({ ...common, ...runtimeProps, ...input, useFactorySlot })} />
+      </FactoryViewsTestContext.Provider>
+    )
+  }) as ConversationSlotProps['renderFactorySlot']
+  const runtimeProps: PropsRuntime<'main.conversation'> & Pick<ConversationSlotProps, 'SessionProvider'> = {
+    usePanelInfo: selector => selector({ activePanelId: null }),
+    sessionId,
+    SessionProvider,
+    useSession: sessionId === undefined ? () => undefined : useSession,
+    useConversation: sessionId === undefined ? () => undefined : useConversation,
     useSessions: bindSnapshotSelector(sessions),
-    useSessionPendingInteraction,
+    useSessionStatus,
+    useSessionRetainInfo: () => undefined,
     useResource,
     useWorkspaces: bindSnapshotSelector(workspaces),
     useProjection: (() => undefined),
-    useComposerBlock: select => select(options.composerBlock),
     useInput,
     inputActions,
-    renderSlot,
-    renderSlotChain,
-    selectWorkspace: retargetWorkspace,
-    t,
   }
-  const view = render(<ConversationRoot {...props} />)
+  const props: ConversationSlotProps = { ...runtimeProps, renderSlot, renderFactorySlot }
+  const view = render(<ConversationMainPanel {...props} />)
   return {
     view, store, wiring, sink, retargetWorkspace, session, conversation, slotCalls, lineageOwners, seatOwners, open,
     pickerOwner: () => pickerOwner,
-    rerender: () => { view.rerender(<ConversationRoot {...props} />) },
-    rerenderSession: (nextSessionId: SessionId) => {
-      view.rerender(<ConversationRoot {...props} sessionId={nextSessionId} />)
-    },
+    rerender: () => { view.rerender(<ConversationMainPanel {...props} />) },
   }
 }
 
@@ -342,6 +398,15 @@ describe('Hero chrome', () => {
 })
 
 describe('ConversationRoot resident composer', () => {
+  it('keeps global header navigation without selecting a Session', () => {
+    const b = mount(sessionSnapshotOf(), [], undefined, { sessionId: undefined })
+    expect(b.view.container.querySelector('header')).not.toBeNull()
+    expect(b.view.getByTestId('view-conversation.header.leading')).toBeTruthy()
+    expect(b.slotCalls).not.toContain('conversation.session.header')
+    expect(b.view.queryByRole('tablist')).toBeNull()
+    expect(b.view.queryByTestId('view-conversation.session.header.corner')).toBeNull()
+  })
+
   it('does not redispatch composer child slots for an unrelated Session publication', () => {
     const b = mount(sessionSnapshotOf())
     const childKeys = new Set([
@@ -381,30 +446,16 @@ describe('ConversationRoot resident composer', () => {
     expect(seat('conversation.input.plan')).toEqual({ locked: true })
   })
 
-  it('allows an empty ungrouped session to draft and submit without picking a workspace', () => {
-    const b = mount(sessionSnapshotOf({ blank: true }), [], undefined, { summaryBlank: true })
-    const box = b.view.getByRole('textbox')
-    expect(box.getAttribute('contenteditable')).toBe('true')
-    expect(box.getAttribute('aria-haspopup')).toBeNull()
-    act(() => { b.wiring.setDraft('hello from an ungrouped chat') })
-    fireEvent.keyDown(box, { key: 'Enter' })
-    expect(b.sink).toHaveBeenCalledWith('hello from an ungrouped chat', [], 'queue', expect.any(AbortSignal))
-    expect(b.retargetWorkspace).not.toHaveBeenCalled()
-    expect(b.view.getByRole('button', { name: '选择工作区' })).toBeTruthy()
-  })
-
-  it('keeps a session blocker actionable without a workspace', () => {
+  it('keeps a blank Session without a Workspace usable, so its block applies', () => {
+    // A chat started without a Workspace is a real Session: only the
+    // no-Session state turns the input into the Workspace trigger.
     const b = mount(sessionSnapshotOf({ blank: true }), [], undefined, {
       summaryBlank: true,
       composerBlock: { reason: 'select a model first' },
     })
     const box = b.view.getByRole('textbox')
-    expect(box.getAttribute('aria-disabled')).toBe('true')
-    expect(box.getAttribute('contenteditable')).not.toBe('true')
-    expect(box.getAttribute('aria-haspopup')).toBeNull()
+    expect(box.getAttribute('aria-haspopup')).not.toBe('menu')
     expect(box.getAttribute('data-placeholder')).toBe('select a model first')
-    fireEvent.keyDown(box, { key: 'Enter' })
-    expect(b.sink).not.toHaveBeenCalled()
     const modelSeat = b.seatOwners.filter(call => call.key === 'conversation.input.model').at(-1)?.owner
     expect(modelSeat).toEqual({ locked: false })
   })
@@ -417,14 +468,17 @@ describe('ConversationRoot resident composer', () => {
     expect(b.store.store.getSnapshot().draft).toBe('ordinary revised')
     fireEvent.keyDown(box, { key: 'Enter' })
     expect(b.sink).toHaveBeenCalledWith('ordinary revised', [], 'queue', expect.any(AbortSignal))
-    expect((b.view.getByRole('button', { name: 'Child' }) as HTMLButtonElement).disabled).toBe(true)
+    // The current crumb is plain text (a drag surface on darwin), not a button.
+    expect(b.view.queryByRole('button', { name: 'Child' })).toBeNull()
+    expect(b.view.getByText('Child').tagName).toBe('SPAN')
     expect(b.view.queryByText('Root')).toBeNull()
   })
 
   it('shows hierarchy only for subagents and opens their ordinary owner', () => {
     const b = mount(sessionSnapshotOf(), undefined, undefined, { summaryOrigin: 'subagent' })
     const root = b.view.getByRole('button', { name: 'Root' })
-    expect((b.view.getByRole('button', { name: 'Child' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(b.view.queryByRole('button', { name: 'Child' })).toBeNull()
+    expect(b.view.getByText('Child').tagName).toBe('SPAN')
     fireEvent.click(root)
     expect(b.open).toHaveBeenCalledWith(sid('root'))
   })
@@ -436,7 +490,7 @@ describe('ConversationRoot resident composer', () => {
     })
     expect(b.view.getByRole('button', { name: 'Root' }).className).not.toContain('crumbSubagent')
     expect(b.view.getByRole('button', { name: 'Parent' }).className).toContain('crumbSubagent')
-    expect(b.view.getByRole('button', { name: 'Child' }).className).toContain('crumbSubagent')
+    expect(b.view.getByText('Child').className).toContain('crumbSubagent')
     expect(b.lineageOwners.slice(-2).map(owner => owner.lineageSessionId)).toEqual([
       sid('parent'),
       SID,
@@ -459,6 +513,7 @@ describe('ConversationRoot resident composer', () => {
     expect(host?.contains(seat)).toBe(true)
     expect(seat?.contains(textarea)).toBe(true)
     expect(b.slotCalls).toContain('conversation.session.header.lineage')
+    expect(b.slotCalls).toContain('conversation.header.leading')
     expect(b.slotCalls).toContain('conversation.session.header.actions')
     expect(b.slotCalls).toContain('conversation.session.header.utilities')
     expect(b.slotCalls).toContain('conversation.session.header.corner')
@@ -473,7 +528,7 @@ describe('ConversationRoot resident composer', () => {
     expect(seat?.contains(fallback)).toBe(true)
   })
 
-  it('hero phase: same textarea, hero chrome, no header, picker switches the workspace', () => {
+  it('hero phase: keeps sidebar controls accessible while hiding conversation chrome', () => {
     const b = mount(
       sessionSnapshotOf({ blank: true }),
       [
@@ -485,7 +540,11 @@ describe('ConversationRoot resident composer', () => {
     const host = b.view.container.querySelector('[data-conversation-scroll]')
     const header = b.view.container.querySelector('header')
     expect(host).not.toBeNull()
-    expect(header?.getAttribute('aria-hidden')).toBe('true')
+    expect(header?.getAttribute('aria-hidden')).not.toBe('true')
+    expect(b.view.getByTestId('view-conversation.session.header.corner')).toBeTruthy()
+    expect(b.view.queryByRole('tablist')).toBeNull()
+    expect(b.slotCalls).not.toContain('conversation.session.header.utilities')
+    expect(b.slotCalls).not.toContain('conversation.session.header.actions')
     expect(b.view.getByText('探索未至之境')).toBeTruthy()
     expect(b.view.getByText('预览版')).toBeTruthy()
     expect(b.view.queryByTestId('view-chat')).toBeNull()
@@ -502,7 +561,7 @@ describe('ConversationRoot resident composer', () => {
     const owner = b.pickerOwner() as { open: boolean; onPick(id: WorkspaceId): void }
     expect(owner.open).toBe(true)
     act(() => { owner.onPick(wid('second')) })
-    expect(b.retargetWorkspace).toHaveBeenCalledWith(wid('second'), expect.any(AbortSignal))
+    expect(b.retargetWorkspace).toHaveBeenCalledWith(wid('second'))
     expect(b.view.getByText('Selected Folder')).toBeTruthy()
   })
 
@@ -592,46 +651,8 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.queryByTestId('view-new-view')).toBeNull()
     expect(b.view.getByRole('tab', { name: 'Chat' }).getAttribute('aria-selected')).toBe('true')
     expect(b.view.getByRole('tab', { name: 'New view' }).getAttribute('aria-selected')).toBe('false')
-  })
-
-  it('publishes the stable active view id for view-owned pointer chrome', () => {
-    const b = mount(sessionSnapshotOf())
-    const header = b.view.container.querySelector('header')
-    expect(header?.getAttribute('data-active-view')).toBe('chat')
-
-    fireEvent.click(b.view.getByRole('tab', { name: 'Trajectory' }))
-    expect(header?.getAttribute('data-active-view')).toBe('trajectory')
-  })
-
-  it('moves and activates native view tabs with roving keyboard focus', () => {
-    const viewTabs: ViewTab[] = [
-      { id: 'chat', label: 'Chat' },
-      { id: 'trajectory', label: 'Trajectory' },
-      { id: 'tasks', label: 'Tasks' },
-    ]
-    const b = mount(sessionSnapshotOf(), undefined, undefined, { viewTabs })
-    const chat = b.view.getByRole('tab', { name: 'Chat' }) as HTMLButtonElement
-    const trajectory = b.view.getByRole('tab', { name: 'Trajectory' }) as HTMLButtonElement
-    const tasks = b.view.getByRole('tab', { name: 'Tasks' }) as HTMLButtonElement
-
-    expect(chat.tabIndex).toBe(0)
-    expect(trajectory.tabIndex).toBe(-1)
-    chat.focus()
-    fireEvent.keyDown(chat, { key: 'ArrowRight' })
-    expect(document.activeElement).toBe(trajectory)
-    expect(trajectory.getAttribute('aria-selected')).toBe('true')
-    expect(trajectory.tabIndex).toBe(0)
-
-    fireEvent.keyDown(trajectory, { key: 'End' })
-    expect(document.activeElement).toBe(tasks)
-    expect(tasks.getAttribute('aria-selected')).toBe('true')
-
-    fireEvent.keyDown(tasks, { key: 'ArrowRight' })
-    expect(document.activeElement).toBe(chat)
-    expect(chat.getAttribute('aria-selected')).toBe('true')
-
-    fireEvent.keyDown(chat, { key: 'Home' })
-    expect(document.activeElement).toBe(chat)
+    // The browser drag lane anchors its header tab-strip probe on this marker.
+    expect(b.view.getByRole('tablist').hasAttribute('data-conversation-tabs')).toBe(true)
   })
 
   it('rolls the pending workspace label back when switching fails', async () => {
@@ -647,112 +668,9 @@ describe('ConversationRoot resident composer', () => {
     fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
     const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
     await act(async () => { owner.onPick(wid('second')); await Promise.resolve() })
-    expect(selectWorkspace).toHaveBeenCalledWith(wid('second'), expect.any(AbortSignal))
+    expect(selectWorkspace).toHaveBeenCalledWith(wid('second'))
     expect(b.view.queryByText('Selected Folder')).toBeNull()
     expect(b.view.getByText('one')).toBeTruthy()
-  })
-
-  it('does not let an older failed Workspace pick clear a newer pick of the same Workspace', async () => {
-    let rejectFirst!: () => void
-    const first = new Promise<void>((_resolve, reject) => {
-      rejectFirst = () => { reject(new Error('stale connection failed')) }
-    })
-    const second = new Promise<void>(() => {})
-    const signals: AbortSignal[] = []
-    let call = 0
-    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
-      if (signal !== undefined) signals.push(signal)
-      return call++ === 0 ? first : second
-    })
-    const b = mount(
-      sessionSnapshotOf({ blank: true }),
-      [
-        { ...workspace('one'), sessionIds: [SID] },
-        { ...workspace('second'), title: 'Selected Folder' },
-      ],
-      selectWorkspace,
-    )
-    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
-    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
-    act(() => { owner.onPick(wid('second')) })
-    const nextOwner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
-    act(() => { nextOwner.onPick(wid('second')) })
-    expect(signals[0]?.aborted).toBe(true)
-    expect(signals[1]?.aborted).toBe(false)
-
-    await act(async () => {
-      rejectFirst()
-      await first.catch(() => {})
-    })
-    expect(b.view.getByText('Selected Folder')).toBeTruthy()
-  })
-
-  it('clears a pending Workspace label when choosing a loose Session', async () => {
-    let resolveSelection!: () => void
-    const selection = new Promise<void>((resolve) => { resolveSelection = resolve })
-    let selectionSignal: AbortSignal | undefined
-    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
-      selectionSignal = signal
-      return selection
-    })
-    const b = mount(
-      sessionSnapshotOf({ blank: true }),
-      [
-        { ...workspace('one'), sessionIds: [SID] },
-        { ...workspace('second'), title: 'Selected Folder' },
-      ],
-      selectWorkspace,
-    )
-    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
-    const owner = b.pickerOwner() as {
-      onPick(id: WorkspaceId): void
-      onChooseNoWorkspace(): void
-    }
-    act(() => { owner.onPick(wid('second')) })
-    expect(b.view.getByText('Selected Folder')).toBeTruthy()
-    expect(selectionSignal?.aborted).toBe(false)
-
-    act(() => { owner.onChooseNoWorkspace() })
-    expect(selectionSignal?.aborted).toBe(true)
-    expect(b.view.queryByText('Selected Folder')).toBeNull()
-    expect(b.view.getByText('one')).toBeTruthy()
-
-    resolveSelection()
-    await selection
-  })
-
-  it('aborts a pending Workspace selection when the resident root unmounts', () => {
-    let selectionSignal: AbortSignal | undefined
-    const selection = new Promise<void>(() => {})
-    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
-      selectionSignal = signal
-      return selection
-    })
-    const b = mount(sessionSnapshotOf({ blank: true }), undefined, selectWorkspace)
-    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
-    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
-    act(() => { owner.onPick(wid('second')) })
-    expect(selectionSignal?.aborted).toBe(false)
-
-    act(() => { b.view.unmount() })
-    expect(selectionSignal?.aborted).toBe(true)
-  })
-
-  it('aborts a pending Workspace selection when the resident Session changes', () => {
-    let selectionSignal: AbortSignal | undefined
-    const selection = new Promise<void>(() => {})
-    const selectWorkspace = vi.fn((_workspaceId: WorkspaceId, signal?: AbortSignal) => {
-      selectionSignal = signal
-      return selection
-    })
-    const b = mount(sessionSnapshotOf({ blank: true }), undefined, selectWorkspace)
-    fireEvent.click(b.view.getByRole('button', { name: '选择工作区' }))
-    const owner = b.pickerOwner() as { onPick(id: WorkspaceId): void }
-    act(() => { owner.onPick(wid('second')) })
-    expect(selectionSignal?.aborted).toBe(false)
-
-    act(() => { b.rerenderSession(sid('other')) })
-    expect(selectionSignal?.aborted).toBe(true)
   })
 
   it('blank session keeps the interactive picker chip (workspace switchable until the first message)', () => {
@@ -760,15 +678,9 @@ describe('ConversationRoot resident composer', () => {
     const chip = b.view.getByRole('button', { name: '选择工作区' })
     expect((chip as HTMLButtonElement).disabled).toBe(false)
     expect(b.slotCalls).toContain('conversation.hero.workspace')
-    expect((b.pickerOwner() as { allowNoWorkspace: boolean }).allowNoWorkspace).toBe(true)
     // The agent-preset chip sits in the same row, for the same reason: both
     // choices are only open before the first message.
     expect(b.slotCalls).toContain('conversation.hero.agentPreset')
-  })
-
-  it('keeps the no-workspace choice out of an active Session picker', () => {
-    const b = mount(sessionSnapshotOf())
-    expect((b.pickerOwner() as { allowNoWorkspace: boolean }).allowNoWorkspace).toBe(false)
   })
 
   it('prompt failure renders the promptError strip (ordinary failure, no transaction UI)', () => {
@@ -781,11 +693,12 @@ describe('ConversationRoot resident composer', () => {
 
   it('publishes the column width as a px variable for the shared width axis', () => {
     const b = mount(sessionSnapshotOf())
-    const root = b.view.container.querySelector('[data-phase]') as HTMLElement
+    const content = b.view.container.querySelector('[data-conversation-content]') as HTMLElement
+    const root = content.parentElement as HTMLElement
     // jsdom offsetWidth is 0 until faked: the observer publishes whatever the
     // layout reports, and the CSS clamp() floors the axis at 680px either way.
-    Object.defineProperty(root, 'offsetWidth', { value: 1200, configurable: true })
-    act(() => { fireResize(root) })
+    Object.defineProperty(content, 'offsetWidth', { value: 1200, configurable: true })
+    act(() => { fireResize(content) })
     expect(root.style.getPropertyValue('--dsh-conversation-column-width')).toBe('1200px')
     // No dragged preference: the user-width override stays absent so the
     // adaptive clamp term applies.
@@ -794,9 +707,10 @@ describe('ConversationRoot resident composer', () => {
 
   it('drag → persist → window clamp round-trip on a width handle', () => {
     const b = mount(sessionSnapshotOf())
-    const root = b.view.container.querySelector('[data-phase]') as HTMLElement
-    Object.defineProperty(root, 'offsetWidth', { value: 1600, configurable: true })
-    act(() => { fireResize(root) })
+    const content = b.view.container.querySelector('[data-conversation-content]') as HTMLElement
+    const root = content.parentElement as HTMLElement
+    Object.defineProperty(content, 'offsetWidth', { value: 1600, configurable: true })
+    act(() => { fireResize(content) })
     const handle = b.view.container.querySelector('[data-width-handle="right"]') as HTMLElement
     expect(handle).not.toBeNull()
     // jsdom lacks pointer capture: emulate per-element so hasPointerCapture
@@ -814,13 +728,16 @@ describe('ConversationRoot resident composer', () => {
       // Dragging the right handle outward by 25px widens by 2×25 = 50 → 970,
       // inside both bounds (max = 1600 − 176 = 1424 keeps the handles on-column).
       fireEvent.pointerDown(handle, { pointerId: 1, clientX: 800, clientY: 300 })
+      fireEvent.pointerMove(handle, { pointerId: 1, clientX: 825, clientY: 300 })
+      expect(handle.style.getPropertyValue('--dsh-width-handle-pointer-y')).toBe('300px')
       fireEvent.pointerUp(handle, { pointerId: 1, clientX: 825, clientY: 300 })
+      expect(handle.hasAttribute('data-dragging')).toBe(false)
       expect(root.style.getPropertyValue('--dsh-chat-user-width')).toBe('970px')
       expect(localStorage.getItem('dsh.conversation.contentWidth')).toBe('970')
       // Window shrinks: the displayed width re-clamps (900 − 176 = 724) but the
       // preference stays.
-      Object.defineProperty(root, 'offsetWidth', { value: 900, configurable: true })
-      act(() => { fireResize(root) })
+      Object.defineProperty(content, 'offsetWidth', { value: 900, configurable: true })
+      act(() => { fireResize(content) })
       expect(root.style.getPropertyValue('--dsh-chat-user-width')).toBe('724px')
       expect(localStorage.getItem('dsh.conversation.contentWidth')).toBe('970')
       // A press without travel (a real double-click delivers two such
@@ -839,6 +756,82 @@ describe('ConversationRoot resident composer', () => {
         else Object.defineProperty(Element.prototype, name, descriptor)
       }
     }
+  })
+
+  it('forwards wheel scrolling from a width handle to the transcript', () => {
+    const b = mount(sessionSnapshotOf())
+    const scrollport = b.view.container.querySelector('[data-conversation-scroll]') as HTMLElement
+    const handle = b.view.container.querySelector('[data-width-handle="right"]') as HTMLElement
+    const scrollBy = vi.fn()
+    Object.defineProperty(scrollport, 'clientHeight', { value: 480, configurable: true })
+    Object.defineProperty(scrollport, 'scrollBy', { value: scrollBy, configurable: true })
+    scrollport.style.lineHeight = '20px'
+
+    fireEvent.wheel(handle, { deltaY: 120, deltaMode: 0 })
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: 120 })
+
+    fireEvent.wheel(handle, { deltaY: 3, deltaMode: 1 })
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: 60 })
+    scrollport.style.lineHeight = 'normal'
+    fireEvent.wheel(handle, { deltaY: 3, deltaMode: 1 })
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: 48 })
+    fireEvent.wheel(handle, { deltaY: -1, deltaMode: 2 })
+    expect(scrollBy).toHaveBeenLastCalledWith({ top: -480 })
+    const calls = scrollBy.mock.calls.length
+    fireEvent.wheel(handle, { deltaY: 0, deltaMode: 0 })
+    fireEvent.wheel(handle, { ctrlKey: true, deltaY: 120, deltaMode: 0 })
+    expect(scrollBy).toHaveBeenCalledTimes(calls)
+
+    scrollport.removeAttribute('data-conversation-scroll')
+    const nestedScrollport = document.createElement('div')
+    nestedScrollport.setAttribute('data-conversation-scroll', '')
+    const nestedScrollBy = vi.fn()
+    Object.defineProperty(nestedScrollport, 'scrollBy', { value: nestedScrollBy, configurable: true })
+    scrollport.append(nestedScrollport)
+    fireEvent.wheel(handle, { deltaY: 120, deltaMode: 0 })
+    expect(scrollBy).toHaveBeenCalledTimes(calls)
+    expect(nestedScrollBy).not.toHaveBeenCalled()
+  })
+
+  it('does not check capture, measure, style, or schedule width-handle moves before dragging', () => {
+    const b = mount(sessionSnapshotOf())
+    const handle = b.view.container.querySelector('[data-width-handle="right"]') as HTMLElement
+    const capture = vi.fn(() => false)
+    Object.defineProperty(handle, 'hasPointerCapture', { value: capture })
+    const measure = vi.spyOn(handle, 'getBoundingClientRect')
+    const style = vi.spyOn(handle.style, 'setProperty')
+    const schedule = vi.spyOn(globalThis, 'requestAnimationFrame')
+    try {
+      fireEvent.pointerMove(handle, { pointerId: 1, clientX: 800, clientY: 300 })
+      fireEvent.pointerMove(handle, { pointerId: 1, clientX: 802, clientY: 302 })
+      expect(capture).not.toHaveBeenCalled()
+      expect(measure).not.toHaveBeenCalled()
+      expect(style).not.toHaveBeenCalled()
+      expect(schedule).not.toHaveBeenCalled()
+    } finally {
+      schedule.mockRestore()
+      style.mockRestore()
+      measure.mockRestore()
+    }
+  })
+
+  it('starts width dragging only from the primary pointer button', () => {
+    const b = mount(sessionSnapshotOf())
+    const handle = b.view.container.querySelector('[data-width-handle="right"]') as HTMLElement
+    const captured = new Set<number>()
+    Object.defineProperties(handle, {
+      setPointerCapture: { configurable: true, value: (pointerId: number) => { captured.add(pointerId) } },
+      releasePointerCapture: { configurable: true, value: (pointerId: number) => { captured.delete(pointerId) } },
+      hasPointerCapture: { configurable: true, value: (pointerId: number) => captured.has(pointerId) },
+    })
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 1, clientX: 800, clientY: 300 })
+    expect(handle.hasAttribute('data-dragging')).toBe(false)
+    fireEvent.pointerDown(handle, { pointerId: 2, button: 0, clientX: 800, clientY: 300 })
+    expect(handle.hasAttribute('data-dragging')).toBe(true)
+    fireEvent.pointerCancel(handle, { pointerId: 2 })
+    expect(handle.hasAttribute('data-dragging')).toBe(false)
+    fireEvent.pointerMove(handle, { pointerId: 2, clientX: 825, clientY: 300 })
+    expect(handle.style.getPropertyValue('--dsh-width-handle-pointer-y')).toBe('')
   })
 
   it('hero phase renders no width handles (no transcript to size)', () => {

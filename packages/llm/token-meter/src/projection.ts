@@ -65,24 +65,6 @@ export interface ContextBreakdownProjection {
   messageTokens: number
 }
 
-/**
- * The provider/model route a session's requests currently resolve to.
- *
- * Every field is copied verbatim from the durable `request/context` record the
- * agent loop appends, so the value names whatever route the composition
- * resolved and this package supplies no route, alias, or default of its own.
- * The record is appended before its request is dispatched, so the route
- * describes what the next request uses, not what a provider confirmed.
- */
-export interface ModelRouteProjection {
-  /** Registered provider route the current requests go to. */
-  provider: string
-  /** Provider-owned model id the current requests name. */
-  model: string
-  /** Maximum combined request and response context in tokens, when the route advertises one. */
-  contextWindow?: number
-}
-
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /** Provider-reported usage accumulated across the complete durable log. */
@@ -91,19 +73,5 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     contextPressure: ContextPressureProjection
     /** Heuristic system/tools/message composition of the next request. */
     contextBreakdown: ContextBreakdownProjection
-    /**
-     * Currently resolved model route; `null` until this session's first
-     * request logs one, and for the whole life of a session that never issues
-     * a request. The sentinel is deliberately serializable: a value pushed
-     * over JSON transports must survive `JSON.stringify` losslessly, where an
-     * `undefined` field would be dropped and a stale route would survive on
-     * the receiving side. The entry itself stays non-optional. See
-     * {@link ModelRouteProjection}.
-     */
-    modelRoute: ModelRouteProjection | null
-  }
-  /** Persisted fold state for the current model route. */
-  interface SessionProjectionStateMap {
-    modelRoute: ModelRouteProjection | null
   }
 }

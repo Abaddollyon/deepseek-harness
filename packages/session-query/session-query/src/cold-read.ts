@@ -13,8 +13,6 @@ export interface ColdSessionLog {
   readonly header: SessionHeader
   /** Exact fork-inherited event count paired with {@link header}. */
   readonly inheritedEventCount: SessionLogOffset
-  /** Number of events read from storage, excluding in-memory recovery closers. */
-  readonly persistedEventCount: number
   /** Stored events plus deterministic in-memory closers for an interrupted final turn; nothing is written back. */
   readonly events: SessionEvent[]
 }
@@ -52,7 +50,6 @@ export async function readColdSessionLog(
   const { events } = read
   return {
     eventState: read.eventState,
-    persistedEventCount: events.length,
     header: handle.header,
     inheritedEventCount: handle.inheritedEventCount,
     events: [...events, ...interruptedTurnClosers(events)],

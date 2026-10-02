@@ -1,14 +1,35 @@
 // Shared plumbing for the web smoke tests (dist location, free port, failure shots).
 import { existsSync, mkdirSync } from 'node:fs'
 import { createServer } from 'node:net'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Locator, Page } from 'playwright'
+import { expect, vi, type MockInstance } from 'vitest'
 
 /** The built page under test; `pnpm run test:web` rebuilds it before running. */
 export const DIST_INDEX = fileURLToPath(new URL('../dist/index.html', import.meta.url))
 
 export const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
+
+const installationRequire = createRequire(join(REPO_ROOT, 'apps/cli/package.json'))
+
+/**
+ * The built copy of a workspace package, as the dsh installation resolves it.
+ * The Host plugins a scaffold profile loads run from built packages through
+ * Node's own loader; a scaffold call that must share their module state
+ * (app-boot keeps the root Include it mounted per context) has to run that
+ * same copy, not the source a bare import gets through the tsconfig paths,
+ * and not the test runner's own inlined copy of the built file either.
+ * `require` of an ES module goes through Node's loader and shares its
+ * module map with the plugins' imports; it needs a graph without top-level
+ * await, which the built Host packages keep.
+ * @param name - the workspace package name.
+ * @returns the package's built module namespace, for the caller to type as the package's own.
+ */
+export function requireBuilt(name: string): unknown {
+  return installationRequire(name)
+}
 
 /**
  * Browser language a page must advertise to boot into the product's Chinese
@@ -16,6 +37,60 @@ export const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
  * from the browser, and Playwright's default browser asks for English.
  */
 export const ZH_BROWSER_LOCALE = 'zh-CN'
+
+/** Same-day anchor for seeded event times and the Asia/Shanghai browser clock. */
+export const WEB_FIXTURE_TIME = Date.parse('2026-01-15T12:00:00+08:00')
+
+/** How often a pinned browser clock advances, in milliseconds. */
+const PINNED_CLOCK_STEP_MS = 250
+
+/**
+ * Pin the Host clock to the shared fixture day for one scenario suite.
+ *
+ * A rendered message clock gains a `clock.md` / `clock.ymd` date prefix as soon
+ * as the message's local day differs from the renderer's, so a scenario whose
+ * message times are stamped by the Host wall clock — a live composer send, or a
+ * seed anchored from `Date.now()` — renders a different aria line once the run
+ * spans `Asia/Shanghai` midnight. Reading the fixture day on both clocks makes
+ * that calendar fact part of the scenario rather than of the run.
+ *
+ * The pinned clock advances with real elapsed time, so turn deadlines, session
+ * ordering, and durations keep running.
+ * @returns the installed `Date.now` spy, restored by the caller in teardown.
+ */
+export function pinHostClock(): MockInstance<typeof Date.now> {
+  const startedAt = performance.now()
+  return vi.spyOn(Date, 'now').mockImplementation(() =>
+    WEB_FIXTURE_TIME + Math.floor(performance.now() - startedAt))
+}
+
+/**
+ * Pin a scenario page's clock to the shared fixture day, advancing with real
+ * time. Pair it with {@link pinHostClock} for a scenario that stamps its own
+ * message times, and with `seedSession`'s `createdAt` for a seeded one.
+ *
+ * The frozen instant is re-applied from the anchor on an interval rather than
+ * left at one value, because product logic reads two `Date.now()` values to
+ * decide a minimum display hold or a deadline window; a permanently frozen
+ * clock stops supplying elapsed time, so a title that owes its golden settled
+ * text keeps rendering its previous one. Both clocks therefore advance at the
+ * real rate and stay within one step of each other.
+ * @param page - page whose clock is pinned.
+ * @returns the disposer that stops re-pinning; call it in teardown.
+ */
+export async function pinBrowserClock(page: Page): Promise<() => void> {
+  const startedAt = Date.now()
+  const step = async (): Promise<void> => {
+    try {
+      await page.clock.setFixedTime(WEB_FIXTURE_TIME + (Date.now() - startedAt))
+    } catch {
+      // The page closed under the interval; teardown owns the last word.
+    }
+  }
+  await step()
+  const timer = setInterval(() => { void step() }, PINNED_CLOCK_STEP_MS)
+  return () => { clearInterval(timer) }
+}
 
 /**
  * Open the standard browser-test page advertising English before client boot.
@@ -33,42 +108,51 @@ export async function newEnglishPage(browser: Browser, height = 1000): Promise<P
 }
 
 /**
- * Expand every currently eligible Turn-process group so a Tool-focused
+ * Scroll a locator whose rendered element can be replaced during layout.
+ * @param target - locator resolved again when its previous element detached.
+ */
+export async function scrollIntoView(target: Locator): Promise<void> {
+  await expect.poll(() => target.evaluate((element) => {
+    if (!element.isConnected) return false
+    element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
+    return true
+  }), { timeout: 10_000 }).toBe(true)
+}
+
+/**
+ * Expand every eligible Turn process and secondary group so a Tool-focused
  * scenario can exercise the original row contract beneath product-default
  * compact Chat presentation.
  * @param page - page containing the Chat view.
  */
 export async function expandTurnProcesses(page: Page): Promise<void> {
-  const controls = page.locator('[data-turn-process]')
+  const controls = page.locator('[data-turn-process], [data-process-activity]')
   await controls.first().waitFor({ state: 'visible', timeout: 10_000 })
   const count = await controls.count()
   for (let index = 0; index < count; index++) {
     const control = controls.nth(index)
-    if (await control.getAttribute('aria-expanded') !== 'true') await control.click()
+    if (await control.isVisible() && await control.getAttribute('aria-expanded') === 'false') await control.click()
   }
 }
 
 /**
- * Expand the Turn-process group containing one possibly hidden descendant.
+ * Expand the settled Turn process and secondary group containing a hidden descendant.
  * @param page - page containing the Chat view.
- * @param target - descendant whose owning Turn process should open.
+ * @param target - descendant whose outer process disclosures should open.
  */
 export async function expandOwningTurnProcess(page: Page, target: Locator): Promise<void> {
+  if (await target.isVisible()) return
   const turn = await target.evaluate(element => element.closest<HTMLElement>('[data-chat-turn]')?.dataset.chatTurn)
-  if (turn === undefined || await target.isVisible()) return
-  const control = page.locator(`[data-turn-process="${turn}"]`)
-  await control.waitFor({ state: 'visible', timeout: 10_000 })
-  if (await control.getAttribute('aria-expanded') !== 'true') await control.click()
-}
-
-/**
- * Open the restored Session selection through its sidebar row. Browser reload
- * restores the Session Controller independently of the shell's Environments
- * location; transcript scenarios must explicitly enter the conversation.
- * @param page - page with one restored selected Session row.
- */
-export async function openSelectedSession(page: Page): Promise<void> {
-  await page.getByRole('treeitem', { selected: true }).click()
+  if (turn !== undefined) {
+    const control = page.locator(`[data-turn-process="${turn}"]`)
+    if (await control.count() > 0) {
+      await control.waitFor({ state: 'visible', timeout: 10_000 })
+      if (await control.getAttribute('aria-expanded') === 'false') await control.click()
+    }
+  }
+  const group = target.locator('xpath=ancestor::*[@data-chat-group-key][1]')
+  const header = group.locator('[data-process-activity]').first()
+  if (await header.isVisible() && await header.getAttribute('aria-expanded') === 'false') await header.click()
 }
 
 /** Fail loud on a stale checkout instead of testing yesterday's bundle. */
@@ -95,10 +179,12 @@ export function probeFreePort(): Promise<number> {
 }
 
 /**
- * Enter New Session from the Environments overview, then drive the hero's
- * workspace picker until the live composer unlocks. A fresh world has no
- * Workspace; scenarios that need workspace files use the explicit Add workspace
- * entry. The directory is staged here
+ * Drive the hero's workspace picker through the composed directory dialog
+ * until the live composer unlocks. A fresh world has no Workspace, so the boot
+ * lands in the Workspace-trigger view state (startup auto-selection has nothing to
+ * select); every scenario that types into the composer must connect one
+ * first. With nothing to list, activating the composer surface raises the dialog directly —
+ * adding a workspace is the picker's only entry. The directory is staged here
  * and adopted through the path editor, which is idempotent across the repeated
  * connects a scenario may make; creating a folder from inside the dialog (the
  * product's other half of the same route) is covered by
@@ -111,9 +197,7 @@ export function probeFreePort(): Promise<number> {
  */
 export async function connectFreshWorkspace(page: Page, root: string, name = 'workspace'): Promise<void> {
   mkdirSync(join(root, name), { recursive: true })
-  await page.getByRole('button', { name: 'New session', exact: true }).last().click()
   await page.getByRole('textbox', { name: 'Choose workspace' }).click()
-  await page.getByRole('menuitem', { name: 'Add workspace…', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Select Workspace Directory' })
   await dialog.waitFor({ timeout: 10_000 })
   await dialog.getByRole('button', { name: 'Edit path' }).click()
@@ -121,11 +205,8 @@ export async function connectFreshWorkspace(page: Page, root: string, name = 'wo
   await pathInput.fill(join(root, name))
   await pathInput.press('Enter')
   await dialog.getByRole('button', { name: 'Open', exact: true }).click()
-  // Picking a directory only stages the draft; submit the complete roots first.
-  const draft = page.getByRole('dialog', { name: 'Create workspace', exact: true })
-  await draft.getByRole('button', { name: 'Create workspace', exact: true }).click()
-  await draft.waitFor({ state: 'hidden' })
-  // The confirmed workspace replaces the locked placeholder with a live composer.
+  // The pick connected the workspace: the blank session's live composer
+  // replaces the locked placeholder and enables.
   await page.locator('[data-composer-input][contenteditable="true"][data-placeholder="Describe what you want to build, / commands, @ files or sessions"]')
     .waitFor({ timeout: 15_000 })
 }
@@ -138,12 +219,11 @@ export async function connectFreshWorkspace(page: Page, root: string, name = 'wo
  * @param page - the browser page under test.
  * @param root - workspace parent directory.
  * @param name - directory created under `root` and connected.
+ * @param modelAvailable - require an editable composer when the selected model is available.
  */
-export async function connectFreshWorkspaceZh(page: Page, root: string, name = 'workspace'): Promise<void> {
+export async function connectFreshWorkspaceZh(page: Page, root: string, name = 'workspace', modelAvailable = true): Promise<void> {
   mkdirSync(join(root, name), { recursive: true })
-  await page.getByRole('button', { name: '新建会话', exact: true }).last().click()
   await page.getByRole('textbox', { name: '选择工作区' }).click()
-  await page.getByRole('menuitem', { name: '添加工作区…', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '选择工作区目录' })
   await dialog.waitFor({ timeout: 10_000 })
   await dialog.getByRole('button', { name: '编辑路径' }).click()
@@ -151,10 +231,8 @@ export async function connectFreshWorkspaceZh(page: Page, root: string, name = '
   await pathInput.fill(join(root, name))
   await pathInput.press('Enter')
   await dialog.getByRole('button', { name: '打开', exact: true }).click()
-  const draft = page.getByRole('dialog', { name: '创建工作区', exact: true })
-  await draft.getByRole('button', { name: '创建工作区', exact: true }).click()
-  await draft.waitFor({ state: 'hidden' })
-  await page.locator('[data-composer-input][contenteditable="true"][data-placeholder="描述你想要构建的内容, / 调用指令, @ 文件或对话"]')
+  const editable = modelAvailable ? '[contenteditable="true"]' : ''
+  await page.locator(`[data-composer-input]${editable}[data-placeholder="描述你想要构建的内容, / 调用指令, @ 文件或对话"]`)
     .waitFor({ timeout: 15_000 })
 }
 
@@ -203,6 +281,30 @@ export async function saveFailureShot(page: Page, name: string): Promise<void> {
 }
 
 /**
+ * Assert a visible tooltip paints above the element a user would read through
+ * it, at the bubble's center and bottom edge. The bubble ignores pointer events
+ * by design, so the measurement enables them for its own duration; each probe
+ * reports the bubble or the covering element, so a failure names its cover.
+ * @param tooltip - locator for the visible `[role="tooltip"]` bubble.
+ */
+export async function expectTooltipOnTop(tooltip: Locator): Promise<void> {
+  const probes = await tooltip.evaluate((bubble) => {
+    const rect = bubble.getBoundingClientRect()
+    const previous = bubble.style.pointerEvents
+    bubble.style.pointerEvents = 'auto'
+    const probe = (y: number): string => {
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, y)
+      if (hit === null) return 'none'
+      return bubble.contains(hit) ? 'tooltip' : `${hit.tagName}.${hit.classList.value}`.slice(0, 120)
+    }
+    const probes = { center: probe(rect.top + rect.height / 2), bottom: probe(rect.bottom - 1) }
+    bubble.style.pointerEvents = previous
+    return probes
+  })
+  expect(probes).toEqual({ center: 'tooltip', bottom: 'tooltip' })
+}
+
+/**
  * The conversation engine's Context key format, restated here rather than
  * imported: these specs live in the Host compiler aggregate, which must not
  * reach the Client plane. The engine's own copy is
@@ -214,4 +316,18 @@ export async function saveFailureShot(page: Page, name: string): Promise<void> {
  */
 export function conversationContextKey(kind: string, id: string): string {
   return `${kind.length}:${kind}${id}`
+}
+
+/** Open Settings through the Web gear or Desktop account menu.
+ * @param page - browser page with the mounted sidebar.
+ * @param locale - current UI language.
+ */
+export async function openSettings(page: Page, locale: 'en' | 'zh'): Promise<void> {
+  const label = locale === 'zh' ? '设置' : 'Settings'
+  if (await page.evaluate(() => 'dshDesktop' in globalThis)) {
+    await page.getByRole('button', { name: locale === 'zh' ? '账号菜单' : 'Account menu', exact: true }).click()
+    await page.getByRole('menuitem', { name: label, exact: true }).click()
+  } else {
+    await page.getByRole('button', { name: label, exact: true }).click()
+  }
 }

@@ -36,9 +36,6 @@
       "path": "../../core/system-prompt"
     },
     {
-      "path": "../pending-interactions"
-    },
-    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

@@ -1,3 +1,0 @@
-not-json
-[]
-{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"wrong","turnId":"wrong","item":null}}

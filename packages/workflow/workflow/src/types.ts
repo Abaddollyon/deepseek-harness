@@ -34,14 +34,6 @@ export interface WorkflowPhase {
   provider?: string
   /** Optional model override this phase is expected to use (informational). */
   model?: string
-  /**
-   * Optional reasoning effort this phase is expected to use (informational).
-   * Present so a phase can still describe the whole LLM target its `agent()`
-   * calls select: provider, model, and effort are independently settable per
-   * call, and a declaration carrying only two of the three would understate the
-   * phase's cost.
-   */
-  reasoningEffort?: string
 }
 
 /**
@@ -87,8 +79,8 @@ export interface WorkflowResult {
   /**
    * How many `agent()` calls the run accepted over its whole lifetime. On a
    * graceful settlement this is the script-side count (calls still queued for
-   * a concurrency slot included); on a termination path (grace force-settle,
-   * worker death) it degrades to the host-observed count — calls queued
+   * a concurrency slot included); on a termination path (cancellation or
+   * process failure) it degrades to the host-observed count — calls queued
    * inside a terminated script are unknowable then.
    */
   agentsStarted: number

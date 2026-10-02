@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-workflow` gives the model the `workflow` tool: a JavaScript orchestration script fans work out across subagents through `ctx.workflowEngine`. Under caller ownership, the parent turn waits for the final value. Under supervisor ownership, the tool durably registers the run, records `run/detached`, and returns its job id immediately while bounded execution continues. Choose it for explicitly requested workflows or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Deployments can rename the tool and cap rendered result text through `toolName` and `maxResultChars`.
+`dsh-tool-workflow` lets a model run JavaScript orchestration that delegates to many subagents and returns a final JSON value. Use it only when the user explicitly requests a workflow or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Foreground execution waits for all work; cancellation or abnormal completion returns an error rather than partial success. `run_in_background: true` returns an owned job id immediately and exposes live output. Deployments can rename the tool with `toolName` and bound returned values with `maxResultChars`.
 
 ## Table of Contents
 
@@ -29,23 +29,25 @@ The `workflow` tool runs a model-authored orchestration script that fans work ou
 
 ### Calling the tool
 
-The model submits three parameters: `meta` (required identity data: `name`, `description`, and optional `whenToUse` and `phases`), `script` (required plain JavaScript body — no `export const meta` statement; the tool description carries the complete authoring contract), and `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest).
+The model submits three parameters plus one flag: `meta` (required identity data: `name`, `description`, and optional `whenToUse` and `phases`), `script` (required plain JavaScript body — no `export const meta` statement; its parameter description carries the body rules and the tool description carries the hook contract), `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest), and `run_in_background` (optional; present only while `enableRunInBackground` holds).
 
-Caller ownership returns `{ runId, agentsStarted, result }` after settlement and renders the final JSON. Supervisor ownership returns `{ runId, jobId, status: 'running' }` only after the initial job record is durable and `run/detached` is recorded; completion arrives through the background-job notice and `job_output`. Parse, validation, cancellation, execution, and cleanup failures remain explicit errors rather than partial success.
+A foreground success returns the envelope `{ kind: 'foreground', runId, agentsStarted, result }`, rendered to the model as `workflow "<name>" completed (<count> agent<optional-s>).` followed by `Return value:` and the pretty-printed JSON. A workflow that cannot start — a script parse or meta validation failure — returns an error the model can correct from. Cancellation and execution failures return `Error: workflow run was cancelled` or `Error: workflow run failed: <error>`; partial output is never reported as success.
 
 ### What to expect during a run
 
-With `ownership: caller`, the tool awaits the result, bridges the parent step's abort signal, and disposes the run before returning. With `ownership: supervisor`, a finite `workflowEngine.maxRunWallMs`, `ctx.jobs`, and a durable store are required; the parent signal is not retained after handoff, while job cancellation stops the run and settlement disposes it. Child messages remain outside the parent conversation in both modes.
+While the script runs, the parent turn waits: the tool starts the run, awaits its result, and always disposes it, so the script and its children reach quiescence on every path — including cancellation, which is bridged from the parent step's abort signal. The model sees one final outcome, never intermediate child messages; the children's own work stays out of the parent conversation.
+
+### Background runs
+
+`run_in_background: true` returns `{ kind: 'background', jobId, runId }` immediately: the run is registered on `ctx.jobs` as an owned `workflow` job, so the session-header job list streams its `phase()`, `log()`, and member lifecycle lines live from the job's output ring, and the row's progress line tracks the current phase. No tool-step signal reaches the run — `job_kill`, the list's stop control, and owner teardown are what cancel it. Settlement is the job's settlement: a completed run carries the same rendered return value as the job's result (the completion notice announces it, the model's first `job_output` after settlement carries it once), a cancelled run settles `killed` with the kill reason, and a failed run settles `failed` with the script's failure message. Without a live job registry and a controller serving the caller the call fails, naming the missing composition pieces.
 
 ### Config
 
 | Field | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Ceiling for the serialized return value only; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. The marker envelope may exceed this value, as with bash result metadata. |
-| `ownership` | `caller` | `caller` waits in the tool call; `supervisor` durably hands the bounded run to `ctx.jobs`. |
-| `maxProgressEvents` | `2000` | Shared per-run ceiling for durable phase and log records; the last slot is a log record marked `truncated: true`. |
-| `maxLogChars` | `2000` | Character ceiling for each durable log message; clipping marks the record `truncated: true`. |
+| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`, or by `{ truncated: true, originalChars, notice, preview }` when no spill backend is mounted. |
+| `enableRunInBackground` | `true` | Expose `run_in_background`; disabled calls are also rejected. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
 
@@ -61,15 +63,21 @@ This section explains how the consumer is split from the engine and how the run 
 
 ### Design concept
 
-The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt guidance, and the result envelope; script parsing, execution, caps, and cancellation live behind `ctx.workflowEngine`, so a hardened engine swaps in without changing what the model sees. Usage guidance ships with the tool plugin as a prompt section, never in the deployment persona.
+The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt guidance, and the result envelope; script parsing, execution, caps, and cancellation live behind `ctx.workflowEngine`, while the PTC engine shares Node process confinement with `run_code`. Usage guidance ships with the tool plugin as a prompt section, never in the deployment persona.
 
 ### Run lifecycle
 
-Caller ownership awaits `run.result`, bridges `exec.signal` to cancellation, and disposes the run before returning; a non-`completed` stop reason becomes a tool error. Supervisor ownership registers the bounded run through `ctx.jobs.startDurable`, records `run/detached`, and returns the job handle; job cancellation owns the detached lifetime, and final settlement waits for disposal. On completion, a return value whose pretty-printed JSON exceeds `maxResultChars` is saved through the session-scoped `ctx.spillStore`; `result` becomes `{ truncated: true, originalChars, spillPath, preview }`, and the referenced file contains the exact complete JSON. The tool fails explicitly if an oversized value cannot be spilled rather than emitting an unrecoverable fragment. Spills carry `kind: 'tool'` provenance with the originating call id; the calling Session remains the artifact owner.
+`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason; completion returns `{ kind, runId, agentsStarted, result }`. A value whose pretty-printed JSON exceeds `maxResultChars` is saved whole through the session-scoped `ctx.spillStore`, and `result` becomes `{ truncated: true, originalChars, spillPath, preview }`. Without a spill backend, `result` becomes `{ truncated: true, originalChars, notice, preview }`, whose `notice` states that the complete JSON was not saved. When a mounted backend fails to save, the call (or background job) fails instead of returning a fragment.
+
+### Background lifecycle
+
+A background call registers the run through `jobs.start` inside the job starter, so a synchronous engine rejection registers nothing and admission preflight runs before the engine spawns. The job's `done` chains from `run.result`: dispose (a disposal failure is warned, never rejected into the registry), stop the mirrors, then map the stop reason onto the job outcome. The ring mirror (`src/record.ts`) subscribes `workflow/phase`, `workflow/log`, and member events once per plugin and routes them into the tracked runs' `JobHandle` faces (`append` for lines, `updateProgress` for the phase); a straggling event after settlement finds no tracked run, and an append against a settled job drops inside the registry.
 
 ### Durable session records
 
-The tool projects each run into the calling Agent's Session: run-start after `start()` returns, phase and log progress plus member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. Nested transport calls also record their run and retain the enclosing model call as `parentCallId`. Phase and log records share increasing ordinals and a bounded per-run allowance; reaching the allowance writes one final truncated log record and drops subsequent progress without suppressing member or terminal records. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup. The package invariant rejects duplicate starts, non-increasing progress ordinals, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append, while accepting missing terminal suffixes.
+For every accepted call, root or dispatched from `run_code` (`exec.parent` set), the tool projects the run into the calling Agent's Session with four log-only events: run-start after `start()` returns, member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. In PTC mode `run_code` is the model's only route to this tool, so a dispatched run records exactly like a root call. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup. The package invariant rejects duplicate starts, unpaired members, terminal events with open members, and updates after run-end on both cold load and live append, while accepting missing terminal suffixes.
+
+The engine's `workflow/phase` and `workflow/log` events have no per-line durable surface from this tool: the session log deliberately records run and member lifecycle only, and the Web transcript derives from those records. A background run's lines reach a human through the job observation record instead, which is transient by design.
 
 ### Render intent
 
@@ -79,8 +87,9 @@ Decided up front per the [render-intent Agent Note](../../../.agents/notes/imple
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin entry: tool registration, run lifecycle, recorder wiring |
-| [`src/types.ts`](src/types.ts) | The log-only lifecycle, progress, and member payloads and their `SessionEventMap` declaration |
+| [`src/index.ts`](src/index.ts) | Plugin entry: tool registration, run lifecycle, background job registration, recorder wiring |
+| [`src/record.ts`](src/record.ts) | Background runs' live-progress mirror into the job's output ring |
+| [`src/types.ts`](src/types.ts) | The four log-only record event payloads and their `SessionEventMap` declaration |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion: durable workflow-record protocol validation |
 
 </details>
@@ -94,7 +103,7 @@ Read these pages when the tool-level contract is not enough. They move from the 
 
 - [Workflow subsystem](../../../docs/subsystems/workflow.md) — the seam contract, start request, and event payloads.
 - [Workflow seam](../workflow/README.md) — the run and result vocabulary behind the tool.
-- [Worker-thread engine](../workflow-worker-thread/README.md) — the engine that executes the scripts.
+- [PTC workflow engine](../workflow-ptc/README.md) — the engine that executes the scripts.
 - [subagent tool](../../subagent/tool-subagent/README.md) — the plain-delegation alternative for one or two children.
 - [Group map](../README.md) — the workflow capability family and its packages.
 - [Dynamic workflows Agent Note](../../../.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md) — the seam design and its decisions.
@@ -142,11 +151,11 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. Caller success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON. An oversized value is replaced by the recoverable spill marker documented above, not a clipped fragment. Supervisor admission renders JSON containing `runId`, `jobId`, and `status: "running"`; the completed job output uses the same completion text and projected value. Caller cancellation becomes `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`; execution failure becomes `Error: workflow run failed: <error-or-unknown error>`. A call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages and log-only progress records do not enter the parent model context.
+The full model-written script, metadata, and args remain in the assistant tool call. A foreground success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; an oversized value is replaced by `{ truncated: true, originalChars, spillPath, preview }`, whose `spillPath` holds the complete JSON; without a spill backend, a `notice` that only the preview remains replaces `spillPath`. A background acceptance is exactly `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`, and the same rendered value later reaches the model through the job's completion notice and `job_output`. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
 
 #### Token effect
 
-Call tokens can be large and remain until compaction. The serialized result is bounded by `maxResultChars`, but spill metadata and completion text add tokens beyond that ceiling; child-model tokens are separate from the parent's retained context.
+Call tokens can be large and remain until compaction. The serialized return value is capped by `maxResultChars`, and the recovery metadata adds a bounded envelope; child-model tokens are separate from the parent's retained context.
 
 #### KV Cache effect
 
@@ -159,10 +168,11 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits define what the tool does not yet support. They are current constraints, not a task backlog.
 
-- **Supervisor ownership is durable accounting, not workflow resumption** — the current workflow record is non-resumable after host death and is honestly settled on restart; live supervised runs continue only while the host process remains alive.
-- **`args` must be an object and the result envelope is metadata-bearing** — callers wrap top-level arrays and scalars in a field; `maxResultChars` caps only the serialized return value, while an oversized value is replaced by a recoverable marker whose envelope may exceed the cap, as with bash result metadata.
+- **A background run reports no intermediate value to the model** — `job_output` before settlement returns status only; the return value arrives whole at completion, and cancellation still discards partial output.
+- **`args` must be an object and the result envelope may exceed the cap** — callers wrap top-level arrays and scalars in a field; `maxResultChars` caps only the serialized return value, so an oversized value's recovery metadata, including its preview, may exceed it.
 - **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
-- **Progress records are bounded and observational** — phase and log narration can be clipped or omitted after their allowance; a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **Durable records are observational** — a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **No recorded-session scenario replays a background run yet** — unit and real-engine composition suites cover the path; the snapshot tree pins only the schema and prompt text.
 
 <a id="dev-note"></a>
 ### Dev Note
@@ -172,6 +182,6 @@ These limits define what the tool does not yet support. They are current constra
 
 This Dev Note is working context for maintainers: open directions that are not decided. It is explicitly non-authoritative — shipped behavior, limits, and accepted rationale live in the sections above, the package code, and the linked Agent Notes.
 
-Open direction: resumable workflow producers.
+Open directions: a recorded-session scenario for the background path.
 
 </details>

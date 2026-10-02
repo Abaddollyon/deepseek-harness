@@ -27,15 +27,6 @@
       "path": "../../llm/llm"
     },
     {
-      "path": "../../jobs/jobs"
-    },
-    {
-      "path": "../../jobs/run-supervisor"
-    },
-    {
-      "path": "../../spill/spill"
-    },
-    {
       "path": "../../core/tools"
     },
     {
@@ -46,6 +37,12 @@
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../jobs/jobs"
+    },
+    {
+      "path": "../../spill/spill"
     }
   ]
 }

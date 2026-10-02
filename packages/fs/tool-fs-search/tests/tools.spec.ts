@@ -12,8 +12,10 @@
 
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
 import { join, sep } from 'node:path'
 import { createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED_BEFORE_DISPATCH, type ToolExecution, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
@@ -38,6 +40,12 @@ import {
   sampleAcrossTopLevel,
   toWorkdirRelative,
 } from '@deepseek-ai/dsh-tool-fs-search'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'test': { kind: 'test' } & ContextFormed
+  }
+}
 
 const testToolSignal = new AbortController().signal
 
@@ -96,6 +104,7 @@ class FakeReader implements SubprocessOutputReader {
  * abort→terminate escalation.
  */
 class FakeHandle implements SubprocessHandle {
+  readonly control = undefined
   readonly stdin = undefined
   readonly stdout = undefined
   readonly stderr = undefined
@@ -146,6 +155,7 @@ class FakeHandle implements SubprocessHandle {
  * assert on the exact spawn specs and settled handles.
  */
 class FakeSubprocess extends SubprocessRuntime {
+  async terminalEnvironment() { return { platform: 'posix' as const } }
   spawns: SubprocessSpawnSpec[] = []
   override async resolveExecutable(command: string): Promise<string> { return command }
   override spawnTerminal(): Promise<never> { throw new Error('search tools spawn pipes, never terminals') }
@@ -240,8 +250,6 @@ describe('registration', () => {
     const prompt = renderPrompt(await ctx.systemPrompt.assemble())
     expect(prompt).toContain('Use the glob tool')
     expect(prompt).toContain('Use the grep tool')
-    expect(prompt).toContain('sampled across top-level entries')
-    expect(prompt).not.toContain('sampled across top-level directories')
     const glob = ctx.tools.schemas().find(schema => schema.name === 'glob')
     expect(glob?.description).toContain('sampled across top-level entries')
   })
@@ -278,11 +286,8 @@ describe('registration', () => {
 
   it('describes the modification-time head when over-cap sampling is disabled', async () => {
     const { ctx } = await setup({ config: { sampleOverCapGlobResults: false } })
-    const prompt = renderPrompt(await ctx.systemPrompt.assemble())
-    expect(prompt).toContain('a larger one keeps the modification-time-ordered head')
-    expect(prompt).not.toContain('sampled across top-level entries')
     const glob = ctx.tools.schemas().find(schema => schema.name === 'glob')
-    expect(glob?.description).toContain('a larger result returns the first 100 paths in modification-time order')
+    expect(glob?.description).toContain('Returns up to 100 paths in modification-time order; a larger result keeps the first paths')
     expect(glob?.description).not.toContain('sampled across top-level entries')
   })
 })
@@ -736,10 +741,12 @@ describe('glob results', () => {
     expect(text(result)).toBe(`${join('src', 'a.ts')}\n/elsewhere/b.ts\nrel/c.ts`)
   })
 
-  it('validates arguments (blank pattern, blank path)', async () => {
-    const { ctx } = await setup()
+  it('rejects a blank pattern and reads a blank path as omitted', async () => {
+    const { ctx, subprocess } = await setup()
     expect(text(await call(ctx, 'glob', { pattern: '  ' }))).toContain('pattern must be a non-empty string')
-    expect(text(await call(ctx, 'glob', { pattern: '*', path: ' ' }))).toContain('path must be a non-empty string')
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'glob', { pattern: '*', path: ' ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv).not.toContain('--')
   })
 
   it('threads a valid path through to the spawn as the plain search root element', async () => {
@@ -762,7 +769,7 @@ describe('glob results', () => {
     ctx.on('tools/post-execute', async () => ({
       kind: 'accept',
       additionalContexts: [createUserMessage({
-        content: [{ type: 'text', text: 'glob context' }], source: { kind: 'plugin', plugin: 'test' },
+        content: [{ type: 'text', text: 'glob context' }], source: { kind: 'test' },
       })],
     }))
     subprocess.handler = () => runResult('a.ts\nb.ts\nc.ts\nd.ts\n')
@@ -974,7 +981,7 @@ describe('grep results', () => {
     ctx.on('tools/post-execute', async () => ({
       kind: 'accept',
       additionalContexts: [createUserMessage({
-        content: [{ type: 'text', text: 'grep context' }], source: { kind: 'plugin', plugin: 'test' },
+        content: [{ type: 'text', text: 'grep context' }], source: { kind: 'test' },
       })],
     }))
     subprocess.handler = () => runResult([
@@ -1054,11 +1061,12 @@ describe('grep results', () => {
     expect(text(result)).toBe('Found 1 of 2 matches\n\na.ts\nLine 1: one\n\n(The complete result could not be saved; narrow pattern, path, or include to see more.)')
   })
 
-  it('validates arguments (empty pattern, blank path, bad include)', async () => {
-    const { ctx } = await setup()
+  it('validates arguments (empty pattern, bad include) and reads blank optional fields as omitted', async () => {
+    const { ctx, subprocess } = await setup()
     expect(text(await call(ctx, 'grep', { pattern: '' }))).toContain('pattern must be a non-empty string')
-    expect(text(await call(ctx, 'grep', { pattern: 'x', path: '  ' }))).toContain('path must be a non-empty string')
-    expect(text(await call(ctx, 'grep', { pattern: 'x', include: '  ' }))).toContain('include must be a non-empty glob')
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'grep', { pattern: 'x', path: '', include: '  ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv.some(arg => arg === '--' || arg.startsWith('--glob='))).toBe(false)
     expect(text(await call(ctx, 'grep', { pattern: 'x', include: '!*.ts' }))).toContain('negated patterns')
     expect(text(await call(ctx, 'grep', { pattern: 'x', include: '*.ts,*.js' }))).toContain('comma-separated list')
   })
@@ -1207,3 +1215,58 @@ describe('helpers', () => {
     expect(grouped).toBe('b.ts\nLine 2: x\nLine 5: z\n\na.ts\nLine 1: y')
   })
 })
+
+/** Create a real per-agent scope over the mounted tool plugins. */
+async function guidanceScope(ctx: Context) {
+  const key = {}
+  let scope!: Scope
+  await ctx.plugin(Object.assign((inner: Context) => { scope = createScope(inner, key) },
+    { inject: ['tools', 'systemPrompt'] }))
+  return { key, scope }
+}
+
+const originalSearchGuidance = {
+  glob: 'Use the glob tool — not shell find — to discover files by path pattern.',
+  grep: 'Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.',
+}
+
+describe('scope-aware search guidance', () => {
+  it.each([[], ['glob'], ['grep'], ['glob', 'grep']].map(allow => ({ allow })))('renders only visible search guidance: $allow', async ({ allow }) => {
+    const { ctx } = await setup()
+    const { key, scope } = await guidanceScope(ctx)
+    scope.ctx.tools.restrict({ allow })
+    try {
+      const assembly = await ctx.systemPrompt.assemble({ scope: key })
+      expect(assembly.tools.map(tool => tool.name)).toEqual([...allow].sort())
+      expect(renderPrompt(assembly)).toBe(withPersona(...allow.map(name => name === 'glob'
+        ? originalSearchGuidance.glob
+        : originalSearchGuidance.grep.replace(' Use read on a matched file when you need surrounding context.', ''))))
+    } finally {
+      await scope.dispose()
+    }
+  })
+
+  it('reuses the unchanged grep paragraph when read is visible', async () => {
+    const { ctx } = await setup()
+    ctx.tools.register({
+      name: 'read', description: 'read fixture', parameters: {},
+      output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: '' }] },
+      execute: () => Promise.resolve(''),
+    })
+    const { key, scope } = await guidanceScope(ctx)
+    try {
+      expect(renderPrompt(await ctx.systemPrompt.assemble({ scope: key })))
+        .toBe(withPersona(originalSearchGuidance.glob, originalSearchGuidance.grep))
+      scope.ctx.tools.restrict({ deny: ['read'] })
+      expect(renderPrompt(await ctx.systemPrompt.assemble({ scope: key })))
+        .toBe(withPersona(originalSearchGuidance.glob, originalSearchGuidance.grep.split(' Use read')[0]!))
+    } finally {
+      await scope.dispose()
+    }
+  })
+})
+
+/** Preserve the default persona and exact section separators in the oracle. */
+function withPersona(...sections: string[]): string {
+  return ['You are an AI agent powered by DeepSeek Harness.', ...sections].join('\n\n')
+}

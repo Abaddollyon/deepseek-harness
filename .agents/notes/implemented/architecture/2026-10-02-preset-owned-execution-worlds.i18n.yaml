@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-preset-owned-execution-worlds.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-02-preset-owned-execution-worlds.md
+/agent-note-preset-owned-execution-worlds:
+  en: 649ada8763091dd4
+  zh: a1fef7d1b0c033f1
+/agent-note-preset-owned-execution-worlds/problem:
+  en: dd8e9b7cef78e694
+  zh: da2d7723e7cbb2f2
+/agent-note-preset-owned-execution-worlds/decision:
+  en: e861538b09098393
+  zh: 5ab1e0ba3f476d01
+/agent-note-preset-owned-execution-worlds/alternatives-considered:
+  en: 7c383682680d3aa1
+  zh: 8b9bdc79f88f9ae8
+/agent-note-preset-owned-execution-worlds/consequences:
+  en: 35005a3ca459e7fe
+  zh: 1e33c226bd454217

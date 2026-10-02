@@ -32,9 +32,6 @@ sequenceDiagram
   Hooks-->>Driver: authoritative reject or enter(messages)
   alt proposed step rejected, first batch empty, or pre-step failed
     Driver-->>Driver: claimed batch stays removed, the open turn spends no step
-    opt the turn aborts before the step starts
-      Driver-->>Driver: unstarted claimed batch restored to the inbox
-    end
   else enter proposed step
   Driver->>Session: <code>step/start</code>
   Driver->>Hooks: <code>agent/request</code> waterfall
@@ -44,9 +41,6 @@ sequenceDiagram
   Driver->>Session: <code>system/message</code> ordered per-node reconciliation
   Driver->>Session: <code>user/message</code> per entered message
   Driver->>Session: <code>request/header</code> and <code>request/context</code> as needed
-  Driver->>Hooks: <code>agent/request-preflight</code> waterfall
-  Hooks-->>Driver: admit or retry after a replacement commit
-  Note over Driver,Session: productive replacement consolidates the system prompt and begins a new request series
   Driver->>Driver: derive and freeze request from the log
   Driver->>LLM: bound prepared call through <code>llm/stream</code> waterfall
   LLM-->>Driver: StreamChunk*
@@ -90,9 +84,9 @@ sequenceDiagram
 
 `assistant/message` 事件会记录每次成功的提供方调用，包括返回空内容或以 `max-tokens` 结束的调用，并嵌入精确的紧凑带时间 stream。空内容不会进入派生历史。失败、重试、取消或 stream error attempt 到达 settlement 时，如果没有 surface message，就会把 stream 记录为 `assistant/attempt`。实时 `agent/assistant-stream` chunk frame 是瞬态数据；回放读取任一种持久 settlement，如果进程在 settlement 前硬中断，则不会留下持久 attempt stream。
 
-`dsh-compaction-basic` 在规范 header 记录之后、派生请求之前通过 `agent/request-preflight` 处理精确路由压力，而 `agent/request-error` 保留为提供方确认溢出的后备。只有当剪枝或摘要推进 surface replacement generation 时，预检才会重试；循环会验证 generation 并限制有效的重新分派次数。摘要之前，压缩会根据实际摘要模型容量为输出、工具 envelope、指令和保留的系统头节点预留 token；如果没有平衡回放范围可容纳，它不会改变持久历史。提供方错误恢复发生在仍打开的步骤内，只有表层推进后才重试，否则仍以原始请求错误为准。每次重试都会准备调用，并在派生请求之前协调保留的已渲染组装结果，不重复组装、pre-step 或用户消息准入。
+`dsh-compaction-basic` 在派生请求之前通过 `agent/pre-step` 处理压力，而 `agent/request-error` 仅用于规范的上下文溢出。任一触发条件满足后，系统都会先执行可选的工具结果剪枝，再选择摘要。恢复发生在仍打开的步骤内，只有剪枝或摘要生成推进 surface replacement generation 时才重试，否则仍以原始请求错误为准。每次重试都会准备调用，并在派生请求之前协调保留的已渲染组装结果，不重复组装、pre-step 或用户消息准入。
 
-以返回的 `agent/pre-step` 决策为准；包装 `next()` 的监听器会保留下游消息和 `startsRequestSeries`，除非有意替换。steering（中途引导）和注入的上下文在后续认领操作取得其下一步骤批次后，会经过同一 waterfall（瀑布式事件）。
+以返回的 `agent/pre-step` 决策为准；通过包装 `next()` 的监听器会保留下游消息与 `startsRequestSeries`，除非有意替换。steering（中途引导）和注入的上下文在后续的认领操作取得其下一步骤批次后，会经过同一 waterfall（瀑布式事件）。
 
 需要可回放 transcript（文本记录）数据的 SDK 用户应当消费 `session/event`；`agent/*` 是用于队列与状态、提示词拦截、请求构造、steering、继续执行和错误处理的实时协调接口。
 

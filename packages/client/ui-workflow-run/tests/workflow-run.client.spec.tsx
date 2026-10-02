@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -19,7 +20,7 @@ import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
 import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
 import {
   chatSnapshot as emptyChatSnapshot, conversationSnapshot, makeTranslate, sessionSnapshot,
-  stubSettingsScope, workspaceSnapshot,
+  stubConfigForm, TestSessions, workspaceSnapshot,
 } from '@deepseek-ai/dsh-client-test-runtime'
 import {
   WorkflowRunPanel, type WorkflowRunInjected, type WorkflowRunPanelProps,
@@ -34,6 +35,7 @@ import type {} from '../src/client/index.ts'
 
 // Every session-scope fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
 const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined, reload: () => {} })) as GlobalStandardProps['useResource']
+const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({ activePanelId: null })
 
 afterEach(cleanup)
 
@@ -190,29 +192,6 @@ describe('workflow-run Conversation Definition', () => {
     })
   })
 
-  it('keeps a detached workflow running after its starting step closes', () => {
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'step/start', { turn: 1, step: 1 }),
-      at(3, 'tool-workflow/run-start', { runId: 'detached', name: 'detached' }),
-      at(4, 'tool-workflow/agent-start', {
-        runId: 'detached', seq: 1, label: 'worker', childId: 'child-1',
-      }),
-      at(5, 'run/detached', {
-        jobId: 'workflow-detached', kind: 'workflow', label: 'workflow: detached',
-        runId: 'detached', resumable: false,
-      }),
-      at(6, 'step/end', { turn: 1, step: 1 }),
-    ])
-    expect(workflowData(value)).toMatchObject({
-      status: 'running', phases: [{ members: [{ status: 'running' }] }],
-    })
-    value.append(at(7, 'tool-workflow/agent-end', { runId: 'detached', seq: 1, outcome: 'completed' }))
-    value.append(at(8, 'tool-workflow/run-end', { runId: 'detached', stopReason: 'completed' }))
-    value.flush()
-    expect(workflowData(value)?.status).toBe('completed')
-  })
-
   it('retains a zero-member run as its own completed node', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
@@ -222,29 +201,6 @@ describe('workflow-run Conversation Definition', () => {
     ])
     expect(workflowData(value)).toEqual({
       name: 'empty', status: 'completed', phases: [],
-    })
-  })
-
-  it('folds phase announcements and narration into the card model', () => {
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'tool-workflow/run-start', { runId: 'progress', name: 'progress' }),
-      at(3, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 1 }),
-      at(4, 'tool-workflow/phase', { runId: 'progress', title: 'Research', ordinal: 2 }),
-      at(5, 'tool-workflow/log', {
-        runId: 'progress', message: 'searching', ordinal: 3, truncated: true,
-      }),
-      at(6, 'tool-workflow/log', { runId: 'progress', message: 'done', ordinal: 4 }),
-      at(7, 'tool-workflow/run-end', { runId: 'progress', stopReason: 'completed' }),
-    ])
-    expect(workflowData(value)).toEqual({
-      name: 'progress',
-      status: 'completed',
-      phases: [{ key: 'value:8:Research', phase: 'Research', members: [] }],
-      narration: [
-        { message: 'searching', ordinal: 3, truncated: true },
-        { message: 'done', ordinal: 4 },
-      ],
     })
   })
 
@@ -340,18 +296,17 @@ const listState = (overrides: Partial<SessionListState> = {}): SessionListState 
   ids: [PARENT_ID, CHILD_ID],
   byId: {
     [PARENT_ID]: {
-      id: PARENT_ID, displayTitle: 'parent', running: true, blank: false, updatedAt: 0,
+      id: PARENT_ID, displayTitle: 'parent', running: true, retainedBy: {}, blank: false, updatedAt: 0,
     },
     [CHILD_ID]: {
       id: CHILD_ID, displayTitle: 'child', parentId: PARENT_ID, origin: 'subagent',
-      running: true, blank: false, updatedAt: 0,
+      running: true, retainedBy: {}, blank: false, updatedAt: 0,
     },
   },
-  current: PARENT_ID,
   phase: 'ready',
-  subagentsByParent: {},
-  jobsBySession: {},
-  currentAddress: undefined,
+  projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [
+    { createdAt: 1, id: CHILD_ID, mode: 'one-shot' },
+  ] } } },
   ...overrides,
 })
 
@@ -360,8 +315,9 @@ function panelProps(data: WorkflowRunChatData, sessions = listState(), openSessi
     node: node(data),
     sessionId: PARENT_ID,
     useSessions: selector => selector(sessions),
-    useResource,
-    useSessionPendingInteraction: selector => selector(panelAttention),
+    usePanelInfo, useResource,
+    useSessionStatus: selector => selector(panelAttention),
+    useSessionRetainInfo: () => undefined,
     useSession: selector => selector(panelSession),
     useProjection: () => undefined,
     useConversation: selector => selector(panelConversation),
@@ -369,6 +325,8 @@ function panelProps(data: WorkflowRunChatData, sessions = listState(), openSessi
     useTrajectory: selector => selector(panelTrajectory),
     useInput: () => { throw new Error('unused') },
     inputActions: {
+      captureInsertion: () => ({ start: 0, end: 0, draftRev: 0 }),
+      insertText: () => false,
       setDraft: () => {},
       addAttachments: () => false,
       removeAttachment: () => {},
@@ -377,6 +335,8 @@ function panelProps(data: WorkflowRunChatData, sessions = listState(), openSessi
     },
     useWorkspaces: selector => selector(panelWorkspace),
     useTurnData: () => undefined,
+    useDisclosure: () => { throw new Error('unused') },
+    openSkill: vi.fn(),
     openFile: () => {},
     inspectCall: () => {},
     forkAt: () => {},
@@ -708,6 +668,10 @@ describe('WorkflowRunPanel', () => {
   it('defers normal completion collapse until focused member content loses focus', () => {
     const sessions = listState({
       ids: [PARENT_ID, CHILD_ID, SECOND_ID],
+      projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [
+        { createdAt: 1, id: CHILD_ID, mode: 'one-shot' },
+        { createdAt: 1, id: SECOND_ID, mode: 'one-shot' },
+      ] } } },
       byId: {
         ...listState().byId,
         [SECOND_ID]: {
@@ -744,10 +708,6 @@ describe('WorkflowRunPanel', () => {
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     member.focus()
 
-    // Navigability ends when the child rows leave the ordinary list (terminal
-    // status alone no longer removes it), so the completion arrives with the
-    // children gone to keep exercising the focused-retention path.
-    const settled = listState({ ids: [PARENT_ID] })
     view.rerender(<WorkflowRunPanel {...panelProps({
       name: 'audit', status: 'completed',
       phases: [phase({
@@ -756,7 +716,7 @@ describe('WorkflowRunPanel', () => {
           { seq: 2, label: 'second', childId: SECOND_ID, status: 'completed' },
         ],
       })],
-    }, settled)} />)
+    }, sessions)} />)
     expect(runHeader.getAttribute('aria-expanded')).toBe('true')
     expect(phaseHeader.getAttribute('aria-expanded')).toBe('true')
     const retained = screen.getByRole('button', { name: 'worker' })
@@ -788,7 +748,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    }, listState({ ids: [PARENT_ID] }))} />)
+    })} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -817,7 +777,7 @@ describe('WorkflowRunPanel', () => {
       phases: [phase({
         members: [{ seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' }],
       })],
-    }, listState({ ids: [PARENT_ID] }))} />)
+    })} />)
     const retained = screen.getByRole('button', { name: 'worker' })
     const phaseHeader = screen.getByRole('button', { name: /未分阶段/ })
     const runHeader = screen.getByRole('button', { name: /^audit/ })
@@ -873,75 +833,56 @@ describe('WorkflowRunPanel', () => {
     expect(screen.getByRole('button', { name: /未分阶段/ }).getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('opens a running ordinary-list subagent proven to have this parent', () => {
+  it('opens a running member confirmed by the direct parent catalog', () => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running', phases: [phase()],
     }
     const openSession = vi.fn()
-    render(<WorkflowRunPanel {...panelProps(data, listState(), openSession)} />)
-    fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
-    expect(openSession).toHaveBeenCalledWith('child-1')
-  })
-
-  it('opens completed and interrupted members while their child Session row exists', () => {
-    const sessions = listState({
-      ids: [PARENT_ID, CHILD_ID, SECOND_ID],
-      byId: {
-        ...listState().byId,
-        // Both child rows are settled: the row's own lifecycle must not gate
-        // navigation once the member's Session exists.
-        [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false },
-        [SECOND_ID]: {
-          id: SECOND_ID, displayTitle: 'second', parentId: PARENT_ID, origin: 'subagent',
-          running: false, blank: false, updatedAt: 0,
-        },
-      },
-    })
-    const data: WorkflowRunChatData = {
-      name: 'audit', status: 'interrupted',
-      phases: [phase({
-        members: [
-          { seq: 1, label: 'worker', childId: CHILD_ID, status: 'completed' },
-          { seq: 2, label: 'second', childId: SECOND_ID, status: 'interrupted' },
-          { seq: 3, label: 'ghost', childId: 'child-3' as SessionId, status: 'completed' },
-        ],
-      })],
-    }
-    const openSession = vi.fn()
+    const sessions = listState()
     render(<WorkflowRunPanel {...panelProps(data, sessions, openSession)} />)
     fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
-    fireEvent.click(screen.getByRole('button', { name: '打开 second' }))
-    expect(openSession).toHaveBeenCalledWith('child-1')
-    expect(openSession).toHaveBeenCalledWith('child-2')
-    // A member whose child Session summary is gone stays a static row.
-    expect(screen.queryByRole('button', { name: '打开 ghost' })).toBeNull()
-    expect(screen.getByText('ghost')).toBeTruthy()
+    expect(openSession).toHaveBeenCalledWith({
+      parentSessionId: PARENT_ID,
+      childSessionId: CHILD_ID,
+      mode: 'one-shot',
+    })
   })
 
-  it('promotes a running member when its ordinary Session row arrives', () => {
+  it('uses observed running state for a catalog-only member', () => {
+    const data: WorkflowRunChatData = { name: 'audit', status: 'running', phases: [phase()] }
+    const sessions = listState({
+      ids: [PARENT_ID],
+      byId: { ...listState().byId, [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false } },
+    })
+    const openSession = vi.fn()
+    let statuses = new Map([[CHILD_ID, { running: true, pendingInteraction: undefined, completionUnread: false }]])
+    const props: WorkflowRunPanelProps = { ...panelProps(data, sessions, openSession),
+      useSessionStatus: select => select(statuses),
+    }
+    const view = render(<WorkflowRunPanel {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: '打开 worker' }))
+    expect(openSession).toHaveBeenCalledWith({ parentSessionId: PARENT_ID, childSessionId: CHILD_ID, mode: 'one-shot' })
+    statuses = new Map([[CHILD_ID, { running: false, pendingInteraction: undefined, completionUnread: false }]])
+    view.rerender(<WorkflowRunPanel {...props} />)
+    expect(screen.queryByRole('button', { name: '打开 worker' })).toBeNull()
+  })
+
+  it('promotes a running member when its parent catalog arrives', () => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running', phases: [phase()],
     }
-    const view = render(<WorkflowRunPanel {...panelProps(data, listState({ ids: [PARENT_ID] }))} />)
+    const view = render(<WorkflowRunPanel {...panelProps(data, listState({ projectionsBySession: {} }))} />)
     expect(screen.queryByRole('button', { name: '打开 worker' })).toBeNull()
     view.rerender(<WorkflowRunPanel {...panelProps(data, listState())} />)
     expect(screen.getByRole('button', { name: '打开 worker' })).toBeTruthy()
   })
 
   it.each([
-    ['not in ordinary list', listState({ ids: [PARENT_ID] }), 'running'],
-    ['remote row', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, origin: undefined },
-    } }), 'running'],
-    ['wrong parent', listState({ byId: {
-      ...listState().byId,
-      [CHILD_ID]: { ...listState().byId[CHILD_ID]!, parentId: 'other' as SessionId },
-    } }), 'running'],
-    ['no child Session row', listState({
-      ids: [PARENT_ID],
-      byId: { [PARENT_ID]: listState().byId[PARENT_ID]! },
-    }), 'completed'],
+    ['catalog absent', listState({ projectionsBySession: {} }), 'running'],
+    ['catalog empty', listState({ projectionsBySession: { [PARENT_ID]: { state: 'ready', error: null, values: { subagentCatalog: [] } } } }), 'running'],
+    ['wrong parent', listState({ projectionsBySession: { ['other' as SessionId]: { state: 'ready', error: null, values: { subagentCatalog: [{ createdAt: 1, id: CHILD_ID, mode: 'one-shot' }] } } } }), 'running'],
+    ['child inactive', listState({ byId: { ...listState().byId, [CHILD_ID]: { ...listState().byId[CHILD_ID]!, running: false } } }), 'running'],
+    ['member terminal', listState(), 'completed'],
   ] as const)('does not navigate when %s', (_name, sessions, memberStatus) => {
     const data: WorkflowRunChatData = {
       name: 'audit', status: 'running',
@@ -957,20 +898,17 @@ describe('WorkflowRunPanel', () => {
   })
 })
 
-class TestSessions extends Service {
-  readonly opened: SessionId[] = []
-  constructor(ctx: Context) { super(ctx, 'sessions') }
-  open(id: SessionId): void { this.opened.push(id) }
-}
-
 describe('plugin lifecycle', () => {
   it('registers and removes the Definition and keyed renderer with its fiber', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry).await()
     ctx.provide('connection', { api: { settings: {} }, isLoopback: false } as never)
     ctx.provide('remote', { $on: () => () => {} } as never)
-    ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
-    await ctx.plugin(TestSessions).await()
+    ctx.provide('configForms', { developerTools: { enabled: createSnapshotStore(true) }, get: () => stubConfigForm().scope } as never)
+    const sessions = new TestSessions(async (action) => { await action() }, ctx)
+    ctx.provide('sessions', sessions)
+    const openSession = vi.fn(async () => {})
+    ctx.provide('uiWorkspace', { openSession } as never)
     const conversationEvents = new UiConversation(ctx, ctx.sessions).events
     ctx.slots.register({
       name: 'root',
@@ -984,7 +922,7 @@ describe('plugin lifecycle', () => {
     const entry = ctx.slots.entries('conversation.chat.node')[0]!
     const face = entry.inject?.() as unknown as WorkflowRunInjected
     face.openSession(CHILD_ID)
-    expect((ctx.sessions as unknown as TestSessions).opened).toEqual([CHILD_ID])
+    expect(openSession).toHaveBeenCalledExactlyOnceWith(CHILD_ID)
     await fiber.dispose()
     expect(conversationEvents.entries()).toEqual([])
     expect(ctx.slots.entries('conversation.chat.node')).toEqual([])

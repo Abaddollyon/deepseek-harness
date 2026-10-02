@@ -154,6 +154,16 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
   )
 }
 
+/**
+ * An optional model-supplied string, with a blank value read as omitted:
+ * strict structured-output providers fill every optional field, often with "".
+ * @param value - the raw optional argument.
+ * @returns the value, or undefined when it is absent or blank.
+ */
+export function presentText(value: string | undefined): string | undefined {
+  return value === undefined || value.trim().length === 0 ? undefined : value
+}
+
 let rgPathPromise: Promise<string> | undefined
 
 /**
@@ -175,7 +185,10 @@ export function resolveRgPath(): Promise<string> {
       ? join(executable.dir, `${executable.name}-rg.exe`)
       : `${process.execPath}-rg`
     if ('pkg' in process && existsSync(executableSidecar)) return executableSidecar
-    return (await import('@vscode/ripgrep')).rgPath
+    const dependency = (await import('@vscode/ripgrep')).rgPath
+    return process.versions.electron === undefined
+      ? dependency
+      : dependency.replace(/\.asar(?=[\\/])/u, '.asar.unpacked')
   })
   return rgPathPromise
 }
@@ -214,6 +227,7 @@ export function resolveRgPath(): Promise<string> {
  * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
  * @param graceMs - the seam's terminate-escalation grace period.
  * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
+ * @param rgPath - configured executable in the execution world; omitted selects {@link resolveRgPath}.
  * @returns the complete stdout, the zero-result flag, and the resolved workdir.
  */
 export async function runRipgrep(
@@ -224,6 +238,7 @@ export async function runRipgrep(
   rawOutputMaxBytes: number,
   graceMs: number,
   stderrMaxBytes: number,
+  rgPath?: string,
 ): Promise<RipgrepRun> {
   if (exec.signal.aborted) {
     throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
@@ -233,7 +248,7 @@ export async function runRipgrep(
   let handle: SubprocessHandle
   try {
     handle = ctx.subprocess.spawn({
-      argv: [await resolveRgPath(), '--no-config', ...argv],
+      argv: [rgPath ?? await resolveRgPath(), '--no-config', ...argv],
       cwd: workdir,
       stdio: {
         stdin: 'ignore',

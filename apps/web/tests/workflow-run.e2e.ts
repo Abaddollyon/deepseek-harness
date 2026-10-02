@@ -1,23 +1,21 @@
 // Keyless shipped-Web acceptance for the durable workflow Conversation Node.
-// Recorded workflow/child responses are combined with one synthetic waiting
-// response for supervised completion. The real workflow tool, worker, subagent
-// provider, Session log, browser plugin graph, and navigation execute unchanged.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+// Reuses the existing recorded workflow parent/child model fixtures; the real
+// workflow tool, worker, subagent provider, Session log, browser plugin graph,
+// and navigation all execute during replay.
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from 'vitest'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
-import { deriveReplayScript, parseSessionLog, type ReplayEntry } from '@deepseek-ai/dsh-llm-replay'
 import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
   fixtureUserPrompts, launchWebScaffold, watchConsole, webSnapshotMode,
   type WebScaffold,
 } from './scaffold.ts'
 import {
-  connectFreshWorkspace, expandOwningTurnProcess, expandTurnProcesses, newEnglishPage, openSelectedSession, REPO_ROOT, saveFailureShot,
+  connectFreshWorkspace, expandOwningTurnProcess, expandTurnProcesses, newEnglishPage, REPO_ROOT, saveFailureShot,
 } from './support.ts'
 
 const MODE = webSnapshotMode()
@@ -27,8 +25,6 @@ const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const PARENT_FIXTURE = join(REPO_ROOT, 'snapshots/session/workflow-run/session.v3.jsonl')
 const CHILD_FIXTURE = join(REPO_ROOT, 'snapshots/session/workflow-run/session.1.v3.jsonl')
 const CHILD_PROMPT = 'Reply with exactly the word WF_CHILD_OK and nothing else.'
-const CHILD_LABEL = 'Reply with exactly the word WF_CHILD_OK and not…'
-const WAITING_REPLY = 'Waiting for the supervised workflow to complete.'
 
 describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () => {
   let scaffold: WebScaffold
@@ -36,9 +32,6 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
   let page: Page
   let tripwire: ReturnType<typeof watchConsole>
   let prompt: string
-  let replayDir: string | undefined
-  let childSessionId: SessionId | undefined
-  const parentTurnEnds: SessionEvent[] = []
   const releaseChild = Promise.withResolvers<undefined>()
 
   const waitForParentSettlement = (): Promise<SessionId> => new Promise((resolve, reject) => {
@@ -52,46 +45,21 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
         resolve(session.id)
       })().catch(reject)
     })
-    onTestFinished(() => { dispose() })
   })
 
   beforeAll(async () => {
-    const fixture = await readFile(PARENT_FIXTURE, 'utf8')
-    const prompts = fixtureUserPrompts(fixture)
+    const prompts = fixtureUserPrompts(await readFile(PARENT_FIXTURE, 'utf8'))
     expect(prompts).toHaveLength(1)
     prompt = prompts[0]!
-    const recorded = deriveReplayScript(parseSessionLog(fixture))
-    expect(recorded).toHaveLength(2)
-    // The shipped supervisor returns a job handle before the held child ends.
-    // This synthetic response parks the parent until real job completion wakes it.
-    const waiting: ReplayEntry = {
-      kind: 'chunks',
-      chunks: [
-        { type: 'block-start', index: 0, blockType: 'text' },
-        { type: 'text-delta', index: 0, text: WAITING_REPLY },
-        { type: 'block-end', index: 0, block: { type: 'text', text: WAITING_REPLY } },
-        { type: 'finish', reason: { kind: 'stop' } },
-      ],
-    }
-    replayDir = await mkdtemp(join(tmpdir(), 'dsh-web-workflow-supervisor-'))
-    const replayOverride = join(replayDir, 'replay.override.json')
-    await writeFile(replayOverride, JSON.stringify([recorded[0]!, waiting, recorded[1]!]))
     scaffold = await launchWebScaffold({
       replayFixture: PARENT_FIXTURE,
-      replayOverride,
       replayChildFixtures: [CHILD_FIXTURE],
       compareReplaySession: false,
-    })
-    scaffold.ctx.on('session/event', (session: Session, event: SessionEvent) => {
-      if (session.header.origin !== 'subagent' && event.type === 'turn/end') parentTurnEnds.push(event)
     })
     // Keep the live child available throughout disclosure, layout, and navigation checks.
     scaffold.ctx.on('llm/stream', async function* (options, next) {
       const session = options.sessionId === undefined ? undefined : scaffold.ctx.sessions.get(options.sessionId)
-      if (session?.header.origin === 'subagent') {
-        childSessionId = session.id
-        await releaseChild.promise
-      }
+      if (session?.header.origin === 'subagent') await releaseChild.promise
       yield* next()
     }, { prepend: true })
     browser = await chromium.launch()
@@ -100,19 +68,15 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspace(page, scaffold.workspaceCwd)
+    const sessions = scaffold.ctx.sessions.list()
+    expect(sessions).toHaveLength(1)
+    scaffold.ctx.permissionPresets.set(sessions[0]!, 'danger-full-access')
   }, 120_000)
 
   afterAll(async () => {
     releaseChild.resolve(undefined)
-    try {
-      await browser?.close()
-    } finally {
-      try {
-        await scaffold?.close()
-      } finally {
-        if (replayDir !== undefined) await rm(replayDir, { recursive: true, force: true })
-      }
-    }
+    await browser?.close()
+    await scaffold?.close()
   })
 
   it('shows the live member, opens its local child, then retains the settled record beside the tool row', async () => {
@@ -126,7 +90,6 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     await input.press('Enter')
 
     const workflow = page.locator('[data-workflow-run][data-run-status="running"]')
-    await workflow.waitFor({ state: 'attached', timeout: 30_000 })
     await expandOwningTurnProcess(page, workflow)
     await workflow.waitFor({ timeout: 30_000 })
     const disclosures = workflow.locator('[data-disclosure-row]')
@@ -139,7 +102,7 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     expect(await phaseDisclosure.getAttribute('aria-expanded')).toBe('true')
     expect(await runDisclosure.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     expect(await phaseDisclosure.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
-    const member = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
+    const member = page.getByRole('button', { name: /^Open Reply with exactly the word/ })
     await member.waitFor({ timeout: 15_000 })
 
     await phaseDisclosure.click()
@@ -171,7 +134,7 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
       const disclosures = element.querySelectorAll('[data-disclosure-row]')
       const runHeader = disclosures[0]
       const phaseHeader = disclosures[1]
-      const phaseTitle = phaseHeader?.children.item(1) as HTMLElement | null
+      const phaseTitle = phaseHeader?.querySelector('[class*="phaseTitle"]') as HTMLElement | null
       const phaseStatus = element.querySelector('[data-phase-status-text]')
       const originalPhaseTitle = phaseTitle?.textContent ?? ''
       if (phaseTitle !== null) phaseTitle.textContent = 'A phase name long enough to require ellipsis in the narrow layout'
@@ -212,21 +175,9 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
 
     const sessions = page.getByRole('tree', { name: 'Sessions' })
-    // The recorded call omits an explicit child label: the card derives one
-    // from its prompt, while the ordinary child hierarchy identifies its Session.
-    expect(childSessionId).toBeDefined()
-    const hierarchy = page.getByRole('navigation', { name: 'Session hierarchy' })
-    await hierarchy.getByRole('button', { name: `Switch subagent: ${childSessionId!}` }).waitFor()
     await sessions.getByRole('treeitem', { name: /Use the workflow tool exactly/ }).click()
-    await settled
-    await page.getByText(WAITING_REPLY, { exact: true }).waitFor()
-    expect(parentTurnEnds).toHaveLength(1)
-    const completed = waitForParentSettlement()
     releaseChild.resolve(undefined)
-    await completed
-    await page.getByText('WORKFLOW_DONE', { exact: true }).waitFor()
-    expect(parentTurnEnds.map(event => event.type === 'turn/end' ? event.data.reason.kind : undefined))
-      .toEqual(['completed', 'completed'])
+    await settled
     await expandTurnProcesses(page)
     await page.locator('[data-workflow-run][data-run-status="completed"]').waitFor()
 
@@ -237,51 +188,36 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     expect(await terminalWorkflow.getAttribute('aria-expanded')).toBe('false')
     expect(await terminalWorkflow.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     await terminalWorkflow.click()
-    const terminalPhase = page.getByRole('button', { name: /^Run/ })
+    const terminalPhase = page.locator('[data-workflow-run][data-run-status="completed"] [data-disclosure-row]').nth(1)
     await terminalPhase.waitFor()
     expect(await terminalPhase.getAttribute('aria-expanded')).toBe('false')
     expect(await terminalPhase.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     await terminalPhase.click()
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
-    // Settlement keeps the member navigable: its child Session row is still in
-    // the ordinary list, and sessions.open works on a finished child.
-    const settledMember = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
-    await settledMember.waitFor({ timeout: 10_000 })
-    await settledMember.click()
-    await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
-
-    // Return to the parent: the reload scenario below rebuilds ITS record.
-    await page.getByRole('tree', { name: 'Sessions' })
-      .getByRole('treeitem', { name: /Use the workflow tool exactly/ }).click()
-    await page.locator('[data-workflow-run][data-run-status="completed"]').waitFor()
+    await expect.poll(
+      () => page.getByRole('button', { name: /^Open Reply with exactly the word/ }).count(),
+      { timeout: 10_000 },
+    ).toBe(0)
   }, 90_000)
 
   it('rebuilds the terminal record from history after reload', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-workflow-run-history'))
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
-    await openSelectedSession(page)
     await expandTurnProcesses(page)
     const workflow = page.getByRole('button', { name: /^snapshot-flow/ })
     await workflow.waitFor({ timeout: 15_000 })
     expect(await workflow.getAttribute('aria-expanded')).toBe('false')
+    const snapshot = await captureStableAria(page, '[data-chat-flow]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
     await workflow.click()
-    const phase = page.getByRole('button', { name: /^Run/ })
+    const phase = page.locator('[data-workflow-run][data-run-status="completed"] [data-disclosure-row]').nth(1)
     await phase.waitFor()
     expect(await phase.getAttribute('aria-expanded')).toBe('false')
     await phase.click()
     await page.getByText(CHILD_PROMPT, { exact: false }).waitFor()
-    const snapshot = await captureStableAria(page, '[data-chat-flow]', scaffold.workspaceCwd)
-    await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
-    // The rebuilt terminal member is still a navigation button: the child
-    // Session row survives the reload in the ordinary list.
-    const reloadedMember = page.getByRole('button', { name: new RegExp(`^Open ${CHILD_LABEL}`) })
-    await reloadedMember.waitFor()
-    await reloadedMember.click()
-    // Navigating the rebuilt member preserves the same ordinary child Session.
-    const reloadedHierarchy = page.getByRole('navigation', { name: 'Session hierarchy' })
-    await reloadedHierarchy.getByRole('button', { name: `Switch subagent: ${childSessionId!}` }).waitFor()
-    await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
+    expect(await page.getByRole('button', { name: /^Open Reply with exactly the word/ }).count()).toBe(0)
+
   }, 60_000)
 
   it('stays clean and owns only its one golden', async () => {

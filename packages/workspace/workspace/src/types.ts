@@ -23,6 +23,38 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 }
 
 /**
+ * Activity families a `workspace/session-activity` listener may report. This
+ * package declares none: each provider merges its own key from a module both
+ * its Host and Client faces import, so a consumer that renders the families
+ * sees exactly the keys its program compiled and falls through to a generic
+ * description for any other. The shipped providers merge `turn` (the Agent
+ * registry), `job` (the job registry seam), `subagent` (the Subagent
+ * runtime), and `schedule` (the Schedule plugin).
+ */
+export interface SessionActivityKindMap {}
+
+/** One activity family key. */
+export type SessionActivityKind = keyof SessionActivityKindMap
+
+/** One active item of a family that has per-item identity. */
+export interface SessionActivityItem {
+  /** Family-specific identity: a session id, a job id, or a schedule id. */
+  readonly id: string
+  /** Display label when the family carries one (a job label, a subagent label). */
+  readonly label?: string
+}
+
+/**
+ * One reason a session counts as active for archive admission. Families with
+ * per-item identity list their items so a caller can name what must stop.
+ */
+export interface SessionActivity {
+  readonly kind: SessionActivityKind
+  /** Active items of the family; absent for a family without per-item identity (`turn`). */
+  readonly items?: readonly SessionActivityItem[]
+}
+
+/**
  * One workspace: a stable id over an existing directory, a display title, and
  * an ordered candidate account of sessions. Membership requires both an id in
  * that account and a session header whose canonical cwd equals the workspace
@@ -39,7 +71,18 @@ export interface Workspace {
    */
   readonly path: string
 
-  /** Canonical additional directories available to this Workspace, excluding the primary path. */
+  /**
+   * Agent preset whose execution world (for example an SSH host) holds
+   * {@link path} and every additional directory; undefined for the Host.
+   * Sessions created in this workspace use this preset.
+   */
+  readonly agentPreset: string | undefined
+
+  /**
+   * Further canonical directories, excluding {@link path}, that a Session
+   * created in this workspace records as its additional roots. Changing them
+   * never changes an existing Session's roots.
+   */
   readonly additionalPaths: readonly string[]
 
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
@@ -69,9 +112,11 @@ export interface Workspace {
   setTitle(title: string): Promise<void>
 
   /**
-   * Replace the additional directory roots durably. Paths are canonicalized,
-   * validated as existing directories, deduplicated, and stored in request order.
-   * @param additionalPaths - Fully qualified existing directories to expose beside {@link path}.
+   * Replace the additional directories durably. Each path must be fully
+   * qualified and resolve to an existing directory; paths are canonicalized
+   * like {@link path}, deduplicated in request order, and the primary path is
+   * dropped. Rejects without writing when any path is invalid.
+   * @param additionalPaths - Complete replacement list; empty removes all.
    * @returns resolution after durability.
    */
   setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>

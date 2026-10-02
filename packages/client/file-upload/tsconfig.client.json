@@ -18,7 +18,6 @@
     { "path": "../../util/crypto" },
     { "path": "../../attachment/attachment" },
     { "path": "../../core/session" },
-    { "path": "../../typert/protocol" },
-    { "path": "../environment-runtime" }
+    { "path": "../../typert/protocol" }
   ]
 }

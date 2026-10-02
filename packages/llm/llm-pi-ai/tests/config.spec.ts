@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { assertServiceable, Config, MAX_AUTH_RECOVERY_RETRIES, resolveProfiles } from '../src/config.ts'
+import { assertServiceable, Config, resolveProfiles, type Options } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
-  () => Config({
+  () => ({ providers: Config({
     providers: {
       'acme-gateway': {
         api: 'openai-completions',
@@ -12,18 +12,22 @@ const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
         ...profile,
       },
     },
-  })
+  }).providers.get() })
 
 /** Validate that route with the caller's fields on its single model entry. */
 const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
 describe('reasoning schema boundary', () => {
-  it('rejects non-positive or oversized model discovery intervals', () => {
-    for (const value of [0, -1, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => resolveProfiles({ openai: { modelDiscovery: { enabled: true, timeoutMs: value } } })).toThrow(/positive timer interval/)
-    }
+  it('accepts an empty provider section and propagates unexpected catalog failures', () => {
+    expect(() => { assertServiceable({}) }).not.toThrow()
+    const failure = new TypeError('model metadata lookup failed')
+    expect(() => resolveProfiles({ openrouter: { models: [{
+      id: '111',
+      get name(): string { throw failure },
+    }], api: 'openai-completions' } }, 'deferred')).toThrow(failure)
   })
+
   it('rejects a level pi-ai does not know at the write that produced it', () => {
     expect(configWith({ reasoningEfforts: { ultra: 'x' } })).toThrow(/"off"/)
     expect(configWith({ reasoningEfforts: { high: 42 } })).toThrow()
@@ -64,7 +68,7 @@ describe('modality schema boundary', () => {
     // well-typed, and the namespace validator is what refuses it. Asserting
     // only the schema would report this route as writable.
     expect(routeWith({ defaultInput: [] })).not.toThrow()
-    expect(() => { assertServiceable(routeWith({ defaultInput: [] })() as Config) })
+    expect(() => { assertServiceable(routeWith({ defaultInput: [] })() as Options) })
       .toThrow(/defaultInput must name at least one modality/)
   })
 
@@ -87,7 +91,6 @@ describe('request image policy bounds', () => {
     ['requestImagePixelBudget', Number.MAX_SAFE_INTEGER + 1, /requestImagePixelBudget must be a positive safe integer/],
     ['requestImageMaxBytes', 0, /requestImageMaxBytes must be a positive safe integer/],
     ['requestImageMaxBytes', 1.5, /requestImageMaxBytes must be a positive safe integer/],
-    ['streamIdleTimeoutMs', 0.5, /streamIdleTimeoutMs must be a positive integer/],
   ] as const)('rejects %s=%s at service resolution', (field, value, message) => {
     const programmatic = {
       providers: {
@@ -98,66 +101,9 @@ describe('request image policy bounds', () => {
           [field]: value,
         },
       },
-    } as unknown as Config
+    } as Options
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
-  })
-})
-
-describe('auth recovery policy', () => {
-  it('resolves the enabled default and an explicit disable', () => {
-    const resolved = resolveProfiles({
-      'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }] },
-    })
-    expect(resolved.get('acme-gateway')?.authRecovery).toEqual({ retries: 1, delayMs: 1000 })
-    const off = resolveProfiles({
-      'acme-gateway': {
-        api: 'openai-completions',
-        baseURL: 'https://acme.test',
-        models: [{ id: 'm' }],
-        authRecovery: { retries: 0 },
-      },
-    })
-    expect(off.get('acme-gateway')?.authRecovery).toEqual({ retries: 0, delayMs: 1000 })
-  })
-
-  it('accepts exact maximum and rejects invalid budgets in both paths', () => {
-    expect(routeWith({ authRecovery: { retries: MAX_AUTH_RECOVERY_RETRIES } })).not.toThrow()
-    const invalid = [-1, 1.5, Number.MAX_VALUE, MAX_AUTH_RECOVERY_RETRIES + 1]
-    for (const retries of invalid) {
-      expect(routeWith({ authRecovery: { retries } })).toThrow()
-      const providers = { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [{ id: 'm' }], authRecovery: { retries } } }
-      expect(() => resolveProfiles(providers)).toThrow(/authRecovery.retries/)
-    }
-  })
-
-  it('rejects an invalid budget at the schema, and at resolution when bypassed', () => {
-    expect(routeWith({ authRecovery: { retries: -1 } })).toThrow()
-    expect(routeWith({ authRecovery: { delayMs: -1 } })).toThrow()
-    expect(() => {
-      assertServiceable({
-        providers: {
-          'acme-gateway': {
-            api: 'openai-completions',
-            baseURL: 'https://acme.test',
-            models: [{ id: 'm' }],
-            authRecovery: { retries: 1.5 },
-          },
-        },
-      })
-    }).toThrow(/authRecovery.retries must be a non-negative integer/)
-    expect(() => {
-      assertServiceable({
-        providers: {
-          'acme-gateway': {
-            api: 'openai-completions',
-            baseURL: 'https://acme.test',
-            models: [{ id: 'm' }],
-            authRecovery: { delayMs: -1 },
-          },
-        },
-      })
-    }).toThrow(/authRecovery.delayMs must be a non-negative finite number/)
   })
 })

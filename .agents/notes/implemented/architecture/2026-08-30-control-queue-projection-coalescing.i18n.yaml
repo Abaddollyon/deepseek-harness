@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-30-control-queue-projection-coalescing.md
-2026-08-30-control-queue-projection-coalescing.md: 019d73eb746b0fc00dd7e1fed2611e9ec32e5793
-2026-08-30-control-queue-projection-coalescing.zh.md: 6c7486e3a0aff9bad0a2d666613c398852e4d7a2

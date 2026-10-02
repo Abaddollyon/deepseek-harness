@@ -8,8 +8,6 @@
     "src"
   ],
   "references": [
-    { "path": "../../util/atomic-write" },
-    { "path": "../../util/home-paths" },
     {
       "path": "../../util/launch-environment"
     },
@@ -41,13 +39,16 @@
       "path": "../../credentials/authorization"
     },
     {
-      "path": "../../settings/settings"
-    },
-    {
       "path": "../../util/timeout"
     },
     {
       "path": "../../util/http-proxy"
+    },
+    {
+      "path": "../../../vendor/loader"
+    },
+    {
+      "path": "../../settings/settings"
     }
   ]
 }

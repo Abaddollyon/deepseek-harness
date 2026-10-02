@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { childSessionMeta, resolveChildAgentOptions } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
@@ -20,18 +20,6 @@ function parentAgent(): Agent {
 }
 
 describe('child Agent options', () => {
-  it('inherits additional workspace roots in child metadata', () => {
-    const base = parentAgent()
-    const session = Session.create(base.id, undefined, undefined, undefined, ['/shared'])
-    const parent = { ...base, session, ctx: new Context() }
-    expect(childSessionMeta(parent, 2, true)).toMatchObject({
-      additionalPaths: ['/shared'],
-      parentSession: base.id,
-      isSeeded: true,
-      delegationDepth: 2,
-    })
-  })
-
   it('inherits the parent effort while the exact route is unchanged', () => {
     expect(resolveChildAgentOptions(parentAgent(), undefined, 1)).toEqual({
       provider: 'parent-provider',
@@ -85,5 +73,19 @@ describe('child Agent options', () => {
       maxTokens: 512,
       subagentDepth: 1,
     })
+  })
+})
+
+describe('child Session metadata', () => {
+  it('gives a fresh child the parent Session additional roots', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const parentSession = ctx.sessions.prepare(SessionId('rooted-parent'), {
+      meta: { cwd: '/work/app', additionalPaths: ['/work/lib'] },
+    })
+    const parent = { id: parentSession.id, session: parentSession, ctx } as Agent
+    const child = ctx.sessions.prepare(SessionId('rooted-child'), { meta: childSessionMeta(parent, 1, false) })
+    expect(child.header.cwd).toBe('/work/app')
+    expect(child.additionalPaths).toEqual(['/work/lib'])
   })
 })

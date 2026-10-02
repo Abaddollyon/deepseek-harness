@@ -16,14 +16,13 @@ import Include from '@deepseek-ai/cordis-plugin-include'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { startInProcessRun } from '../src/index.ts'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
-const ROOTS = [{ path: join(FIXTURES, 'presets'), trust: 'system' as const }]
 
 const contexts: Context[] = []
 
@@ -40,7 +39,10 @@ async function setupPresetHost(): Promise<{ ctx: Context; adapter: MockAdapter; 
   ctx.loader.builtins.include = Include
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(AgentPresets, { default: 'coding', roots: ROOTS, includeShippedRoot: false, includeUserRoot: false })
+  await ctx.plugin(AgentPresets, { default: 'coding' })
+  for (const [id, tool] of [['coding', 'preset_only'], ['reviewing', 'reviewing_only']] as const) {
+    await ctx.agentPresets.register({ id, plugins: [{ name: pathToFileURL(join(FIXTURES, 'plugins/preset-tool.js')).href, config: { tool } }] })
+  }
   const adapter = new MockAdapter([textResponse('parent idle'), textResponse('child done')])
   ctx.llm.registerAdapter(['mock'], adapter)
   const handle = await ctx.agents.create({
@@ -131,5 +133,32 @@ describe('a child agent composed in-process', () => {
     expect(ctx.tools.schemas(run.localAgent).map(schema => schema.name)).toEqual(['reviewing_only'])
     expect(run.localAgent?.session.header.agentPreset).toBe('reviewing')
     await run.dispose()
+  })
+
+  it('joins the preset and cwd an execution target names instead of its parent\'s', async () => {
+    const { ctx, parent } = await setupPresetHost()
+
+    const run = await startInProcessRun(spawnRequest(parent), { target: { agentPreset: 'reviewing', cwd: '/remote/work' } })
+    await run.result
+
+    // The header is what a cold resume reads, so it must name the target, not the parent.
+    expect(ctx.tools.schemas(run.localAgent).map(schema => schema.name)).toEqual(['reviewing_only'])
+    expect(run.localAgent?.session.header).toMatchObject({ agentPreset: 'reviewing', cwd: '/remote/work' })
+    await run.dispose()
+  })
+
+  it('refuses a forked seed with an execution target, whose seed would carry the parent\'s roots there', async () => {
+    const { ctx } = await setupPresetHost()
+    const parent = (await ctx.agents.create({
+      sessionId: SessionId('rooted-parent'),
+      meta: { cwd: '/local/work', additionalPaths: ['/local/extra'] },
+      agentOptions: { provider: 'mock', model: 'mock' },
+      setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, 'coding'),
+    })).agent
+    const seed = parent.session.snapshotEvents()
+
+    await expect(startInProcessRun(spawnRequest(parent), { seed, target: { agentPreset: 'reviewing', cwd: '/remote/work' } }))
+      .rejects.toThrow('cannot run in agent preset "reviewing"')
+    expect(ctx.agents.list().map(agent => agent.id)).toEqual(['parent', 'rooted-parent'])
   })
 })

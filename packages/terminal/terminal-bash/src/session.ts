@@ -1,8 +1,8 @@
 /** Persistent PTY session with bounded output, readiness, and terminal-protocol replies. */
 
 import { Buffer } from 'node:buffer'
-import { createRequire } from 'node:module'
 import type { IDisposable, Terminal as HeadlessTerminalType } from '@xterm/headless'
+import { createLazyRequire } from '@deepseek-ai/dsh-lazy-require'
 import type {
   SubprocessOutcome,
   SubprocessTerminalForeground,
@@ -25,8 +25,7 @@ import type {
 import type { ResolvedConfig } from './config.ts'
 import { CONTROLLED_PROMPT, TerminalSanitizer } from './sanitize.ts'
 
-// Node exposes this package's CommonJS main as default-only, so load its named export through require.
-const { Terminal: HeadlessTerminal } = createRequire(import.meta.url)('@xterm/headless') as typeof import('@xterm/headless')
+const requireHeadless = createLazyRequire<typeof import('@xterm/headless')>('@xterm/headless', import.meta.url)
 
 function utf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text) <= maxBytes) return { text, truncated: false }
@@ -65,8 +64,18 @@ class BoundedTextBuffer {
     private readonly maxLines?: number,
   ) {}
 
+  get truncated(): boolean {
+    return this.dropped
+  }
+
+  get isEmpty(): boolean {
+    return this.head === undefined
+  }
+
   append(text: string): void {
     if (text.length === 0) return
+    // Sanitized text can be a slice retaining discarded controls; copy UTF-16 without replacing lone surrogates.
+    text = Buffer.from(text, 'utf16le').toString('utf16le')
     this.bytes += Buffer.byteLength(text)
     const tail = this.tail
     if (tail !== undefined) {
@@ -84,7 +93,7 @@ class BoundedTextBuffer {
       tail.text += text
     } else {
       if (tail !== undefined && tail.text.length <= COALESCED_CHUNK_UNITS) {
-        // Seal small fragments into owned storage before retaining another chunk.
+        // Copy coalesced fragments into one string; large tails already own their storage.
         tail.text = Buffer.from(tail.text, 'utf16le').toString('utf16le')
       }
       const chunk: TextChunk = { text, start: 0, next: undefined }
@@ -151,8 +160,6 @@ class LocalSendOperation implements TerminalSendOperation {
   private readonly promise: PromiseWithResolvers<TerminalSendResult>
   private finished = false
   private cancellationRequested = false
-  private outputSeen = false
-  private pwshSilenceDeferred = false
   private initialForegroundLeftWait: boolean
   private initialForegroundPgid: number | undefined
 
@@ -178,16 +185,8 @@ class LocalSendOperation implements TerminalSendOperation {
     return this.cancellationRequested
   }
 
-  get hasOutput(): boolean {
-    return this.outputSeen
-  }
-
   append(text: string): void {
-    if (!this.finished) {
-      this.outputSeen ||= text.length > 0
-      this.pwshSilenceDeferred = false
-      this.output.append(text)
-    }
+    if (!this.finished) this.output.append(text)
   }
 
   settle(waitReason: TerminalWaitReason, sessionStatus: TerminalSessionStatus, inheritedTruncation: boolean): void {
@@ -210,12 +209,6 @@ class LocalSendOperation implements TerminalSendOperation {
 
   readOutput(): TerminalSendRead {
     return this.output.consume()
-  }
-
-  deferPwshSilenceOnce(): boolean {
-    if (this.pwshSilenceDeferred) return false
-    this.pwshSilenceDeferred = true
-    return true
   }
 
   setInitialForeground(foreground: SubprocessTerminalForeground | undefined): void {
@@ -287,6 +280,7 @@ export class LocalPtySession implements TerminalBackendSession {
     private readonly config: ResolvedConfig,
   ) {
     this.pid = terminal.pid
+    const { Terminal: HeadlessTerminal } = requireHeadless()
     this.emulator = new HeadlessTerminal({ cols: config.cols, rows: config.rows, scrollback: 0 })
     this.emulatorData = this.emulator.onData((data) => {
       this.pendingResponseWrites += 1
@@ -578,7 +572,7 @@ export class LocalPtySession implements TerminalBackendSession {
         return
       }
       const elapsed = Date.now() - operation.startedAt
-      const startupHasOutput = !this.initializing || this.scrollback.snapshot().text.length > 0
+      const startupHasOutput = !this.initializing || !this.scrollback.isEmpty
       const acceptsStdinWait = startupHasOutput && foreground !== undefined
         && operation.acceptsStdinWait(foreground.processGroupId, foreground.inputWaiting)
       if (elapsed >= this.config.exactProbeAfterMs && acceptsStdinWait) {
@@ -589,12 +583,16 @@ export class LocalPtySession implements TerminalBackendSession {
       // child also inherits PROMPT_COMMAND. Silence therefore remains the bound
       // on waiting for shell ownership instead of letting a child marker suppress
       // readiness until the absolute timeout.
-      const pwshRendering = this.config.shellDialect === 'pwsh' && operation.hasOutput
-      const handoffGrace = pwshRendering
-        ? this.config.idleSilenceMs + this.config.handoffGraceMs
-        : this.promptSeen ? this.config.handoffGraceMs : 0
-      if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace) {
-        if (pwshRendering && operation.deferPwshSilenceOnce()) return
+      const handoffGrace = this.promptSeen ? this.config.handoffGraceMs : 0
+      // A seen marker whose printable tail has not arrived yet is the prompt function's own
+      // evidence that the shell reached its prompt: the tail is written by the same render, so
+      // its absence within the bound is a delivery delay rather than an absent prompt. The
+      // configured tolerance holds the send on the exact path for that state alone: a tail that
+      // arrived and was then invalidated by later output can no longer complete, so it keeps the
+      // plain bound. Zero leaves the bound at `idleSilenceMs + handoffGraceMs`.
+      const tailPending = this.promptSeen && !this.promptTextSeen && CONTROLLED_PROMPT.startsWith(this.promptTail)
+      const tailGrace = tailPending ? this.config.promptTailGraceMs : 0
+      if (startupHasOutput && idleFor >= this.config.idleSilenceMs + handoffGrace + tailGrace) {
         this.settleActive('inferred_idle')
       }
     } catch (error: unknown) {
@@ -707,7 +705,7 @@ export class LocalPtySession implements TerminalBackendSession {
   private settleActive(waitReason: TerminalWaitReason, retainOwnership = false): void {
     const operation = this.active
     if (operation === undefined) return
-    const scrollbackTruncated = this.scrollback.snapshot().truncated
+    const scrollbackTruncated = this.scrollback.truncated
     if (retainOwnership) {
       this.stopPolling()
       this.activeAbort?.()

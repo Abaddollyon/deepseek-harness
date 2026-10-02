@@ -36,11 +36,8 @@ describe('writableRoots', () => {
   it('workspace-write grants the workspace root plus the platform temp areas, canonical and deduplicated', () => {
     const ws = mkdtempSync(join(tmpdir(), 'dsh-ws-'))
     roots.push(ws)
-    const side = mkdtempSync(join(tmpdir(), 'dsh-side-'))
-    const writable = writableRoots({ mode: 'workspace-write', workspaceRoot: ws, additionalRoots: [side] })
-    roots.push(side)
+    const writable = writableRoots({ mode: 'workspace-write', workspaceRoot: ws })
     expect(writable).toContain(realpathSync.native(ws))
-    expect(writable).toContain(realpathSync.native(side))
     expect(writable).toContain(canonicalPath('/tmp'))
     expect(writable).toContain(realpathSync.native(tmpdir()))
     // Deduplicated after canonicalization (/tmp and os.tmpdir() may coincide).

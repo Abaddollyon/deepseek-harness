@@ -3,7 +3,8 @@ import { ToolCallId, createUserMessage, expandAssistantStream } from '@deepseek-
  * Tests for the queue-aware `Agent.cancel()` primitive. The default clears
  * queued and steering work, while `keepInbox` preserves pending input for a
  * later wake after the active turn reaches quiescence. The suite
- * covers every landing window plus signal reset and `whenIdle()` quiescence.
+ * covers every landing window plus signal reset, `whenIdle()` quiescence, and
+ * the cause each cancelled turn records.
  * @module dsh-agent-loop/tests/cancel
  */
 
@@ -13,7 +14,7 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionLogOffset, TurnEndReason } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
-import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent, type AgentCancelCause } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
@@ -57,6 +58,92 @@ function userTexts(agent: Agent): string[] {
 }
 
 describe('Agent.cancel()', () => {
+  /**
+   * Cancel one turn, let `mutate` alter the caller's cause the way a transport
+   * does once it observes the abort, then report every recorded turn ending.
+   */
+  async function endingsAfterMutatingCancel(
+    cause: AgentCancelCause,
+    mutate: (cause: AgentCancelCause) => void,
+  ): Promise<{ endings: TurnEndReason[]; errors: unknown[]; requests: number }> {
+    const adapter = new MockAdapter([textResponse('next turn')])
+    const ctx = await harness(adapter)
+    try {
+      const agent = await ctx.agentLoop.create(SessionId('cancel-mutated-cause'), { provider: 'mock', model: 'mock' })
+      const errors: unknown[] = []
+      ctx.on('agent/error', ({ error }) => { errors.push(error) })
+      ctx.on('agent/request', ({ signal, turn }, next) => {
+        if (turn === 1) {
+          signal.addEventListener('abort', () => { mutate(cause) }, { once: true })
+          agent.cancel(cause)
+        }
+        return next()
+      })
+
+      send(agent, 'cancel this turn')
+      await agent.whenIdle()
+      // A second turn proves the cancelled one closed: an unclosed turn would
+      // make the next `turn/start` fail the session's turn-bracket invariant.
+      send(agent, 'continue')
+      await agent.whenIdle()
+
+      return {
+        endings: agent.session.snapshotEvents()
+          .flatMap(event => event.type === 'turn/end' ? [event.data.reason] : []),
+        errors,
+        requests: adapter.requests.length,
+      }
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  }
+
+  /**
+   * Node's fetch assigns an enumerable `stack` string onto the abort reason it
+   * receives (`node:internal/deps/undici`), which a plain assignment reproduces.
+   */
+  function assignTransportStack(cause: AgentCancelCause): void {
+    Object.defineProperty(cause, 'stack', {
+      value: 'Error\n    at node:internal/deps/undici/undici',
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+
+  /** Add an own property JSON discards, the descriptor `Error.captureStackTrace` produces. */
+  function captureNonEnumerableStack(cause: AgentCancelCause): void {
+    Error.captureStackTrace(cause)
+  }
+
+  it.each<AgentCancelCause>([
+    { kind: 'user' },
+    { kind: 'parent' },
+    { kind: 'hook', reason: 'policy stopped this turn' },
+    { kind: 'disposed' },
+  ])('records $kind cancellation without the stack a transport assigned to the abort reason', async (cause) => {
+    const expectedCause = { ...cause }
+
+    const { endings, errors, requests } = await endingsAfterMutatingCancel(cause, assignTransportStack)
+
+    expect(Object.getOwnPropertyDescriptor(cause, 'stack')?.enumerable).toBe(true)
+    expect(errors).toEqual([])
+    expect(endings).toEqual([{ kind: 'aborted', reason: expectedCause }, { kind: 'completed' }])
+    expect(requests).toBe(1)
+  })
+
+  it('closes a cancelled turn whose abort reason acquired an own property JSON discards', async () => {
+    const cause: AgentCancelCause = { kind: 'user' }
+
+    // `Session.append` rejects a payload JSON cannot hold rather than logging a
+    // lossy ending, so the caller's object must not reach the log by reference.
+    const { endings, errors } = await endingsAfterMutatingCancel(cause, captureNonEnumerableStack)
+
+    expect(Object.getOwnPropertyDescriptor(cause, 'stack')?.enumerable).toBe(false)
+    expect(errors).toEqual([])
+    expect(endings).toEqual([{ kind: 'aborted', reason: { kind: 'user' } }, { kind: 'completed' }])
+  })
+
   it('cancel() on an idle agent with nothing queued is a no-op; the next prompt runs (F2 leak guard)', async () => {
     const adapter = new MockAdapter([textResponse('reply')])
     const ctx = await harness(adapter)
@@ -74,7 +161,7 @@ describe('Agent.cancel()', () => {
     expect(agent.session.snapshotEvents().some(e => e.type === 'turn/end')).toBe(true)
   })
 
-  it('cancel({ keepInbox: true }) restores work already claimed by a waking send', async () => {
+  it('cancel({ keepInbox: true }) does not restore work already claimed by a waking send', async () => {
     const adapter = new MockAdapter([textResponse('wake reply')])
     const ctx = await harness(adapter)
     const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
@@ -89,7 +176,7 @@ describe('Agent.cancel()', () => {
     expect(agent.session.snapshotEvents().some(event =>
       event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
     await agent.whenIdle()
-    expect(agent.inbox.nextTurn).toHaveLength(1)
+    expect(agent.inbox.nextTurn).toHaveLength(0)
     expect(userTexts(agent)).toEqual([])
     expect(adapter.requests).toHaveLength(0)
     expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
@@ -98,8 +185,8 @@ describe('Agent.cancel()', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'wake it')
     await idle
-    expect(userTexts(agent)).toEqual(['preserved', 'wake it'])
-    expect(adapter.requests).toHaveLength(2)
+    expect(userTexts(agent)).toEqual(['wake it'])
+    expect(adapter.requests).toHaveLength(1)
   })
 
   it('cancel({ keepInbox: true }) parks queued work after an active turn aborts', async () => {
@@ -262,34 +349,6 @@ describe('Agent.cancel()', () => {
     expect(agent.status).toBe('idle')
   })
 
-  it('cancel wins when a pre-step listener requeues claimed input and rejects the proposed step', async () => {
-    const adapter = new MockAdapter([textResponse('should not run')])
-    const ctx = await harness(adapter)
-    const agent = await ctx.agentLoop.create(SessionId('cancel-reject-pre-step'), { provider: 'mock', model: 'mock' })
-    const prompt = createUserMessage({
-      content: [{ type: 'text', text: 'cancel this proposal' }],
-      source: { kind: 'user' },
-    })
-
-    ctx.on('agent/pre-step', async ({ agent: subject, messages }) => {
-      if (subject === agent) {
-        const claimed = messages[0]
-        if (claimed === undefined) throw new Error('pre-step omitted the claimed prompt')
-        subject.inject(claimed)
-        subject.cancel({ kind: 'user' }, { keepInbox: true })
-      }
-      return { kind: 'reject' as const }
-    })
-
-    agent.followup(prompt)
-    await agent.whenIdle()
-
-    expect(adapter.requests).toHaveLength(0)
-    expect(agent.inbox.nextStep.map(message => message.id)).toEqual([prompt.id])
-    expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.data.reason)
-      .toEqual({ kind: 'aborted', reason: { kind: 'user' } })
-  })
-
   it('disposal from the running notification drops queued work before turn start', async () => {
     const adapter = new MockAdapter([textResponse('should not run')])
     const ctx = await harness(adapter)
@@ -369,8 +428,8 @@ describe('Agent.cancel()', () => {
     const idle = waitForIdle(ctx, agent)
     send(agent, 'later')
     await idle
-    expect(adapter.requests).toHaveLength(3)
-    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'later'])
+    expect(adapter.requests).toHaveLength(2)
+    expect(userTexts(agent)).toEqual(['first', 'later'])
   })
 
   it('replacement work queued after idle-listener cancellation replays at convergence', async () => {
@@ -400,15 +459,15 @@ describe('Agent.cancel()', () => {
 
     // The wake sent after the cancel fired is latched: the surviving
     // replacement runs at convergence without a third message.
-    expect(adapter.requests).toHaveLength(3)
-    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'surviving replacement'])
+    expect(adapter.requests).toHaveLength(2)
+    expect(userTexts(agent)).toEqual(['first', 'surviving replacement'])
     expect(agent.inbox.nextTurn).toHaveLength(0)
 
     const idle = waitForIdle(ctx, agent)
     send(agent, 'wake it')
     await idle
-    expect(adapter.requests).toHaveLength(4)
-    expect(userTexts(agent)).toEqual(['first', 'cancelled replacement', 'surviving replacement', 'wake it'])
+    expect(adapter.requests).toHaveLength(3)
+    expect(userTexts(agent)).toEqual(['first', 'surviving replacement', 'wake it'])
   })
 
   it('cancel() mid-step aborts the active turn and drops every queued tail item', async () => {
@@ -469,17 +528,17 @@ describe('Agent.cancel()', () => {
     expect(call?.type === 'tool/call' ? call.data.callId : undefined).toBe('c1')
     expect(result?.type === 'tool/result' ? result.data : undefined).toMatchObject({
       message: {
+        role: 'tool',
         source: { kind: 'tool', callId: 'c1' },
-        content: [{ type: 'tool-result', toolCallId: 'c1', isError: true }],
+        content: [{ type: 'text' }],
+        isError: true,
       },
       error: { name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH },
     })
 
     send(agent, 'continue safely')
     await waitForIdle(ctx, agent)
-    const replayedResult = adapter.requests[1]!.messages
-      .flatMap(message => message.content)
-      .find(block => block.type === 'tool-result')
+    const replayedResult = adapter.requests[1]!.messages.find(message => message.role === 'tool')
     expect(replayedResult).toMatchObject({ toolCallId: 'c1', isError: true })
     expect(reasons).toEqual([
       { kind: 'aborted', reason: { kind: 'user' } },
@@ -891,18 +950,17 @@ describe('Agent.cancel()', () => {
     send(agent, 'B')
 
     await idle
-    expect(userTexts(agent)).toEqual(['A', 'B'])
+    expect(userTexts(agent)).toEqual(['B'])
     expect(agent.inbox.nextTurn).toHaveLength(0)
-    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests).toHaveLength(1)
 
     const replacementIdle = waitForIdle(ctx, agent)
     send(agent, 'C')
     await replacementIdle
-    expect(userTexts(agent)).toEqual(['A', 'B', 'C'])
-    expect(adapter.requests).toHaveLength(3)
-    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(4)
+    expect(userTexts(agent)).toEqual(['B', 'C'])
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(3)
   })
-
 
   it("cancel clears the turn's steering — it is not re-enqueued as a fresh turn", async () => {
     const adapter = new MockAdapter(['hang'])

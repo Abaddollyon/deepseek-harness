@@ -3,17 +3,21 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { liveConfig } from '../../../settings/settings/tests/live-config.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import * as toolSchedule from '@deepseek-ai/dsh-schedule'
+import ScheduleService from '@deepseek-ai/dsh-schedule'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { ContentBlock, GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId, LlmError, QUOTA_EXCEEDED_CODE, errorChain } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -22,8 +26,6 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
-import { createActivationObserver, createLifecycleEmitter, terminalDiagnostic } from '../src/lifecycle.ts'
-import { settlementSummary } from '../src/continuation-messages.ts'
 import type { SubagentPromptRequestId } from '../src/control-types.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 import { TestSessionQuery } from './test-session-query.ts'
@@ -33,6 +35,8 @@ import {
   continuationManager,
   dropContinuationActivation,
 } from './continuation-internals.ts'
+
+const subagentConfigs = new WeakMap<Context, Awaited<ReturnType<typeof liveConfig>>>()
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
@@ -75,10 +79,29 @@ afterEach(async () => {
   if (errors.length > 1) throw new AggregateError(errors, 'temp-root cleanup failed')
 })
 
+/** Mount the real Schedule service for root-only tool-registration assertions. */
+async function mountScheduleForOwnership(ctx: Context): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-subagent-schedule-'))
+  const fibers: Array<{ dispose(): Promise<void> }> = []
+  cleanups.unshift(async () => {
+    for (const fiber of fibers.toReversed()) await fiber.dispose()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
+  fibers.push(await ctx.plugin(Storage))
+  fibers.push(await ctx.plugin(StorageJson, { root }))
+  fibers.push(await ctx.plugin(StorageDomain, { backend: 'json' }))
+  // This ownership test creates no reminders and invokes no Remote methods.
+  // Unexpected delivery must fail instead of activating an unrelated Session.
+  ctx.provide('sessionController', {
+    resolveAgent: async () => { throw new Error('ownership test must not dispatch reminders') },
+  } as never)
+  fibers.push(await ctx.plugin(ScheduleService))
+}
+
 /** Boot the full continuable stack: loop, persistence, providers, and subagents. */
 async function setupWith(
   adapter: LlmAdapter,
-  options: { persistence?: boolean; schedule?: boolean; sessionQuery?: boolean } = {},
+  options: { persistence?: boolean; schedule?: boolean; sessionQuery?: boolean; maxActiveSubagents?: number } = {},
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
@@ -95,9 +118,10 @@ async function setupWith(
     })
   }
   await ctx.plugin(AgentLoop, { agents: [] })
-  if (options.schedule) await ctx.plugin(toolSchedule)
+  if (options.schedule) await mountScheduleForOwnership(ctx)
   if (options.sessionQuery !== false) await ctx.plugin(TestSessionQuery)
-  await ctx.plugin(SubagentRuntime)
+  subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime,
+    options.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: options.maxActiveSubagents }))
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -138,7 +162,7 @@ function hasAssistantText(events: readonly SessionEvent[], text: string): boolea
 
 /** Caller-supplied user message texts in log order (runtime-context snapshots excluded). */
 function userTexts(events: readonly SessionEvent[]): string[] {
-  return events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'plugin'
+  return events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'runtime-context'
     ? event.data.content.flatMap(block => block.type === 'text'
       && !block.text.startsWith('Your parent agent id is ')
       ? [block.text]
@@ -252,6 +276,247 @@ function observeCancel(agent: Agent, callback: () => void): void {
     cancel(cause, options)
   })
 }
+
+describe('continuable activation capacity', () => {
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid configured capacity %s', async (maxActiveSubagents) => {
+    const ctx = new Context()
+    try {
+      await expect(ctx.plugin(SubagentRuntime, { maxActiveSubagents })).rejects.toThrow()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('layers editable depth over composition and removes the section on disposal', async () => {
+    const ctx = new Context()
+    try {
+
+      const live = await liveConfig(ctx, SubagentRuntime, { maxDepth: 4 })
+      subagentConfigs.set(ctx, live)
+      const fiber = live.fiber
+      expect(ctx.subagents.resolveMaxDepth()).toBe(4)
+      await subagentConfigs.get(ctx)!.update({ maxDepth: 0 })
+      expect(ctx.subagents.resolveMaxDepth()).toBe(0)
+      expect(ctx.subagents.resolveMaxDepth(2)).toBe(2)
+      expect(ctx.subagents.resolveMaxDepth('provider-managed')).toBeUndefined()
+      await expect(subagentConfigs.get(ctx)!.update({ maxDepth: -1 })).rejects.toThrow()
+      await expect(subagentConfigs.get(ctx)!.update({ maxDepth: 1.5 })).rejects.toThrow()
+      await expect(subagentConfigs.get(ctx)!.update({ maxActiveSubagents: 0 })).rejects.toThrow()
+      expect(ctx.subagents.resolveMaxDepth()).toBe(0)
+      await subagentConfigs.get(ctx)!.replace({ maxDepth: 4 })
+      expect(ctx.subagents.resolveMaxDepth()).toBe(4)
+      await fiber.dispose()
+      expect(ctx.get('subagents')).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('applies capacity edits to an existing root without stopping resident children', async () => {
+    const release = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter(Array.from({ length: 4 }, () => ({ chunks: textResponse('done'), gate: release.promise })))
+    const { ctx, parent } = await setupWith(adapter, { maxActiveSubagents: 1 })
+    parkParent(ctx, parent)
+    try {
+
+      const first = await ctx.subagents.startContinuable(startSpec(parent))
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      await subagentConfigs.get(ctx)!.update({ maxActiveSubagents: 2 })
+      const second = await ctx.subagents.startContinuable(startSpec(parent))
+      await subagentConfigs.get(ctx)!.update({ maxActiveSubagents: 1 })
+      expect(ctx.agents.get(first.childId)).toBeDefined()
+      expect(ctx.agents.get(second.childId)).toBeDefined()
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      await subagentConfigs.get(ctx)!.update({ maxActiveSubagents: 3 })
+      const third = await ctx.subagents.startContinuable(startSpec(parent))
+      release.resolve(undefined)
+      await Promise.all([first, second, third].map(child => waitNoActivation(ctx, child.childId)))
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('defaults to eight live children and reuses capacity after settlement', async () => {
+    const release = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      ...Array.from({ length: 8 }, () => ({ chunks: textResponse('done'), gate: release.promise })),
+      { chunks: textResponse('replacement') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
+    try {
+      const started = await Promise.all(Array.from({ length: 8 }, () => ctx.subagents.startContinuable(startSpec(parent))))
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      release.resolve(undefined)
+      await Promise.all(started.map(child => waitNoActivation(ctx, child.childId)))
+      const replacement = await ctx.subagents.startContinuable(startSpec(parent))
+      await waitNoActivation(ctx, replacement.childId)
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('shares slots across siblings, providers and nested children while isolating roots', async () => {
+    const release = Promise.withResolvers<undefined>()
+    const releaseParent = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('parent done'), gate: releaseParent.promise },
+      ...Array.from({ length: 3 }, () => ({ chunks: textResponse('done'), gate: release.promise })),
+    ])
+    const { ctx, parent } = await setupWith(adapter, { maxActiveSubagents: 3 })
+    const other = await ctx.agentLoop.create(SessionId('other-root'), { provider: 'mock', model: 'mock' })
+    parkParent(ctx, parent)
+    parkParent(ctx, other)
+    try {
+      const first = await ctx.subagents.startContinuable(startSpec(parent))
+      const child = ctx.agents.get(first.childId)!
+      await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+      const nested = await ctx.subagents.startContinuable(startSpec(child, 'fork'))
+      const sibling = await ctx.subagents.startContinuable(startSpec(parent))
+      await expect(ctx.subagents.startContinuable(startSpec(ctx.agents.get(nested.childId)!)))
+        .rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      await expect(ctx.subagents.startContinuable(startSpec(parent)))
+        .rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      const independent = await ctx.subagents.startContinuable(startSpec(other))
+      parkParent(ctx, child)
+      releaseParent.resolve(undefined)
+      await child.whenIdle()
+      expect(continuationActivations(ctx).get(first.childId)).toBeDefined()
+      await expect(ctx.subagents.startContinuable(startSpec(parent)))
+        .rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      release.resolve(undefined)
+      await Promise.all([first, nested, sibling, independent].map(entry => waitNoActivation(ctx, entry.childId)))
+    } finally {
+      releaseParent.resolve(undefined)
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reserves the last slot before asynchronous creation and returns it after failure', async () => {
+    const { ctx, parent } = await setupWith(new MockAdapter([textResponse('replacement')]), { maxActiveSubagents: 1 })
+    parkParent(ctx, parent)
+    const agents = continuationActivations(ctx).ownerCtx.agents
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const createSpy = vi.spyOn(agents, 'create').mockImplementationOnce(async () => {
+      entered.resolve(undefined)
+      await release.promise
+      throw new Error('creation failed')
+    })
+    const starting = ctx.subagents.startContinuable(startSpec(parent))
+    const rejected = expect(starting).rejects.toThrow('creation failed')
+    try {
+      await entered.promise
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      expect(createSpy).toHaveBeenCalledTimes(1)
+      release.resolve(undefined)
+      await rejected
+      createSpy.mockRestore()
+      const replacement = await ctx.subagents.startContinuable(startSpec(parent))
+      await waitNoActivation(ctx, replacement.childId)
+    } finally {
+      release.resolve(undefined)
+      createSpy.mockRestore()
+      await rejected
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps one-shot runs outside continuable capacity', async () => {
+    const release = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('continuable'), gate: release.promise },
+      { chunks: textResponse('one-shot') },
+    ])
+    const { ctx, parent } = await setupWith(adapter, { maxActiveSubagents: 1 })
+    parkParent(ctx, parent)
+    try {
+      const child = await ctx.subagents.startContinuable(startSpec(parent))
+      await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+      const run = await ctx.subagents.start('spawn', { parent, prompt: message('one-shot'), signal: testSignal })
+      try {
+        expect((await run.result).output).toEqual(message('one-shot'))
+      } finally {
+        await run.dispose()
+      }
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      release.resolve(undefined)
+      await waitNoActivation(ctx, child.childId)
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('checks cold resume but accepts messages to an already resident child at capacity', async () => {
+    const release = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first') },
+      { chunks: textResponse('busy'), gate: release.promise },
+      { chunks: textResponse('queued') },
+      { chunks: textResponse('resumed') },
+    ])
+    const { ctx, parent } = await setupWith(adapter, { maxActiveSubagents: 1 })
+    parkParent(ctx, parent)
+    try {
+      const old = await ctx.subagents.startContinuable(startSpec(parent))
+      await waitNoActivation(ctx, old.childId)
+      const busy = await ctx.subagents.startContinuable(startSpec(parent))
+      await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+      await expect(queuePrompt(ctx, parent, old.childId, message('resume'))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      await queuePrompt(ctx, parent, busy.childId, message('queue at capacity'))
+      release.resolve(undefined)
+      await waitNoActivation(ctx, busy.childId)
+      await queuePrompt(ctx, parent, old.childId, message('resume'))
+      await waitNoActivation(ctx, old.childId)
+      const loaded = await loadStoredSession(ctx.sessionPersistence, old.childId)
+      expect(userTexts(loaded.events)).toEqual(['child task', 'resume'])
+    } finally {
+      release.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each([false, true])('retains the slot through disposal, including cleanup failure: %s', async (failDisposal) => {
+    const releaseRun = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('busy'), gate: releaseRun.promise },
+      { chunks: textResponse('replacement') },
+    ])
+    const { ctx, parent } = await setupWith(adapter, { maxActiveSubagents: 1 })
+    parkParent(ctx, parent)
+    const entered = Promise.withResolvers<undefined>()
+    const releaseDisposal = Promise.withResolvers<undefined>()
+    try {
+      const started = await ctx.subagents.startContinuable(startSpec(parent))
+      await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+      const activation = continuationActivations(ctx).get(started.childId)!
+      const dispose = activation.handle.dispose.bind(activation.handle)
+      activation.handle.dispose = async () => {
+        entered.resolve(undefined)
+        await releaseDisposal.promise
+        await dispose()
+        if (failDisposal) throw new Error('cleanup report failed')
+      }
+      const drained = ctx.subagents.drainContinuableChildren(parent, [started.childId])
+      const outcome = drained.catch((error: unknown) => error)
+      releaseRun.resolve(undefined)
+      await entered.promise
+      await expect(ctx.subagents.startContinuable(startSpec(parent))).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      releaseDisposal.resolve(undefined)
+      expect(await outcome).toEqual(failDisposal ? expect.objectContaining({ code: 'ACTIVATION_TEARDOWN_FAILED' }) : undefined)
+      const replacement = await ctx.subagents.startContinuable(startSpec(parent))
+      await waitNoActivation(ctx, replacement.childId)
+    } finally {
+      releaseRun.resolve(undefined)
+      releaseDisposal.resolve(undefined)
+      await ctx.fiber.dispose()
+    }
+  })
+})
 
 describe('SubagentRuntime.startContinuable', () => {
   it('returns both identities at inbox acceptance, without waiting for the turn or the log', async () => {
@@ -421,6 +686,67 @@ describe('SubagentRuntime.startContinuable', () => {
     await vi.waitFor(() => {
       expect(ctx.agents.list().map(agent => agent.id)).toEqual([SessionId('parent')])
     })
+  })
+
+  it('releases the Activation when the parent catalog append fails', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    const childId = SessionId('00000000-0000-4000-8000-000000000321')
+    const catalogFailure = new Error('catalog append failed')
+    const cleanupFailure = new Error('activation disposal also failed')
+    const appendCatalog = parent.session.append.bind(parent.session) as (
+      type: 'subagent/catalog',
+      data: SessionEventMap['subagent/catalog'],
+    ) => SessionEvent<'subagent/catalog'>
+    vi.spyOn(parent.session, 'append').mockImplementation(((type: string, data: unknown) => {
+      if (type === 'subagent/catalog') {
+        const activation = continuationActivations(ctx).get(childId)
+        if (activation === undefined) throw new Error('expected live Activation')
+        const dispose = activation.handle.dispose.bind(activation.handle)
+        vi.spyOn(activation.handle, 'dispose').mockImplementation(async () => {
+          await dispose()
+          throw cleanupFailure
+        })
+        throw catalogFailure
+      }
+      return appendCatalog('subagent/catalog', data as SessionEventMap['subagent/catalog'])
+    }) as typeof parent.session.append)
+
+    await expect(ctx.subagents.startContinuable({
+      ...startSpec(parent),
+      childId,
+    })).rejects.toBe(catalogFailure)
+
+    await vi.waitFor(() => { expect(ctx.agents.get(childId)).toBeUndefined() })
+    expect(parent.session.snapshotEvents().filter(event => event.type === 'subagent/catalog')).toEqual([])
+  })
+
+  it('preserves prompt admission failure when Activation disposal also fails', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    const childId = SessionId('00000000-0000-4000-8000-000000000322')
+    const admissionFailure = new Error('prompt admission failed')
+    const cleanupFailure = new Error('activation disposal also failed')
+    const controller = new AbortController()
+    const warnings: string[] = []
+    ctx.logger.warn = (message: string) => { warnings.push(message) }
+    ctx.on('subagent/start', () => {
+      const activation = continuationActivations(ctx).get(childId)
+      if (activation === undefined) throw new Error('expected live Activation')
+      const dispose = activation.handle.dispose.bind(activation.handle)
+      vi.spyOn(activation.handle, 'dispose').mockImplementation(async () => {
+        await dispose()
+        throw cleanupFailure
+      })
+      controller.abort(admissionFailure)
+    })
+
+    await expect(ctx.subagents.startContinuable({
+      ...startSpec(parent, 'spawn', controller.signal),
+      childId,
+    })).rejects.toBe(admissionFailure)
+    await vi.waitFor(() => { expect(ctx.agents.get(childId)).toBeUndefined() })
+    expect(warnings.some(warning => warning.startsWith(
+      'subagent continuation: disposal after admission or catalog append failure also failed:',
+    ))).toBe(true)
   })
 
   it('rolls an unpublished Activation back when lifecycle publication fails', async () => {
@@ -1078,12 +1404,11 @@ describe('continuable durability and teardown', () => {
     parkParent(ctx, parent)
     const flushing = Promise.withResolvers<undefined>()
     const releaseFlush = Promise.withResolvers<undefined>()
-    const childFlushes: string[] = []
+    let childFlushes = 0
     ctx.on('session/flush', async (session) => {
       if (session.header.parentSession === undefined) return
-      const activation = continuationActivations(ctx).get(session.id)!
-      childFlushes.push(activation.inbox.closing === undefined ? 'settlement' : 'disposal')
-      if (childFlushes.length !== 1) return
+      childFlushes++
+      if (childFlushes !== 1) return
       flushing.resolve(undefined)
       await releaseFlush.promise
     })
@@ -1103,7 +1428,7 @@ describe('continuable durability and teardown', () => {
     expect(cancelSpy).not.toHaveBeenCalled()
     releaseFlush.resolve(undefined)
     await waitNoActivation(ctx, started.childId)
-    expect(childFlushes).toEqual(['settlement', 'settlement', 'disposal'])
+    expect(childFlushes).toBe(2)
     const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
     expect(hasUserText(loaded.events, 'accepted during flush')).toBe(true)
     expect(hasAssistantText(loaded.events, 'late answer')).toBe(true)
@@ -1118,12 +1443,11 @@ describe('continuable durability and teardown', () => {
     parkParent(ctx, parent)
     const flushing = Promise.withResolvers<undefined>()
     const releaseFlush = Promise.withResolvers<undefined>()
-    const childFlushes: string[] = []
+    let childFlushes = 0
     ctx.on('session/flush', async (session) => {
       if (session.header.parentSession === undefined) return
-      const activation = continuationActivations(ctx).get(session.id)!
-      childFlushes.push(activation.inbox.closing === undefined ? 'settlement' : 'disposal')
-      if (childFlushes.length !== 1) return
+      childFlushes++
+      if (childFlushes !== 1) return
       flushing.resolve(undefined)
       await releaseFlush.promise
     })
@@ -1139,7 +1463,7 @@ describe('continuable durability and teardown', () => {
     releaseFlush.resolve(undefined)
 
     await waitNoActivation(ctx, started.childId)
-    expect(childFlushes).toEqual(['settlement', 'settlement', 'disposal'])
+    expect(childFlushes).toBe(2)
     const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
     expect(hasUserText(loaded.events, 'detached result')).toBe(true)
   })
@@ -1486,46 +1810,21 @@ describe('continuable durability and teardown', () => {
 
   it('reports selected-child disposal failures after releasing the child', async () => {
     const hold = Promise.withResolvers<undefined>()
-    const holdChild = Promise.withResolvers<undefined>()
-    const adapter = new GatedAdapter([
-      { chunks: textResponse('target'), gate: hold.promise },
-      { chunks: textResponse('child'), gate: holdChild.promise },
-    ])
+    const adapter = new GatedAdapter([{ chunks: textResponse('target'), gate: hold.promise }])
     const { ctx, parent } = await setupWith(adapter)
     const target = await ctx.subagents.startContinuable(startSpec(parent))
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
-    const targetAgent = ctx.agents.get(target.childId)!
-    const descendant = await ctx.subagents.startContinuable(startSpec(targetAgent))
-    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
-    const activation = continuationActivations(ctx).get(descendant.childId)!
+    const activation = continuationActivations(ctx).get(target.childId)!
     const realDispose = activation.handle.dispose.bind(activation.handle)
     activation.handle.dispose = async () => {
       await realDispose()
-      throw new Error('selected cleanup failed', { cause: new LlmError('quota', QUOTA_EXCEEDED_CODE, { providerRetryAfterMs: 2_000 }) })
+      throw new Error('selected cleanup failed')
     }
 
     const drained = ctx.subagents.drainContinuableChildren(parent, [target.childId])
     hold.resolve(undefined)
-    holdChild.resolve(undefined)
 
-    const failure = await drained.catch((error: unknown) => error)
-    expect(failure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
-    expect(errorChain(failure)).toContain('descendant teardown failures')
-    // This is the AggregateError produced by dispose(), not a synthetic graph:
-    // the descendant SubagentError remains reachable through both aggregate
-    // layers and its LLM cause keeps the retry classification intact.
-    const outer = (failure as SubagentError).cause
-    expect(outer).toBeInstanceOf(AggregateError)
-    const childFailure: unknown = (outer as AggregateError).errors[0]
-    expect(childFailure).toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
-    expect((childFailure as SubagentError).cause).toBeInstanceOf(AggregateError)
-    expect(terminalDiagnostic(failure)).toMatchObject({
-      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 2_000 },
-    })
-    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
-    expect(settlementNotices(parent)[0]!.text).toContain(
-      "The provider's quota for this route is exhausted; do not retry this route.",
-    )
+    await expect(drained).rejects.toMatchObject({ code: 'ACTIVATION_TEARDOWN_FAILED' })
     expect(ctx.agents.get(target.childId)).toBeUndefined()
   })
 
@@ -1547,7 +1846,7 @@ describe('continuable durability and teardown', () => {
 
   it('rejects selected-child teardown through a stale parent identity', async () => {
     const { ctx, parent } = await setup([])
-    const stale = { ...parent, id: parent.id } as unknown as Agent
+    const stale = { ...parent, id: parent.id } as Agent
 
     await expect(ctx.subagents.drainContinuableChildren(stale, []))
       .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
@@ -1625,7 +1924,7 @@ describe('continuable durability and teardown', () => {
 
   it('ignores a stale scoped root without disabling its live same-id Agent', async () => {
     const { ctx, parent } = await setup([textResponse('done')])
-    const stale = { ...parent, id: parent.id } as unknown as Agent
+    const stale = { ...parent, id: parent.id } as Agent
 
     await ctx.subagents.drainContinuableDescendants([stale])
     const started = await ctx.subagents.startContinuable(startSpec(parent))
@@ -1841,56 +2140,6 @@ describe('continuable review regressions', () => {
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     // Deriving this from disposal success would report the failure as completed.
     expect(ends[0]!.stopReason).toBe('max-tokens')
-  })
-
-  it('carries typed quota facts through the continuable lifecycle and parent notice', async () => {
-    const { ctx, parent } = await setup([
-      () => {
-        throw new LlmError('quota exhausted', QUOTA_EXCEEDED_CODE, {
-          providerRetryAfterMs: 12_000,
-        })
-      },
-      textResponse('parent ack'),
-    ])
-    const ends: SubagentRunEndInfo[] = []
-    ctx.on('subagent/end', (info) => { ends.push(info) })
-
-    const started = await ctx.subagents.startContinuable(startSpec(parent))
-    await waitNoActivation(ctx, started.childId)
-    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
-    expect(ends[0]).toMatchObject({
-      stopReason: 'error',
-      failure: { code: QUOTA_EXCEEDED_CODE, retryAfterMs: 12_000 },
-    })
-    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
-    expect(settlementNotices(parent)[0]!.text).toContain(
-      "The provider's quota for this route is exhausted; do not retry this route.",
-    )
-  })
-
-  it('maps a future plugin-provided turn reason to the safe error fallback', async () => {
-    const { ctx, parent } = await setup([])
-    const childId = SessionId('future-reason-child')
-    const child = await ctx.agentLoop.create(childId, {})
-    const observer = createActivationObserver(
-      createLifecycleEmitter(ctx, () => ctx),
-      'spawn',
-      childId,
-      parent,
-    )
-    observer.start(child)
-    child.session.append('turn/start', { turn: 1 })
-    child.session.append('step/start', { turn: 1, step: 1 })
-    child.session.append('turn/end', { turn: 1, reason: { kind: 'test-future' } as never })
-    observer.capture(child)
-
-    expect(observer.terminal(undefined)).toEqual({ stopReason: 'error' })
-  })
-
-  it('renders a future backend stop reason as an abnormal settlement', () => {
-    expect(settlementSummary(SessionId('future-child'), 'test-future' as never)).toBe(
-      'Background subagent future-child ended abnormally (test-future) before it finished.',
-    )
   })
 
   it('rejects a live delivery whose caller signal aborted before admission', async () => {
@@ -2191,7 +2440,7 @@ describe('continuable review regressions', () => {
   })
 
   it.each([
-    { label: 'plugin', source: { kind: 'plugin' as const, plugin: 'tool-jobs' } },
+    { label: 'plugin', source: { kind: 'tool-jobs' as const } },
     { label: 'non-plugin', source: { kind: 'team-message', teamId: 't-1' } as never },
   ])('keeps an idle child resident while its Inbox holds $label injected context', async ({ source }) => {
     const release = Promise.withResolvers<undefined>()
@@ -2225,7 +2474,7 @@ describe('continuable review regressions', () => {
     // a driver, so residency must survive until that turn claims the message.
     const steered = createUserMessage({
       content: message('Cordis Host handler failed'),
-      source: { kind: 'plugin', plugin: 'cordis-host-runner' },
+      source: { kind: 'cordis-host-runner' },
     })
     child.steer(steered)
     ctx.subagents.interrupt(started.childId, { kind: 'user', parentSessionId: parent.id })
@@ -2375,7 +2624,7 @@ function settlementNotices(agent: Agent): { sender: string; text: string; summar
 describe('continuable adjacent-Agent delivery', () => {
   it('rejects a stale sender before resolving either adjacent target', async () => {
     const { ctx, parent } = await setup([])
-    const stale = { ...parent, id: parent.id } as unknown as Agent
+    const stale = { ...parent, id: parent.id } as Agent
 
     await expect(ctx.subagents.sendMessage(stale, SessionId('target'), message('stale'), {
       signal: testSignal,
@@ -2656,7 +2905,7 @@ describe('continuable settlement delivery', () => {
     )
   })
 
-  it('preserves work interrupted by an ancestor before its first step and reports stopped on teardown', async () => {
+  it('reports a child an ancestor interrupted before its first step as stopped', async () => {
     const atCheckpoint = Promise.withResolvers<undefined>()
     const releaseCheckpoint = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([{ chunks: textResponse('parent ack') }])
@@ -2670,28 +2919,12 @@ describe('continuable settlement delivery', () => {
 
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await atCheckpoint.promise
-    const child = ctx.agents.get(started.childId)!
+    // The shipped interrupt path: nothing about it runs inside this manager, so
+    // no pre-cancel sample could see it — the child's own log has to say so.
     ctx.subagents.interrupt(started.childId, { kind: 'ancestor', agent: parent })
     releaseCheckpoint.resolve(undefined)
-    await child.whenIdle()
-    await passSettlementCheck(ctx, started.childId)
-
-    expect(ctx.agents.get(started.childId)).toBe(child)
-    expect(child.inbox.nextTurn).toHaveLength(1)
-    expect(child.inbox.nextTurn[0]!.content).toEqual(message('child task'))
-    expect(child.session.snapshotEvents().findLast(event => event.type === 'turn/end')).toMatchObject({
-      data: { reason: { kind: 'aborted', reason: { kind: 'parent' } } },
-    })
-    expect(adapter.requests).toEqual([])
-    expect(settlementNotices(parent)).toEqual([])
-    await ctx.sessions.flush(child.session)
-    const persisted = await loadStoredSession(ctx.sessionPersistence, started.childId)
-    expect(persisted.events.findLast(event => event.type === 'agent/inbox/spliced')).toMatchObject({
-      data: { target: 'next-turn', inserted: child.inbox.nextTurn },
-    })
-
-    await ctx.subagents.drainContinuableChildren(parent, [started.childId])
     await waitNoActivation(ctx, started.childId)
+
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished.`
@@ -2938,21 +3171,15 @@ describe('continuable settlement delivery', () => {
     await drained
     expect(settlementNotices(host.agent)).toHaveLength(1)
 
-    // Disposal keeps the pending inbox, so the notice it never claimed is
-    // still parked when the resumed lifecycle takes over: pending input is
-    // durable session state, not runtime residue teardown may discard.
+    // Disposal keeps the pending inbox, so the resumed parent still holds the
+    // notice it never claimed.
     await host.dispose()
     const resumed = await ctx.agents.resume({
       resumeSessionId: parentId,
       agentOptions: { provider: 'mock', model: 'mock' },
     })
     expect(settlementNotices(resumed.agent)).toHaveLength(1)
-    expect(settlementNotices(resumed.agent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIt left no closing message.',
-    )
     await resumed.dispose()
-    // The notice remains pending in the durable log after host disposal.
     const persisted = await loadStoredSession(ctx.sessionPersistence, parentId)
     expect(persisted.events.flatMap(event => event.type === 'agent/inbox/spliced'
       ? [{ inserted: event.data.inserted.length, removed: event.data.removedCount ?? 0 }]
@@ -3138,7 +3365,7 @@ describe('continuable errors', () => {
       return found!
     })
     // A stale parent reference: same id, not the exact live entry.
-    const stale = { ...parent, id: parent.id } as unknown as Agent
+    const stale = { ...parent, id: parent.id } as Agent
 
     await expect(queuePrompt(ctx, stale, started.childId, message('stale')))
       .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
@@ -3521,7 +3748,7 @@ describe('SubagentRuntime.interrupt', () => {
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
     const sibling = ctx.agents.get(siblingStart.childId)!
     const stranger = await ctx.agentLoop.create(SessionId('stranger'), { provider: 'mock', model: 'mock' })
-    const stale = { ...parent, id: parent.id } as unknown as Agent
+    const stale = { ...parent, id: parent.id } as Agent
     const cancelSpy = vi.spyOn(target, 'cancel')
 
     expect(() => { ctx.subagents.interrupt(targetStart.childId, { kind: 'ancestor', agent: target }) })
@@ -3561,11 +3788,6 @@ describe('SubagentRuntime.interrupt', () => {
     expect(cancelSpy).not.toHaveBeenCalled()
     await run.result
     await run.dispose()
-  })
-
-  it('ignores absent ids during selected child teardown', async () => {
-    const { ctx, parent } = await setup([textResponse('unused')])
-    await expect(ctx.subagents.drainContinuableChildren(parent, [SessionId('absent-child')])).resolves.toBeUndefined()
   })
 
   it('accepts an interrupt after natural completion', async () => {

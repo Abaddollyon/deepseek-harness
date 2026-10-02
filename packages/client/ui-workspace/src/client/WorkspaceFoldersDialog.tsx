@@ -1,109 +1,146 @@
-/** One primary directory plus explicitly selected sidepaths; never changes an existing Session. */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+/**
+ * Manage-folders dialog: edits one Workspace's additional directories with the
+ * composed directory flow, or by typed path for a Workspace on another
+ * execution host, then saves the complete list in one Host call.
+ * Sessions keep the roots they recorded; only new Sessions use the saved list.
+ */
+import type { ReactNode } from 'react'
+import { useEffect, useState } from 'react'
+import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from './contract/slots.ts'
 import css from './WorkspacePicker.module.css'
 
-/** Folder draft owned by one mounted creation or editing interaction. */
+/** Inputs owned by the Workspace browser for one open dialog. */
 export interface WorkspaceFoldersDialogProps {
+  /** Primary Workspace directory, shown read-only. */
   path: string
+  /** Additional directories when the dialog opened. */
   additionalPaths: readonly string[]
-  creating?: boolean
+  /** The Workspace lives on another execution host: folders are typed paths there, not Host picks. */
+  remote?: boolean
+  /** Whether the directory-flow hole is occupied. */
   flowAvailable: boolean
+  /** Render the directory-flow hole with this dialog as its owner. */
   renderDirectoryFlow: (owner: DirectoryFlowOwnerProps) => ReactNode
+  /** Persist the complete list; a rejection's message is shown in the dialog. */
   onSave: (additionalPaths: readonly string[]) => Promise<void>
+  /** Dismiss the dialog. */
   onClose: () => void
+  /** The Workspace locale seat. */
   t: WorkspacePickerProps['t']
 }
 
-/** Render an atomic folder editor using the Host's composed directory picker. */
+/**
+ * Render the folder list editor and its directory flow.
+ * @param props - dialog inputs.
+ * @returns the dialog and the flow hole.
+ */
 export function WorkspaceFoldersDialog({
-  path, additionalPaths, creating = false, flowAvailable, renderDirectoryFlow, onSave, onClose, t,
+  path, additionalPaths, remote = false, flowAvailable, renderDirectoryFlow, onSave, onClose, t,
 }: WorkspaceFoldersDialogProps) {
-  const [paths, setPaths] = useState([...additionalPaths])
+  const [paths, setPaths] = useState<readonly string[]>(additionalPaths)
+  const [typed, setTyped] = useState('')
+  const addFolder = (folder: string): void => {
+    setPaths(items => folder === path || items.includes(folder) ? items : [...items, folder])
+  }
+  const addTyped = (): void => {
+    const folder = typed.trim()
+    if (folder === '') return
+    addFolder(folder)
+    setTyped('')
+  }
   const [picking, setPicking] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const mounted = useRef(true)
-  const pending = useRef(false)
-  const picker = useRef<AbortController | null>(null)
-  const activePicker = picker.current
+  // A flow occupant that unloads mid-pick leaves nobody to answer; show the dialog again.
   useEffect(() => {
-    mounted.current = true
-    return () => { mounted.current = false; picker.current?.abort() }
-  }, [])
-  useEffect(() => {
-    if (!flowAvailable) { picker.current?.abort(); setPicking(false) }
-  }, [flowAvailable])
-  const close = (): void => { if (!pending.current) onClose() }
-  const save = async (): Promise<void> => {
-    if (pending.current || picking) return
-    pending.current = true
+    if (picking && !flowAvailable) setPicking(false)
+  }, [picking, flowAvailable])
+
+  const save = (): void => {
     setSaving(true)
     setError(null)
-    try {
-      await onSave(paths)
-      if (mounted.current) onClose()
-    } catch (reason) {
-      if (mounted.current) setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      pending.current = false
-      if (mounted.current) setSaving(false)
-    }
+    onSave(paths).then(onClose, (reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : String(reason))
+      setSaving(false)
+    })
   }
-  return <>
-    <Modal
-      open={!picking}
-      onClose={close}
-      closeLabel={t('close')}
-      title={t(creating ? 'folders.create' : 'folders.edit')}
-      footer={<>
-        <Button variant="outline" disabled={saving} onClick={close}>{t('cancel')}</Button>
-        <Button variant="primary" disabled={saving} onClick={() => { void save() }}>{t(creating ? 'folders.create' : 'folders.save')}</Button>
-      </>}
-    >
-      <div className={css.folders}>
-        <strong>{t('folders.primary')}</strong>
-        <div className={css.folderPath}>{path}</div>
-        <p>{t('folders.scope')}</p>
-        <strong>{t('folders.additional')}</strong>
-        {paths.length === 0 && <p>{t('folders.empty')}</p>}
-        <ul className={css.folderList}>
-          {paths.map(folder => <li key={folder} className={css.folderRow}>
-            <span className={css.folderPath}>{folder}</span>
-            <Button variant="outline" disabled={saving} aria-label={t('folders.remove', { path: folder })} onClick={() => { setPaths(items => items.filter(item => item !== folder)) }}>{t('folders.removeLabel')}</Button>
-          </li>)}
-        </ul>
-        <Button variant="outline" disabled={saving || !flowAvailable} onClick={() => {
-          picker.current?.abort()
-          picker.current = new AbortController()
-          setError(null)
-          setPicking(true)
-        }}>{t('folders.add')}</Button>
-        {!creating && <p>{t('folders.newSessions')}</p>}
-        {error !== null && <div className={css.modalError} role="alert">{error}</div>}
-      </div>
-    </Modal>
-    {renderDirectoryFlow({
-      open: picking && flowAvailable,
-      busy: false,
-      onPicked: (folder) => {
-        if (!mounted.current || !picking || !flowAvailable || activePicker === null || activePicker.signal.aborted) return
-        activePicker.abort()
-        setPaths(items => folder === path || items.includes(folder) ? items : [...items, folder])
-        setPicking(false)
-      },
-      onCancel: () => {
-        if (activePicker === null || activePicker.signal.aborted) return
-        activePicker.abort()
-        setPicking(false)
-      },
-      onError: (message) => {
-        if (activePicker === null || activePicker.signal.aborted) return
-        activePicker.abort()
-        setPicking(false)
-        setError(message)
-      },
-    })}
-  </>
+  const close = (): void => { if (!saving) onClose() }
+
+  return (
+    <>
+      <Modal
+        open={!picking}
+        onClose={close}
+        closeLabel={t('close')}
+        title={t('folders.title')}
+        footer={(
+          <>
+            <Button variant="outline" className={css.modalAction} disabled={saving} onClick={close}>{t('cancel')}</Button>
+            <Button variant="primary" className={css.modalAction} disabled={saving} onClick={save}>{t('folders.save')}</Button>
+          </>
+        )}
+      >
+        <div className={css.folders}>
+          <div className={css.folderLabel}>{t('folders.primary')}</div>
+          <div className={css.folderPath}>{path}</div>
+          <div className={css.folderLabel}>{t('folders.additional')}</div>
+          {paths.length === 0 && <div className={css.folderHint}>{t('folders.empty')}</div>}
+          {paths.length > 0 && (
+            <ul className={css.folderList}>
+              {paths.map(folder => (
+                <li key={folder} className={css.folderRow}>
+                  <span className={css.folderPath}>{folder}</span>
+                  <Button
+                    variant="outline"
+                    disabled={saving}
+                    aria-label={t('folders.remove', { path: folder })}
+                    onClick={() => { setPaths(items => items.filter(item => item !== folder)) }}
+                  >
+                    {t('folders.removeLabel')}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {remote
+            ? (
+              <div className={css.folderRow}>
+                <Input
+                  aria-label={t('remoteWorkspace.path')}
+                  placeholder={t('remoteWorkspace.placeholder')}
+                  value={typed}
+                  disabled={saving}
+                  onChange={(event) => { setTyped(event.target.value) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') addTyped() }}
+                />
+                <Button variant="outline" disabled={saving || typed.trim() === ''} onClick={addTyped}>{t('folders.add')}</Button>
+              </div>
+            )
+            : (
+              <div>
+                <Button variant="outline" disabled={saving || !flowAvailable} onClick={() => { setError(null); setPicking(true) }}>
+                  {t('folders.add')}
+                </Button>
+              </div>
+            )}
+          <div className={css.folderHint}>{t('folders.newSessions')}</div>
+          {error !== null && <div className={css.modalError} role="alert">{error}</div>}
+        </div>
+      </Modal>
+      {renderDirectoryFlow({
+        open: picking && flowAvailable,
+        busy: false,
+        onPicked: (folder) => {
+          setPicking(false)
+          addFolder(folder)
+        },
+        onCancel: () => { setPicking(false) },
+        onError: (message) => {
+          setPicking(false)
+          setError(message)
+        },
+      })}
+    </>
+  )
 }

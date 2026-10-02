@@ -3,8 +3,8 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
-import type { WorkspaceId, WorkspaceView } from '../types.ts'
-import type { WorkspaceFeedRecovery, WorkspaceFeedSnapshot } from './feed.ts'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { WorkspaceView, WorkspaceWorld } from '../types.ts'
 import type { ClientWorkspaceModel, WorkspaceSnapshot } from './model.ts'
 
 /** Structured create failure for callers that distinguish Host business errors. */
@@ -14,6 +14,20 @@ export class WorkspaceCreateError extends Error {
   /** @param rpcError - Host business or folded carrier failure. */
   constructor(readonly rpcError: RemoteFailure) {
     super(`workspace create failed: ${rpcError.code}: ${rpcError.message}`)
+  }
+}
+
+/**
+ * Archive failed on the Host. `rpcError.code` distinguishes the active-session
+ * refusal (`workspace/session-active`, whose details name what still runs)
+ * from a missing session or a carrier fault.
+ */
+export class WorkspaceArchiveError extends Error {
+  override readonly name = 'WorkspaceArchiveError'
+
+  /** @param rpcError - Host business or folded carrier failure. */
+  constructor(readonly rpcError: RemoteFailure) {
+    super(`workspace session archive failed: ${rpcError.code}: ${rpcError.message}`)
   }
 }
 
@@ -33,23 +47,31 @@ export interface WorkspaceSource {
 export interface IWorkspaces {
   /** Host-authoritative Workspace rows, order, archive set, and follow lifecycle. */
   readonly list: WorkspaceSource
-  /** Sanitized follow readiness diagnostics, independent of retained rows. */
-  readonly feed: { getSnapshot(): WorkspaceFeedSnapshot; subscribe(listener: () => void): () => void }
-  /** Retry only a failed Workspace read subscription; never replay commands. */
-  retryFeed(): void
   /**
    * Register an existing path as a Workspace.
-   * @param input - Host create payload.
+   * @param input - Host create payload; `agentPreset` selects another execution host,
+   *   and `additionalPaths` must match an existing Workspace's.
    * @returns the created or idempotently resolved Workspace.
    */
-  create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
+  create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
   /**
-   * Replace a Workspace's additional directory roots.
+   * List the Agent presets whose own filesystem can hold a new Workspace, such as SSH hosts.
+   * @returns usable presets in roster order; empty when only the Host is available.
+   */
+  worlds(): Promise<readonly WorkspaceWorld[]>
+  /**
+   * Replace a Workspace's additional directories; existing Sessions keep their recorded roots.
    * @param workspaceId - target Workspace.
-   * @param additionalPaths - requested additional roots.
+   * @param additionalPaths - complete replacement list; empty removes all.
    * @returns the updated Workspace.
    */
   updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView>
+  /**
+   * Initialize or reuse the default Workspace.
+   * @param signal - caller lifetime.
+   * @returns the prepared Workspace, or undefined when first-use initialization is ineligible; rejects on preparation failure.
+   */
+  initializeDefault(signal?: AbortSignal): Promise<WorkspaceView | undefined>
   /**
    * Rename a Workspace.
    * @param workspaceId - target Workspace.
@@ -71,8 +93,26 @@ export interface IWorkspaces {
   /**
    * Archive a Session from Workspace grouping surfaces.
    * @param sessionId - Session to archive.
+   * @param options - `stopActivity` asks the Host to stop the Session's running work instead of refusing.
+   * @throws {WorkspaceArchiveError} when the Host refuses; without `stopActivity` a Session with
+   *   running work fails as `workspace/session-active`, its details naming what runs.
    */
-  archiveSession(sessionId: SessionId): Promise<void>
+  archiveSession(sessionId: SessionId, options?: { readonly stopActivity?: boolean }): Promise<void>
+  /**
+   * Unarchive a Session from the archived Session list.
+   * @param sessionId - Session to unarchive.
+   */
+  unarchiveSession(sessionId: SessionId): Promise<void>
+  /**
+   * Pin a Session ahead of unpinned Sessions on Workspace grouping surfaces.
+   * @param sessionId - Session to pin.
+   */
+  pinSession(sessionId: SessionId): Promise<void>
+  /**
+   * Remove a Session's pin without changing its saved Session order.
+   * @param sessionId - Session to unpin.
+   */
+  unpinSession(sessionId: SessionId): Promise<void>
   /**
    * Move a Session within one Workspace account.
    * @param workspaceId - owning Workspace.
@@ -90,31 +130,38 @@ export interface IWorkspaces {
 /** Owns the bare Workspace snapshot and Workspace-only commands. */
 export class WorkspaceController extends Service implements IWorkspaces {
   readonly list: WorkspaceSource
-  readonly feed: WorkspaceFeedRecovery['snapshot']
 
   /**
    * @param ctx - Client root Context.
    * @param model - Remote-backed Workspace state model.
-   * @param recovery - Resource-owned follow lifecycle.
    */
-  constructor(ctx: Context, private readonly model: ClientWorkspaceModel, private readonly recovery: WorkspaceFeedRecovery) {
+  constructor(ctx: Context, private readonly model: ClientWorkspaceModel) {
     super(ctx, 'workspaces')
     this.list = model
-    this.feed = recovery.snapshot
   }
 
-  retryFeed(): void { this.recovery.retry() }
-
-  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
+  async create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     const result = await this.model.create(input)
     if (!result.ok) throw new WorkspaceCreateError(result.error)
     return result.value.workspace
   }
 
+  async worlds(): Promise<readonly WorkspaceWorld[]> {
+    const result = await this.model.worlds()
+    if (!result.ok) throw commandError('list worlds', result.error)
+    return result.value.worlds
+  }
+
   async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
-    const result = await this.model.updatePaths(workspaceId, additionalPaths)
+    const result = await this.model.updatePaths({ workspaceId, additionalPaths })
     if (!result.ok) throw commandError('update paths', result.error)
     return result.value.workspace
+  }
+
+  async initializeDefault(signal?: AbortSignal): Promise<WorkspaceView | undefined> {
+    const result = await this.model.initializeDefault(signal)
+    if (!result.ok) throw new WorkspaceCreateError(result.error)
+    return result.value?.workspace
   }
 
   async rename(workspaceId: WorkspaceId, title: string): Promise<WorkspaceView> {
@@ -133,9 +180,24 @@ export class WorkspaceController extends Service implements IWorkspaces {
     if (!result.ok) throw commandError('reorder', result.error)
   }
 
-  async archiveSession(sessionId: SessionId): Promise<void> {
-    const result = await this.model.archiveSession(sessionId)
-    if (!result.ok) throw commandError('session archive', result.error)
+  async archiveSession(sessionId: SessionId, options: { readonly stopActivity?: boolean } = {}): Promise<void> {
+    const result = await this.model.archiveSession(sessionId, options)
+    if (!result.ok) throw new WorkspaceArchiveError(result.error)
+  }
+
+  async unarchiveSession(sessionId: SessionId): Promise<void> {
+    const result = await this.model.unarchiveSession(sessionId)
+    if (!result.ok) throw commandError('session unarchive', result.error)
+  }
+
+  async pinSession(sessionId: SessionId): Promise<void> {
+    const result = await this.model.pinSession(sessionId)
+    if (!result.ok) throw commandError('session pin', result.error)
+  }
+
+  async unpinSession(sessionId: SessionId): Promise<void> {
+    const result = await this.model.unpinSession(sessionId)
+    if (!result.ok) throw commandError('session unpin', result.error)
   }
 
   async insertSessionBefore(

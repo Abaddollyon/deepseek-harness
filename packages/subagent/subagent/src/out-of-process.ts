@@ -14,7 +14,7 @@
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentCapabilities, SubagentFailure, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
+import type { SubagentCapabilities, SubagentResult, SubagentRun, SubagentStopReason } from './types.ts'
 
 /** Maximum UTF-8 size of {@link SubagentResult.diagnostic}. */
 const MAX_SUBAGENT_DIAGNOSTIC_BYTES = 4_096
@@ -154,6 +154,10 @@ export function resolveChildCwd(prefix: string, configured: string | undefined, 
 
 /** Normalize an unknown thrown value to an Error (the catch binding is `unknown`). */
 function toError(value: unknown): Error {
+  // The rejecting surfaces (wire clients, spawn failures) only throw
+  // `Error`s; the `String(value)` arm is a defensive fallback for a non-Error
+  // throw the typed surfaces cannot produce.
+  /* v8 ignore next */
   return value instanceof Error ? value : new Error(String(value))
 }
 
@@ -162,13 +166,11 @@ export interface RunResultSettlement {
   /** The turn attempt (typically racing local cancellation); returns the terminal result. */
   attempt: () => Promise<SubagentResult>
   /** Snapshot the provider exposes when cancellation or failure wins settlement. */
-  collectOutput: () => ContentBlock[]
+  collectOutput: () => readonly ContentBlock[]
   /** Snapshot safe provider-authored detail when a failure wins settlement. */
   collectDiagnostic?: (() => string | undefined) | undefined
   /** Whether local cancellation settled before the attempt's outcome is observed. */
   cancelled: () => boolean
-  /** Structured retry/routing facts when a failure flattened to a stop reason. */
-  collectFailure?: (() => SubagentFailure | undefined) | undefined
   /** Diagnostic sink for a failure flattened to a stop reason; a throw from it is contained. */
   onError?: ((error: Error, stopReason: SubagentStopReason) => void) | undefined
   /** The request's cancellation signal (the listener is removed at settlement). */
@@ -203,14 +205,12 @@ export async function settleRunResult(parts: RunResultSettlement): Promise<Subag
       // The diagnostic sink cannot reject the run result.
     }
     const collected = parts.collectDiagnostic?.()
-    const failure = parts.collectFailure?.()
     const diagnostic = collected === undefined
       ? undefined
       : limitSubagentDiagnostic(collected)
     return {
       output: parts.collectOutput(),
       ...diagnostic === undefined ? {} : { diagnostic },
-      ...failure === undefined ? {} : { failure },
       stopReason: 'error',
     }
   } finally {

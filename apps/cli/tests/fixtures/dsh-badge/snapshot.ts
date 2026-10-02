@@ -23,7 +23,6 @@ try {
     ctx,
     id: agentId,
     options: {},
-    hasExecutionBudget: false,
     session,
     inbox: unsupportedInbox(),
     status: 'idle',

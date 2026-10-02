@@ -9,14 +9,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { ApiSessionList } from '../src/list.ts'
 import { SessionHistoryController } from '@deepseek-ai/dsh-api-session-controller/src/history.ts'
 import { subagentIdentityProjectionDefinition } from '@deepseek-ai/dsh-subagent/src/projection.ts'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
-import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { createInboxStub, mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { Agent, Inbox } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import AttachmentStore from '@deepseek-ai/dsh-attachment'
@@ -24,10 +22,10 @@ import type { SessionPromptRequest, SessionRequestId } from '../src/types.ts'
 import {
   SessionPersistenceRevision,
   type SessionPersistenceSnapshot,
+  type SessionHandle, SessionAccess,
 } from '@deepseek-ai/dsh-session-persistence'
 import {
   createSessionTestRemote,
-  installSessionReadTestServices,
   testSessionPersistence,
 } from './test-remote.ts'
 
@@ -99,14 +97,13 @@ describe('sessions.list cold merge', () => {
     ctx.provide('sessionProjectionCache', {
       cachedSnapshot: () => undefined,
       cachedPredecessorTitle: (meta: SessionHeader) => meta.id === sid('legacy-title')
-        ? { asOfSeq: -1, values: { title: 'Cached predecessor title' } }
+        ? { asOfSeq: 2, values: { title: 'Cached predecessor title' } }
         : undefined,
     } as never)
     const remote = createSessionTestRemote(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
-      cwd: '/tmp', coldBlankProbeMaxBytes: 0,
+      cwd: '/tmp',
     })
-    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([])
     const observe = vi.spyOn(ctx.sessionQuery, 'observeSession')
 
     const response = await remote.list(request({}))
@@ -122,7 +119,7 @@ describe('sessions.list cold merge', () => {
         sessionId: sid('legacy-title'),
         blank: false,
         updatedAt: 100,
-        projections: { asOfSeq: -1, values: { title: 'Cached predecessor title' } },
+        projections: { kind: 'cached', asOfSeq: 2, values: { title: 'Cached predecessor title' } },
       }),
     ])
     expect(stat).not.toHaveBeenCalled()
@@ -155,13 +152,18 @@ describe('sessions.list cold merge', () => {
         if (meta.id === sid('cached-conversation')) {
           return { asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1000 } } }
         }
+        if (meta.id === sid('seeded-cold')) {
+          return {
+            asOfSeq: 5,
+            values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200 } },
+          }
+        }
         return undefined
       },
       cachedPredecessorTitle: () => undefined,
     } as never)
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
-    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([])
     const response = await remote.list(request({}))
     expect(response.ok).toBe(true)
     if (!response.ok) throw new Error('unreachable')
@@ -176,10 +178,18 @@ describe('sessions.list cold merge', () => {
       origin: 'subagent',
     })
     expect(byId['missing-cwd']).toBeUndefined()
-    // A cold seeded header never consults the cache: its cut is not 0, so a
-    // cut-0 lookup would alias a different projection identity.
-    expect(byId['seeded-cold']).toMatchObject({ blank: false, updatedAt: 450 })
-    expect(cacheCalls).not.toContain('seeded-cold')
+    // A cold seeded header reads the cache by header alone, like any other
+    // cold row: the cache binds the lifecycle, and a listing never seeds a fold.
+    expect(byId['seeded-cold']).toMatchObject({
+      blank: false,
+      updatedAt: 1200,
+      projections: {
+        kind: 'cached',
+        asOfSeq: 5,
+        values: { title: 'Forked title', sessionListMetadata: { blank: false, lastPromptAt: 1200 } },
+      },
+    })
+    expect(cacheCalls).toContain('seeded-cold')
     expect(inspect).not.toHaveBeenCalled()
   })
 
@@ -207,7 +217,7 @@ describe('attached updatedAt tracks human prompts', () => {
       ],
       meta: { cwd: '/proj', createdAt: 500 },
     })
-    ctx.agents.register({ id: resumed.id, session: resumed, status: 'idle', ctx } as Agent)
+    await ctx.agents.register({ id: resumed.id, session: resumed, status: 'idle', ctx } as Agent)
     const boundary = resumed.snapshotEvents().at(-1)
     expect(boundary?.type).toBe('session/end-seed')
     expect(boundary?.time).toBeGreaterThan(worked)
@@ -276,6 +286,79 @@ describe('cold history recovery view', () => {
 })
 
 describe('Remote Agent and Session lookup policy', () => {
+  it('resumes a cold session before mutating a restored queue row', async () => {
+    const ctx = new Context()
+    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestHarness(ctx)
+    const sessionId = sid('session-cold-queue-mutation')
+    const meta = header(sessionId, 1000)
+    const message = createUserMessage({
+      content: [{ type: 'text', text: 'survives restart' }],
+      source: { kind: 'user' },
+    })
+    const events: SessionEvent[] = [{
+      type: 'agent/inbox/spliced',
+      seq: SessionSeq(0),
+      time: 1001,
+      data: { target: 'next-turn', start: 0, inserted: [message] },
+    }]
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events }),
+      open: (_id: SessionId, access: SessionAccess): Promise<SessionHandle> => Promise.resolve({
+        id: sessionId,
+        header: meta,
+        inheritedEventCount: SessionLogOffset(0),
+        access,
+        read: () => Promise.resolve({ eventState: 'detached', events: structuredClone(events) }),
+        append: (appended) => { events.push(...appended); return Promise.resolve() },
+        flush: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+        [Symbol.asyncDispose]: () => Promise.resolve(),
+      }),
+    })
+    const resume = vi.spyOn(ctx.agents, 'resume')
+    const remote = createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+    })
+
+    const response = await remote.updateQueue(request({
+      sessionId,
+      itemId: message.id,
+      action: { kind: 'remove' },
+    }))
+
+    expect(response).toEqual({ ok: true, value: { accepted: true } })
+    expect(resume).toHaveBeenCalledOnce()
+    const resumedAgent = ctx.agents.get(sessionId)
+    expect(resumedAgent?.inbox.nextTurn).toEqual([])
+    expect(resumedAgent?.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'agent/inbox/spliced',
+      data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' },
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps queue-item-not-found for a cold session when no persistence backend is composed', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const remote = createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+    })
+
+    const response = await remote.updateQueue(request({
+      sessionId: sid('session-no-persistence'),
+      itemId: MessageId('queued-item'),
+      action: { kind: 'remove' },
+    }))
+
+    expect(response.ok).toBe(false)
+    if (!response.ok) expect(response.error.code).toBe('session/queue-item-not-found')
+  })
+
   it('deduplicates a cold resume across Agent and Session parameters', async () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)
@@ -335,7 +418,7 @@ describe('Remote Agent and Session lookup policy', () => {
       meta: { cwd: '/proj', parentSession: sid('session-parent'), origin: 'subagent' },
     })
     const liveAgent = { id: liveSession.id, session: liveSession, status: 'idle', ctx } as Agent
-    ctx.agents.register(liveAgent)
+    await ctx.agents.register(liveAgent)
     const resume = vi.spyOn(ctx.agents, 'resume')
     const defaultAgentLookup = ctx.typert.lookups.get('agent')
     const defaultSessionLookup = ctx.typert.lookups.get('session')
@@ -358,6 +441,40 @@ describe('Remote Agent and Session lookup policy', () => {
     await expect(liveFailure).rejects.toMatchObject(ownershipFailure)
     expect(resume).not.toHaveBeenCalled()
     expect(inspect).toHaveBeenCalledOnce()
+  })
+
+  it('reapplies the subagent ownership fence after a successful resume publishes the Agent', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const sessionId = sid('session-remote-resumed-child')
+    const meta = header(sessionId, 1000)
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] as SessionEvent[] }),
+      locate: () => undefined,
+    })
+    vi.spyOn(ctx.agents, 'resume').mockImplementationOnce(async () => {
+      const session = ctx.sessions.create(sessionId, {
+        meta: { cwd: '/proj', origin: 'subagent' },
+      })
+      const published = { id: session.id, session, status: 'idle', ctx } as Agent
+      await ctx.agents.register(published)
+      return { agent: published, dispose: () => Promise.resolve() }
+    })
+    const defaultLookup = ctx.typert.lookups.get('agent')
+    createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+    })
+    await vi.waitFor(() => { expect(ctx.typert.lookups.get('agent')).not.toBe(defaultLookup) })
+    const lookup = ctx.typert.lookups.get('agent')
+    if (lookup === undefined) throw new Error('Agent lookup provider was not mounted')
+
+    const resolution = lookup.resolve(sessionId)
+
+    await expect(resolution).rejects.toMatchObject({ code: 'session/agent-busy' })
   })
 })
 
@@ -483,7 +600,7 @@ describe('subagent ownership fence', () => {
     await ctx.plugin(AgentRegistry)
     const parentSession = ctx.sessions.create(sid('session-parent'), { meta: { cwd: '/proj' } })
     const parent = { id: parentSession.id, session: parentSession, status: 'idle', ctx } as Agent
-    ctx.agents.register(parent)
+    await ctx.agents.register(parent)
 
     const originSession = ctx.sessions.create(sid('session-origin-child'), {
       meta: { cwd: '/proj', parentSession: parent.id, origin: 'subagent' },
@@ -498,7 +615,7 @@ describe('subagent ownership fence', () => {
       cancel,
       updateInbox,
     } as unknown as Agent
-    ctx.agents.register(originChild)
+    await ctx.agents.register(originChild)
 
     const startingSession = ctx.sessions.create(sid('session-starting-child'), {
       meta: { cwd: '/proj', parentSession: parent.id },
@@ -554,7 +671,7 @@ describe('subagent ownership fence', () => {
     const agent = {
       id: session.id, session, inbox: inboxFor(), status: 'idle', ctx, followup,
     } as unknown as Agent
-    ctx.agents.register(agent)
+    await ctx.agents.register(agent)
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
 
     const response = await remote.prompt(promptRequest({
@@ -575,7 +692,7 @@ describe('subagent ownership fence', () => {
     const agent = {
       id: session.id, session, inbox: inboxFor(), status: 'idle', ctx, followup,
     } as unknown as Agent
-    ctx.agents.register(agent)
+    await ctx.agents.register(agent)
     const remote = createSessionTestRemote(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
       cwd: '/tmp',
@@ -691,7 +808,7 @@ describe('sessions.prompt synchronous rejection', () => {
     const session = ctx.sessions.create(sid('session-empty-prompt'))
     const followup = vi.fn()
     const steer = vi.fn()
-    ctx.agents.register({
+    await ctx.agents.register({
       id: session.id,
       session,
       inbox: inboxFor(),
@@ -713,6 +830,7 @@ describe('sessions.prompt synchronous rejection', () => {
       AttachmentStore.prototype,
     ) as never)
     ctx.provide('llm', {
+      listModels: async () => [{ id: 'm', name: 'Model' }],
       listProviders: () => [{ id: 'p', name: 'Provider' }],
       resolveModelInfo: () => Promise.resolve({
         provider: 'p', id: 'm', name: 'Model', inputModalities: ['text', 'image'],
@@ -786,7 +904,7 @@ describe('sessions.prompt synchronous rejection', () => {
     const session = ctx.sessions.create(sid('session-throwing'))
     // A live structural stub whose delivery verbs throw synchronously, the
     // shape a disposed loop presents at this gateway boundary.
-    ctx.agents.register({
+    await ctx.agents.register({
       id: session.id,
       session,
       inbox: inboxFor(),
@@ -825,7 +943,7 @@ describe('sessions.prompt synchronous rejection', () => {
     // while the generic cold resume is in flight, so the resume collides.
     const parentSession = ctx.sessions.create(sid('race-parent'), { meta: { cwd: '/proj' } })
     const parent = { id: parentSession.id, session: parentSession, status: 'idle', ctx } as Agent
-    ctx.agents.register(parent)
+    await ctx.agents.register(parent)
     const childSession = ctx.sessions.create(sessionId, {
       meta: { cwd: '/proj', parentSession: parent.id, origin: 'subagent' },
     })
@@ -833,7 +951,7 @@ describe('sessions.prompt synchronous rejection', () => {
     vi.spyOn(ctx.agents, 'resume').mockImplementationOnce(async () => {
       // The parent's `enter()` wins the identity between the pre-resume
       // re-check and publication; the generic resume then collides.
-      ctx.agents.register(child)
+      await ctx.agents.register(child)
       throw new Error('session id already published')
     })
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
@@ -846,444 +964,5 @@ describe('sessions.prompt synchronous rejection', () => {
         details: { reason: 'use subagent delivery for this child session' },
       })
     }
-  })
-})
-
-describe('cold list title warmup', () => {
-  it('keeps a warmed title bounded by the older cached projection watermark', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    installSessionReadTestServices(ctx)
-    const source = header('partial-title-watermark', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    ctx.provide('sessionProjectionCache', {
-      cachedSnapshot: () => ({ asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1 } } }),
-    } as never)
-    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([{
-      status: 'fulfilled', sessionId: source.id,
-      value: { session: source, title: { title: 'warmed', eventSeq: SessionSeq(3), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } },
-    }])
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      await list.list()
-      await expect(list.list()).resolves.toEqual([expect.objectContaining({
-        projections: { asOfSeq: 1, values: { sessionListMetadata: { blank: false, lastPromptAt: 1 }, title: 'warmed' } },
-      })])
-    } finally { await ctx.fiber.dispose() }
-  })
-
-  it('discards a pending cold title when the Session is attached before publication', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    installSessionReadTestServices(ctx)
-    const source = header('title-attachment-race', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof ctx.sessionQuery.readTitleSnapshots>>>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockReturnValueOnce(pending.promise).mockResolvedValue([])
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      await list.list()
-      const live = ctx.sessions.prepare(source.id, { meta: source })
-      const detach = ctx.sessions.enter(live)
-      pending.resolve([{
-        status: 'fulfilled', sessionId: source.id,
-        value: { session: source, title: { title: 'stale cold title', eventSeq: SessionSeq(3), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } },
-      }])
-      await new Promise<void>(resolve => setImmediate(resolve))
-      detach()
-      const after = await list.list()
-      expect(after[0]?.projections?.values.title).toBeUndefined()
-      expect(readTitles).toHaveBeenCalledTimes(2)
-    } finally { pending.resolve([]); await ctx.fiber.dispose() }
-  })
-
-  it('retries isolated rejected titles through public polls', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('isolated-rejection', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
-      .mockResolvedValueOnce([{ status: 'rejected', sessionId: source.id, reason: new Error('unavailable') }] as never)
-      .mockResolvedValueOnce([{ status: 'fulfilled', sessionId: source.id, value: { session: source, title: { title: 'recovered', eventSeq: 3, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }] as never)
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await expect(remote.list(request({}))).resolves.toMatchObject({ ok: true })
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const recovered = await remote.list(request({}))
-    if (!recovered.ok) throw new Error('list failed')
-    expect(recovered.value.items[0]?.projections?.values.title).toBe('recovered')
-    await ctx.fiber.dispose()
-  })
-
-  it('invalidates changed titles across real lifecycle events and stops reading disappeared rows', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('transition-title', 1)
-    const listSessions = vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([{ status: 'fulfilled', sessionId: source.id, value: { session: source, title: { title: 'new durable title', eventSeq: 3, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }] as never)
-    const created: SessionId[] = []
-    const disposed: SessionId[] = []
-    ctx.on('session/created', (session) => { created.push(session.id) })
-    ctx.on('session/disposed', (session) => { disposed.push(session.id) })
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-    const live = ctx.sessions.prepare(source.id, { meta: source })
-    const detach = ctx.sessions.enter(live)
-    ctx.sessions.announce(live)
-    expect(created).toEqual([source.id])
-    expect(await remote.list(request({}))).toMatchObject({
-      ok: true, value: { items: [expect.objectContaining({ sessionId: source.id })] },
-    })
-    detach()
-    expect(disposed).toEqual([source.id])
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const coldResult = await remote.list(request({}))
-    if (!coldResult.ok) throw new Error('list failed')
-    expect(coldResult.value.items[0]?.projections?.values.title).toBe('new durable title')
-    listSessions.mockResolvedValueOnce([])
-    await expect(remote.list(request({}))).resolves.toMatchObject({ ok: true, value: { items: [] } })
-    expect(readTitles).toHaveBeenCalledTimes(2)
-    await ctx.fiber.dispose()
-  })
-
-  it('retries a caller-aborted warmup on a later public poll', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('aborted-title', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const entered = Promise.withResolvers<undefined>()
-    const first = Promise.withResolvers<unknown[]>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation((_ids, signal) => {
-      entered.resolve(undefined)
-      signal?.addEventListener('abort', () => { first.reject(new Error('cancelled')) }, { once: true })
-      return first.promise as never
-    })
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    const caller = new AbortController()
-    await remote.list(request({}), caller.signal)
-    await entered.promise
-    caller.abort()
-    await new Promise<void>(resolve => setImmediate(resolve))
-    readTitles.mockResolvedValueOnce([{ status: 'fulfilled', sessionId: source.id, value: { session: source, title: { title: 'retried', eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }] as never)
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const retried = await remote.list(request({}))
-    if (!retried.ok) throw new Error('list failed')
-    expect(retried.value.items[0]?.projections?.values.title).toBe('retried')
-    await ctx.fiber.dispose()
-  })
-
-  it('retries a failed title observation without duplicating corpus scans', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const headers = Array.from({ length: 17 }, (_, index) => header('title-batch-' + String(index), index))
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
-    let calls = 0
-    const batchIds: SessionId[][] = []
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation(async (ids) => {
-      batchIds.push([...ids])
-      calls++
-      if (calls === 1) throw new Error('first batch failed')
-      return ids.map(id => ({ status: 'fulfilled' as const, sessionId: id, value: { session: headers.find(item => item.id === id), title: { title: 'title-' + id, eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } })) as never
-    })
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-    expect(batchIds).toEqual([headers.map(item => item.id)])
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const titled = await remote.list(request({}))
-    if (!titled.ok) throw new Error('list failed')
-    expect(titled.value.items.find(item => item.sessionId === headers[0]?.id)?.projections?.values.title).toBe('title-' + String(headers[0]?.id))
-    await ctx.fiber.dispose()
-  })
-
-  it('shares queued and in-flight cold title reads across seven list polls', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const headers = Array.from({ length: 33 }, (_, index) => header('shared-title-' + String(index), index))
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
-    const release = Promise.withResolvers<undefined>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation(async (ids) => {
-      await release.promise
-      return ids.map(id => ({ status: 'fulfilled' as const, sessionId: id, value: { session: headers.find(item => item.id === id)!, title: { title: 'title-' + id, eventSeq: SessionSeq(2), updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' as const } } } }))
-    })
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      for (let poll = 0; poll < 7; poll++) await list.list()
-      const whileBlocked = readTitles.mock.calls.length
-      release.resolve(undefined)
-      await new Promise<void>(resolve => setImmediate(resolve))
-      const reads = readTitles.mock.calls.flatMap(([ids]) => ids)
-      expect({ whileBlocked, completedBatches: readTitles.mock.calls.length, snapshotReads: reads.length }).toEqual({
-        whileBlocked: 1, completedBatches: 1, snapshotReads: 33,
-      })
-      expect(new Set(reads).size).toBe(33)
-      const titled = await list.list()
-      expect(titled.every(item => item.projections?.values.title === 'title-' + item.sessionId)).toBe(true)
-      expect(readTitles).toHaveBeenCalledOnce()
-    } finally {
-      release.resolve(undefined)
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('shares reservations when seven list requests discover cold titles concurrently', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    installSessionReadTestServices(ctx)
-    const source = header('simultaneous-title', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const release = Promise.withResolvers<Awaited<ReturnType<typeof ctx.sessionQuery.readTitleSnapshots>>>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockReturnValue(release.promise)
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      const results = await Promise.all(Array.from({ length: 7 }, () => list.list()))
-      expect(results.every(items => items[0]?.sessionId === source.id)).toBe(true)
-      expect(readTitles).toHaveBeenCalledOnce()
-      expect(readTitles.mock.calls[0]?.[0]).toEqual([source.id])
-    } finally {
-      release.resolve([])
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('ignores title results outside the requested catalog', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    installSessionReadTestServices(ctx)
-    const source = header('requested-title', 1)
-    const unrelated = header('unrequested-title', 2)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([
-      { status: 'fulfilled', sessionId: unrelated.id, value: { session: unrelated } },
-      { status: 'fulfilled', sessionId: source.id, value: { session: source } },
-    ])
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      await list.list()
-      await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-      const items = await list.list()
-      expect(items.map(item => item.sessionId)).toEqual([source.id])
-      expect(readTitles).toHaveBeenCalledOnce()
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('loads 64 cold titles once through the bounded query provider while seven clients refresh', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    const headers = Array.from({ length: 64 }, (_, index) => header('corpus-title-' + String(index), index))
-    const release = Promise.withResolvers<undefined>()
-    let active = 0
-    let maximum = 0
-    const persistedList = vi.fn(async () => headers)
-    const inspect = vi.fn(async (id: SessionId) => {
-      active++
-      maximum = Math.max(maximum, active)
-      try {
-        await release.promise
-        return {
-          meta: headers.find(item => item.id === id)!,
-          events: [...conversationEvents(), {
-            type: 'session/title', seq: SessionSeq(2), time: 1300,
-            data: { title: 'Title ' + id, messageSeqs: [], source: { kind: 'fallback' } },
-          } satisfies SessionEvent],
-        }
-      } finally { active-- }
-    })
-    providePersistence(ctx, { list: persistedList, inspect })
-    installSessionReadTestServices(ctx)
-    await ctx.plugin(function settlePersistence() {}).await()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
-    const list = new ApiSessionList(ctx, 0)
-    try {
-      for (let client = 0; client < 7; client++) await list.list()
-      await vi.waitFor(() => { expect(active).toBe(4) })
-      expect(readTitles).toHaveBeenCalledOnce()
-      expect(persistedList).toHaveBeenCalledTimes(8)
-      release.resolve(undefined)
-      await readTitles.mock.results[0]!.value
-      const titled = await list.list()
-      expect(titled).toHaveLength(64)
-      expect(titled.every(item => item.projections?.values.title === 'Title ' + item.sessionId)).toBe(true)
-      expect(inspect).toHaveBeenCalledTimes(64)
-      expect(maximum).toBe(4)
-      expect(active).toBe(0)
-    } finally {
-      release.resolve(undefined)
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('fences overlapping stale results through public list responses', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('overlapping-title', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const first = Promise.withResolvers<unknown[]>()
-    const second = Promise.withResolvers<unknown[]>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockReturnValueOnce(first.promise as never).mockReturnValueOnce(second.promise as never)
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-    // Invalidate the original reservation before starting a replacement read.
-    const live = ctx.sessions.prepare(source.id, { meta: source })
-    const detach = ctx.sessions.enter(live)
-    ctx.sessions.announce(live)
-    detach()
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const result = (title: string) => [{ status: 'fulfilled' as const, sessionId: source.id, value: { session: source, title: { title, eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }]
-    second.resolve(result('newer'))
-    await new Promise<void>(resolve => setImmediate(resolve))
-    first.resolve(result('older'))
-    await new Promise<void>(resolve => setImmediate(resolve))
-    const refreshed = await remote.list(request({}))
-    if (!refreshed.ok) throw new Error('list failed')
-    expect(refreshed.value.items[0]?.projections?.values.title).toBe('newer')
-    await ctx.fiber.dispose()
-  })
-
-  it('supports the public list without a caller signal', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('no-signal-list', 1)
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValue([] as never)
-    const list = new ApiSessionList(ctx, 0)
-    await expect(list.list()).resolves.toHaveLength(1)
-    await ctx.fiber.dispose()
-  })
-  it('handles public list title service absence and changed headers', async () => {
-    const missingCtx = new Context()
-    await missingCtx.plugin(SessionStore)
-    missingCtx.provide('sessionQuery', { listSessions: () => Promise.resolve([{ header: header('missing-title-service', 1), live: false, persisted: true }]) } as never)
-    const missingRemote = createSessionTestRemote(missingCtx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await expect(missingRemote.list(request({}))).resolves.toMatchObject({ ok: true, value: { items: [expect.objectContaining({ sessionId: sid('missing-title-service') })] } })
-    await missingCtx.fiber.dispose()
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('title-source-identity', 1)
-    const changed = header('title-source-identity', 2, { cwd: '/new' })
-    const listSessions = vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue([{ header: source, live: false, persisted: true }])
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockResolvedValueOnce([{ status: 'fulfilled', sessionId: source.id, value: { session: { ...source, cwd: '/other' }, title: undefined } }] as never).mockResolvedValueOnce([{ status: 'fulfilled', sessionId: changed.id, value: { session: changed, title: undefined } }] as never)
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledOnce() })
-    await remote.list(request({}))
-    expect(readTitles).toHaveBeenCalledOnce()
-    listSessions.mockResolvedValueOnce([{ header: changed, live: false, persisted: true }])
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(readTitles).toHaveBeenCalledTimes(2) })
-    const result = await remote.list(request({}))
-    if (!result.ok) throw new Error('list failed')
-    expect(result.value.items[0]?.projections?.values.title).toBeUndefined()
-    await ctx.fiber.dispose()
-  })
-  it('lists through a query that disappears before cold title projection', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SessionProjectionRegistry)
-    const source: SessionHeader = { version: SESSION_FORMAT_VERSION, id: sid('query-disappears'), createdAt: 1, cwd: '/proj', isSeeded: false }
-    const disposeQuery = ctx.provide('sessionQuery', {
-      listSessions: async () => {
-        disposeQuery?.()
-        return [{ header: source, live: false, persisted: true }]
-      },
-    } as never)
-    const list = new ApiSessionList(ctx, 0)
-    await expect(list.list()).resolves.toEqual([expect.objectContaining({ sessionId: source.id })])
-    await ctx.fiber.dispose()
-  })
-
-  it('drops a title result when lifecycle invalidation removes its pending batch entry', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('pending-lifecycle-invalidation', 1)
-    const headers = [source, ...Array.from({ length: 15 }, (_, index) => header('pending-lifecycle-invalidation-' + String(index), index + 2))]
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
-    const entered = Promise.withResolvers<undefined>()
-    const release = Promise.withResolvers<unknown[]>()
-    const batchIds: SessionId[][] = []
-    vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots')
-      .mockImplementationOnce((ids, _signal) => { batchIds.push([...ids]); entered.resolve(undefined); return release.promise as never })
-      .mockImplementationOnce((ids) => {
-        batchIds.push([...ids])
-        return Promise.resolve([{ status: 'fulfilled', sessionId: headers[0]!.id, value: { session: headers[0]!, title: { title: 'fresh', eventSeq: 3, updatedAt: 2, messageSeqs: [], source: { kind: 'fallback' } } } }]) as never
-      })
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    await entered.promise
-    const invalidated = headers[0]!
-    const live = ctx.sessions.prepare(invalidated.id, { meta: invalidated })
-    const detach = ctx.sessions.enter(live)
-    ctx.sessions.announce(live)
-    detach()
-    release.resolve([{ status: 'fulfilled', sessionId: invalidated.id, value: { session: invalidated, title: { title: 'stale', eventSeq: 2, updatedAt: 1, messageSeqs: [], source: { kind: 'fallback' } } } }] as never)
-    await new Promise<void>(resolve => setImmediate(resolve))
-    await remote.list(request({}))
-    await vi.waitFor(() => { expect(batchIds.filter(ids => ids.includes(invalidated.id)).length).toBeGreaterThan(1) })
-    const refreshed = await remote.list(request({}))
-    if (!refreshed.ok) throw new Error('list failed')
-    expect(refreshed.value.items.find(item => item.sessionId === invalidated.id)?.projections?.values.title).toBe('fresh')
-    expect(batchIds[0]).toEqual(headers.map(item => item.id))
-    await ctx.fiber.dispose()
-  })
-
-  it('aborts and joins pending warmup teardown without publishing after disposal', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
-    installSessionReadTestServices(ctx)
-    const source = header('title-warmup-dispose', 100)
-    const headers = Array.from({ length: 17 }, (_, index) => header('title-warmup-dispose-' + String(index), 100 + index))
-    vi.spyOn(ctx.sessionQuery, 'listSessions').mockResolvedValue(headers.map(header => ({ header, live: false, persisted: true })))
-    const entered = Promise.withResolvers<AbortSignal>()
-    const release = Promise.withResolvers<unknown[]>()
-    const readTitles = vi.spyOn(ctx.sessionQuery, 'readTitleSnapshots').mockImplementation((_ids, signal) => { entered.resolve(signal as AbortSignal); return release.promise as never })
-    const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
-    await remote.list(request({}))
-    const operationSignal = await entered.promise
-    let disposed = false
-    const disposing = ctx.fiber.dispose().then(() => { disposed = true })
-    await new Promise<void>(resolve => setImmediate(resolve))
-    expect(operationSignal.aborted).toBe(true)
-    expect(disposed).toBe(false)
-    let getterReads = 0
-    const lateSession = {
-      id: source.id,
-      get createdAt() { getterReads++; return source.createdAt },
-      get cwd() { getterReads++; return source.cwd },
-    } as unknown as typeof source
-    release.resolve([{ status: 'fulfilled', sessionId: source.id, value: { session: lateSession, title: { title: 'late', eventSeq: 2, updatedAt: 100, messageSeqs: [], source: { kind: 'fallback' } } } }])
-    await disposing
-    expect(getterReads).toBe(0)
-    const after = await remote.list(request({}))
-    expect(after.ok).toBe(false)
-    expect(after).not.toMatchObject({ value: { items: [expect.objectContaining({ projections: { values: { title: 'late' } } })] } })
-    expect(readTitles).toHaveBeenCalledOnce()
   })
 })

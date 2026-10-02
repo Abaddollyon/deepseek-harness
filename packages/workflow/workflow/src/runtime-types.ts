@@ -17,8 +17,6 @@ import type {
  * `agent()` spawned by the script is attributed to that live Agent.
  */
 export interface WorkflowStartRequest {
-  /** Optional caller-allocated id used to link a durable owner before startup. */
-  id?: WorkflowRunId
   /** The plain-JS script body (top-level await allowed; ends with `return <json-value>`). */
   script: string
   /** The workflow's identity block, as plain JSON data (shape-validated by the engine). */
@@ -46,6 +44,6 @@ export interface WorkflowRun {
   readonly result: Promise<WorkflowResult>
   /** Cancel the run and its children. */
   cancel(reason?: string): void
-  /** Cancel if needed and await bounded settlement and cleanup. */
+  /** Cancel if needed and await script and child cleanup. */
   dispose(): Promise<void>
 }

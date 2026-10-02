@@ -11,18 +11,18 @@
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import { isContextOverflow } from '@earendil-works/pi-ai'
+import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
 
 /**
- * Map pi-ai usage. pi-ai keeps reasoning inside output; when the provider
- * reports the split it surfaces it as usage.reasoning, a sub-breakdown of
- * output that must not be accumulated as a fifth bucket.
+ * Map pi-ai usage. pi-ai keeps reasoning inside output and reports the
+ * provider's split, when there is one, as `usage.reasoning`: a sub-breakdown
+ * of output, never an additional bucket.
  * @param usage - cumulative usage from the terminal pi-ai event.
  * @returns harness counts with pi-ai's exact total; cache fields appear only
- *   when non-zero (pi-ai reports zeros, not absence), reasoningTokens only
- *   when the provider reports the split.
+ *   when non-zero (pi-ai reports zeros, not absence), and `reasoningTokens`
+ *   only when the provider reports the split, including a reported zero.
  */
 export function mapUsage(usage: PiUsage): TokenUsage {
   return {
@@ -31,7 +31,7 @@ export function mapUsage(usage: PiUsage): TokenUsage {
     totalTokens: usage.totalTokens,
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
-    ...usage.reasoning !== undefined ? { reasoningTokens: usage.reasoning } : {},
+    ...usage.reasoning === undefined ? {} : { reasoningTokens: usage.reasoning },
   }
 }
 
@@ -41,16 +41,19 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // `cause` chain before it reaches us. undici carries the actionable transport
 // detail on `cause` (e.g. `SocketError: other side closed`) but hands the fetch
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
-// If pi-ai ever forwards the original Error, classify on `code`/`cause` instead
-// of text. pi-ai 0.84's StreamOptions.fetch hook was evaluated for capturing the
-// cause and rejected: attributing a wrapper-captured `cause` to the right
-// request needs per-request side state across concurrent streams and pi-ai's own
-// client retries (see the transport-truncation Agent Note).
-/** Harness failure code for a provider credential rejection (HTTP 401/403). */
-export const AUTH_FAILURE_CODE = 'AUTH'
-
+// If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
+// us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): string {
-  if (/\b(?:401|403)\b/.test(message)) return AUTH_FAILURE_CODE
+  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing, and `received from peer` alone
+  // appears in unrelated wording (TLS certificates). Node renders the reset
+  // code as NGHTTP2_* and intermediaries name the RST_STREAM frame. The peer
+  // reset one stream, not the connection, so resending the request can succeed.
+  // Checked before status codes: the stream id can read like one (`stream ID 401;`).
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
+  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   // A rejected request body (gateway or provider size cap): resending the
@@ -58,9 +61,10 @@ function classifyPiAiError(message: string): string {
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
-  // Codex can report an overload as an SSE error without an HTTP status.
-  // Classify the known provider fault, not every unknown PI_AI_ERROR.
-  if (/\b(?:servers? (?:are|is) (?:currently )?overloaded|overloaded_error)\b/i.test(message)) return 'SERVER'
+  // An overload reported in-stream without an HTTP status: codex-lb's
+  // `server_is_overloaded` failed response, Anthropic's `overloaded_error` SSE
+  // error, and the OpenAI overload sentence. Unknown failures stay unclassified.
+  if (/\b(?:servers? (?:are|is) (?:currently )?overloaded|overloaded_error|server_is_overloaded)\b/i.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -69,23 +73,18 @@ function classifyPiAiError(message: string): string {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
-  // The Codex bridge reports a lost websocket continuation with a stale
-  // previous_response_id. It is a transport interruption and must re-enter
-  // the normal retry path instead of becoming a permanent PI_AI_ERROR.
+  // codex-lb reports a lost upstream WebSocket as a failed response: its
+  // `stream_incomplete` code with an upstream-transport or rejected-anchor
+  // fragment, or `bridge_previous_response_not_found` carrying the close
+  // message. Each is a truncation a fresh attempt can complete; any other
+  // `stream_incomplete` reason (a cancelled scope) stays out of the retry loop.
   if ((/\bbridge_previous_response_not_found\b/i.test(message)
     && /upstream websocket closed before response\.completed/i.test(message))
     || /previous response anchor was rejected upstream/i.test(message)
-    || (/\bstream_incomplete\b/i.test(message) && /anchor|previous_response/i.test(message))) return 'TRANSPORT'
-  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
-  // stream ID N; <CODE>; received from peer`. Both fragments are required:
-  // bare `stream error` is generic phrasing application-level failures also
-  // carry, and `received from peer` alone appears in unrelated wording (TLS
-  // certificates, key material). Node renders the reset code as NGHTTP2_* and
-  // intermediaries name the RST_STREAM frame; those tokens appear only in
-  // HTTP/2 reset vocabulary. The peer reset one stream, not the connection,
-  // so resending the request can succeed.
-  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
-  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
+    || (/\bstream_incomplete\b/i.test(message) && (/anchor|previous_response/i.test(message)
+      || /upstream websocket (?:closed before response\.completed|closed without a complete handshake|receive failed)/i.test(message)))) {
+    return 'TRANSPORT'
+  }
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
@@ -105,8 +104,8 @@ function classifyPiAiError(message: string): string {
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures. Known status-less provider overloads
- *   map to `SERVER`; unclassified errors remain `PI_AI_ERROR`.
+ *   to non-retryable `PI_AI_ERROR` failures. Known status-less overloads map to
+ *   `SERVER`; unclassified errors remain `PI_AI_ERROR`.
  */
 export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
@@ -114,15 +113,13 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
-    // The local fallback names the resolved capacity and the usage that tripped
-    // it so the reader can act without reproducing the turn. Every value is
-    // present here: pi-ai's detector only fires without provider error wording
-    // for usage-versus-window overflows, which require a resolved
-    // contextWindow, and usage is a required message field.
+    // Without provider wording, pi-ai detects overflow only from usage against
+    // the resolved window, so the fallback can name both.
     return {
       kind: 'error',
       failure: {
-        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}" at resolved context window ${contextWindow} tokens (input ${message.usage.input}, cache-read ${message.usage.cacheRead})`,
+        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}" at resolved context`
+          + ` window ${contextWindow} tokens (input ${message.usage.input}, cache-read ${message.usage.cacheRead})`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     }
@@ -171,7 +168,7 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
  * @param callerSignal - caller cancellation state; an aborted caller makes any
  *   in-band terminal error an aborted finish.
- * @param requestedModel - request model identity for durable replay provenance.
+ * @param requestedModel - request model identity recorded for durable replay.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */

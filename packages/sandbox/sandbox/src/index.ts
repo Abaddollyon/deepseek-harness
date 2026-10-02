@@ -15,6 +15,7 @@ export {
   approveEscalation,
   escalationHintMarker,
   sandboxDenialMarker,
+  sandboxPermissionsDescription,
   validateEscalationArgs,
 } from './escalation.ts'
 export type { EscalationApproval, EscalationApprover, EscalationOutcome, EscalationRequest } from './escalation.ts'
@@ -39,9 +40,9 @@ export type ConfinedSandboxMode = Exclude<SandboxMode, 'danger-full-access'>
 export interface SandboxExecutionPolicy {
   /** The file-effect mode this execution runs under. */
   mode: SandboxMode
-  /** Absolute primary root directory `workspace-write` may write under. */
+  /** Absolute root directory `workspace-write` may write under. */
   workspaceRoot: string
-  /** Additional absolute roots granted to `workspace-write`, when present. */
+  /** Further absolute roots `workspace-write` may write under; absent or empty means none. */
   additionalRoots?: readonly string[]
   /**
    * Opaque identity of the calling session (the branded `dsh-session`
@@ -171,10 +172,13 @@ export abstract class SandboxProvider extends Service {
    *   `['bash', '-c', command]`.
    * @param policy - the file-effect policy this execution runs under,
    *   carried per call (see {@link SandboxPolicy}).
+   * @param signal - cancellation while the provider resolves the policy and runner.
    * @returns the argv to spawn instead, plus the enforcement completeness
    *   the selected backend achieves for it.
    */
-  abstract confine(argv: readonly string[], policy: SandboxPolicy): ConfinedArgv
+  abstract confine(argv: readonly string[], policy: SandboxPolicy, signal?: AbortSignal): Promise<ConfinedArgv>
 }
 
 export default SandboxProvider
+
+export { classifyRunnerFailure, isRunnerSpawnFailure, matchesSignature } from './diagnostics.ts'

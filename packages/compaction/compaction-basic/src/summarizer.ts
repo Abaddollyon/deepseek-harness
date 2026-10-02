@@ -5,9 +5,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { contentHasImage, createUserMessage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
-  ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema,
+  ContentBlock, FinishReason, GenerateOptions, Message, RequestMessage, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
@@ -64,17 +65,6 @@ const COMPACTION_INSTRUCTION = [
   '- Output only the checkpoint text: do not call any tool or take any other action.',
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
 ].join('\n')
-
-/**
- * Build the final user directive appended to every default summarizer replay.
- * @returns a fresh message carrying the owned compaction instruction.
- */
-export function createCompactionInstructionMessage(): Message {
-  return createUserMessage({
-    content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
-    source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
-  })
-}
 
 /** Framing that makes the replacement user message established context. */
 const CHECKPOINT_PREAMBLE =
@@ -152,14 +142,18 @@ export async function summarizeWithLlm(
   }
 
   const assembler = new BlockAssembler()
-  const messages: Message[] = [
+  const messages: RequestMessage[] = [
     ...input.messages,
-    createCompactionInstructionMessage(),
+    deepFreeze({
+      role: 'user',
+      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
+    }),
   ]
   const options: GenerateOptions = {
     provider: target.provider,
     model: target.model,
     messages,
+    toolHistory: agent.session.toolHistory(),
     ...input.tools === undefined ? {} : { tools: [...input.tools] },
     maxTokens: config.maxTokens,
     sessionId: agent.session.id,
@@ -204,9 +198,7 @@ function finishError(finish: FinishReason): Error | undefined {
   switch (finish.kind) {
     case 'error':
     case 'aborted': {
-      const error = new Error(finish.failure.message) as Error & { code?: string }
-      error.code = finish.failure.code
-      return error
+      return new LlmError(finish.failure.message, finish.failure.code, finish.failure)
     }
     case 'max-tokens': {
       const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }

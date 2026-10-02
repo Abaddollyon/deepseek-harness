@@ -13,13 +13,19 @@ import type {
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
   WorkspaceOrderValue,
+  WorkspacePinSessionRequest,
+  WorkspacePinValue,
   WorkspaceRenameRequest,
   WorkspaceUpdatePathsRequest,
+  WorkspaceWorldsValue,
+  WorkspaceUnarchiveSessionRequest,
+  WorkspaceUnpinSessionRequest,
   WorkspaceValue,
   WorkspaceId,
   WorkspaceView,
 } from '../src/types.ts'
-import { RemoteError, type RemoteFailure, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError, type RemoteFailure, type RemoteResult, type RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
+import { streamHandle } from '@deepseek-ai/dsh-remote-mock'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 const sid = (id: string): SessionId => id as SessionId
@@ -34,7 +40,6 @@ function workspace(
     workspaceId: wid(id),
     path: `/w/${id}`,
     title: id,
-    additionalPaths: [],
     sessionIds,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt,
@@ -66,13 +71,12 @@ function deferred<T>(): Deferred<T> {
 }
 
 class FakeWorkspaceRemote implements WorkspaceRemote {
+  readonly initializeDefault = vi.fn<WorkspaceRemote['initializeDefault']>(async () => remoteOk({ workspace: workspace('default') }))
   readonly calls: Array<{ readonly method: string; readonly request: unknown }> = []
   onCreate: (request: WorkspaceCreateRequest) => Promise<RemoteResult<WorkspaceCreateValue>> = request =>
     Promise.resolve(remoteOk({ workspace: workspace(request.path.split('/').pop() ?? 'workspace'), created: true }))
   onRename: (request: WorkspaceRenameRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
     Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), title: request.title } }))
-  onUpdatePaths: (request: WorkspaceUpdatePathsRequest) => Promise<RemoteResult<WorkspaceValue>> = request =>
-    Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), additionalPaths: request.additionalPaths } }))
   onDelete: (_request: WorkspaceDeleteRequest) => Promise<RemoteResult<WorkspaceDeleteValue>> = () =>
     Promise.resolve(remoteOk({ deleted: true }))
   onInsertBefore: (
@@ -88,6 +92,18 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     request: WorkspaceArchiveSessionRequest,
   ) => Promise<RemoteResult<WorkspaceArchiveValue>> = request =>
     Promise.resolve(remoteOk({ archivedSessionIds: [request.sessionId] }))
+  onUnarchiveSession: (
+    request: WorkspaceUnarchiveSessionRequest,
+  ) => Promise<RemoteResult<WorkspaceArchiveValue>> = request =>
+    Promise.resolve(remoteOk({ archivedSessionIds: [request.sessionId] }))
+  onPinSession: (
+    request: WorkspacePinSessionRequest,
+  ) => Promise<RemoteResult<WorkspacePinValue>> = request =>
+    Promise.resolve(remoteOk({ pinnedSessionIds: [request.sessionId] }))
+  onUnpinSession: (
+    _request: WorkspaceUnpinSessionRequest,
+  ) => Promise<RemoteResult<WorkspacePinValue>> = () =>
+    Promise.resolve(remoteOk({ pinnedSessionIds: [] }))
 
   create(request: WorkspaceCreateRequest): Promise<RemoteResult<WorkspaceCreateValue>> {
     this.record('create', request)
@@ -99,8 +115,14 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     return this.onRename(request)
   }
 
+  worlds(): Promise<RemoteResult<WorkspaceWorldsValue>> {
+    this.record('worlds', {})
+    return Promise.resolve(remoteOk({ worlds: [] }))
+  }
+
   updatePaths(request: WorkspaceUpdatePathsRequest): Promise<RemoteResult<WorkspaceValue>> {
-    return this.onUpdatePaths(request)
+    this.record('updatePaths', request)
+    return Promise.resolve(remoteOk({ workspace: { ...workspace(String(request.workspaceId)), additionalPaths: request.additionalPaths } }))
   }
 
   delete(request: WorkspaceDeleteRequest): Promise<RemoteResult<WorkspaceDeleteValue>> {
@@ -123,7 +145,24 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
     return this.onArchiveSession(request)
   }
 
-  async *follow(_signal?: AbortSignal): AsyncGenerator<WorkspaceFollowFrame> {}
+  unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<RemoteResult<WorkspaceArchiveValue>> {
+    this.record('unarchiveSession', request)
+    return this.onUnarchiveSession(request)
+  }
+
+  pinSession(request: WorkspacePinSessionRequest): Promise<RemoteResult<WorkspacePinValue>> {
+    this.record('pinSession', request)
+    return this.onPinSession(request)
+  }
+
+  unpinSession(request: WorkspaceUnpinSessionRequest): Promise<RemoteResult<WorkspacePinValue>> {
+    this.record('unpinSession', request)
+    return this.onUnpinSession(request)
+  }
+
+  follow(_signal?: AbortSignal): RemoteStreamHandle<WorkspaceFollowFrame, never> {
+    return streamHandle<WorkspaceFollowFrame>((async function* () {})())
+  }
 
   private record(method: string, request: unknown): void {
     this.calls.push({ method, request })
@@ -138,11 +177,32 @@ function baseline(
   model: ClientWorkspaceModel,
   items: readonly WorkspaceView[] = [],
   archivedSessionIds: readonly SessionId[] = [],
+  pinnedSessionIds: readonly SessionId[] = [],
 ): void {
-  model.replaceBaseline({ items, archivedSessionIds })
+  model.replaceBaseline({ items, archivedSessionIds, pinnedSessionIds })
 }
 
 describe('ClientWorkspaceModel', () => {
+  it('publishes the prepared Workspace and leaves the list unchanged on refusal', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model)
+    const signal = new AbortController().signal
+    await expect(model.initializeDefault(signal)).resolves.toMatchObject({ ok: true })
+    expect(remote.initializeDefault).toHaveBeenCalledWith(signal)
+    expect(model.getSnapshot().items.map(item => item.workspaceId)).toEqual(['default'])
+    const before = model.getSnapshot()
+    remote.initializeDefault.mockResolvedValueOnce(remoteOk(undefined))
+    await expect(model.initializeDefault())
+      .resolves.toEqual({ ok: true, value: undefined })
+    expect(model.getSnapshot()).toBe(before)
+    remote.initializeDefault.mockResolvedValueOnce(workspaceError(
+      new RemoteError('gateway/bad-request', 'choose a folder', {}),
+    ))
+    await expect(model.initializeDefault()).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot()).toBe(before)
+  })
+
   it('replaces reconnect state and applies ordered increments', () => {
     const model = modelFor()
     expect(model.getSnapshot()).toMatchObject({ phase: 'pending', state: 'loading' })
@@ -314,67 +374,158 @@ describe('ClientWorkspaceModel', () => {
     remote.onArchiveSession = request => Promise.resolve(remoteOk({ archivedSessionIds: [request.sessionId] }))
     await expect(model.archiveSession(sid('fresh'))).resolves.toMatchObject({ ok: true })
     expect(model.getSnapshot().archivedSessionIds).toEqual(['fresh'])
+
+    remote.onUnarchiveSession = () => Promise.resolve(workspaceError(
+      new RemoteError('session/not-found', 'missing', { sessionId: sid('missing') }),
+    ))
+    await expect(model.unarchiveSession(sid('missing'))).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['fresh'])
+    remote.onUnarchiveSession = () => Promise.resolve(remoteOk({ archivedSessionIds: [] }))
+    await expect(model.unarchiveSession(sid('fresh'))).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual([])
+    expect(remote.calls).toContainEqual({ method: 'unarchiveSession', request: { sessionId: 'fresh' } })
   })
 
-  it('does not let a delayed archive echo overwrite a newer stream frame', async () => {
+  it('keeps the latest unarchive reply when overlapping requests settle out of order', async () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
-    baseline(model)
+    baseline(model, [], [sid('first'), sid('second')])
+    const firstGate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    const secondGate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    let request = 0
+    remote.onUnarchiveSession = () => request++ === 0 ? firstGate.promise : secondGate.promise
+
+    const first = model.unarchiveSession(sid('first'))
+    const second = model.unarchiveSession(sid('second'))
+    secondGate.resolve(remoteOk({ archivedSessionIds: [] }))
+    await expect(second).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual([])
+    firstGate.resolve(remoteOk({ archivedSessionIds: [sid('second')] }))
+    await expect(first).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual([])
+  })
+
+  it('keeps a pushed archive set when an unarchive reply lands later', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [], [sid('first')])
     const gate = deferred<RemoteResult<WorkspaceArchiveValue>>()
-    remote.onArchiveSession = () => gate.promise
-    const pending = model.archiveSession(sid('first'))
+    remote.onUnarchiveSession = () => gate.promise
+
+    const pending = model.unarchiveSession(sid('first'))
     model.replaceArchived([sid('first'), sid('second')])
-    gate.resolve(remoteOk({ archivedSessionIds: [sid('first')] }))
-    await pending
-    expect(model.getSnapshot().archivedSessionIds).toEqual([sid('first'), sid('second')])
+    gate.resolve(remoteOk({ archivedSessionIds: [] }))
+    await expect(pending).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['first', 'second'])
   })
 
-  it.each(['stream', 'baseline'] as const)('keeps newer roots from %s over an equal-timestamp unary echo', async (kind) => {
-    const remote = new FakeWorkspaceRemote()
-    const model = new ClientWorkspaceModel(remote)
-    const initial = workspace('one')
-    baseline(model, [initial])
-    const echo = deferred<RemoteResult<WorkspaceValue>>()
-    remote.onUpdatePaths = () => echo.promise
-    const pending = model.updatePaths(wid('one'), ['/old'])
-    const newer = { ...initial, additionalPaths: ['/new'] }
-    if (kind === 'stream') model.upsertView(newer)
-    else baseline(model, [newer])
-    echo.resolve(remoteOk({ workspace: { ...initial, additionalPaths: ['/old'] } }))
-    await pending
-    expect(model.getSnapshot().items[0]?.additionalPaths).toEqual(['/new'])
-  })
-
-  it('returns a rejected create without adding a phantom row', async () => {
+  it('keeps the latest archive reply when overlapping requests settle out of order', async () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
-    baseline(model)
-    const error = new RemoteError('gateway/internal', 'denied', {})
-    remote.onCreate = () => Promise.resolve(workspaceError(error))
-    await expect(model.create({ path: '/denied' })).resolves.toEqual({ ok: false, error })
-    expect(model.getSnapshot().items).toEqual([])
+    const firstGate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    const secondGate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    let request = 0
+    remote.onArchiveSession = () => request++ === 0 ? firstGate.promise : secondGate.promise
+
+    const first = model.archiveSession(sid('first'))
+    const second = model.archiveSession(sid('second'))
+    secondGate.resolve(remoteOk({ archivedSessionIds: [sid('first'), sid('second')] }))
+    await expect(second).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['first', 'second'])
+    firstGate.resolve(remoteOk({ archivedSessionIds: [sid('first')] }))
+    await expect(first).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['first', 'second'])
   })
 
-  it('merges a successful update-paths echo when no stream frame supersedes it', async () => {
+  it('keeps a baseline archive set when an unarchive reply lands later', async () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
-    baseline(model, [workspace('one')])
-    await expect(model.updatePaths(wid('one'), ['/side'])).resolves.toMatchObject({ ok: true })
-    expect(model.getSnapshot().items[0]?.additionalPaths).toEqual(['/side'])
+    baseline(model, [], [sid('first')])
+    const gate = deferred<RemoteResult<WorkspaceArchiveValue>>()
+    remote.onUnarchiveSession = () => gate.promise
+
+    const pending = model.unarchiveSession(sid('first'))
+    baseline(model, [], [sid('second')])
+    gate.resolve(remoteOk({ archivedSessionIds: [] }))
+    await expect(pending).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['second'])
   })
 
-  it('keeps a streamed row when a stale unary echo has the same timestamp', async () => {
+  it('applies pin mutation echoes and leaves failed results unchanged', async () => {
     const remote = new FakeWorkspaceRemote()
     const model = modelFor(remote)
-    const initial = workspace('one', [], '2026-01-01T00:00:00.001Z')
-    baseline(model, [initial])
-    const gate = deferred<RemoteResult<WorkspaceValue>>()
-    remote.onRename = () => gate.promise
-    const pending = model.rename(wid('one'), 'old')
-    model.upsertView({ ...initial, title: 'new' })
-    gate.resolve(remoteOk({ workspace: { ...initial, title: 'old' } }))
-    await pending
-    expect(model.getSnapshot().items[0]?.title).toBe('new')
+    baseline(model, [], [], [sid('kept')])
+
+    remote.onPinSession = () => Promise.resolve(workspaceError(
+      new RemoteError('session/not-found', 'missing', { sessionId: sid('missing') }),
+    ))
+    await expect(model.pinSession(sid('missing'))).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['kept'])
+    remote.onPinSession = request => Promise.resolve(remoteOk({
+      pinnedSessionIds: [request.sessionId, sid('kept')],
+    }))
+    await expect(model.pinSession(sid('fresh'))).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['fresh', 'kept'])
+    expect(remote.calls).toContainEqual({ method: 'pinSession', request: { sessionId: 'fresh' } })
+
+    remote.onUnpinSession = () => Promise.resolve(workspaceError(
+      new RemoteError('gateway/internal', 'wire down', {}),
+    ))
+    await expect(model.unpinSession(sid('fresh'))).resolves.toMatchObject({ ok: false })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['fresh', 'kept'])
+    remote.onUnpinSession = () => Promise.resolve(remoteOk({ pinnedSessionIds: [sid('kept')] }))
+    await expect(model.unpinSession(sid('fresh'))).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['kept'])
+    expect(remote.calls).toContainEqual({ method: 'unpinSession', request: { sessionId: 'fresh' } })
+
+    const before = model.getSnapshot()
+    model.replacePinned([sid('kept')])
+    expect(model.getSnapshot()).toBe(before)
+    model.replacePinned([sid('other')])
+    expect(model.getSnapshot()).not.toBe(before)
+    expect(model.getSnapshot().pinnedSessionIds).toEqual([sid('other')])
+  })
+
+  it('keeps the latest pin reply when overlapping requests settle out of order', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    const firstGate = deferred<RemoteResult<WorkspacePinValue>>()
+    const secondGate = deferred<RemoteResult<WorkspacePinValue>>()
+    let request = 0
+    remote.onPinSession = () => request++ === 0 ? firstGate.promise : secondGate.promise
+
+    const first = model.pinSession(sid('first'))
+    const second = model.pinSession(sid('second'))
+    secondGate.resolve(remoteOk({ pinnedSessionIds: [sid('second'), sid('first')] }))
+    await expect(second).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['second', 'first'])
+    firstGate.resolve(remoteOk({ pinnedSessionIds: [sid('first')] }))
+    await expect(first).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['second', 'first'])
+  })
+
+  it('keeps a pushed pin set when an unpin reply lands later', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [], [], [sid('first')])
+    const gate = deferred<RemoteResult<WorkspacePinValue>>()
+    remote.onUnpinSession = () => gate.promise
+
+    const pending = model.unpinSession(sid('first'))
+    model.replacePinned([sid('first'), sid('second')])
+    gate.resolve(remoteOk({ pinnedSessionIds: [] }))
+    await expect(pending).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['first', 'second'])
+  })
+
+  it('mirrors the Host pin drop locally when an archive echo lands', async () => {
+    const remote = new FakeWorkspaceRemote()
+    const model = modelFor(remote)
+    baseline(model, [], [], [sid('pinned'), sid('kept')])
+
+    await expect(model.archiveSession(sid('pinned'))).resolves.toMatchObject({ ok: true })
+    expect(model.getSnapshot().archivedSessionIds).toEqual(['pinned'])
+    expect(model.getSnapshot().pinnedSessionIds).toEqual(['kept'])
   })
 
   it('keeps the newest row and places Workspaces missing from partial orders last', async () => {

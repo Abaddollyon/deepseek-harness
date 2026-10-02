@@ -36,6 +36,11 @@ export const expectedUnsupported: Readonly<Partial<Record<string, { sourceVersio
     sourceVersion: 2,
     reason: 'session snapshot line 3: format v2 surface before first step cannot acquire a system head without changing chronology',
   },
+  // This recording contains an event absent from the released V2 event inventory.
+  'snapshots/web/present/session.v2.jsonl': {
+    sourceVersion: 2,
+    reason: 'session snapshot line 21: format v2 to v3 cannot safely transform unclassified event deliverables/presented',
+  },
   'snapshots/web/pwsh-terminal/session.v2.jsonl': {
     sourceVersion: 2,
     reason: 'session snapshot line 3: format v2 surface before first step cannot acquire a system head without changing chronology',
@@ -47,15 +52,6 @@ export const expectedUnsupported: Readonly<Partial<Record<string, { sourceVersio
   'snapshots/web/seeded-history/session.v2.jsonl': {
     sourceVersion: 2,
     reason: 'session snapshot line 3: format v2 surface before first step cannot acquire a system head without changing chronology',
-  },
-}
-
-/** Exact historical source-validation failures retained as frozen evidence. */
-export const expectedInvalid: Readonly<Partial<Record<string, { sourceVersion: number; sha256: string; reason: string }>>> = {
-  'snapshots/session/agent-instructions/session.jsonl': {
-    sourceVersion: 0,
-    sha256: '6631f373c436cf1166bfce9193f231cc0a24a58e772fe8ea1dc069740eda4459',
-    reason: 'session snapshot line 19: compaction checkpoint at seq 17 has no matching compaction/start',
   },
 }
 

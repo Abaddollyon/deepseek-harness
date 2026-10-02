@@ -17,7 +17,7 @@ import type { GenericCallView, SearchResultView, ToolResult } from '@deepseek-ai
 import type { RetainedItems } from '@deepseek-ai/dsh-output-retention'
 import type { SpillRef } from '@deepseek-ai/dsh-spill'
 import type { GrepMatch } from './search-core.ts'
-import { SearchError, previewLine, retainGrepMatches, runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
+import { SearchError, presentText, previewLine, retainGrepMatches, runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
 import { grepSearchMeta, searchViewFromMeta } from './presentation.ts'
 import { acceptedDirectCallValue } from './direct-call.ts'
 
@@ -50,6 +50,8 @@ export interface GrepToolCaps {
   stderrMaxBytes: number
   /** Cooperative tool-call budget (ms) attached as `ToolDefinition.timeoutMs`. */
   timeoutMs: number
+  /** Ripgrep executable in the execution world; omitted selects the packaged binary. */
+  rgPath?: string
 }
 
 /** Validated `grep` arguments. */
@@ -60,12 +62,11 @@ export interface GrepInput {
 }
 
 /**
- * Reject an `include` that is not ONE positive glob filter: blank strings,
- * negated patterns (`!…`), and comma-separated lists. A comma inside a brace
- * group is fine — `*.{ts,tsx}` is one glob with alternation, not a list.
+ * Reject an `include` that is not ONE positive glob filter: negated patterns
+ * (`!…`) and comma-separated lists. A comma inside a brace group is fine —
+ * `*.{ts,tsx}` is one glob with alternation, not a list.
  */
 function validateInclude(include: string): void {
-  if (include.trim().length === 0) throw new Error('include must be a non-empty glob when given')
   if (include.startsWith('!')) throw new Error('include must be a positive glob filter; negated patterns ("!…") are not supported')
   let braceDepth = 0
   for (const char of include) {
@@ -79,21 +80,23 @@ function validateInclude(include: string): void {
 
 /**
  * Validate value constraints the schema DSL can't express: a non-EMPTY
- * `pattern` (whitespace is a legitimate regex), a non-blank `path` when given,
- * and a single positive `include` glob ({@link GrepInput}). Throws a plain
- * `Error` (an ordinary tool argument error) otherwise.
+ * `pattern` (whitespace is a legitimate regex) and a single positive
+ * `include` glob ({@link GrepInput}). A blank `path` or `include` counts as
+ * omitted, because strict structured output fills every optional field.
+ * Throws a plain `Error` (an ordinary tool argument error) otherwise.
  *
  * @param args - the schema-validated `grep` arguments.
- * @returns the accepted input, unchanged.
+ * @returns the accepted input without blank optional fields.
  */
 export function parseGrepArgs(args: { pattern: string; path?: string; include?: string }): GrepInput {
   if (args.pattern.length === 0) throw new Error('pattern must be a non-empty string')
-  if (args.path !== undefined && args.path.trim().length === 0) throw new Error('path must be a non-empty string when given')
-  if (args.include !== undefined) validateInclude(args.include)
+  const path = presentText(args.path)
+  const include = presentText(args.include)
+  if (include !== undefined) validateInclude(include)
   return {
     pattern: args.pattern,
-    ...args.path !== undefined ? { path: args.path } : {},
-    ...args.include !== undefined ? { include: args.include } : {},
+    ...path !== undefined ? { path } : {},
+    ...include !== undefined ? { include } : {},
   }
 }
 
@@ -265,7 +268,7 @@ export function presentGrepResult(
 }
 
 /**
- * Register the `grep` tool and its system-prompt guidance.
+ * Register the `grep` tool and its scope-aware system-prompt guidance.
  *
  * @param ctx - the plugin context; registrations are effects scoped to it, and
  *   execution uses its `subprocess` service.
@@ -275,14 +278,16 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
   ctx.systemPrompt.section({
     name: 'tool:grep',
     order: ctx.systemPrompt.getSectionOrder('TOOL_GREP'),
-    text: 'Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.',
+    text: ({ scope }) => ctx.tools.get('grep', scope) === undefined
+      ? ''
+      : 'Use the grep tool — not shell grep or rg — to search file contents.'
+        + (ctx.tools.get('read', scope) === undefined ? '' : ' Use read on a matched file when you need surrounding context.'),
   })
 
   const tool = defineTool({
     name: 'grep',
     description: 'Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. '
-      + `Returns the first ${caps.maxMatches} matches inline; a capped result reports where the complete match list was saved. `
-      + 'Use read on a matched file for surrounding context.',
+      + `Returns up to ${caps.maxMatches} matches; a larger result reports where the complete match list was saved.`,
     parameters: {
       pattern: { type: 'string', required: true, description: 'Regular expression to search for (ripgrep syntax).' },
       path: { type: 'string', description: 'File or directory to search. Defaults to the session workspace; a relative path resolves against it.' },
@@ -318,7 +323,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGrepArgs(args)
-      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
+      const run = await runRipgrep(ctx, exec, 'grep', buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.rgPath)
       if (run.noMatches) return { matches: [] }
 
       const all: GrepMatch[] = []

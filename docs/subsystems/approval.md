@@ -50,7 +50,7 @@ Both policies contribute their complete current meaning to the cache-safe runtim
 
 ## Approval request
 
-`ApprovalRequest` identifies the agent and tool action closely enough to route and audit the question. It deliberately omits tool arguments: an answerer attaches the prompt to the already-streamed tool call through `callId` instead of rendering a second copy that could drift.
+`ApprovalRequest` identifies the agent and tool action closely enough to route and audit the question. It deliberately omits tool arguments: an answerer attaches the prompt to the already-streamed tool call through `callId` instead of rendering a second copy that could drift. Optional `displayReason` carries requester-owned locale strings to presentation; `reason` remains the audit text.
 
 ```ts type-equiv
 /**
@@ -142,36 +142,6 @@ overrideOf(session: Session): ApprovalPolicy | undefined
 Types: [Agent](core.md) · [Session](session.md)
 
 Source: [`packages/interaction/user-approval/src/index.ts`](../../packages/interaction/user-approval/src/index.ts)
-
-<a id="ctxpendinginteractions--pendinginteractionregistry"></a>
-
-### `ctx.pendingInteractions` — `PendingInteractionRegistry`
-
-Host registry of current pending interactions and their revisioned lifecycle.
-
-```ts cordis-catalog
-/**
- * Begin one content-free lifecycle.
- * @param input - interaction kind and optional owning agent.
- * @returns the idempotent end capability.
- */
-begin(input: PendingInteractionBegin): () => void
-
-/**
- * Read the current immutable baseline; historical ended interactions are absent.
- * @returns epoch, revision, and current pending records.
- */
-snapshot(): PendingInteractionSnapshot
-
-/**
- * Subscribe to future deltas; callers obtain history through snapshot().
- * @param listener - failure-contained consumer of future lifecycle changes.
- * @returns synchronous unsubscribe capability.
- */
-onChange(listener: (change: PendingInteractionChange) => void | Promise<void>): () => void
-```
-
-Source: [`packages/interaction/pending-interactions/src/index.ts`](../../packages/interaction/pending-interactions/src/index.ts)
 
 <a id="approval-events"></a>
 

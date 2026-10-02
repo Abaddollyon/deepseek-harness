@@ -1,23 +1,24 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiSessionAgentController,
   ApiSessionCwdConflict,
-  ApiSessionWorkspaceConflict,
   ApiSessionNotFound,
   ApiSessionSubagentOwnership,
   inspectApiSession,
 } from '../src/agent.ts'
+import { installAdditionalPathsProjection } from '../src/additional-paths-projection.ts'
 import { installModelSelectionProjection } from '../src/model-selection-projection.ts'
 import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
 
@@ -81,8 +82,6 @@ describe('ApiSession identity failures', () => {
       .toContain('records no cwd')
     expect(new ApiSessionCwdConflict(SessionId('wrong-cwd'), '/wanted', '/existing').message)
       .toContain('belongs to "/existing"')
-    expect(new ApiSessionWorkspaceConflict(SessionId('missing-roots'), ['/wanted'], undefined).message)
-      .toContain('records no additional roots')
   })
 
   it('maps absent and cwd-less point observations to not found', async () => {
@@ -175,7 +174,7 @@ describe('ApiSession Agent lookup and recovery', () => {
   it('projects live Agent contexts and maps missing cold identities through Typert lookup failures', async () => {
     const { ctx } = await harness()
     const live = agent(ctx, header('live'))
-    ctx.agents.register(live)
+    await ctx.agents.register(live)
     providePersistence(ctx, {
       list: () => Promise.resolve([]),
       inspect: vi.fn(),
@@ -196,7 +195,7 @@ describe('ApiSession Agent lookup and recovery', () => {
     })
     const winner = agent(ordinary.ctx, ordinaryMeta)
     vi.spyOn(ordinary.ctx.agents, 'resume').mockImplementation(async () => {
-      ordinary.ctx.agents.register(winner)
+      await ordinary.ctx.agents.register(winner)
       throw new Error('raced publication')
     })
     await expect(ordinary.agents.resolveAgent(ordinaryMeta.id)).resolves.toEqual({ agent: winner })
@@ -236,6 +235,37 @@ describe('ApiSession Agent lookup and recovery', () => {
     })
     vi.spyOn(failed.ctx.agents, 'resume').mockRejectedValue(new Error('factory unavailable'))
     await expect(failed.agents.resolveAgent(meta.id)).resolves.toMatchObject({
+      error: { code: 'gateway/internal', message: expect.stringContaining('factory unavailable') as string },
+    })
+  })
+
+  it('identifies a held Session writer without classifying other resume failures as contention', async () => {
+    const { ctx, agents } = await harness()
+    const meta = header('owned-session')
+    providePersistence(ctx, {
+      list: () => Promise.resolve([meta]),
+      inspect: () => Promise.resolve({ meta, events: [] }),
+    })
+    const resume = vi.spyOn(ctx.agents, 'resume').mockRejectedValue(new SessionAlreadyOwnedError(meta.id))
+    await expect(agents.resolveAgent(meta.id)).resolves.toMatchObject({
+      error: { code: 'session/writer-held', details: { sessionId: meta.id } },
+    })
+    resume.mockRejectedValue(Object.assign(new Error('another module copy'), { name: 'SessionAlreadyOwnedError' }))
+    await expect(agents.resolveAgent(meta.id)).resolves.toMatchObject({
+      error: { code: 'session/writer-held', details: { sessionId: meta.id } },
+    })
+    resume.mockRejectedValue(new Error('unrelated failure'))
+    await expect(agents.resolveAgent(meta.id)).resolves.toMatchObject({
+      error: { code: 'gateway/internal' },
+    })
+  })
+
+  it('retains resume diagnostics without a persistence service', async () => {
+    const { ctx, agents } = await harness()
+    const meta = header('memory-only-resume')
+    ctx.sessions.create(meta.id, { meta })
+    vi.spyOn(ctx.agents, 'resume').mockRejectedValue(new Error('factory unavailable'))
+    await expect(agents.resolveAgent(meta.id)).resolves.toMatchObject({
       error: { code: 'gateway/internal', message: expect.stringContaining('factory unavailable') as string },
     })
   })
@@ -301,44 +331,6 @@ describe('ApiSession model selection', () => {
 })
 
 describe('ApiSession create or adoption', () => {
-  it('rejects changed root snapshots before adopting live or cold sessions', async () => {
-    const { ctx, agents } = await harness()
-    const id = SessionId('live-roots')
-    const session = ctx.sessions.create(id, { meta: { cwd: '/workspace', additionalPaths: ['/original'] } })
-    const live = { id, session, status: 'idle', ctx } as Agent
-    ctx.agents.register(live)
-    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/original'])).resolves.toBe(live)
-    await expect(agents.ensureSession(id, '/workspace', true, undefined, ['/changed']))
-      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
-    expect(session.additionalPaths).toEqual(['/original'])
-
-    const cold = await harness()
-    const meta = header('cold-roots')
-    const events: SessionEvent[] = [{ type: 'workspace/roots', seq: SessionSeq(0), time: 1, data: { additionalPaths: ['/original'] } }]
-    providePersistence(cold.ctx, { list: () => Promise.resolve([meta]), inspect: () => Promise.resolve({ meta, events }) })
-    const resume = vi.spyOn(cold.ctx.agents, 'resume')
-    await expect(cold.agents.ensureSession(meta.id, '/workspace', true, undefined, ['/changed']))
-      .rejects.toBeInstanceOf(ApiSessionWorkspaceConflict)
-    expect(resume).not.toHaveBeenCalled()
-    expect(cold.ctx.agents.get(meta.id)).toBeUndefined()
-  })
-
-  it('copies non-empty additional roots into a newly created Agent', async () => {
-    const { ctx, agents } = await harness()
-    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-roots-'))
-    tempDirs.push(cwd)
-    const id = SessionId('created-roots')
-    const meta = { ...header('created-roots', cwd), additionalPaths: ['/shared'] } as SessionHeader
-    const created = agent(ctx, meta)
-    const create = vi.spyOn(ctx.agents, 'create').mockResolvedValue({
-      agent: created, dispose: () => Promise.resolve(),
-    })
-
-    await expect(agents.ensureSession(id, cwd, false, undefined, ['/shared'])).resolves.toBe(created)
-    expect(create).toHaveBeenCalledOnce()
-    expect(create.mock.calls[0]?.[0].meta).toMatchObject({ cwd, additionalPaths: ['/shared'] })
-  })
-
   it('shares one in-flight creation between concurrent callers', async () => {
     const { ctx, agents } = await harness()
     const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-concurrent-'))
@@ -367,7 +359,7 @@ describe('ApiSession create or adoption', () => {
     const ordinaryMeta = header('create-race', cwd)
     const winner = agent(ordinary.ctx, ordinaryMeta)
     vi.spyOn(ordinary.ctx.agents, 'create').mockImplementation(async () => {
-      ordinary.ctx.agents.register(winner)
+      await ordinary.ctx.agents.register(winner)
       throw new Error('raced creation')
     })
     await expect(ordinary.agents.ensureSession(ordinaryMeta.id, cwd, false))
@@ -484,6 +476,25 @@ describe('ApiSession create or adoption', () => {
       .rejects.toBeInstanceOf(ApiSessionCwdConflict)
   })
 
+  it('records workspace additional roots on a new Session, projects them, and refuses a vanished root', async () => {
+    const { ctx, agents } = await harness()
+    installAdditionalPathsProjection(ctx)
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-roots-'))
+    tempDirs.push(cwd)
+    const create = vi.spyOn(ctx.agents, 'create').mockImplementation((options) => {
+      const session = ctx.sessions.create(options.sessionId, { meta: options.meta ?? {} })
+      return Promise.resolve({ agent: { id: options.sessionId, session, status: 'idle', ctx } as Agent, dispose: () => Promise.resolve() })
+    })
+
+    const created = await agents.ensureSession(SessionId('rooted-create'), cwd, false, undefined, [tmpdir()])
+    expect(create.mock.calls[0]?.[0].meta).toMatchObject({ cwd, additionalPaths: [tmpdir()] })
+    expect(created.session.additionalPaths).toEqual([tmpdir()])
+    expect(ctx.sessionProjections.snapshot(created.session).values['additionalPaths']).toEqual([tmpdir()])
+    await expect(agents.ensureSession(SessionId('vanished-root'), cwd, false, undefined, [join(cwd, 'missing')]))
+      .rejects.toThrow('is unavailable')
+    expect(create).toHaveBeenCalledOnce()
+  })
+
   it('surfaces directory creation failure', async () => {
     const { agents } = await harness()
     const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-file-'))
@@ -492,5 +503,57 @@ describe('ApiSession create or adoption', () => {
     writeFileSync(file, 'not a directory')
     await expect(agents.ensureSession(SessionId('mkdir-failure'), join(file, 'child'), false))
       .rejects.toThrow('failed to ensure project directory')
+  })
+
+  it('checks the cwd through a preset-owned filesystem without creating a Host directory', async () => {
+    const { ctx, agents } = await harness()
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-remote-'))
+    tempDirs.push(parent)
+    const cwd = join(parent, 'remote-only')
+    const types: Record<string, 'directory' | 'file'> = { [cwd]: 'directory', [join(parent, 'file')]: 'file' }
+    ctx.provide('agentPresets', {
+      resolve: (id?: string) => Promise.resolve({ id: id ?? 'remote' }),
+      mount: () => Promise.resolve(),
+      serviceForPreset: () => ({
+        resolve: (path: string) => Promise.resolve(path),
+        stat: (path: string) => Promise.resolve(types[path] === undefined ? undefined : { type: types[path] }),
+      }),
+    } as never)
+    const created = agent(ctx, { ...header('remote-cwd', cwd), agentPreset: 'remote' })
+    const create = vi.spyOn(ctx.agents, 'create').mockResolvedValue({ agent: created, dispose: () => Promise.resolve() })
+
+    await expect(agents.ensureSession(created.id, cwd, false, 'remote')).resolves.toBe(created)
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd, agentPreset: 'remote' } }))
+    expect(existsSync(cwd)).toBe(false)
+    for (const missing of [join(parent, 'absent'), join(parent, 'file')]) {
+      await expect(agents.ensureSession(SessionId('remote-missing'), missing, false, 'remote'))
+        .rejects.toThrow('not a directory in the execution world of agent preset "remote"')
+    }
+    expect(existsSync(join(parent, 'absent'))).toBe(false)
+    // Additional roots live in the same world: a remote directory is accepted, a remote file is not.
+    const root = join(parent, 'remote-root')
+    types[root] = 'directory'
+    await expect(agents.ensureSession(SessionId('remote-roots'), cwd, false, 'remote', [root])).resolves.toBe(created)
+    await expect(agents.ensureSession(SessionId('remote-file-root'), cwd, false, 'remote', [join(parent, 'file')]))
+      .rejects.toThrow('is not a directory')
+  })
+
+  it('refuses a preset-owned world whose filesystem is unavailable instead of creating the cwd on the Host', async () => {
+    const { ctx, agents } = await harness()
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-offline-'))
+    tempDirs.push(parent)
+    const cwd = join(parent, 'remote-only')
+    ctx.provide('agentPresets', {
+      resolve: (id?: string) => Promise.resolve({ id: id ?? 'remote' }),
+      mount: () => Promise.resolve(),
+      serviceForPreset: () => undefined,
+      ownsWorld: (id: string) => id === 'remote',
+    } as never)
+    const create = vi.spyOn(ctx.agents, 'create')
+
+    await expect(agents.ensureSession(SessionId('remote-offline'), cwd, false, 'remote'))
+      .rejects.toThrow('the execution world of agent preset "remote" is not available')
+    expect(existsSync(cwd)).toBe(false)
+    expect(create).not.toHaveBeenCalled()
   })
 })

@@ -233,9 +233,9 @@ describe('runScenario', () => {
     expect(materialized).toContain(pathToFileURL(join(patchDir, 'plugin.mjs')).href)
     expect(materialized).toContain(pathToFileURL(join(dir, 'nested.mjs')).href)
     expect(materialized).toContain('example-package')
-    expect(await realpath(join(dir, '.dsh', 'profiles', 'node_modules', 'example-package')))
+    expect(await realpath(join(dir, '.dsh', 'profiles', 'acp', 'node_modules', 'example-package')))
       .toBe(await realpath(packageDir))
-    expect(await realpath(join(dir, '.dsh', 'profiles', 'node_modules', '@fixture', 'example-package')))
+    expect(await realpath(join(dir, '.dsh', 'profiles', 'acp', 'node_modules', '@fixture', 'example-package')))
       .toBe(await realpath(scopedPackageDir))
     expect(await readFile(await materializedPatch(materializedRoot, '1-selected.cordis.yml'), 'utf8')).toContain('[]')
 
@@ -255,7 +255,7 @@ describe('runScenario', () => {
     const conflictPatch = join(dir, 'conflict.cordis.yml')
     const conflictPackage = join(dir, 'node_modules', 'conflict-package')
     const otherPackage = join(dir, 'other-conflict-package')
-    const conflictLink = join(dir, '.dsh', 'profiles', 'node_modules', 'conflict-package')
+    const conflictLink = join(dir, '.dsh', 'profiles', 'acp', 'node_modules', 'conflict-package')
     await Promise.all([
       mkdir(conflictPackage, { recursive: true }),
       mkdir(otherPackage, { recursive: true }),
@@ -642,11 +642,7 @@ describe('runScenario', () => {
       { steps: [...boot, { op: 'prompt', text: 'ls' }] },
       { agent: AGENT, mode: 'replay', fixtureFile, workspaceDir },
     )
-    expect(result.rawStdout).toContain('workspace:.git,seeded.txt')
-    // The agent's own listing shows the harness-planted marker, but captured
-    // workspace state excludes harness-owned root entries.
-    expect(result.initialWorkspace).toEqual([{ path: 'seeded.txt', kind: 'text', content: 'hello' }])
-    expect(result.finalWorkspace).toEqual(result.initialWorkspace)
+    expect(result.rawStdout).toContain('workspace:seeded.txt')
   })
 
   it('prepares the generated workspace after copying committed fixtures', { timeout: 20_000 }, async () => {
@@ -670,12 +666,7 @@ describe('runScenario', () => {
       },
     )
 
-    expect(result.rawStdout).toContain('workspace:.git,committed.txt,runtime.txt')
-    expect(result.initialWorkspace).toEqual([
-      { path: 'committed.txt', kind: 'text', content: 'committed' },
-      { path: 'runtime.txt', kind: 'text', content: 'runtime' },
-    ])
-    expect(result.finalWorkspace).toEqual(result.initialWorkspace)
+    expect(result.rawStdout).toContain('workspace:committed.txt,runtime.txt')
   })
 
   it('creates the generated workspace under an explicit parent', { timeout: 20_000 }, async () => {

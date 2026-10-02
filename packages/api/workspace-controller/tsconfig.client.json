@@ -7,15 +7,13 @@
   },
   "files": [
     "src/client/index.ts",
-    "src/client/feed.ts",
-    "src/client/transport.ts",
     "src/client/model.ts",
     "src/client/service.ts",
+    "src/default-workspace.ts",
     "src/types.ts"
   ],
   "references": [
     { "path": "../../../vendor/cordis" },
-    { "path": "../../../vendor/schemastery" },
     { "path": "../gateway/tsconfig.client.json" },
     { "path": "../../client/connection/tsconfig.client.json" },
     { "path": "../../client/store" },

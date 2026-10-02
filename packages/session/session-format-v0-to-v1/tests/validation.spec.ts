@@ -118,10 +118,8 @@ const validPayloads: Readonly<Record<string, SessionFormatJsonValue>> = {
   'todo/write': { todos: [{ content: 'work', status: 'in_progress' }] },
   'tool-workflow/agent-end': { runId: 'run-1', seq: 1, outcome: 'completed' },
   'tool-workflow/agent-start': { runId: 'run-1', seq: 1, label: 'worker', phase: 'build', childId: 'child-1' },
-  'tool-workflow/log': { runId: 'run-1', message: 'Working', ordinal: 2, truncated: true },
-  'tool-workflow/phase': { runId: 'run-1', title: 'Build', ordinal: 1 },
   'tool-workflow/run-end': { runId: 'run-1', stopReason: 'completed' },
-  'tool-workflow/run-start': { runId: 'run-1', name: 'workflow', parentCallId: 'call-1' },
+  'tool-workflow/run-start': { runId: 'run-1', name: 'workflow' },
   'tool/call': { turn: 1, step: 0, callId: 'call-1', name: 'read', arguments: '{}' },
   'tool/code-dispatch': {
     rootCallId: 'root', parentCallId: 'parent', subCallId: 'sub', name: 'read', arguments: { path: '/work' },
@@ -207,8 +205,8 @@ function invalidLeafMutations(
 function replaceAtPath(value: SessionFormatJsonValue, path: string, replacement: SessionFormatJsonValue): SessionFormatJsonValue {
   const copy = structuredClone(value)
   const keys = path.split('.')
-  let current = copy as unknown as Record<string, SessionFormatJsonValue>
-  for (const key of keys.slice(0, -1)) current = current[key] as unknown as Record<string, SessionFormatJsonValue>
+  let current = copy as Record<string, SessionFormatJsonValue>
+  for (const key of keys.slice(0, -1)) current = current[key] as Record<string, SessionFormatJsonValue>
   current[keys.at(-1) as string] = replacement
   return copy
 }
@@ -216,7 +214,7 @@ function replaceAtPath(value: SessionFormatJsonValue, path: string, replacement:
 describe('released event and payload inventory', () => {
   it('has an executable valid fixture for every frozen released-v0 event type', () => {
     expect(Object.keys(validPayloads).sort()).toEqual([...RELEASED_V0_EVENT_TYPES].sort())
-    expect(RELEASED_V0_EVENT_TYPES).toHaveLength(53)
+    expect(RELEASED_V0_EVENT_TYPES).toHaveLength(51)
     expect(RELEASED_V0_EVENT_TYPES.filter(type => !KNOWN_SESSION_EVENT_TYPES.has(type))).toEqual([
       'assistant/chunk',
       'tool/code-dispatch',
@@ -227,26 +225,6 @@ describe('released event and payload inventory', () => {
     for (const [type, data] of Object.entries(validPayloads)) {
       expect(() => { assertPayload(type, data) }, type).not.toThrow()
     }
-  })
-
-  it.each([
-    ['tool-workflow/phase', { runId: 'run-1', title: 'Phase', ordinal: 0 }],
-    ['tool-workflow/log', { runId: 'run-1', message: 'Line', ordinal: 1.5 }],
-    ['tool-workflow/log', { runId: 'run-1', message: 'Line', ordinal: 1, truncated: false }],
-    ['tool-workflow/run-start', { runId: 'run-1', name: 'workflow', parentCallId: '' }],
-  ] as const)('refuses malformed released workflow progress in %s', (type, data) => {
-    expect(() => { assertPayload(type, data) }).toThrow()
-  })
-
-  it('preserves released workflow progress and enclosing call identities through v0 to v1', () => {
-    const rows = [
-      { type: 'tool-workflow/run-start', data: validPayloads['tool-workflow/run-start']! },
-      { type: 'tool-workflow/phase', data: validPayloads['tool-workflow/phase']! },
-      { type: 'tool-workflow/log', data: validPayloads['tool-workflow/log']! },
-      { type: 'tool-workflow/log', data: { runId: 'run-1', message: 'Unclipped', ordinal: 3 } },
-      { type: 'tool-workflow/run-end', data: validPayloads['tool-workflow/run-end']! },
-    ].map((row, seq) => ({ ...row, seq, time: seq + 1 }))
-    expect(restoreV0ToV1(v0Header, rows).events).toEqual(rows)
   })
 
   it('refuses an unexpected member on every known payload', () => {
@@ -391,7 +369,7 @@ describe('released event and payload inventory', () => {
     }) }).toThrow(/unknown historical event/)
   })
 
-  it('permits empty Assistant provenance only under the released-v1 policy', () => {
+  it('permits empty Assistant source-event references only under the released-v1 policy', () => {
     const assistant = {
       type: 'assistant/message', seq: 1, time: 2, data: {},
       sourceEventSeqs: [], surfaceOp: 'append',
@@ -399,7 +377,7 @@ describe('released event and payload inventory', () => {
     expect(() => { assertReleasedSurfaceMetadata(assistant, 1, assistant.type, 'allow-empty-assistant') })
       .not.toThrow()
     expect(() => { assertReleasedSurfaceMetadata(assistant, 1, assistant.type, 'forbid-assistant') })
-      .toThrow(/obsolete chunk provenance/)
+      .toThrow(/obsolete chunk references/)
   })
 
   it('keeps capturedFormatVersion v1-only inside session-reference sources', () => {

@@ -216,36 +216,34 @@ export class BrowserAuth {
   }
 
   /**
-   * Add this process's launch token to one trusted application index path.
-   * @param baseUrl - canonical browser origin without credentials.
-   * @param pathname - exact trusted index pathname selected by the caller.
-   * @returns URL carrying the process token as its sole authentication input.
+   * Add this process's launch token to the caller's application URL.
+   * @param baseUrl - clean browser URL whose authority and mount are preserved.
+   * @returns the same URL carrying the process token as its sole authentication input.
    */
-  authenticatedUrl(baseUrl: string, pathname = '/'): string {
+  authenticatedUrl(baseUrl: string): string {
     const url = new URL(baseUrl)
-    url.pathname = pathname
-    url.search = ''
-    url.hash = ''
     url.searchParams.set(TOKEN_QUERY, this.launchToken)
     return url.href
   }
 
   /**
-   * Authenticate an index request. A valid query token on the caller-selected
-   * path mints the cookie and redirects to that clean path; a valid cookie lets the caller serve the
-   * index; every other request receives the same minimal 401 response.
+   * Authenticate an index request. A valid query token on the exchange path
+   * mints the cookie and redirects to the same clean path, written relative to
+   * its directory (`./` for the root); a valid cookie lets the caller serve
+   * the index; every other request receives the same minimal 401 response.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
-   * @param pathname - exact trusted index pathname selected by the caller.
+   * @param exchangePath - exact pathname that accepts the token, such as a client surface path; defaults to the root.
    * @returns true only when the caller may serve index.html.
    */
-  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, pathname = '/'): boolean {
+  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, exchangePath = '/'): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
+    const location = `./${exchangePath.slice(exchangePath.lastIndexOf('/') + 1)}`
     if (tokens.length > 0) {
       const authority = requestAuthority(req.headers)
-      if (req.method === 'GET' && url.pathname === pathname && tokens.length === 1
+      if (req.method === 'GET' && url.pathname === exchangePath && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
         const issuedAt = Date.now()
         const expiresAt = issuedAt + this.maxAgeMilliseconds
@@ -257,7 +255,7 @@ export class BrowserAuth {
         }, this.secret)
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': pathname,
+          'location': location,
           'referrer-policy': 'no-referrer',
           'set-cookie': sessionCookie(
             cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
@@ -266,10 +264,10 @@ export class BrowserAuth {
         res.end()
         return false
       }
-      if (req.method === 'GET' && url.pathname === pathname && this.isAuthenticated(req)) {
+      if (req.method === 'GET' && url.pathname === exchangePath && this.isAuthenticated(req)) {
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': pathname,
+          'location': location,
           'referrer-policy': 'no-referrer',
         })
         res.end()

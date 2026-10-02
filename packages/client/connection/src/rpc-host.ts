@@ -2,7 +2,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import type {} from '@deepseek-ai/dsh-client-modules'
+import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import {
   RpcId,
   type ClientRequest,
@@ -13,13 +13,14 @@ import { bridge } from './http-bridge.ts'
 import { isTrustedApiRequest } from './api-request-trust.ts'
 import { API_PATH } from './api-path.ts'
 import type { BrowserAuth } from './browser-auth.ts'
+import { OperatorPeer } from './operator-peer.ts'
 import type {
+  PeerAdmission,
   ConnectionIndexRequest,
   ConnectionIndexResponse,
   ConnectionFetchRoute,
   ConnectionFetchHandler,
   HostConnectionFetch,
-  ConnectionRpcChannelOptions,
   ConnectionRpcEndpointMatcher,
   ConnectionRpcFailure,
   ConnectionRpcHandler,
@@ -60,6 +61,8 @@ declare module '@deepseek-ai/cordis' {
 
 /** Host Connection service whose channel registrations belong to the caller fiber. */
 export class HostConnectionService extends Service implements HostConnectionHandle {
+  /** The operator Peer every admitted request speaks for. */
+  readonly operator: PeerScope
   private readonly interceptors = new Map<string, ConnectionRpcInterceptor>()
   private readonly fetchRoutes = new Map<string, RegisteredFetchRoute>()
 
@@ -75,13 +78,15 @@ export class HostConnectionService extends Service implements HostConnectionHand
     private readonly browserAuth: BrowserAuth,
   ) {
     super(ctx, 'connection')
+    this.operator = new OperatorPeer(ctx)
+    ctx.effect(() => () => this.operator.dispose(), 'client-connection: operator Peer')
   }
 
   /** Generic channel registry scoped to the Context reading this service. */
   get rpc(): HostConnectionRpc {
     const owner = this.ctx
     return {
-      handle: (channel, handler, options) => this.register(owner, channel, handler, options),
+      handle: (channel, handler) => this.register(owner, channel, handler),
       intercept: (channel, matches, handler) =>
         this.registerInterceptor(owner, channel, matches, handler),
     }
@@ -101,23 +106,20 @@ export class HostConnectionService extends Service implements HostConnectionHand
     return this.browserAuth.isAuthenticated(request) ? undefined : 401
   }
 
+  /** A request that passes the fence and authentication speaks for the operator. */
+  admit(request: ConnectionTrustRequest): PeerAdmission {
+    const rejection = this.requestRejection(request)
+    return rejection === undefined ? { peer: this.operator } : { rejection }
+  }
+
   /** Authenticate an index request through the process-token exchange or cookie. */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, surfaceId?: string): boolean {
-    return this.browserAuth.authorizeIndex(request, response, this.surfacePath(surfaceId))
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, exchangePath?: string): boolean {
+    return this.browserAuth.authorizeIndex(request, response, exchangePath)
   }
 
   /** Add this process's launch token to the clean application URL. */
-  authenticatedUrl(baseUrl: string, surfaceId?: string): string {
-    return this.browserAuth.authenticatedUrl(baseUrl, this.surfacePath(surfaceId))
-  }
-
-  private surfacePath(surfaceId: string | undefined): string {
-    if (surfaceId === undefined) return '/'
-    const definition = this.ctx.get('clientSurfaces')?.get(surfaceId)
-    if (definition === undefined) {
-      throw new Error(`connection: unknown client surface ${JSON.stringify(surfaceId)}`)
-    }
-    return definition.path
+  authenticatedUrl(baseUrl: string): string {
+    return this.browserAuth.authenticatedUrl(baseUrl)
   }
 
   /**
@@ -170,22 +172,20 @@ export class HostConnectionService extends Service implements HostConnectionHand
     owner: Context,
     channel: string,
     handler: ConnectionRpcHandler,
-    options?: ConnectionRpcChannelOptions,
   ): () => Promise<void> {
     assertChannel(channel)
-    const maxBodyBytes = rpcChannelBodyLimit(options)
-    const fetchHandler = rpcFetchHandler(channel, handler)
+    const fetchHandler = rpcFetchHandler(channel, handler, this.operator)
     const route: WebRoute = {
       kind: 'prefix',
       path: channel,
       handler: async (req, res) => {
-        const rejection = this.requestRejection(req)
-        if (rejection !== undefined) {
-          res.writeHead(rejection)
-          res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+        const admission = this.admit(req)
+        if ('rejection' in admission) {
+          res.writeHead(admission.rejection)
+          res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
           return
         }
-        await bridge(req, res, fetchHandler, maxBodyBytes)
+        await bridge(req, res, fetchHandler)
       },
     }
     return owner.effect(
@@ -205,7 +205,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
     }
     const interceptor: ConnectionRpcInterceptor = {
       matches,
-      fetchHandler: rpcFetchHandler(channel, handler),
+      fetchHandler: rpcFetchHandler(channel, handler, this.operator),
     }
     return owner.effect(() => {
       if (this.interceptors.has(channel)) {
@@ -222,6 +222,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
 function rpcFetchHandler(
   channel: string,
   handler: ConnectionRpcHandler,
+  peer: PeerScope,
 ): ConnectionFetchHandler {
   return {
     requestBodyMode: () => 'buffered',
@@ -257,7 +258,7 @@ function rpcFetchHandler(
       }
 
       try {
-        const result = await handler(endpoint, message.payload, request.signal)
+        const result = await handler(endpoint, message.payload, request.signal, peer)
         return fullResponse(message.rpcId, result)
       } catch (error) {
         return new Response(`handler failure: ${String(error)}`, { status: 500 })
@@ -291,28 +292,29 @@ function errorResponse(rpcId: RpcIdType, error: ConnectionRpcFailure): Response 
   return fullResponse(rpcId, { ok: false, error })
 }
 
-function fullResponse(rpcId: RpcIdType, result: ConnectionRpcResult<unknown>): Response {
-  const body: ConnectionServerResponse = { type: 'server-response', rpcId, result }
-  return Response.json(body)
+function fullResponse(rpcId: RpcIdType, result: Awaited<ReturnType<ConnectionRpcHandler>>): Response {
+  if (!result.ok) {
+    const body: ConnectionServerResponse = { type: 'server-response', rpcId, result }
+    return Response.json(body)
+  }
+  const { attachments, ...success } = result
+  const body: ConnectionServerResponse = { type: 'server-response', rpcId, result: success }
+  if (attachments === undefined || attachments.length === 0) return Response.json(body)
+  const parts = new FormData()
+  const attachmentMetadata = attachments.map((attachment, index) => {
+    const part = `bytes-${index}`
+    // FileSystem bytes may have SharedArrayBuffer backing, which BlobPart excludes.
+    parts.set(part, new Blob([new Uint8Array(attachment.bytes)]))
+    return { path: [...attachment.path], codec: 'bytes' as const, part }
+  })
+  parts.set('metadata', JSON.stringify({ ...body, attachments: attachmentMetadata }))
+  return new Response(parts)
 }
 
 function assertChannel(channel: string): void {
   if (!CHANNEL_PATTERN.test(channel) || channel === '/api') {
     throw new Error(`connection: invalid or reserved RPC channel ${JSON.stringify(channel)}`)
   }
-}
-
-function rpcChannelBodyLimit(options: unknown): number | undefined {
-  if (options === undefined) return undefined
-  if (typeof options !== 'object' || options === null || Array.isArray(options)
-    || Object.keys(options).length !== 1 || !Object.hasOwn(options, 'maxBodyBytes')) {
-    throw new Error('connection: RPC channel body limit options must contain only maxBodyBytes')
-  }
-  const { maxBodyBytes } = options as { maxBodyBytes: unknown }
-  if (typeof maxBodyBytes !== 'number' || !Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) {
-    throw new Error('connection: RPC channel body limit maxBodyBytes must be a positive safe integer')
-  }
-  return maxBodyBytes
 }
 
 function assertFetchRoute(route: ConnectionFetchRoute): void {

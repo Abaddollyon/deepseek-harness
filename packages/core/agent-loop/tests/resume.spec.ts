@@ -5,10 +5,11 @@ import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionLogOffset, SessionSeq, Session, SessionId, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionLogOffset, SessionSeq, Session, SessionId, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineContentToolFixture, TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 
@@ -16,6 +17,12 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'tool-bash': { kind: 'tool-bash' } & ContextFormed
+  }
+}
 
 const dirs: string[] = []
 afterEach(async () => { for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }) })
@@ -195,24 +202,18 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     // The real close still runs (releasing write ownership); the injected
     // failure models a drain that reports a durability error at close.
     const realClose = stored.close.bind(stored)
-    const closeFailure = new Error('close exploded')
     vi.spyOn(stored, 'close').mockImplementation(async () => {
       await realClose()
-      throw closeFailure
+      throw new Error('close exploded')
     })
 
-    await expect(handle.dispose()).rejects.toBe(closeFailure)
-    // Teardown releases the registries and writer even when the final close rejects.
+    await expect(handle.dispose()).rejects.toThrow('close exploded')
+    // Teardown reached quiescence before the rejection: the agent and session
+    // are unregistered, and write ownership is released — the never-flushed
+    // session reports absence, not an ownership conflict.
     expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(ctx.sessions.get(sessionId)).toBeUndefined()
-    // Disposal's explicit flush preserves the empty session header.
-    const reopened = await ctx.sessionPersistence.open(sessionId, 'write')
-    try {
-      expect(reopened.id).toBe(sessionId)
-      expect((await reopened.read()).events).toEqual([])
-    } finally {
-      await reopened.close()
-    }
+    await expect(ctx.sessionPersistence.open(sessionId, 'write')).rejects.toThrow('not found')
     await ctx.fiber.dispose()
   })
 
@@ -595,12 +596,12 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     await ctx2.fiber.dispose()
   })
 
-  it('agent/session-start fires "startup" for createAgent and "resume" for resume()', async () => {
-    // Lifecycle 1: a fresh createAgent emits session-start with source 'startup'.
+  it('agent/created fires "startup" for createAgent and "resume" for resume()', async () => {
+    // Lifecycle 1: a fresh createAgent announces creation with source 'startup'.
     const adapter1 = new MockAdapter([textResponse('a')])
     const { ctx: ctx1, root } = await persistentHarness(adapter1)
     const sources1: string[] = []
-    ctx1.on('agent/session-start', ({ source }) => void sources1.push(source))
+    ctx1.on('agent/created', ({ source }) => void sources1.push(source))
     const h1 = await ctx1.agents.create({ sessionId: SessionId('start-sess') })
     expect(sources1).toEqual(['startup'])
     h1.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'q' }], source: { kind: 'user' } }))
@@ -608,10 +609,10 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     await h1.dispose()
     await ctx1.fiber.dispose()
 
-    // Lifecycle 2: resuming the persisted session emits session-start 'resume'.
+    // Lifecycle 2: resuming the persisted session announces creation 'resume'.
     const ctx2 = await mountPersistentHarness(root, new MockAdapter([textResponse('b')]))
     const sources2: string[] = []
-    ctx2.on('agent/session-start', ({ source }) => void sources2.push(source))
+    ctx2.on('agent/created', ({ source }) => void sources2.push(source))
     await ctx2.agents.resume({ resumeSessionId: SessionId('start-sess') })
     expect(sources2).toEqual(['resume'])
     await ctx2.fiber.dispose()
@@ -632,11 +633,8 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     })
     ctx.on('agent/created', ({ agent }) => {
       expect(agent.status).toBe('idle')
-      order.push('agent/created')
-    })
-    ctx.on('agent/session-start', ({ agent }) => {
       expect(() => { agent.cancel({ kind: 'user' }) }).not.toThrow()
-      order.push('agent/session-start')
+      order.push('agent/created')
     })
 
     const resuming = ctx.agents.resume({
@@ -677,7 +675,6 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
       'setup-listener:session/created',
       'agent/created',
       'setup-listener:agent/created',
-      'agent/session-start',
     ])
     await handle.dispose()
     await ctx.fiber.dispose()
@@ -728,7 +725,6 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     const published: string[] = []
     ctx.on('session/created', () => void published.push('session/created'))
     ctx.on('agent/created', () => void published.push('agent/created'))
-    ctx.on('agent/session-start', () => void published.push('agent/session-start'))
 
     await expect(ctx.agents.resume({
       resumeSessionId: sessionId,
@@ -833,7 +829,6 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     const published: string[] = []
     ctx.on('session/created', () => void published.push('session/created'))
     ctx.on('agent/created', () => void published.push('agent/created'))
-    ctx.on('agent/session-start', () => void published.push('agent/session-start'))
 
     let resuming!: ReturnType<typeof ctx.agents.resume>
     const owner = await ctx.plugin(Object.assign((inner: Context) => {
@@ -852,7 +847,7 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     const retry = await promptly(ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: 'mock', model: 'mock' } }))
     await rejection
     expect(opens).toBe(2)
-    expect(published).toEqual(['session/created', 'agent/created', 'agent/session-start'])
+    expect(published).toEqual(['session/created', 'agent/created'])
 
     // Settlement of the abandoned backend open cannot resume the old
     // transaction: the late handle is closed, and no second publication lands
@@ -862,7 +857,7 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     await expect.poll(() => abandoned.close.mock.calls.length).toBe(1)
     expect(ctx.agents.get(sessionId)).toBe(retry.agent)
     expect(ctx.sessions.get(sessionId)).toBe(retry.agent.session)
-    expect(published).toEqual(['session/created', 'agent/created', 'agent/session-start'])
+    expect(published).toEqual(['session/created', 'agent/created'])
 
     await retry.dispose()
     await ctx.fiber.dispose()
@@ -955,11 +950,10 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     const a1 = (await ctx1.agents.create({ sessionId: SessionId('inject-sess'), meta: { cwd: '/w' }, agentOptions: { provider: 'mock', model: 'mock' } })).agent
     a1.followup(createUserMessage({ content: [{ type: 'text', text: 'q' }], source: { kind: 'user' } }))
     await waitForIdle(ctx1, a1)
-    a1.inject(createUserMessage({ content: [{ type: 'text', text: 'background job 42 finished' }], source: { kind: 'plugin', plugin: 'tool-bash' } }))
+    a1.inject(createUserMessage({ content: [{ type: 'text', text: 'background job 42 finished' }], source: { kind: 'tool-bash' } }))
     await a1.whenIdle()
     await ctx1.sessions.flush(a1.session)
-    // Simulate a wedged first lifecycle: a graceful dispose would durably
-    // discard the pending inject, and the still-open kernel write lock would
+    // Simulate a wedged first lifecycle: the still-open kernel write lock would
     // otherwise exclude the second lifecycle. Removing the lock file orphans
     // the held inode so the resumer locks a fresh one (the documented
     // forfeit-by-unlink escape hatch).
@@ -979,6 +973,100 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     expect(flat).toContain('background job 42 finished')
     await ctx2.fiber.dispose()
     await ctx1.fiber.dispose()
+  })
+
+  it.skipIf(process.platform === 'win32')('disposal keeps pending input and its unstarted claimed batch for a resumed lifecycle', async () => {
+    const { ctx: first, root } = await persistentHarness(new MockAdapter([]))
+    const sessionId = SessionId('dispose-keeps-inbox')
+    const handle = await first.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    const preStep = Promise.withResolvers<undefined>()
+    first.on('agent/pre-step', async ({ signal }, next) => {
+      preStep.resolve(undefined)
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      }
+      return next()
+    })
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'claimed' }], source: { kind: 'user' } }))
+    await preStep.promise
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'queued' }], source: { kind: 'user' } }))
+    await handle.dispose()
+    await first.fiber.dispose()
+
+    const second = await mountPersistentHarness(root, new MockAdapter([]))
+    const resumed = await second.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    expect(resumed.agent.inbox.nextTurn.map(message => message.content)).toEqual([
+      [{ type: 'text', text: 'claimed' }],
+      [{ type: 'text', text: 'queued' }],
+    ])
+    expect(resumed.agent.session.snapshotEvents().some(event =>
+      event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
+    await second.fiber.dispose()
+  })
+
+  it.each(['resume', 'fork'] as const)('%s continues persisted history after a live scheduler failure', async (mode) => {
+    const firstAdapter = new MockAdapter([[
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('started'), name: 'probe', arguments: '{}' } },
+      { type: 'block-start', index: 1, blockType: 'tool-call' },
+      { type: 'block-end', index: 1, block: { type: 'tool-call', id: ToolCallId('pending'), name: 'probe', arguments: '{}' } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]])
+    const { ctx: first, root } = await persistentHarness(firstAdapter)
+    let next: Context | undefined
+    try {
+      first.tools.register(defineContentToolFixture({
+        name: 'probe', description: 'probe', parameters: {},
+        async execute() { return [{ type: 'text', text: 'unexpected execution' }] },
+      }))
+      first.tools[TOOL_RUNTIME_SCHEDULER].prepare = () => { throw new Error('scheduler prepare failed') }
+      const sessionId = SessionId('failed-tool-history')
+      const initial = await first.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+      const failed = waitForIdle(first, initial.agent)
+      initial.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'try tools' }], source: { kind: 'user' } }))
+      await failed
+      await initial.dispose()
+      await first.fiber.dispose()
+
+      const nextAdapter = new MockAdapter([textResponse('continued after failure')])
+      next = await mountPersistentHarness(root, nextAdapter)
+      const stored = await readStoredEvents(next, sessionId)
+      expect(stored.filter(event => event.type === 'tool/result').map(event => [
+        event.data.message.toolCallId, event.data.error?.code,
+      ])).toEqual([[ToolCallId('started'), TOOL_OUTCOME_UNKNOWN], [ToolCallId('pending'), TOOL_NOT_STARTED]])
+      expect(stored.at(-1)).toMatchObject({
+        type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'scheduler prepare failed' } } },
+      })
+
+      const continued = mode === 'resume'
+        ? await next.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+        : await next.agents.create({
+          sessionId: SessionId('failed-tool-history-fork'), seed: stored,
+          meta: { parentSession: sessionId, isSeeded: true },
+          inheritedEventCount: SessionLogOffset(stored.length),
+          agentOptions: { provider: 'mock', model: 'mock' },
+        })
+      const done = waitForIdle(next, continued.agent)
+      continued.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }))
+      await done
+
+      expect(nextAdapter.requests[0]?.messages.flatMap((message): string[] => {
+        if (message.role === 'tool') return [`result:${message.toolCallId}`]
+        return message.content.flatMap((block): string[] => {
+          if (block.type === 'tool-call') return [`call:${block.id}`]
+          if (message.role === 'user' && block.type === 'text') return [`user:${block.text}`]
+          return []
+        })
+      })).toEqual(['user:try tools', 'call:started', 'call:pending', 'result:started', 'result:pending', 'user:continue'])
+      await continued.dispose()
+      const reopened = await readStoredEvents(next, continued.agent.session.id)
+      expect(reopened.slice(0, stored.length)).toEqual(stored)
+      expect(reopened.filter(event => event.type === 'tool/result')).toHaveLength(2)
+      expect(reopened.at(-1)).toMatchObject({ type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    } finally {
+      await next?.fiber.dispose()
+      await first.fiber.dispose()
+    }
   })
 
   it('resume reloads a persisted session: history + turn numbering continue, no duplicate seqs', async () => {

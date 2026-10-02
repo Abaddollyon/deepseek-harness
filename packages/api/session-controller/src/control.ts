@@ -1,26 +1,23 @@
-/** Live Session queue, jobs, and projection state with reconnect baselines. */
+/** Live Session projection state with reconnect baselines. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, InboxState } from '@deepseek-ai/dsh-agent'
-import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+import { Deque } from '@deepseek-ai/dsh-deque'
 import type {
-  Session, SessionId, UserMessage,
+  Session, SessionId,
 } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
-  SessionJob,
   SessionProjectionBaseline,
   SessionProjectionValues,
-  SessionQueuedItem,
 } from './types.ts'
 
 /** Owns the Host-wide Session control stream. */
 export class SessionControlController {
   private readonly streams = new Set<ControlQueue>()
 
-  /** @param ctx - Host context carrying live Agent, projection, and jobs services. */
+  /** @param ctx - Host context carrying live Agent and projection services. */
   constructor(private readonly ctx: Context) {
     ctx.sessionProjections.onChanged((session, key, value, seq) => {
       this.broadcast({
@@ -30,21 +27,6 @@ export class SessionControlController {
         value: value as JsonValue,
         seq,
       })
-      if (key !== 'inbox') return
-      const agent = this.ctx.agents.get(session.id)
-      if (agent?.session !== session) return
-      this.broadcast({
-        type: 'queue',
-        sessionId: session.id,
-        items: queueItemsFromInbox(value as InboxState),
-      })
-    })
-    ctx.inject(['jobs'], (jobsCtx) => {
-      jobsCtx.jobs.onJobsChanged((owner) => { this.onJobsChanged(owner) })
-    })
-    ctx.on('session/created', (session) => {
-      const jobs = this.jobsFor(this.ctx.agents.get(session.id))
-      if (jobs.length > 0) this.broadcast({ type: 'jobs', sessionId: session.id, jobs })
     })
     ctx.effect(() => () => {
       for (const stream of this.streams) stream.end()
@@ -72,16 +54,7 @@ export class SessionControlController {
 
   private baseline(): SessionControlBaseline {
     const sessions = this.ctx.sessions.list()
-    const queues = Object.create(null) as Record<SessionId, readonly SessionQueuedItem[]>
-    const jobs = Object.create(null) as Record<SessionId, readonly SessionJob[]>
-    for (const session of sessions) {
-      const agent = this.ctx.agents.get(session.id)
-      queues[session.id] = agent?.session === session ? queueItems(agent) : []
-      jobs[session.id] = this.jobsFor(agent)
-    }
     return {
-      queues,
-      jobs,
       projections: this.projectionBaseline(sessions),
     }
   }
@@ -89,38 +62,16 @@ export class SessionControlController {
   private projectionBaseline(
     sessions: readonly Session[],
   ): Readonly<Record<SessionId, SessionProjectionBaseline>> {
-    const registry = this.ctx.get('sessionProjections')
     const blocks = Object.create(null) as Record<SessionId, SessionProjectionBaseline>
     for (const session of sessions) {
-      const snapshot = registry?.snapshot(session)
-      blocks[session.id] = snapshot === undefined
-        ? { asOfSeq: session.seq - 1, values: {} }
-        : {
-          asOfSeq: snapshot.asOfSeq,
-          // Every projection definition validates its value before snapshot publication.
-          values: snapshot.values as SessionProjectionValues,
-        }
+      const snapshot = this.ctx.sessionProjections.snapshot(session)
+      blocks[session.id] = {
+        asOfSeq: snapshot.asOfSeq,
+        // Every projection definition validates its value before snapshot publication.
+        values: snapshot.values as SessionProjectionValues,
+      }
     }
     return blocks
-  }
-
-  private onJobsChanged(owner: Agent | undefined): void {
-    if (owner !== undefined) {
-      this.broadcast({ type: 'jobs', sessionId: owner.id, jobs: this.jobsFor(owner) })
-      return
-    }
-    for (const session of this.ctx.sessions.list()) {
-      this.broadcast({
-        type: 'jobs',
-        sessionId: session.id,
-        jobs: this.jobsFor(this.ctx.agents.get(session.id)),
-      })
-    }
-  }
-
-  private jobsFor(agent: Agent | undefined): SessionJob[] {
-    const jobs = this.ctx.get('jobs')
-    return jobs === undefined ? [] : jobs.list(agent).map(jobView)
   }
 
   private broadcast(frame: SessionControlFrame): void {
@@ -128,183 +79,43 @@ export class SessionControlController {
   }
 }
 
-/**
- * The (Session, projection key) identity a newer queued frame supersedes.
- * Kept as a tuple and stored in nested maps, so any byte — NUL included — is
- * safe inside either half and two distinct pairs can never collide.
- */
-interface SupersedingKey {
-  readonly sessionId: SessionId
-  readonly key: string
-}
-
-/**
- * Per-stream async queue: the controller's broadcasts push, the control
- * generation's AsyncIterable pulls; abort/return cleans up.
- *
- * A push may carry a superseding identity. While an undelivered node with that
- * identity is still queued, a newer frame unlinks it in O(1) — the superseded
- * frame is never delivered and its memory is released immediately, so a
- * stalled consumer's queue stays bounded by one node per identity plus the
- * unkeyed frames, and no discarded payload remains in the queue. Unlinking touches only
- * the superseded node, so every other frame keeps its pushed relative order.
- * This is only sound for a frame whose payload is the COMPLETE current state
- * of its identity, so that the newer frame alone reconstructs everything the
- * dropped one carried; {@link controlSupersedingKey} owns that judgement per
- * frame kind.
- */
-export class ControlQueue {
-  private readonly buffer = new Set<QueueEntry>()
-  private readonly supersedable = new Map<SessionId, Map<string, QueueEntry>>()
+class ControlQueue {
+  private readonly buffer = new Deque<SessionControlFrame>()
   private wake: (() => void) | undefined
   private done = false
 
-  /** Frames still queued for delivery; superseded entries release their payloads immediately. */
-  get size(): number { return this.buffer.size }
-
-  /** Queue one frame, superseding an undelivered projection for the same identity.
-   * @param frame - frame to queue.
-   */
   push(frame: SessionControlFrame): void {
     if (this.done) return
-    const key = controlSupersedingKey(frame)
-    const entry: QueueEntry = { frame, key }
-    if (key !== undefined) {
-      const byKey = this.supersedable.get(key.sessionId) ?? new Map<string, QueueEntry>()
-      const prior = byKey.get(key.key)
-      if (prior !== undefined) this.buffer.delete(prior)
-      byKey.set(key.key, entry)
-      this.supersedable.set(key.sessionId, byKey)
-    }
-    this.buffer.add(entry)
+    this.buffer.pushBack(frame)
     const wake = this.wake
     this.wake = undefined
     wake?.()
   }
 
-  /** Stop accepting frames; already queued active frames still flush. */
   end(): void {
     if (this.done) return
     this.done = true
-    this.supersedable.clear()
     const wake = this.wake
     this.wake = undefined
     wake?.()
   }
 
-  /** Pull queued frames until the queue ends; abort drops the remaining buffer.
-   * @param signal - remote stream cancellation.
-   * @returns delivered frames in queue order.
-   */
   async *iterate(signal: AbortSignal): AsyncIterable<SessionControlFrame> {
     const onAbort = (): void => { this.end() }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       while (!this.done && !signal.aborted) {
-        const frame = this.take()
-        if (frame !== undefined) { yield frame; continue }
+        const frame = this.buffer.popFront()
+        if (frame !== undefined) {
+          yield frame
+          continue
+        }
         await new Promise<void>((resolve) => { this.wake = resolve })
       }
-      while (!signal.aborted) {
-        const frame = this.take()
-        if (frame === undefined) return
-        yield frame
-      }
+      while (this.buffer.size > 0 && !signal.aborted) yield this.buffer.popFront() as SessionControlFrame
     } finally {
       signal.removeEventListener('abort', onAbort)
       this.end()
-      this.buffer.clear()
     }
-  }
-
-  private take(): SessionControlFrame | undefined {
-    const entry = this.buffer.values().next().value
-    if (entry !== undefined) {
-      this.buffer.delete(entry)
-      if (entry.key !== undefined) {
-        const byKey = this.supersedable.get(entry.key.sessionId)
-        if (byKey?.get(entry.key.key) === entry) {
-          byKey.delete(entry.key.key)
-          if (byKey.size === 0) this.supersedable.delete(entry.key.sessionId)
-        }
-      }
-      return entry.frame
-    }
-    return undefined
-  }
-}
-
-interface QueueEntry {
-  readonly frame: SessionControlFrame
-  readonly key: SupersedingKey | undefined
-}
-
-/**
- * The superseding identity of one control frame, or undefined when the frame
- * must be delivered no matter what follows it.
- *
- * Sole owner of the coalescing safety judgement, and deliberately narrow.
- *
- * `projection` qualifies on both counts a drop requires. It carries a unit's
- * COMPLETE finished value plus the watermark `seq` it was computed at, and
- * the client store applies it as `seq <= current ? ignore : replace`
- * (ProjectionValueStore.apply, src/client/sessions/projection-store.ts) — so a
- * frame that a newer one for the same `(session, key)` overtook inside this
- * queue is precisely a frame the client would itself have discarded on
- * arrival. It is also the only kind with the volume to matter: per-event units
- * such as token-meter's out-produce every other control traffic.
- *
- * `queue` and `jobs` are whole-snapshot last-wins frames that would be sound
- * to coalesce, and are still excluded: both fire on rare user or registry
- * actions rather than per event, so there were no frames to save, while
- * collapsing a job's `running -> stopping -> killed` push run would cost a
- * visible transition for nothing. `baseline` never passes through the queue:
- * each control generation yields it directly before any queued frame.
- * @param frame - the queued control frame.
- * @returns the superseding identity, or undefined to always deliver.
- */
-function controlSupersedingKey(frame: SessionControlFrame): SupersedingKey | undefined {
-  return frame.type === 'projection' ? { sessionId: frame.sessionId, key: frame.key } : undefined
-}
-
-function queueItems(agent: Agent): SessionQueuedItem[] {
-  return queueItemsFromInbox({
-    'next-turn': agent.inbox.nextTurn,
-    'next-step': agent.inbox.nextStep,
-  })
-}
-
-function queueItemsFromInbox(inbox: InboxState): SessionQueuedItem[] {
-  return [
-    ...inbox['next-turn'].map(message => ({
-      id: message.id,
-      placement: 'queued' as const,
-      ...promptRpcId(message),
-      message: { id: message.id, content: message.content as unknown as JsonValue[] },
-    })),
-    ...inbox['next-step'].map(message => ({
-      id: message.id,
-      placement: message.source.kind === 'user' ? 'steering' as const : 'context' as const,
-      ...promptRpcId(message),
-      message: { id: message.id, content: message.content as unknown as JsonValue[] },
-    })),
-  ]
-}
-
-/** Prompt-RPC identity carried by a browser-submitted message's user source. */
-function promptRpcId(message: UserMessage): Pick<SessionQueuedItem, 'rpcId'> {
-  const source = message.source
-  return source.kind === 'user' && 'rpcId' in source ? { rpcId: source.rpcId } : {}
-}
-
-function jobView(job: JobSnapshot): SessionJob {
-  return {
-    id: job.id,
-    kind: job.kind,
-    label: job.label,
-    status: job.status,
-    ...(job.detail === undefined ? {} : { detail: job.detail }),
-    startedAt: job.startedAt,
-    ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
   }
 }

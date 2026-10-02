@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve } from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import * as yaml from 'js-yaml'
 import {
   client as createAcpClientApp,
@@ -358,7 +358,7 @@ function profileArgs(
   const materializedRoot = join(cwd, '.dsh-profile-patches')
   mkdirSync(materializedRoot, { recursive: true })
   const materializedDir = mkdtempSync(join(materializedRoot, 'launch-'))
-  const materialized = patches.map((file, index) => materializeProfilePatch(file, cwd, materializedDir, index))
+  const materialized = patches.map((file, index) => materializeProfilePatch(file, cwd, profile, materializedDir, index))
   return ['--profile', profile, ...materialized.flatMap(file => ['--patch', file])]
 }
 
@@ -375,38 +375,25 @@ function barePackageName(specifier: string): string | undefined {
   return first.startsWith('@') ? `${first}/${second}` : first
 }
 
-/** Prefer the authored patch's installation, then declared harness dependencies. */
+/** Find a bare package's directory from the authored patch's module-resolution anchor. */
 function packageDirFromPatch(source: string, packageName: string): string | undefined {
-  const harnessManifest = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
-    dependencies?: Record<string, unknown>
-    devDependencies?: Record<string, unknown>
-    peerDependencies?: Record<string, unknown>
-  }
-  const declared = new Set([
-    ...Object.keys(harnessManifest.dependencies ?? {}),
-    ...Object.keys(harnessManifest.devDependencies ?? {}),
-    ...Object.keys(harnessManifest.peerDependencies ?? {}),
-  ])
-  const anchors = declared.has(packageName) ? [pathToFileURL(source), import.meta.url] : [pathToFileURL(source)]
-  for (const anchor of anchors) {
-    for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
-      const candidate = join(searchPath, packageName)
-      if (existsSync(join(candidate, 'package.json'))) return realpathSync(candidate)
-    }
+  for (const searchPath of createRequire(pathToFileURL(source)).resolve.paths(packageName) ?? []) {
+    const candidate = join(searchPath, packageName)
+    if (existsSync(join(candidate, 'package.json'))) return realpathSync(candidate)
   }
   return undefined
 }
 
 /**
  * Install an authored patch's resolvable bare package into the temporary
- * profile fallback. This mirrors `dsh plugin` while retaining the bare entry
- * name and package provenance used by request metadata.
+ * profile. This mirrors `dsh plugin` while retaining the bare entry
+ * name and package identity used by request metadata.
  */
-function linkProfilePackage(source: string, cwd: string, packageName: string): void {
+function linkProfilePackage(source: string, cwd: string, profile: string, packageName: string): void {
   const packageDir = packageDirFromPatch(source, packageName)
   // The package may instead belong to the dsh installation; profile boot heals those links.
   if (packageDir === undefined) return
-  const link = join(cwd, '.dsh', 'profiles', 'node_modules', packageName)
+  const link = join(cwd, '.dsh', 'profiles', profile, 'node_modules', packageName)
   mkdirSync(dirname(link), { recursive: true })
   if (existsSync(link)) {
     if (realpathSync(link) !== packageDir) {
@@ -420,21 +407,23 @@ function linkProfilePackage(source: string, cwd: string, packageName: string): v
 
 /**
  * Copy one authored patch into the launch cwd with relative plugin names made absolute.
- * Bare packages link from the patch's installation first, then only the harness's declared dependencies.
  * @param source - authored profile patch path.
- * @param cwd - isolated process cwd whose profile fallback receives package links.
+ * @param cwd - isolated process cwd whose profile receives package links.
+ * @param profile - profile whose local package lookup receives the test links.
  * @param targetDir - existing directory that owns the materialized patch.
  * @param index - stable patch ordinal used in the output filename.
  * @returns absolute materialized patch path.
  */
-export function materializeProfilePatch(source: string, cwd: string, targetDir: string, index: number): string {
+export function materializeProfilePatch(
+  source: string, cwd: string, profile: string, targetDir: string, index: number,
+): string {
   const parsed = yaml.load(readFileSync(source, 'utf8'), { schema: entryListSchema })
   if (!Array.isArray(parsed)) throw new Error(`snapshot profile patch must be a top-level array: ${source}`)
   const patches = parsed as PatchOptions[]
   const baseDir = dirname(source)
   const resolveName = (value: string): string => {
     const packageName = barePackageName(value)
-    if (packageName !== undefined) linkProfilePackage(source, cwd, packageName)
+    if (packageName !== undefined) linkProfilePackage(source, cwd, profile, packageName)
     return value.startsWith('./') || value.startsWith('../')
       ? pathToFileURL(resolve(baseDir, value)).href
       : value

@@ -1,10 +1,9 @@
 /**
  * Keyless-by-default ACP snapshot suite factory. Each scenario drives the real
- * subprocess and compares normalized stdout. Comparable session fixtures are
- * replay input and expected output unless a separate complete writer oracle
- * preserves the current-format replay generation. Record mode refreshes
- * reproducible model scenarios from the live API, while refresh mode replays
- * committed scripts and rewrites only the declared output files without a key.
+ * subprocess and compares normalized stdout; comparable session fixtures are
+ * both replay input and expected output. Record mode refreshes reproducible
+ * model scenarios from the live API, while refresh mode replays committed
+ * scripts and rewrites derived artifacts without a key.
  * Replay scenarios run concurrently because each subprocess owns unique temp
  * cwd and persistence roots and reads only committed fixtures. Record and
  * refresh stay serial while writing.
@@ -30,18 +29,14 @@ import {
   parseSnapshotManifest,
   writesCurrentSessionFixtures,
   type SnapshotSessionFormatManifest,
-  type SnapshotManifest,
 } from './manifest.ts'
 import { redactSessionSnapshotIds } from './identity.ts'
 import { captureExpectedWorkspaceSnapshot } from './workspace.ts'
 import {
   assertSessionFixtureVersion,
-  assertSnapshotWriterOracles,
-  parseSessionFixtureName,
   sessionFixtureName,
   sessionFixtureNames,
   sessionHeaderVersion,
-  writerSnapshotName,
 } from './session-files.ts'
 import {
   type CwdPathMode,
@@ -108,8 +103,6 @@ export interface Scenario {
   recorded: boolean
   /** Historical generation retained as a read-only migration fixture. */
   sessionFormat?: SnapshotSessionFormatManifest
-  /** Keep current-format replay generations immutable and compare dedicated full writer outputs. */
-  writerOracle?: 'separate'
   /**
    * Whether replay is driven by a hand-written `replay.override.json` sidecar
    * (a `ReplayOverrideDoc` that replaces or patches the script derived from
@@ -531,7 +524,7 @@ export function parseToolSchemasSnapshot(snapshot: string): ToolSchemasSnapshot 
 /**
  * Restore one sidecar schema set into a tokenized pinned header.
  *
- * @param header The parsed request header carrying `tools: "{{tools}}"`.
+ * @param header The parsed request header carrying a tools token or ordered tool names matching the sidecar.
  * @param schemas The complete schemas for this full header snapshot.
  * @returns A copy of the header with its complete schemas restored.
  */
@@ -539,8 +532,15 @@ export function restorePinnedToolSchemas(header: unknown, schemas: readonly unkn
   if (header === null || typeof header !== 'object' || Array.isArray(header)) {
     throw new Error('acp-snapshot: pinned request header must be an object')
   }
-  if ((header as { tools?: unknown }).tools !== TOOLS_TOKEN) {
-    throw new Error(`acp-snapshot: pinned request header tools must equal ${TOOLS_TOKEN}`)
+  const tools = (header as { tools?: unknown }).tools
+  const namesMatch = Array.isArray(tools) && tools.length === schemas.length
+    && tools.every((name, index) => {
+      const schema = schemas[index]
+      return typeof name === 'string' && schema !== null && typeof schema === 'object'
+        && 'name' in schema && schema.name === name
+    })
+  if (tools !== TOOLS_TOKEN && !namesMatch) {
+    throw new Error(`acp-snapshot: pinned request header tools must equal ${TOOLS_TOKEN} or the ordered sidecar tool names`)
   }
   return { ...header, tools: schemas }
 }
@@ -653,6 +653,7 @@ function surfaceEventMessage(record: Record<string, unknown>): Record<string, un
       message = data
       break
     case 'system/message':
+    case 'developer/message':
     case 'assistant/message':
     case 'tool/result':
       message = data.message
@@ -769,7 +770,7 @@ export function stabilizeFixtureMessageIds(logs: readonly string[], fixtures: re
 /** One packed row's member times, or `undefined` for an ordinary record. */
 function packedTimes(record: Record<string, unknown>): number[] | undefined {
   if (!PACKED_CHUNK_ROW_TYPES.has(record.type as string)) return undefined
-  const row = record as unknown as { time0?: number; data: { dt: number[] } }
+  const row = record as { time0?: number; data: { dt: number[] } }
   const times = [row.time0 ?? 0]
   for (const gap of row.data.dt) times.push((times[times.length - 1] as number) + gap)
   return times
@@ -844,6 +845,32 @@ export function refreshFixtureReplacements(logs: HarvestedLog[], fixtures: strin
   return replacements
 }
 
+/**
+ * Check raw parent/child clocks before normalization, or preserve their equality during refresh.
+ * @param logs - one scenario's parent and child logs with shared Session ids.
+ * @param policy - validate live output, or align refreshed catalogs to the retained child headers.
+ * @returns logs with only conflicting catalog creation times replaced under preserve-headers.
+ */
+export function reconcileCatalogCreationTimes(logs: readonly string[], policy: 'validate' | 'preserve-headers'): string[] {
+  const headers = new Map(logs.map((log) => {
+    const header = parseJsonlRecords(log)[0]
+    return [header?.['id'], header] as const
+  }))
+  return logs.map(log => log.split('\n').map((line) => {
+    if (line.length === 0) return line
+    const record = JSON.parse(line) as Record<string, unknown>
+    if (record.type !== 'subagent/catalog' || !isRecord(record.data)) return line
+    const child = headers.get(record.data.childId)
+    // Partial harvested corpora need not retain every cataloged child log.
+    if (child === undefined || record.data.childCreatedAt === child.createdAt) return line
+    if (policy === 'validate') {
+      throw new Error(`catalog child ${String(record.data.childId)} creation time ${String(record.data.childCreatedAt)} disagrees with child header ${String(child.createdAt)}`)
+    }
+    record.data.childCreatedAt = child.createdAt
+    return JSON.stringify(record)
+  }).join('\n'))
+}
+
 function preserveFixtureVolatiles(record: Record<string, unknown>, existing: Record<string, unknown> | undefined): void {
   if (existing === undefined || existing.type !== record.type) return
   if (record.type === 'session') {
@@ -871,7 +898,7 @@ function preservePackedMemberTimes(
   existingMembers: Record<string, unknown>[],
 ): void {
   if (!PACKED_CHUNK_ROW_TYPES.has(record.type as string)) return
-  const row = record as unknown as { time0: number; data: { dt: number[] } }
+  const row = record as { time0: number; data: { dt: number[] } }
   const firstTime = existingMembers[0]?.time
   if (!Number.isSafeInteger(firstTime)) return
   row.time0 = firstTime as number
@@ -1155,28 +1182,6 @@ export function stabilizeRefreshLog(
   return records.map(record => JSON.stringify(record)).join('\n') + '\n'
 }
 
-/** Validate owned replay generations and exact dedicated writer inventory. */
-async function validateWriterOracles(
-  dir: string,
-  scenarioName: string,
-  manifest: SnapshotManifest,
-  fixtureFiles: readonly string[],
-): Promise<void> {
-  const names = (await readdir(dir)).filter(file => file.startsWith('writer') && file.endsWith('.jsonl'))
-  const oracles = await Promise.all(names.map(async name => ({
-    name,
-    content: await readFile(join(dir, name), 'utf8'),
-  })))
-  assertSnapshotWriterOracles(scenarioName, manifest, fixtureFiles.length, oracles)
-  if (manifest.writerOracle === 'separate') {
-    for (const file of fixtureFiles) {
-      expect(assertSessionFixtureVersion(file, await readFile(join(dir, file), 'utf8')),
-        `${scenarioName}/${file}: separate writer inputs must use the current format`)
-        .toBe(SESSION_FORMAT_VERSION)
-    }
-  }
-}
-
 /**
  * Check every selected role for tool/path defects and current generations for canonical prompt/identity storage.
  * Historical roles retain their released bytes, including roles retired by the current writer.
@@ -1185,16 +1190,11 @@ async function validateWriterOracles(
  * @returns Resolves when all selected fixtures satisfy the storage checks.
  */
 export async function assertSessionFixtureStorage(dir: string, scenarioName: string): Promise<void> {
-  const files = [
-    ...await sessionFixtures(dir),
-    ...(await readdir(dir)).filter(file => file.startsWith('writer') && file.endsWith('.jsonl')).sort(),
-  ]
+  const files = await sessionFixtures(dir)
   const currentFixtures: string[] = []
   for (const file of files) {
     const fixture = await readFile(join(dir, file), 'utf8')
-    const version = file.startsWith('writer')
-      ? sessionHeaderVersion(fixture, file)
-      : assertSessionFixtureVersion(file, fixture)
+    const version = assertSessionFixtureVersion(file, fixture)
     expect(unknownToolCallIds(fixture), `${scenarioName}/${file} contains UNKNOWN_TOOL`)
       .toEqual([])
     expect(fixture, `${scenarioName}/${file} carries a non-canonical macOS cwd token`)
@@ -1318,19 +1318,13 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         // files drive the model scripts. Record mode creates that inventory
         // from the harvested live logs, so it must also work for a brand-new
         // scenario with no Session fixture yet.
-        const separateWriter = manifest.writerOracle === 'separate'
-        let fixtureFiles = RECORDING && !separateWriter ? [] : await sessionFixtures(dir)
-        if (separateWriter && mode === 'replay') await validateWriterOracles(dir, scenario.name, manifest, fixtureFiles)
-        const immutableFiles = separateWriter
-          ? (await readdir(dir)).filter(file => parseSessionFixtureName(file) !== undefined).sort()
-          : []
-        const immutableInputs = await Promise.all(immutableFiles.map(file => readFile(join(dir, file), 'utf8')))
+        let fixtureFiles = RECORDING ? [] : await sessionFixtures(dir)
         const childFixtureFiles = fixtureFiles.slice(1)
         const primaryFixtureFile = fixtureFiles[0] ?? sessionFixtureName(0, 0)
         // A retained historical generation is an immutable replay input: record
         // and refresh never write or compare a current-writer session for it.
-        const comparesLog = separateWriter || (scenario.comparesLog ?? (scenario.hasModelTurn
-          && manifest.sessionFormat === undefined))
+        const comparesLog = scenario.comparesLog ?? (scenario.hasModelTurn
+          && manifest.sessionFormat === undefined)
         const result = await runScenario(input, {
           agent,
           mode: childMode,
@@ -1348,6 +1342,7 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           ...scenario.configPath !== undefined ? { configPath: scenario.configPath } : {},
         })
 
+        reconcileCatalogCreationTimes(result.sessionLogs.map(log => log.content), 'validate')
         for (const log of result.sessionLogs) {
           expect(unknownToolCallIds(log.content), `session ${log.id}: snapshot scenarios must not accept UNKNOWN_TOOL`)
             .toEqual([])
@@ -1373,19 +1368,20 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         const portableFixture = scenario.workspaceParent === undefined
           ? tokenizeSessionFixtureCwd
           : (log: string): string => log
-        const writesSessionOutputs = (writesCurrentSessionFixtures(manifest, mode) || separateWriter)
+        const writesSessionFixtures = writesCurrentSessionFixtures(manifest, mode)
           && ((RECORDING && scenario.recorded && scenario.hasModelTurn) || (REFRESHING && comparesLog))
-        if (writesSessionOutputs) {
+        if (writesSessionFixtures) {
           expect(result.sessionLogs.length, `${mode} produced no session log to harvest`).toBeGreaterThan(0)
-          if (REFRESHING || separateWriter) {
+          if (REFRESHING) {
             expect(result.sessionLogs.length, `expected ${fixtureFiles.length} session logs (parent + children)`)
               .toBe(fixtureFiles.length)
           }
-          const outputFixtureFiles = result.sessionLogs.map((log, index) => separateWriter
-            ? writerSnapshotName(index)
-            : sessionFixtureName(index, sessionHeaderVersion(log.content, `harvested Session ${index}`)))
-          const existingFixtures = await Promise.all(outputFixtureFiles.map(async (outputFile, index) => {
-            const file = separateWriter && existsSync(join(dir, outputFile)) ? outputFile : fixtureFiles[index]
+          const outputFixtureFiles = result.sessionLogs.map((log, index) => sessionFixtureName(
+            index,
+            sessionHeaderVersion(log.content, `harvested Session ${index}`),
+          ))
+          const existingFixtures = await Promise.all(outputFixtureFiles.map(async (_file, index) => {
+            const file = fixtureFiles[index]
             if (file === undefined) return ''
             return readFile(join(dir, file), 'utf8')
           }))
@@ -1400,10 +1396,12 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
               ctx,
             ))))
             : result.sessionLogs.map(log => scrubSessionSnapshot(portableFixture(log.content)))
-          const outputFixtures = redactSessionSnapshotIds(stabilizeFixtureMessageIds(freshFixtures, existingFixtures))
+          const outputFixtures = redactSessionSnapshotIds(stabilizeFixtureMessageIds(
+            reconcileCatalogCreationTimes(freshFixtures, 'preserve-headers'), existingFixtures,
+          ))
           await Promise.all(outputFixtures.map((fixture, index) =>
-            writeFile(join(dir, outputFixtureFiles[index] as string), fixture, { flag: separateWriter ? 'w' : 'wx' })))
-          if (!separateWriter) fixtureFiles = outputFixtureFiles
+            writeFile(join(dir, outputFixtureFiles[index] as string), fixture)))
+          fixtureFiles = outputFixtureFiles
           if (scenario.pinsHeader === true) {
             const primary = result.sessionLogs[0] as HarvestedLog
             const prompts = normalizedSystemPrompts(primary.content, ctx)
@@ -1458,14 +1456,6 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           }
         }
 
-        if (separateWriter) {
-          await validateWriterOracles(dir, scenario.name, manifest, fixtureFiles)
-          expect((await readdir(dir)).filter(file => parseSessionFixtureName(file) !== undefined).sort(),
-            `${scenario.name}: replay generation inventory is immutable`).toEqual(immutableFiles)
-          expect(await Promise.all(immutableFiles.map(file => readFile(join(dir, file), 'utf8'))),
-            `${scenario.name}: replay input generations are immutable`).toEqual(immutableInputs)
-        }
-
         for (const expected of stdoutExpectedVariants(scenario)) {
           const stdout = normalizeStdout(result.rawStdout, ctx, { cwdPathMode: expected.cwdPathMode })
           if (REFRESHING) {
@@ -1480,17 +1470,16 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           // The harvested logs (primary-first) must match their committed fixtures 1:1.
           expect(result.sessionLogs.length, 'this scenario must persist one log per session fixture').toBe(fixtureFiles.length)
           const harvested = result.sessionLogs.map(log => log.content)
-          const expectedFiles = separateWriter ? fixtureFiles.map((_, index) => writerSnapshotName(index)) : fixtureFiles
-          const fixtures = await Promise.all(expectedFiles.map(file => readFile(join(dir, file), 'utf8')))
+          const fixtures = await Promise.all(fixtureFiles.map(file => readFile(join(dir, file), 'utf8')))
           const fixtureContexts = fixtures.map(fixtureContext)
           const fixtureCtx: NormalizeContext = {
             sessionIds: fixtureContexts.flatMap(context => context.sessionIds),
             cwd: (fixtureContexts[0] as NormalizeContext).cwd,
           }
-          const actualSnapshots = normalizeSessionSnapshots(harvested, ctx)
-          const expectedSnapshots = normalizeSessionSnapshots(fixtures, fixtureCtx)
+          const actualSnapshots = normalizeSessionSnapshots(harvested, ctx, { nativeWriterOutput: true })
+          const expectedSnapshots = normalizeSessionSnapshots(fixtures, fixtureCtx, { nativeWriterOutput: true })
           for (const [index, actual] of actualSnapshots.entries()) {
-            expect(actual, `${expectedFiles[index]} mismatch`).toEqual(expectedSnapshots[index])
+            expect(actual, `${fixtureFiles[index]} mismatch`).toEqual(expectedSnapshots[index])
           }
         }
 
@@ -1505,8 +1494,7 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         const schemaSource = schemaSourceByClass.get(classOf(scenario)) ?? pinningScenario
         const pinningDir = join(snapshotsDir, pinningScenario.name)
         const [pinningFixtureFile] = await sessionFixtures(pinningDir)
-        const pinnedFixture = await readFile(join(pinningDir,
-          pinningScenario.writerOracle === 'separate' ? writerSnapshotName(0) : pinningFixtureFile as string), 'utf8')
+        const pinnedFixture = await readFile(join(pinningDir, pinningFixtureFile as string), 'utf8')
         const pinned = pinningHeaderPayloads(pinnedFixture, fixtureContext(pinnedFixture))
         const promptSnapshot = await readFile(
           join(snapshotsDir, promptSource.name, SYSTEM_PROMPT_SNAPSHOT),
@@ -1626,7 +1614,7 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
 
     it('every registered scenario has its required fixture files', async () => {
       // Every scenario needs input, stdout, a primary session fixture, and matching optional sidecars.
-      for (const { name, overridden, pinsNativeWindowsStdout, pinsChildToolSchemas, pinsChildSystemPrompts, writerOracle } of scenarios) {
+      for (const { name, overridden, pinsNativeWindowsStdout, pinsChildToolSchemas, pinsChildSystemPrompts } of scenarios) {
         const dir = join(snapshotsDir, name)
         const files = (await readdir(dir, { withFileTypes: true }))
           .filter(entry => entry.isFile())
@@ -1636,8 +1624,6 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         const manifest = parseSnapshotManifest(await readFile(manifestPath, 'utf8'), manifestPath)
         expect(manifest.profile, `${name}: manifest profile`).toBe(agent.profile ?? 'acp')
         expect(manifest.session, `${name}: ACP scenarios own their session`).toBeUndefined()
-        expect(manifest.writerOracle, `${name}: writer oracle declaration`).toBe(writerOracle)
-        await validateWriterOracles(dir, name, manifest, await sessionFixtures(dir))
         const childIndices = (pattern: RegExp): Set<number> => new Set(files
           .map(file => pattern.exec(file))
           .filter((match): match is RegExpExecArray => match !== null)
@@ -1687,8 +1673,7 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         const schemaSource = schemaSourceByClass.get(classOf(scenario)) ?? scenario
         const fixtureDir = join(snapshotsDir, scenario.name)
         const [fixtureFile] = await sessionFixtures(fixtureDir)
-        const fixture = await readFile(join(fixtureDir,
-          scenario.writerOracle === 'separate' ? writerSnapshotName(0) : fixtureFile as string), 'utf8')
+        const fixture = await readFile(join(fixtureDir, fixtureFile as string), 'utf8')
         const headers = pinningHeaderPayloads(fixture, fixtureContext(fixture))
         const promptSnapshot = await readFile(
           join(snapshotsDir, promptSource.name, SYSTEM_PROMPT_SNAPSHOT),

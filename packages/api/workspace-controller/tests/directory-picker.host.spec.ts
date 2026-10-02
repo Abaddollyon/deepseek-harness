@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { DirectoryPicker, DirectoryPickerError } from '@deepseek-ai/dsh-host-directory-picker'
-import type {
-  DirectoryPickerBrowseCapability, DirectoryPickerCapability,
-} from '@deepseek-ai/dsh-host-directory-picker'
+import type { DirectoryPickerCapability } from '@deepseek-ai/dsh-host-directory-picker'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { DirectoryPickerController } from '../src/directory-picker.ts'
-import { DirectoryBrowserController } from '../src/directory-browser.ts'
 
 const roots: Context[] = []
 
@@ -25,7 +22,7 @@ class StubPicker extends DirectoryPicker {
 
 const NATIVE_STUB: DirectoryPickerCapability = { kind: 'native', pick: async () => null }
 
-const BROWSE_STUB: DirectoryPickerBrowseCapability = {
+const BROWSE_STUB: DirectoryPickerCapability = {
   kind: 'browse',
   list: async (path) => {
     if (path === '/denied') {
@@ -50,29 +47,11 @@ const BROWSE_STUB: DirectoryPickerBrowseCapability = {
   },
 }
 
-class StubDirectoryBrowser extends Service {
-  static capabilityStub: Extract<DirectoryPickerCapability, { kind: 'browse' }> = BROWSE_STUB
-
-  constructor(ctx: Context) {
-    super(ctx, 'directoryBrowser')
-  }
-
-  list(path?: string, signal?: AbortSignal) {
-    return StubDirectoryBrowser.capabilityStub.list(path, signal)
-  }
-
-  createDirectory(path: string, name: string) {
-    return StubDirectoryBrowser.capabilityStub.createDirectory(path, name)
-  }
-}
-
 async function harness(capability: DirectoryPickerCapability = NATIVE_STUB) {
   StubPicker.capabilityStub = capability
-  StubDirectoryBrowser.capabilityStub = capability.kind === 'browse' ? capability : BROWSE_STUB
   const ctx = new Context()
   roots.push(ctx)
   await ctx.plugin(StubPicker).await()
-  await ctx.plugin(StubDirectoryBrowser).await()
   return new DirectoryPickerController(ctx)
 }
 
@@ -178,62 +157,11 @@ describe('directoryPicker browse Remotes', () => {
     expect((await pending).code).toBe('gateway/cancelled')
   })
 
-  it('serves browse verbs from an independent browser under a native picker composition', async () => {
+  it('refuses the browse verbs under a native composition', async () => {
     const picker = await harness()
-    expect(await picker.list(undefined, new AbortController().signal))
-      .toMatchObject({ path: '/home/user' })
-    expect(await picker.createDirectory('/x', 'y')).toBe('/x/y')
-  })
-})
-
-describe('directoryBrowser Remotes', () => {
-  it('serves bounded browsing independently while the interactive picker stays native', async () => {
-    StubPicker.capabilityStub = NATIVE_STUB
-    StubDirectoryBrowser.capabilityStub = BROWSE_STUB
-    const ctx = new Context()
-    roots.push(ctx)
-    await ctx.plugin(StubPicker).await()
-    await ctx.plugin(StubDirectoryBrowser).await()
-    const browser = new DirectoryBrowserController(ctx)
-    const picker = new DirectoryPickerController(ctx)
-
-    expect(await picker.pick(new AbortController().signal)).toBeNull()
-    expect(await browser.list('/home/user', new AbortController().signal))
-      .toMatchObject({ path: '/home/user' })
-    expect(await browser.createDirectory('/home/user', 'fresh')).toBe('/home/user/fresh')
-  })
-
-  it('maps browser cancellation, typed failures, invalid names, and unknown errors', async () => {
-    StubPicker.capabilityStub = BROWSE_STUB
-    StubDirectoryBrowser.capabilityStub = BROWSE_STUB
-    const ctx = new Context()
-    roots.push(ctx)
-    await ctx.plugin(StubPicker).await()
-    await ctx.plugin(StubDirectoryBrowser).await()
-    const browser = new DirectoryBrowserController(ctx)
-
-    expect(await refused(browser.list('/denied', new AbortController().signal)))
-      .toMatchObject({ code: 'directory-picker/unreadable', details: { path: '/denied' } })
-    expect((await refused(browser.createDirectory('/home/user', 'taken'))).code).toBe('directory-picker/exists')
-    expect((await refused(browser.createDirectory('/home/user', 'unwritable'))).code).toBe('gateway/internal')
-    expect(await refused(browser.createDirectory('/home/user', 'gone')))
-      .toMatchObject({ code: 'gateway/internal', message: 'the volume vanished' })
-
-    for (const name of ['', ' ', '.', '..', 'a/b', 'a\\b']) {
-      expect(await refused(browser.createDirectory('/home/user', name)))
-        .toMatchObject({ code: 'gateway/bad-request' })
-    }
-
-    StubDirectoryBrowser.capabilityStub = {
-      kind: 'browse',
-      list: (_path, signal) => new Promise((_resolve, reject) => {
-        signal?.addEventListener('abort', () => { reject(new Error('scan aborted')) }, { once: true })
-      }),
-      createDirectory: async () => '/never',
-    }
-    const abort = new AbortController()
-    const pending = refused(browser.list('/home/user', abort.signal))
-    abort.abort()
-    expect((await pending).code).toBe('gateway/cancelled')
+    expect(await refused(picker.list(undefined, new AbortController().signal)))
+      .toMatchObject({ code: 'directory-picker/unavailable', details: { capability: 'native' } })
+    expect(await refused(picker.createDirectory('/x', 'y')))
+      .toMatchObject({ code: 'directory-picker/unavailable', details: { capability: 'native' } })
   })
 })

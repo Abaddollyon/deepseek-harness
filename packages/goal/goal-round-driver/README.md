@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Continue an active, armed goal in the same session whenever its agent is idle and round capacity remains. Each goal-sourced round spends one model turn and adds a retained prompt; exhausting the cap records a blocker. Choose immediate continuation or event-driven waiting for external progress. Mount `dsh-goal-round-driver` with `dsh-goal` and `dsh-tool-goal` for tasks that should advance across rounds; leave it out when every step needs human steering.
+`dsh-goal-round-driver` automatically continues an active goal in the same session while the agent is idle, continuation is armed, and the configured round allowance remains. Each round gives the model another turn toward the objective; only goal rounds that reach model history consume the allowance, and exhaustion records a blocker. The driver has no configuration: the goal defines the round limit, and `dsh-tool-goal` defines when repeated blocking stops continuation. Mount it with `dsh-goal` and `dsh-tool-goal` for unattended multi-round progress; omit it when each step requires human steering.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Mount `dsh-goal-round-driver` when an active goal should keep making progress wi
 
 ### Compose it
 
-Mount the driver beside the goal service and the goal tools. Its optional `wake` policy defaults to `always`, which continues immediately. Select `event-driven` with a bounded `timeoutMs` to wait for external progress while a child agent or caller-owned background job is live; a user message, notice, relay, or timer safety net can wake continuation. Event-driven mode requires the Cordis timer service; job inspection is optional.
+Mount the driver beside the goal service and the goal tools; the driver itself takes no configuration.
 
 ```yaml
 - id: goal
@@ -71,7 +71,7 @@ This section explains how the driver schedules rounds without races; the observa
 - **Reservation, then admission.** At idle the driver reserves `roundsStarted + 1` for the current `{ goalId, revision }`, queues one `<goal_round>` prompt with a goal message source, and only an entered `user/message` increments `roundsStarted`. A reservation rejected as stale does not consume the round number.
 - **Race fences.** The `agent/pre-step` listener verifies the complete claimed record against the current goal both before and after downstream listeners, so a stale, cancelled, or competing prompt is rejected before its step enters. Human work that arrives before a reservation makes automatic work yield until the agent is idle again.
 - **Durability checkpoint.** `goal/changed` creates a durability obligation: before queuing work the driver awaits `ctx.sessions.flush()` and rechecks the goal revision and competing input after the await. A flush failure arriving through `agent/error` disarms continuation before another round can start.
-- **Fail-closed teardown.** Teardown closes admission, disarms every live goal, removes a claimed prompt owned by the driver before cancelling with the `parent` cause, and awaits the driver plus agent quiescence while its event fence remains installed. Foreign human input remains pending.
+- **Fail-closed teardown.** Teardown closes admission, disarms every live goal, cancels active work with the `parent` cause while keeping pending input queued without starting a turn for it (`wake: false`), and awaits the driver plus agent quiescence while its event fence remains installed.
 
 ### Source map
 

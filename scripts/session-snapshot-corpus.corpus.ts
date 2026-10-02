@@ -6,7 +6,6 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { expect, it } from 'vitest'
 import {
   assertSessionFixtureVersion,
-  assertSnapshotWriterOracles,
   captureExpectedWorkspaceSnapshot,
   EMPTY_WORKSPACE_MARKER,
   parseSnapshotManifest,
@@ -24,6 +23,7 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const corpusRoot = join(repoRoot, 'snapshots')
 const profiles = ['acp', 'sdk', 'session', 'web'] as const
 const snapshotAdapters = [
+  'apps/web/tests/code-language.snapshot.ts',
   'apps/web/tests/message-feedback-protocol.snapshot.ts',
   'apps/web/tests/minimal-preset.snapshot.ts',
   'apps/web/tests/preset-migration.snapshot.ts',
@@ -121,21 +121,6 @@ it('keeps every recorded session owned, pinned, redacted, and header-scrubbed', 
 
     const localEntries = await readdir(dir)
     const localSessionNames = localEntries.filter(name => parseSessionFixtureName(name) !== undefined)
-    const writerNames = localEntries.filter(name => name.startsWith('writer') && name.endsWith('.jsonl'))
-    const writerOracles = await Promise.all(writerNames.map(async name => ({
-      name, content: await readFile(join(dir, name), 'utf8'),
-    })))
-    assertSnapshotWriterOracles(key, manifest,
-      manifest.session === undefined ? sessionFixtureNames(localEntries).length : 0, writerOracles)
-    const writerContents = writerOracles.sort((left, right) => {
-      const ordinal = (name: string): number => name === 'writer.expected.jsonl' ? 0 : Number(name.split('.')[1])
-      return ordinal(left.name) - ordinal(right.name)
-    }).map(oracle => oracle.content)
-    expect(redactSessionSnapshotIds(writerContents), `${key}: writer typed identity fixed point`).toEqual(writerContents)
-    for (const content of writerContents) {
-      expect(scrubSystemPrompts(content), `${key}: writer system prompt must be a sidecar`).toBe(content)
-      expect(scrubToolSchemas(content), `${key}: writer tool schemas must be a sidecar`).toBe(content)
-    }
     if (manifest.session === undefined) {
       expect(localSessionNames.length, `${key}: owner Session fixture`).toBeGreaterThan(0)
     } else {
@@ -207,7 +192,7 @@ it('keeps every recorded session owned, pinned, redacted, and header-scrubbed', 
   }
 })
 
-it('keeps a current-writer majority plus bounded declared historical migration coverage', async () => {
+it('keeps V3 replay input plus bounded declared historical migration coverage', async () => {
   const owners = (await scenarios()).filter(scenario => scenario.manifest.session === undefined)
   const inventory = await Promise.all(owners.map(async scenario => ({
     key: scenario.key,
@@ -217,8 +202,10 @@ it('keeps a current-writer majority plus bounded declared historical migration c
       : { retained: scenario.manifest.sessionFormat }),
   })))
 
-  expect(assertSnapshotCorpusPolicy(inventory)).toMatchObject({
-    retainedRoles: 9,
-    retainedScenarios: 7,
+  const summary = assertSnapshotCorpusPolicy(inventory)
+  expect(summary.baselineRoles).toBeGreaterThan(0)
+  expect(summary).toMatchObject({
+    retainedRoles: 11,
+    retainedScenarios: 8,
   })
 })

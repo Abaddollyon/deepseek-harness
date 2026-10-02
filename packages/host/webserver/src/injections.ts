@@ -20,7 +20,7 @@ export type IndexInjection =
   /**
    * External classic script, executed in table order: a parser-blocking tag
    * when served, an awaited fetch-and-execute in the worker form (whose
-   * loader resolves worker-only URLs such as `/plugins/...`).
+   * loader resolves worker-only references such as `plugins/...`).
    */
   | { kind: 'script-src'; placement: IndexInjectionPlacement; src: string }
   /** Advisory preload for an external classic script; static workers may ignore it. */
@@ -37,6 +37,10 @@ function escapeHtmlAttribute(value: string): string {
     .replaceAll('"', '&quot;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
+}
+
+function assertNever(row: never): never {
+  throw new Error(`webserver: unknown index injection row ${JSON.stringify(row)}`)
 }
 
 /** Render one row to markup with its placement. */
@@ -61,6 +65,8 @@ function renderRow(row: IndexInjection): { placement: IndexInjectionPlacement; m
       return { placement: 'head', markup: `<style>${row.text}</style>` }
     case 'html':
       return { placement: row.placement, markup: row.html }
+    default:
+      return assertNever(row)
   }
 }
 
@@ -103,9 +109,11 @@ export function renderIndexInjections(html: string, rows: readonly IndexInjectio
     // of every document script.
     out = open === null ? `${head}${out}` : splice(out, open.index + open[0].length, head)
   }
-  const open = /<body(?:\s[^>]*)?>/i.exec(out)
-  // Body-less fragments receive the rows at the end, where the HTML parser
-  // has already synthesized a body.
-  out = open === null ? `${out}${body}` : splice(out, open.index + open[0].length, body)
+  if (body !== '') {
+    const open = /<body(?:\s[^>]*)?>/i.exec(out)
+    // Body-less fragments receive the rows at the end, where the HTML parser
+    // has already synthesized a body.
+    out = open === null ? `${out}${body}` : splice(out, open.index + open[0].length, body)
+  }
   return out
 }

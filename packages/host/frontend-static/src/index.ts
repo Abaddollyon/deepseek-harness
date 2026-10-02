@@ -68,13 +68,11 @@ const STATIC_MISS_CODES: ReadonlySet<string | undefined> = new Set([
  * @param authorizeIndex - authenticates an index response before its bytes are read.
  * @param renderIndex - produces the index.html body (structured injection
  * rendering) for the dist root and configured index path.
- * @param surfacePath - optional registered exact path that also renders the index.
  */
 export async function serveStatic(
   pathname: string, res: ServerResponse, distRoot: string, distIndex: string,
   authorizeIndex: () => boolean,
   renderIndex: () => Promise<string>,
-  surfacePath?: string,
 ): Promise<void> {
   const target = resolve(normalize(join(distRoot, pathname)))
   // Traversal rejection: the target must be distRoot itself (`/`) or stay under
@@ -88,7 +86,7 @@ export async function serveStatic(
   let body: string | Buffer
   let type: string
   try {
-    if (target === distRoot || target === distIndex || pathname === surfacePath) {
+    if (target === distRoot || target === distIndex) {
       if (!authorizeIndex()) return
       body = await renderIndex()
       type = HTML_MIME
@@ -116,16 +114,10 @@ export async function serveStatic(
 export function apply(ctx: Context, config: Config): void {
   const distIndex = config.distIndex
   const distRoot = dirname(distIndex)
-  // The dist is built with a relative base so the same files mount under any
-  // static directory; served pages also answer deep SPA-fallback paths, where
-  // relative asset URLs would resolve under the request directory, so the
-  // served form anchors them at the site root ahead of every URL-bearing tag.
-  const renderIndex = async (surfaceId?: string): Promise<string> => {
-    const body = ctx.webServer.renderIndex(
-      await readFile(distIndex, 'utf8'),
-      surfaceId === undefined ? {} : { variant: surfaceId },
-    )
-    return body.replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="/">`)
+  // Insert after all index transforms so the base precedes every resource reference.
+  const renderIndex = async (variant?: string): Promise<string> => {
+    const body = ctx.webServer.renderIndex(await readFile(distIndex, 'utf8'), variant === undefined ? {} : { variant })
+    return body.replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`)
   }
   ctx.effect(() => ctx.webServer.registerFallback(async (req, res) => {
     // Non-GET/HEAD without a matching named route is 405 (fallback-only
@@ -138,15 +130,15 @@ export function apply(ctx: Context, config: Config): void {
     /* v8 ignore next -- node:http always sets url on server requests */
     const rawPath = new URL(req.url ?? '/', 'http://x').pathname
     const pathname = decodeURIComponent(rawPath)
+    // A registered client surface path is served as the index with that surface's boot graph.
     const surface = ctx.get('clientSurfaces')?.findByPath(pathname)
     await serveStatic(
-      pathname,
+      surface === undefined ? pathname : '/',
       res,
       distRoot,
       distIndex,
-      () => ctx.connection.authorizeIndex(req, res, surface?.id),
+      () => ctx.connection.authorizeIndex(req, res, surface?.path),
       () => renderIndex(surface?.id),
-      surface?.path,
     )
   }), 'frontend-static: fallback seat')
 }

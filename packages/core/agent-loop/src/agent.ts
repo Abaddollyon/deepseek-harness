@@ -14,21 +14,21 @@ import type {
   InboxTarget,
   PreStepDecision,
   RequestErrorAction,
-  RequestPreflightAction,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
   createAssistantMessage,
+  createDeveloperMessage,
   errorChain,
   markAgentLoopRequest,
 } from '@deepseek-ai/dsh-llm'
-import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import type { EpochHeader, RequestContext, Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
-import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
@@ -38,10 +38,6 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
-import { AgentBudgetTracker } from './budget.ts'
-
-/** Productive preflight redispatches allowed before provider recovery owns admission. */
-const MAX_REQUEST_PREFLIGHT_ATTEMPTS = 8
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -57,7 +53,12 @@ type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }
 
 type PreparedStep =
   | { kind: 'reject' }
-  | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly; startsRequestSeries?: true }
+  | {
+    kind: 'enter'
+    messages: UserMessage[]
+    startsRequestSeries?: true
+    assembly: PromptAssembly
+  }
 
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
@@ -66,6 +67,31 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
   if (header.adapterDefaults.reasoningEffort === true) delete proposal.reasoningEffort
   if (header.adapterDefaults.maxTokens === true) delete proposal.maxTokens
   return proposal
+}
+
+/**
+ * Read the cause `cancel()` passed when aborting a loop-owned signal, copying
+ * only the fields `turn/end` records. The live reason stays the caller's
+ * object, and Node's fetch assigns a `stack` onto it that `Session.append`
+ * would either log or reject as data JSON cannot hold.
+ * @param signal - a turn or maintenance signal this loop owns.
+ * @returns the copied cause, or undefined while the signal is still live.
+ */
+function abortedCancelCause(signal: AbortSignal): AgentCancelCause | undefined {
+  if (!signal.aborted) return undefined
+  // `cancel()` is the only aborter of the signals this loop owns.
+  const cause = signal.reason as AgentCancelCause
+  switch (cause.kind) {
+    case 'user':
+    case 'parent':
+    case 'disposed':
+      return { kind: cause.kind }
+    case 'hook':
+      return { kind: 'hook', reason: cause.reason }
+    /* v8 ignore next -- cancel accepts the closed AgentCancelCause union */
+    default:
+      return assertNever(cause)
+  }
 }
 
 /** Drives one session through turn and step boundaries. */
@@ -92,7 +118,8 @@ export class ReactLoopAgent implements Agent {
   private readonly systemPrompt: SystemPromptProjection
   /** Identities fully frozen by this loop; weak references do not retain replaced history. */
   private readonly frozenMessages = new WeakSet<Message>()
-  private readonly budget: AgentBudgetTracker | undefined
+  /** Activities cancelled by disposal or with `wake: false`: no wake replays or latches behind them. */
+  private readonly parkedActivities = new WeakSet<AbortController>()
 
   constructor(
     private loopCtx: Context,
@@ -100,7 +127,7 @@ export class ReactLoopAgent implements Agent {
     public readonly options: AgentOptions,
     public readonly session: Session,
   ) {
-    this.requestSurfaceGeneration = session.surface.replaceGeneration
+    this.requestSurfaceGeneration = session.surface.contentGeneration
     this.dispatch = agentEvents(loopCtx, this)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx
@@ -110,11 +137,6 @@ export class ReactLoopAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.runtimeContext = new RuntimeContextProjection(this.ctx, session)
     this.systemPrompt = new SystemPromptProjection(session)
-    this.budget = options.budget === undefined ? undefined : new AgentBudgetTracker(options.budget)
-  }
-
-  get hasExecutionBudget(): boolean {
-    return this.budget !== undefined
   }
 
   get status(): AgentStatus {
@@ -153,11 +175,13 @@ export class ReactLoopAgent implements Agent {
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
-    if (!options.keepInbox) {
-      this.inbox.clear()
-      if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
-    }
-    if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+    if (!options.keepInbox) this.inbox.clear()
+    if (this.phase.kind === 'idle') return
+    // Disposal and `wake: false` keep the inbox for later work but never replay or latch a wake.
+    const parked = cause.kind === 'disposed' || options.wake === false
+    if (parked) this.parkedActivities.add(this.phase.abort)
+    if (!options.keepInbox || parked) this.phase.wakeRequested = false
+    this.phase.abort.abort(cause)
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -176,7 +200,8 @@ export class ReactLoopAgent implements Agent {
         return await job(maintenance.abort.signal)
       } finally {
         this.setPhase({ kind: 'idle', lastTurn: maintenance.lastTurn })
-        if (maintenance.wakeRequested && this.inbox.hasPending) this.wakeDriver()
+        const cause = abortedCancelCause(maintenance.abort.signal)
+        if (cause?.kind !== 'disposed' && maintenance.wakeRequested && this.inbox.hasPending) this.wakeDriver()
         done.resolve()
       }
     })()
@@ -194,9 +219,8 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'idle') {
       // Maintenance and aborted drivers cannot deliver the wake: latch it for
       // replay at convergence. Live drivers claim queued work themselves;
-      // disposal never latches, so teardown waits on no model turn.
-      const reason = this.phase.abort.signal.reason as AgentCancelCause | undefined
-      if (reason?.kind !== 'disposed' && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
+      // a parked activity never latches, so teardown waits on no model turn.
+      if (!this.parkedActivities.has(this.phase.abort) && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
         this.phase.wakeRequested = true
       }
       return
@@ -262,39 +286,32 @@ export class ReactLoopAgent implements Agent {
         }),
       )
       signal.throwIfAborted()
-      return decision.kind === 'reject' ? decision : { ...decision, assembly }
+      if (decision.kind === 'reject') return decision
+      return { ...decision, assembly }
     } catch (error: unknown) {
-      // The claim is a durable deletion committed before assembly and the
-      // waterfall run; an abort before the step starts would otherwise drop
-      // input no model request ever saw. A non-abort failure stays terminal
-      // with the batch removed: owning listeners already restored what they
-      // keep, and a silent requeue would replay a rejected proposal.
-      if (signal.aborted) this.restoreClaimed(claimed, steeringCount)
+      // No step admitted the claimed batch yet. Lifecycle disposal returns it
+      // for a later lifecycle; other cancellations and pre-step failures end
+      // it here, with listeners restoring what they own.
+      if (abortedCancelCause(signal)?.kind === 'disposed') this.restoreClaimed(claimed, steeringCount)
       throw error
     }
   }
 
   /**
-   * Return a claimed-but-unstarted batch to the inbox after an abort, keeping
-   * each message ahead of input that arrived after the claim. Messages a
-   * listener re-queued or restored itself are skipped, since pending
-   * identities must stay unique across both lists.
-   * @param claimed - the batch {@link ReactLoopInbox.claim} removed for the aborted step.
-   * @param steeringCount - how many leading entries of `claimed` came from `next-step`.
+   * Return an unstarted claimed batch to the front of the lists it came from,
+   * skipping messages a pre-step listener already queued again.
+   * @param claimed - the batch removed by {@link ReactLoopInbox.claim}.
+   * @param steeringCount - how many leading `claimed` entries came from `next-step`.
    */
   private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
-    const restore = (messages: readonly UserMessage[], target: InboxTarget): void => {
-      for (const message of messages.toReversed()) {
-        if (this.inbox.nextStep.some(candidate => candidate.id === message.id)
-          || this.inbox.nextTurn.some(candidate => candidate.id === message.id)) continue
-        this.inbox.splice(target, 0, 0, [message])
-      }
-    }
-    restore(claimed.slice(steeringCount), 'next-turn')
-    restore(claimed.slice(0, steeringCount), 'next-step')
+    const pending = new Set([...this.inbox.nextStep, ...this.inbox.nextTurn].map(message => message.id))
+    const unclaimed = (messages: readonly UserMessage[]): UserMessage[] =>
+      messages.filter(message => !pending.has(message.id))
+    this.inbox.splice('next-turn', 0, 0, unclaimed(claimed.slice(steeringCount)))
+    this.inbox.splice('next-step', 0, 0, unclaimed(claimed.slice(0, steeringCount)))
   }
 
-  /** Whether assembled schemas differ from the logged request header. */
+  /** Whether the assembled tool schemas differ from the logged request header's. */
   private toolsChanged(tools: PromptAssembly['tools']): boolean {
     const baseline = this.session.requestHeader()
     if (baseline === undefined) return false
@@ -334,10 +351,13 @@ export class ReactLoopAgent implements Agent {
           turnEnds = { kind: 'completed' }
           return false
         }
-        this.budget?.admitStep()
         signal.throwIfAborted()
         this.session.append('step/start', { turn, step })
         phase.step = step
+        const toolRecovery = new ToolCallRecovery()
+        const stopRecovery = this.ctx.on('session/event', (session, event) => {
+          if (session === this.session) toolRecovery.observe(event)
+        })
         try {
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.
@@ -345,7 +365,20 @@ export class ReactLoopAgent implements Agent {
           // max-tokens stays sticky: a later completed step must not
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
+        } catch (error: unknown) {
+          try {
+            for (const event of toolRecovery.results()) {
+              this.session.append('tool/result', event.data, {
+                surfaceOp: 'append',
+                ...event.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: event.sourceEventSeqs },
+              })
+            }
+          } catch (recoveryError: unknown) {
+            throw new AggregateError([error, recoveryError], 'Step failed and its pending tool results could not be recorded', { cause: error })
+          }
+          throw error
         } finally {
+          stopRecovery()
           this.session.append('step/end', { turn, step })
         }
         signal.throwIfAborted()
@@ -357,8 +390,10 @@ export class ReactLoopAgent implements Agent {
         target = 'next-step'
       }
     } catch (error: unknown) {
-      if (signal.aborted) {
-        turnEnds = { kind: 'aborted', reason: signal.reason as AgentCancelCause }
+      // A cause is present exactly while the signal is aborted.
+      const cause = abortedCancelCause(signal)
+      if (cause !== undefined) {
+        turnEnds = { kind: 'aborted', reason: cause }
         throw error
       }
       // Every failure is structured: an `LlmError` keeps its facts, anything
@@ -401,8 +436,8 @@ export class ReactLoopAgent implements Agent {
       const commits = this.systemPrompt.project(renderedPrompt, {
         inHistory: preparedCall?.systemPromptUpdate === 'in-history',
         startsSeries: startsRequestSeries
-          || this.requestSurfaceGeneration !== this.session.surface.replaceGeneration
-          || this.toolsChanged(assembly.tools),
+          || this.requestSurfaceGeneration !== this.session.surface.contentGeneration
+          || (preparedCall?.toolUpdate === undefined && this.toolsChanged(assembly.tools)),
       })
       for (const { message, intent } of commits) {
         this.session.append('system/message', { turn, step, message }, intent)
@@ -413,10 +448,7 @@ export class ReactLoopAgent implements Agent {
         }
       }
       firstAttempt = false
-      const request = await this.buildRequest(turn, step, config, preparedCall, assembly.tools, renderedPrompt, startsRequestSeries, signal)
-      const budgetedRequest = this.budget === undefined
-        ? undefined
-        : { admittedInput: this.budget.admitRequest(request, preparedCall) }
+      const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal)
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -476,9 +508,6 @@ export class ReactLoopAgent implements Agent {
             { cause: error },
           )
         }
-        if (budgetedRequest !== undefined) {
-          this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
-        }
         throw error
       }
       try {
@@ -488,9 +517,6 @@ export class ReactLoopAgent implements Agent {
             'assistant/attempt',
             () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
           )
-          if (budgetedRequest !== undefined) {
-            this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
-          }
           const action = await this.dispatch.waterfall(
             'agent/request-error', {
               turn,
@@ -506,7 +532,6 @@ export class ReactLoopAgent implements Agent {
           if (action?.kind !== 'retry') {
             throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
           }
-          this.budget?.admitRetry()
           continue
         }
 
@@ -528,9 +553,6 @@ export class ReactLoopAgent implements Agent {
             stream: live.stream,
           }, { surfaceOp: 'append' }).seq,
         )
-        if (budgetedRequest !== undefined) {
-          this.budget?.settleRequest(request, budgetedRequest.admittedInput, live.usage)
-        }
         if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
 
         const toolCalls = message.content.filter(block => block.type === 'tool-call')
@@ -555,9 +577,8 @@ export class ReactLoopAgent implements Agent {
   ): Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall }> {
     const { session } = this
 
-    // AgentOptions seeds this loop instance's first proposal and wins over a
-    // resumed effort. Omission restores only a same-route explicit value;
-    // later proposals re-resolve values marked as adapter defaults.
+    // A loop instance starts from its declared route, restoring only an explicit
+    // effort owned by that exact model. Later steps re-resolve marked defaults.
     const persistedHeader = session.requestHeader()
     const persistedConfig = persistedHeader?.config
     const route = { provider: this.options.provider ?? '', model: this.options.model ?? '' }
@@ -583,51 +604,74 @@ export class ReactLoopAgent implements Agent {
       () => Promise.resolve(seedConfig),
     )
     signal.throwIfAborted()
-    const budgetedConfig = this.budget?.clampOutput(proposedConfig) ?? proposedConfig
-    if (!budgetedConfig.provider || !budgetedConfig.model) {
+    if (!proposedConfig.provider || !proposedConfig.model) {
       throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or supply both via the agent/request waterfall`)
     }
     let config: LlmCallConfig
     let preparedCall: PreparedLlmCall | undefined
     try {
-      preparedCall = await this.loopCtx.llm.prepareCall(budgetedConfig, signal)
+      preparedCall = await this.loopCtx.llm.prepareCall(proposedConfig, signal)
       config = preparedCall.config
     } catch (error: unknown) {
       // Middleware may serve an unregistered route; terminal dispatch still requires an adapter.
       if (!(error instanceof LlmError) || error.code !== 'NO_ADAPTER') throw error
-      config = budgetedConfig
+      config = proposedConfig
     }
     signal.throwIfAborted()
     return { config, ...preparedCall === undefined ? {} : { preparedCall } }
   }
 
   /** Log the resolved envelope and derive a frozen request from the admitted surface. */
-  private async buildRequest(
-    turn: number,
-    step: number,
+  private buildRequest(
     config: LlmCallConfig,
     preparedCall: PreparedLlmCall | undefined,
     tools: GenerateOptions['tools'] & object,
-    renderedPrompt: string,
+    position: { turn: number; step: number },
     startsRequestSeries: boolean,
     signal: AbortSignal,
-  ): Promise<GenerateOptions> {
+  ): GenerateOptions {
     const { session } = this
-    const surfaceGeneration = session.surface.replaceGeneration
-    const header = deepFreeze(structuredClone(canonicalHeader({
+    const surfaceGeneration = session.surface.contentGeneration
+    const header = canonicalHeader({
       config,
       ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },
       ...tools.length > 0 ? { tools } : {},
-    })))
+    })
     const baseline = this.session.requestHeader()
-    const startsSeries = startsRequestSeries || this.requestSurfaceGeneration !== surfaceGeneration
+    const startsSeries = startsRequestSeries
+      || this.requestSurfaceGeneration !== surfaceGeneration
+    let headerSeq: SessionSeq | undefined
     if (!this.requestHeaderLogged) {
-      this.session.append('request/header', { header, reason: baseline === undefined ? 'initial' : 'resume' })
+      // Compaction during the first resumed pre-step must still mark a new series.
+      headerSeq = this.session.append('request/header', {
+        header,
+        reason: baseline === undefined ? 'initial' : 'resume',
+        ...startsSeries ? { startsSeries: true } : {},
+      }).seq
       this.requestHeaderLogged = true
     } else if (baseline === undefined || !headerEquals(baseline, header)) {
-      this.session.append('request/header', { header, reason: 'change', ...startsSeries ? { startsSeries: true } : {} })
+      headerSeq = this.session.append('request/header', {
+        header,
+        reason: 'change',
+        ...startsSeries ? { startsSeries: true } : {},
+      }).seq
     } else if (startsSeries) {
       this.session.append('request/header', { header, reason: 'series' })
+    }
+    if (baseline !== undefined && headerSeq !== undefined) {
+      const previousNames = new Set(baseline.tools?.map(tool => tool.name))
+      const currentNames = new Set(tools.map(tool => tool.name))
+      const additions = tools.filter(tool => !previousNames.has(tool.name))
+        .map(tool => ({ type: 'tool-addition' as const, toolName: tool.name }))
+      const removals = (baseline.tools ?? []).filter(tool => !currentNames.has(tool.name))
+        .map(tool => ({ type: 'tool-removal' as const, toolName: tool.name }))
+      if (additions.length > 0 || removals.length > 0) {
+        session.append('developer/message', {
+          ...position,
+          message: createDeveloperMessage({ source: { kind: 'tool-registry' }, content: [...additions, ...removals] }),
+          ...additions.length > 0 ? { headerSeq } : {},
+        }, { surfaceOp: 'append' })
+      }
     }
     this.requestSurfaceGeneration = surfaceGeneration
 
@@ -648,52 +692,8 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
-    const reconcilePrompt = (): void => {
-      for (const { message, intent } of this.systemPrompt.project(renderedPrompt, {
-        inHistory: preparedCall?.systemPromptUpdate === 'in-history',
-        startsSeries: true,
-      })) {
-        session.append('system/message', { turn, step, message }, intent)
-      }
-    }
-    // Only replacement commits justify redispatch. Log-only activity can be
-    // unrelated or a failed compaction bracket and must not create a hot loop.
-    let preflightGeneration = session.surface.replaceGeneration
-    for (let attempt = 1; attempt <= MAX_REQUEST_PREFLIGHT_ATTEMPTS; attempt += 1) {
-      const action = await this.dispatch.waterfall(
-        'agent/request-preflight',
-        {
-          turn,
-          step,
-          header,
-          contextWindow,
-          attempt,
-          maxAttempts: MAX_REQUEST_PREFLIGHT_ATTEMPTS,
-          signal,
-        },
-        () => Promise.resolve<RequestPreflightAction>(undefined),
-      )
-      signal.throwIfAborted()
-      if (action?.kind !== 'retry') break
-      const currentGeneration = session.surface.replaceGeneration
-      if (action.surfaceGeneration !== currentGeneration
-        || currentGeneration <= preflightGeneration) {
-        throw new Error(
-          `agent "${this.id}": agent/request-preflight returned retry without a newer replacement surface`,
-        )
-      }
-      // Reprice the complete prompt on the next admission pass, not an old head
-      // whose latest in-history update the replacement may have shadowed.
-      reconcilePrompt()
-      preflightGeneration = session.surface.replaceGeneration
-    }
-
-    if (session.surface.replaceGeneration !== surfaceGeneration) {
-      reconcilePrompt()
-      session.append('request/header', { header, reason: 'series' })
-      this.requestSurfaceGeneration = session.surface.replaceGeneration
-    }
-    signal.throwIfAborted()
+    // canonicalHeader is shallow; append logs a detached snapshot, not these local values.
+    deepFreeze(header)
     const boundaryMessages = session.deriveMessages()
     for (const message of boundaryMessages) {
       if (this.frozenMessages.has(message)) continue
@@ -704,6 +704,7 @@ export class ReactLoopAgent implements Agent {
     const request = markAgentLoopRequest(Object.freeze({
       ...header.config,
       messages: boundaryMessages,
+      toolHistory: session.toolHistory(),
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,
       signal,

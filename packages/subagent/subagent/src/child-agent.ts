@@ -14,19 +14,21 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
-// Type-only: make `ctx.get('sandboxPolicy')` / `ctx.get('approval')` resolve
-// to the policy services when composed — delegation consumes both
+// Type-only: make `ctx.get('sandboxPolicy')`, `ctx.get('approval')`, and
+// `ctx.get('permissionPresets')` resolve to their services when composed — delegation consumes them
 // opportunistically (the documented `ctx.get` pattern), never as a hard dep —
-// and merge the `sandbox/mode` / `approval/policy` session-event payloads.
+// and merge the inherited permission session-event payloads.
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 // Type-only: make `ctx.get('agentPresets')` resolve to the preset roster when
 // composed — a child inherits its parent's composition opportunistically (the
 // documented `ctx.get` pattern), never as a hard dep. A rosterless deployment
 // keeps its model-facing rows on the host plane, where the child already sees
 // them through the tool registry's global layer.
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { delegationDepthOf } from './depth.ts'
+import type { ChildExecutionTarget } from './types.ts'
 
 /** Thrown when starting a child would exceed the requested depth cap. */
 export class SubagentDepthError extends Error {
@@ -119,8 +121,8 @@ export function resolveChildAgentOptions(
 }
 
 /**
- * Build the child session's durable creation metadata: the parent's workspace,
- * its direct lineage, coarse product origin, the recursion budget that must
+ * Build the child session's durable creation metadata: the parent's workspace
+ * and additional roots, its direct lineage, coarse product origin, the recursion budget that must
  * survive persistence, the seed boundary that separates inherited parent
  * history from child work, and the composition the child runs under.
  *
@@ -133,18 +135,26 @@ export function resolveChildAgentOptions(
  * @param parent - the delegating parent agent.
  * @param childDepth - the resolved delegation depth to persist.
  * @param isSeeded - whether this child inherits a parent-log prefix, including an explicitly empty one.
+ * @param target - preset and cwd replacing the parent's, for a child that runs elsewhere.
  * @returns the `meta` for `ctx.agents.create()`.
+ * @throws {Error} when a seeded child names a target: the seed's `workspace/roots` would carry the parent's roots into the target's world.
  */
 export function childSessionMeta(
   parent: Agent,
   childDepth: number,
   isSeeded: boolean,
+  target?: ChildExecutionTarget,
 ): NonNullable<CreateAgentOptions['meta']> {
+  if (isSeeded && target !== undefined) {
+    throw new Error(`a child seeded from its parent's log cannot run in agent preset "${target.agentPreset}" through an execution target`)
+  }
   const parentHeader = parent.session.header
-  const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+  const agentPreset = target?.agentPreset ?? parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+  const cwd = target?.cwd ?? parentHeader.cwd
   return {
-    ...parentHeader.cwd !== undefined ? { cwd: parentHeader.cwd } : {},
-    ...(parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: [...parent.session.additionalPaths] }),
+    ...cwd !== undefined ? { cwd } : {},
+    // Additional roots belong to the parent's execution world; a targeted child starts with its own cwd only.
+    ...target !== undefined || parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: parent.session.additionalPaths },
     ...agentPreset === undefined ? {} : { agentPreset },
     parentSession: parentHeader.id,
     isSeeded,
@@ -176,7 +186,8 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + 'limitation in your reply so the delegating agent can handle it.'
 
 /**
- * Compose one child inside its creation window: join its parent's preset,
+ * Compose one child inside its creation window: join its parent's preset, or
+ * the different preset its header records (a {@link ChildExecutionTarget}),
  * register the fixed delegation-scope statement, then apply the child's own
  * shadowing persona section and tool restriction, all owned by the child's
  * scope and therefore invisible to its parent and siblings. Creation and cold
@@ -196,13 +207,18 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * @param childCtx - the child agent's scoped creation context.
  * @param parent - the delegating parent whose composition the child joins.
  * @param composition - the per-child persona and tool filter to install.
+ * @param child - the child being composed; its header preset selects a target other than the parent's.
  */
-export function applyChildComposition(
+export async function applyChildComposition(
   childCtx: Context,
   parent: Agent,
   composition: ChildComposition,
-): void {
-  childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+  child?: Agent,
+): Promise<void> {
+  const presets = childCtx.get('agentPresets')
+  const own = child?.session.header.agentPreset
+  if (presets !== undefined && own !== undefined && own !== presets.composedPreset(parent.ctx)) await presets.mount(childCtx, own)
+  else presets?.composeFrom(childCtx, parent.ctx)
   childCtx.systemPrompt.context({
     name: 'subagent:delegation',
     order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),
@@ -220,6 +236,11 @@ export function applyChildComposition(
 
 /** Policy seeded onto a child session's log at the delegation boundary. */
 export interface DelegatedPolicyOverrides {
+  /**
+   * The parent's current preset identity when it runs in Auto or Full access;
+   * the child keeps it under the pinned `never` approval policy.
+   */
+  readonly permissionPreset: 'auto' | 'danger-full-access' | undefined
   /** The parent session's explicit sandbox-mode override, or `undefined` without one. */
   readonly sandboxMode: SandboxMode | undefined
   /**
@@ -231,17 +252,20 @@ export interface DelegatedPolicyOverrides {
 }
 
 /**
- * Capture the policy to seed into one delegation. Call synchronously before
+ * Capture the permission state to seed into one delegation. Call synchronously before
  * the child start's first await: a later parent switch belongs to the
- * parent's future, not to this child. Only the parent session's explicit
- * sandbox override is captured — never deployment defaults or one-shot
- * grants — and the approval policy is pinned to `'never'` regardless of the
- * parent's own policy.
+ * parent's future, not to this child. Auto and Full access identities are
+ * inherited only through the in-process DSH path so either can replace a stale
+ * same-bundle fork value. Only the parent session's explicit sandbox override
+ * is captured — never deployment defaults or one-shot grants — and the approval
+ * policy is pinned to `'never'` regardless of the parent's own policy.
  * @param parent - the delegating parent agent.
  * @returns the sandbox override (or `undefined` without one) and the approval pin.
  */
 export function captureDelegatedPolicyOverrides(parent: Agent): DelegatedPolicyOverrides {
+  const preset = parent.ctx.get('permissionPresets')?.current(parent.session)
   return {
+    permissionPreset: preset === 'auto' || preset === 'danger-full-access' ? preset : undefined,
     sandboxMode: parent.ctx.get('sandboxPolicy')?.overrideOf(parent.session),
     approvalPolicy: parent.ctx.get('approval') === undefined ? undefined : 'never',
   }
@@ -265,6 +289,9 @@ export function appendDelegatedPolicyOverrides(
   }
   if (overrides.approvalPolicy !== undefined) {
     childSession.append('approval/policy', { policy: overrides.approvalPolicy, source: 'delegation' })
+  }
+  if (overrides.permissionPreset !== undefined) {
+    childSession.append('permission/preset', { preset: overrides.permissionPreset })
   }
 }
 

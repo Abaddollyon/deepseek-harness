@@ -1,38 +1,22 @@
 /** Shared live/prepared observations for Session page and lifecycle consumers. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { isAppendSurfaceEvent, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId , SessionLogOffset as SessionLogOffsetType , SessionSeqCursor } from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionPersistenceRevision,
   SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { ProjectionCheckpoint, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import type SessionProjectionCache from '@deepseek-ai/dsh-session-projection-cache'
-import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
+import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import { SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE, SessionQueryError } from './config.ts'
 import { readColdSessionLog, type ColdSessionLog } from './cold-read.ts'
 
-/**
- * How many times a cold tail refolds when the durable revision moved under it.
- * A log that keeps moving declines to the complete preparation path rather than publishing a
- * revision that does not describe the observed events.
- */
-const COLD_TAIL_REVISION_ATTEMPTS = 3
-
-/** The three services one cold tail fold reads, resolved once by the caller. */
-interface ColdTailServices {
-  readonly persistence: SessionPersistence
-  readonly registry: SessionProjectionRegistry
-  readonly cache: SessionProjectionCache
-}
-
 /** One exact immutable Session cut retained for the caller's read lifetime. */
 export interface SessionObservation extends Disposable {
-  /** Whether the cut came from an attached Session, retained preparation, or keyed cold tail. */
-  readonly source: 'live' | 'prepared' | 'cold'
+  /** Whether the cut came from an attached Session or a retained preparation. */
+  readonly source: 'live' | 'prepared'
   /** Immutable Session identity metadata. */
   readonly header: SessionHeader
   /** Exact fork-inherited event count paired with {@link header}. */
@@ -62,10 +46,6 @@ export interface SessionObservationOptions {
   readonly signal?: AbortSignal
   /** Whether to compute every projection or leave projection state untouched. */
   readonly projectionMode?: 'all' | 'none'
-  /** Prefer the keyed projection-cache tail for detached history opening. */
-  readonly historyTail?: boolean
-  /** Requested message page size; used to choose a sufficiently wide cold read. */
-  readonly maxMessages?: number
 }
 
 /**
@@ -74,8 +54,8 @@ export interface SessionObservationOptions {
  * instance still reports the same revision.
  */
 interface PreparedEntry {
-  /** The persistence instance whose `stat` produced {@link revision}; revisions from another instance are incomparable. */
-  readonly persistence: SessionPersistence
+  /** Stable service identity whose `stat` produced this revision; proxy references are not instance identities. */
+  readonly persistenceIdentity: symbol
   /** Durable revision observed by `stat` immediately before the log read. */
   readonly revision: SessionPersistenceRevision
   /** Unpublished Session restored from the balanced log; never entered into the store. */
@@ -113,6 +93,7 @@ export class SessionObservationReader {
    * @param sessionId - logical Session identity.
    * @param options - cancellation and all-or-none projection computation for this read.
    * @returns one exact immutable observation.
+   * @throws {@link SessionQueryError} with code `SESSION_QUERY_CORRUPT_SESSION` when live or prepared projection computation fails.
    */
   async read(
     sessionId: SessionId,
@@ -125,15 +106,11 @@ export class SessionObservationReader {
       if (live !== undefined) return this.live(live, projectionMode)
       const persistence = this.ctx.get('sessionPersistence')
       if (persistence === undefined) throw notFound(sessionId)
-      if (options.historyTail === true && projectionMode === 'all') {
-        const cold = await this.coldTail(sessionId, signal, options.maxMessages ?? 50)
-        if (cold !== undefined) return cold
-      }
 
       const snapshot = await this.statSource(persistence, sessionId, signal)
       const attachedDuringStat = this.ctx.sessions.get(sessionId)
       if (attachedDuringStat !== undefined) return this.live(attachedDuringStat, projectionMode)
-      let entry = this.cachedEntry(persistence, sessionId, snapshot.revision)
+      let entry = this.cachedEntry(persistence.identity, sessionId, snapshot.revision)
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
@@ -162,7 +139,7 @@ export class SessionObservationReader {
           )
         }
         entry = {
-          persistence,
+          persistenceIdentity: persistence.identity,
           revision: snapshot.revision,
           session,
           events: Object.freeze(seed),
@@ -225,12 +202,12 @@ export class SessionObservationReader {
 
   /** Return a still-valid cached entry and mark it most recently used. */
   private cachedEntry(
-    persistence: SessionPersistence,
+    persistenceIdentity: symbol,
     sessionId: SessionId,
     revision: SessionPersistenceRevision,
   ): PreparedEntry | undefined {
     const cached = this.cache.get(sessionId)
-    if (cached === undefined || cached.persistence !== persistence || cached.revision !== revision) {
+    if (cached === undefined || cached.persistenceIdentity !== persistenceIdentity || cached.revision !== revision) {
       return undefined
     }
     this.cache.delete(sessionId)
@@ -295,181 +272,6 @@ export class SessionObservationReader {
     return lease()
   }
 
-  /**
-   * Open one detached history tail from the durable snapshot, the projection
-   * cache, and a suffix read, or decline so the caller falls back to the
-   * always-correct complete preparation path.
-   *
-   * The point snapshot precedes the suffix read, so an append or an artifact
-   * replacement in between would publish a revision that does not describe the
-   * events this observation carries. The revision is therefore revalidated
-   * after the fold, and a log that keeps moving under a bounded number of
-   * attempts declines instead of publishing an incoherent cut.
-   */
-  private async coldTail(
-    sessionId: SessionId,
-    signal: AbortSignal | undefined,
-    maxMessages: number,
-  ): Promise<SessionObservation | undefined> {
-    const persistence = this.ctx.get('sessionPersistence')
-    const registry = this.ctx.get('sessionProjections')
-    const cache = this.ctx.get('sessionProjectionCache')
-    if (persistence === undefined || registry === undefined || cache === undefined) return undefined
-    try {
-      return await this.coldAttempts({ persistence, registry, cache }, sessionId, maxMessages, signal)
-    } catch (error: unknown) {
-      // A backend that rejects because the caller cancelled must read as
-      // cancellation here, exactly as a cancelled read does.
-      throwIfObservationAborted(signal)
-      throw error
-    }
-  }
-
-  /**
-   * Fold the cold tail until it is coherent with an unmoved durable revision.
-   * @param services - the persistence, projection registry, and cache resolved by the caller.
-   * @param sessionId - logical Session identity being observed.
-   * @param maxMessages - requested opening page size.
-   * @param signal - optional cancellation for the cold reads.
-   * @returns the cold observation, or undefined to fall back to the complete preparation path.
-   */
-  private async coldAttempts(
-    services: ColdTailServices,
-    sessionId: SessionId,
-    maxMessages: number,
-    signal: AbortSignal | undefined,
-  ): Promise<SessionObservation | undefined> {
-    const { persistence } = services
-    for (let attempt = 0; attempt < COLD_TAIL_REVISION_ATTEMPTS; attempt += 1) {
-      const found = await persistence.stat(sessionId, signal === undefined ? undefined : { signal })
-      throwIfObservationAborted(signal)
-      if (found === undefined || found.header.isSeeded) return undefined
-      const folded = await this.coldFold(services, sessionId, found, maxMessages, signal)
-      if (folded === undefined) return undefined
-      // A Session that attached during the cold I/O owns sequences this
-      // detached cut cannot see; publishing the cut would open the follow
-      // stream at a cursor the live event feed has already passed.
-      if (this.ctx.sessions.get(sessionId) !== undefined) {
-        folded[Symbol.dispose]()
-        return undefined
-      }
-      const current = await persistence.stat(sessionId, signal === undefined ? undefined : { signal })
-      throwIfObservationAborted(signal)
-      if (this.ctx.sessions.get(sessionId) !== undefined) {
-        folded[Symbol.dispose]()
-        return undefined
-      }
-      if (current !== undefined && current.revision === found.revision) return folded
-      folded[Symbol.dispose]()
-    }
-    return undefined
-  }
-
-  /**
-   * Fold one cold observation over the narrowest suffix that still contains the
-   * complete opening page.
-   * @param services - the persistence, projection registry, and cache resolved by the caller.
-   * @param sessionId - logical Session identity being observed.
-   * @param found - the point snapshot whose revision this fold is bound to.
-   * @param maxMessages - requested opening page size.
-   * @param signal - optional cancellation for suffix reads.
-   * @returns the cold observation, or undefined when the registry serves no unit.
-   */
-  private async coldFold(
-    services: ColdTailServices,
-    sessionId: SessionId,
-    found: SessionPersistenceSnapshot,
-    maxMessages: number,
-    signal: AbortSignal | undefined,
-  ): Promise<SessionObservation | undefined> {
-    const { persistence, registry, cache } = services
-    const loaded = await readColdSessionLog(persistence, sessionId, signal)
-    throwIfObservationAborted(signal)
-    // The handle validates and migrates the complete generation before any suffix is projected.
-    deepFreeze(loaded.header)
-    const frozenFrom = loaded.eventState === 'shared-frozen' ? loaded.persistedEventCount : 0
-    for (const event of loaded.events.slice(frozenFrom)) deepFreeze(event)
-    // Bind checkpoint identity to the loaded generation, not the earlier stat result.
-    const rows: ProjectionCheckpoint = cache.checkpointFor(loaded.header, loaded.inheritedEventCount) ?? {}
-    const restoreFloor = registry.restoreFloor(rows)
-    if (restoreFloor === undefined) return undefined
-
-    // A projection restore floor is not a history-page floor. Widen the read
-    // until the complete append-surface message group at the page boundary is
-    // present; otherwise paginate() would report a false short page/hasMore.
-    let base = restoreFloor
-    let width = Math.max(8, maxMessages * 4)
-    for (;;) {
-      throwIfObservationAborted(signal)
-      const suffix = {
-        meta: loaded.header,
-        inheritedEventCount: loaded.inheritedEventCount,
-        fromSeq: base,
-        events: Object.freeze(loaded.events.slice(base)),
-      }
-      throwIfObservationAborted(signal)
-      // A row claiming events this read does not contain is stale-by-shrink or
-      // future. Only the complete log can discard one, so go there in a single
-      // step instead of halving the anchor across repeated whole-file reads.
-      if (base > 0 && claimsBeyond(rows, suffix.events.at(-1)?.seq ?? -1)) {
-        base = SessionLogOffset(0)
-        continue
-      }
-      const page = tailPageBoundary(suffix.events, maxMessages)
-      if ((page.complete && page.cut >= base) || base === 0) {
-        let restored: ReturnType<typeof registry.restore>
-        try {
-          restored = registry.restore(rows, suffix.events, suffix.fromSeq, suffix.meta, suffix.inheritedEventCount)
-        } catch (error: unknown) {
-          // Stale and future rows are disposable, but discarding one is only
-          // sound over the complete log, so restore refuses above seq 0. Read
-          // everything and refold; at seq 0 the row is dropped for init.
-          if (base > 0) { base = SessionLogOffset(0); continue }
-          throw error
-        }
-        // Await write-back before publishing the observation. It is fail-soft
-        // but guarantees a successful first-frame-only read heals the cache.
-        if (loaded.events.length === loaded.persistedEventCount) {
-          await cache.writeBack(suffix.meta, suffix.inheritedEventCount, restored.checkpoint, rows)
-          throwIfObservationAborted(signal)
-        }
-        const events = suffix.events
-        const cursor: SessionSeqCursor = events.at(-1)?.seq ?? -1
-        let disposed = false
-        return {
-          source: 'cold', header: suffix.meta, events,
-          inheritedEventCount: suffix.inheritedEventCount, cursor,
-          revision: found.revision, projections: restored.snapshot,
-          retain: () => {
-            if (disposed) throw new Error(`session observation "${sessionId}" is disposed`)
-            return this.coldLease(
-              suffix.meta, events, suffix.inheritedEventCount, cursor, found.revision, restored.snapshot,
-            )
-          },
-          [Symbol.dispose]: () => { disposed = true },
-        }
-      }
-      base = SessionLogOffset(Math.max(0, base - width))
-      width *= 2
-    }
-  }
-
-  private coldLease(
-    header: SessionHeader,
-    events: readonly SessionEvent[],
-    inheritedEventCount: SessionLogOffsetType,
-    cursor: SessionSeqCursor,
-    revision: SessionPersistenceRevision,
-    projections: ProjectionSnapshot,
-  ): SessionObservation {
-    let disposed = false
-    return {
-      source: 'cold', header, events, inheritedEventCount, cursor, revision, projections,
-      retain: () => { if (disposed) throw new Error(`session observation "${header.id}" is disposed`); return this.coldLease(header, events, inheritedEventCount, cursor, revision, projections) },
-      [Symbol.dispose]: () => { disposed = true },
-    }
-  }
-
   private live(
     session: Session,
     projectionMode: NonNullable<SessionObservationOptions['projectionMode']>,
@@ -478,9 +280,18 @@ export class SessionObservationReader {
     // below `seq` is the same array whenever a consumer first reads `events`.
     const seq = session.seq
     let materialized: readonly SessionEvent[] | undefined
-    const projections = projectionMode === 'none'
-      ? undefined
-      : this.ctx.get('sessionProjections')?.snapshot(session)
+    let projections: ProjectionSnapshot | undefined
+    try {
+      projections = projectionMode === 'none'
+        ? undefined
+        : this.ctx.get('sessionProjections')?.snapshot(session)
+    } catch (error: unknown) {
+      throw new SessionQueryError(
+        `failed to project session "${session.id}": ${errorMessage(error)}`,
+        'SESSION_QUERY_CORRUPT_SESSION',
+        { cause: error },
+      )
+    }
     const lease = (): SessionObservation => {
       let disposed = false
       return {
@@ -488,6 +299,7 @@ export class SessionObservationReader {
         header: session.header,
         inheritedEventCount: session.inheritedEventCount,
         get events() {
+          // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
           materialized ??= session.snapshotEvents(SessionLogOffset(0), seq)
           return materialized
         },
@@ -511,26 +323,6 @@ export class SessionObservationReader {
       ? registry.hydrate(entry.session, {}, entry.events, SessionLogOffset(0))
       : cache.hydratePrepared(entry.session, entry.events)
   }
-}
-
-/** Whether any cached row claims a watermark past the supplied log end. */
-function claimsBeyond(rows: ProjectionCheckpoint, endSeq: SessionSeqCursor): boolean {
-  for (const row of Object.values(rows)) if (row.seq > endSeq) return true
-  return false
-}
-
-function tailPageBoundary(events: readonly SessionEvent[], maxMessages: number): { complete: boolean; cut: SessionLogOffsetType } {
-  let count = 0
-  let cut = SessionLogOffset(0)
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i] as SessionEvent
-    if (!isAppendSurfaceEvent(event) || (event.type !== 'user/message' && event.type !== 'assistant/message')) continue
-    count++
-    let groupStart = event.seq
-    for (const source of event.sourceEventSeqs ?? []) if (source < groupStart) groupStart = source
-    if (count >= maxMessages) { cut = SessionLogOffset(groupStart); return { complete: true, cut } }
-  }
-  return { complete: false, cut }
 }
 
 function throwIfObservationAborted(signal: AbortSignal | undefined): void {

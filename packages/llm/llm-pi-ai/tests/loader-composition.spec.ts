@@ -1,12 +1,4 @@
-/**
- * Real-composition guard for the dormant pi-ai posture: LlmRuntime,
- * settings-file, credentials-local, and a bare `llm-pi-ai` row boot from a
- * test-only cordis.yml through the actual Loader + Include path, an external
- * edit of settings.yaml registers the route live, and the next request
- * carries the credential the credentials document supplies. A hand-mounted `ctx.plugin` cannot
- * catch Loader export-shape failures, which is why the twin adapter has the
- * same guard.
- */
+/** Profile patch edits and credential updates reach the next real adapter request. */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,11 +6,11 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Loader, { type ModuleLoaderV2 } from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import LlmRuntime, { createMessage, createUserMessage, userAgent } from '@deepseek-ai/dsh-llm'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
-import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
+import { profileComposition } from '../../../settings/settings/tests/profile-composition.ts'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
@@ -42,26 +34,17 @@ afterEach(async () => {
   root = undefined
   await closeMockServers()
   vi.unstubAllEnvs()
-  vi.unstubAllGlobals()
 })
 
 /** Boot the dormant composition: a bare `llm-pi-ai` row with no config at all. */
-async function loadComposition(existingRoot?: string): Promise<{ ctx: Context; settingsPath: string }> {
-  root = existingRoot ?? await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
-  vi.stubEnv('DSH_HOME', root)
-  const settingsPath = join(root, 'settings.yaml')
-  if (existingRoot === undefined) await writeFile(settingsPath, '# personal settings\n')
+async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }> {
+  root = await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
   await writeFile(join(root, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_COMPOSITION_KEY: key-from-store\n', { mode: 0o600 })
 
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
     '- id: llm',
     "  name: 'test-llm-service'",
-    '- id: settings',
-    "  name: '@deepseek-ai/dsh-settings-file'",
-    '  config:',
-    `    path: ${JSON.stringify(settingsPath)}`,
-    '    debounceMs: 10',
     '- id: credentials',
     "  name: '@deepseek-ai/dsh-credentials-local'",
     '  config:',
@@ -79,101 +62,27 @@ async function loadComposition(existingRoot?: string): Promise<{ ctx: Context; s
   ctx.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
     ['test-llm-service', LlmRuntime],
-    ['@deepseek-ai/dsh-settings-file', FileSettingsProvider],
     ['@deepseek-ai/dsh-credentials-local', LocalCredentialProvider],
     ['@deepseek-ai/dsh-llm-pi-ai', LlmPiAi],
   ])
-  ctx.loader.internal = {
+  const internal: ModuleLoaderV2 = {
     version: 'v2',
-    async import(specifier: string) {
+    loadCache: new Map(),
+    import: (specifier: string) => {
       if (!modules.has(specifier)) throw new Error(`unexpected Loader import: ${specifier}`)
-      return modules.get(specifier)
+      return Promise.resolve(modules.get(specifier))
     },
-  } as unknown as NonNullable<typeof ctx.loader.internal>
-  await ctx.loader.create({
-    name: 'cordis:include',
-    config: { path: pathToFileURL(configPath).href },
-  })
-  await ctx.loader.await()
-  return { ctx, settingsPath }
+    register(): never { throw new Error('unexpected module hook registration') },
+    getOrCreateModuleJob(): never { throw new Error('unexpected module job creation') },
+    resolveSync(): never { throw new Error('unexpected synchronous module resolution') },
+    load(): never { throw new Error('unexpected module load') },
+  }
+  ctx.loader.internal = internal
+  const patchPath = await profileComposition(ctx, root, configPath)
+  return { ctx, settingsPath: patchPath }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
-  it('R3 cold dispatch resolves cached selection without waiting for an offline metadata endpoint', async () => {
-    const nativeFetch = globalThis.fetch
-    let offline = false
-    vi.stubGlobal('fetch', (url: string | URL | Request, init?: RequestInit) => {
-      const address = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url
-      if (address.endsWith('/models')) {
-        return offline ? new Promise<Response>(() => {}) : Promise.resolve(Response.json({ data: [{ id: 'cold-model' }] }))
-      }
-      return nativeFetch(url, init)
-    })
-    const server = await mockServer([{ events: textEvents }])
-    const first = await loadComposition()
-    await first.ctx.settings.update('llm-pi-ai', { providers: { 'cold-route': {
-      api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
-      modelDiscovery: { enabled: true, timeoutMs: 60_000 }, models: [{ id: 'configured' }],
-    } } })
-    await first.ctx.llm.discoverModels('llm-pi-ai', { provider: 'cold-route' })
-    const savedConfig = JSON.stringify(first.ctx.settings.get('llm-pi-ai'))
-    await first.ctx.fiber.dispose()
-    offline = true
-    const second = await loadComposition(root)
-    expect(JSON.stringify(second.ctx.settings.get('llm-pi-ai'))).toBe(savedConfig)
-    // No listModels, explicit refresh, polling, or network completion primes this process.
-    const [resolved, prepared, dispatched] = await Promise.all([
-      second.ctx.llm.resolveModelInfo('cold-route', 'cold-model'),
-      second.ctx.llm.prepareCall({ provider: 'cold-route', model: 'cold-model' }),
-      assemble(second.ctx, { provider: 'cold-route', model: 'cold-model', messages: [] }),
-    ])
-    expect(resolved.id).toBe('cold-model')
-    expect(prepared.config.model).toBe('cold-model')
-    expect(dispatched.message.content).toEqual([{ type: 'text', text: 'hello' }])
-    expect(server.paths).toEqual(['/chat/completions'])
-  })
-
-  it('R3 cold unknown selection receives a discovery opportunity without picker priming', async () => {
-    const server = await mockServer([
-      { body: JSON.stringify({ data: [{ id: 'cold-new' }] }) }, { events: textEvents },
-    ])
-    const { ctx } = await loadComposition()
-    await ctx.settings.update('llm-pi-ai', { providers: { 'cold-route': {
-      api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
-      modelDiscovery: { enabled: true }, models: [{ id: 'configured' }],
-    } } })
-    const result = await assemble(ctx, { provider: 'cold-route', model: 'cold-new', messages: [] })
-    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
-    expect(server.paths).toEqual(['/models', '/chat/completions'])
-  })
-
-  it('discovers a custom Kimi route through Loader and dispatches the discovered selection', async () => {
-    vi.stubEnv('PI_COMPOSITION_KEY', '')
-    const server = await mockServer([
-      { body: JSON.stringify({ data: [{ id: 'new-kimi', context_length: 131072, think_efforts: ['low', 'high'] }] }) },
-      { events: textEvents },
-    ])
-    const { ctx } = await loadComposition()
-    await ctx.settings.update('llm-pi-ai', {
-      providers: { 'kimi-code': {
-        api: 'openai-completions', baseURL: server.url, apiKeyEnv: 'PI_COMPOSITION_KEY',
-        modelDiscovery: { enabled: true },
-        models: [{ id: 'existing-kimi', contextWindow: 90000 }],
-        compat: { thinkingFormat: 'deepseek', supportsDeveloperRole: false },
-      } },
-    })
-    await vi.waitFor(async () => {
-      expect((await ctx.llm.listModels('kimi-code')).map(model => model.id)).toContain('new-kimi')
-    })
-    const result = await assemble(ctx, { provider: 'kimi-code', model: 'new-kimi', messages: [] })
-    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
-    expect(server.paths).toEqual(['/models', '/chat/completions'])
-    expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
-    expect(server.requests[1]).toMatchObject({ model: 'new-kimi' })
-    const stored = ctx.settings.get('llm-pi-ai')
-    expect(JSON.stringify(stored)).not.toContain('new-kimi')
-  })
-
   it('boots with zero routes and registers one the moment settings supply a profile', async () => {
     vi.stubEnv('PI_COMPOSITION_KEY', '')
     const server = await mockServer([{ events: textEvents }])
@@ -184,18 +93,19 @@ describe('llm-pi-ai real dormant composition', () => {
 
     // Exactly what the web Models page leaves on disk.
     await writeFile(settingsPath, [
-      'llm-pi-ai:',
-      '  providers:',
-      '    deepseek:',
-      '      apiKeyEnv: PI_COMPOSITION_KEY',
-      `      baseURL: ${server.url}`,
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      deepseek:',
+      '        apiKeyEnv: PI_COMPOSITION_KEY',
+      `        baseURL: ${server.url}`,
       '',
     ].join('\n'))
     await vi.waitFor(() => {
       expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['deepseek'])
     }, { timeout: 5000 })
 
-    const result = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
+    const result = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-flash', messages: [] })
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
   })
@@ -206,18 +116,19 @@ describe('llm-pi-ai real dormant composition', () => {
     const { ctx, settingsPath } = await loadComposition()
 
     await writeFile(settingsPath, [
-      'llm-pi-ai:',
-      '  providers:',
-      '    acme-gateway:',
-      '      apiKeyEnv: PI_COMPOSITION_KEY',
-      '      api: openai-completions',
-      `      baseURL: ${server.url}`,
-      '      headers:',
-      '        X-Company-Code: private-tenant',
-      '        Accept: text/plain',
-      '        User-Agent: deployment-owned',
-      '      models:',
-      '        - id: acme-bootstrap',
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      acme-gateway:',
+      '        apiKeyEnv: PI_COMPOSITION_KEY',
+      '        api: openai-completions',
+      `        baseURL: ${server.url}`,
+      '        headers:',
+      '          X-Company-Code: private-tenant',
+      '          Accept: text/plain',
+      '          User-Agent: deployment-owned',
+      '        models:',
+      '          - id: acme-bootstrap',
       '',
     ].join('\n'))
     await vi.waitFor(() => {
@@ -244,11 +155,12 @@ describe('llm-pi-ai real dormant composition', () => {
     ])
     const { ctx, settingsPath } = await loadComposition()
     await writeFile(settingsPath, [
-      'llm-pi-ai:',
-      '  providers:',
-      '    deepseek:',
-      '      apiKeyEnv: PI_COMPOSITION_KEY',
-      `      baseURL: ${server.url}`,
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      deepseek:',
+      '        apiKeyEnv: PI_COMPOSITION_KEY',
+      `        baseURL: ${server.url}`,
       '',
     ].join('\n'))
     await vi.waitFor(() => {
@@ -257,7 +169,7 @@ describe('llm-pi-ai real dormant composition', () => {
 
     const truncated = await assemble(ctx, {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       messages: [],
     })
     expect(truncated.finish).toEqual({ kind: 'max-tokens' })
@@ -265,14 +177,14 @@ describe('llm-pi-ai real dormant composition', () => {
     expect(truncated.message.source).toEqual({
       kind: 'model',
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       replayState: {
         response: {
           kind: 'pi-ai',
           version: 2,
           api: 'openai-completions',
           provider: 'deepseek',
-          model: 'deepseek-v4-flash',
+          model: 'deepseek-flash',
           stopReason: 'length',
         },
         blocks: [{ type: 'text' }],
@@ -281,7 +193,7 @@ describe('llm-pi-ai real dormant composition', () => {
 
     const continued = await assemble(ctx, {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       messages: [
         truncated.message,
         createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }),
@@ -304,11 +216,12 @@ describe('llm-pi-ai real dormant composition', () => {
     const server = await mockServer([{ events: textEvents }])
     const { ctx, settingsPath } = await loadComposition()
     await writeFile(settingsPath, [
-      'llm-pi-ai:',
-      '  providers:',
-      '    deepseek:',
-      '      apiKeyEnv: PI_COMPOSITION_KEY',
-      `      baseURL: ${server.url}`,
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      '      deepseek:',
+      '        apiKeyEnv: PI_COMPOSITION_KEY',
+      `        baseURL: ${server.url}`,
       '',
     ].join('\n'))
     await vi.waitFor(() => {
@@ -324,13 +237,13 @@ describe('llm-pi-ai real dormant composition', () => {
         kind: 'model',
         ...{
           provider: 'deepseek',
-          model: 'deepseek-v4-flash',
+          model: 'deepseek-flash',
           replayState: {
             kind: 'pi-ai',
             version: 1,
             api: 'openai-completions',
             provider: 'deepseek',
-            model: 'deepseek-v4-flash',
+            model: 'deepseek-flash',
             stopReason: 'length',
             blocks: [{ type: 'text' }, { type: 'tool-call' }],
           },
@@ -339,7 +252,7 @@ describe('llm-pi-ai real dormant composition', () => {
     })
     const continued = await assemble(ctx, {
       provider: 'deepseek',
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-flash',
       messages: [
         poisoned,
         createUserMessage({ content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' } }),
