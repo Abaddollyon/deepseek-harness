@@ -353,6 +353,18 @@
               "fresh",
               "fork"
             ]
+          },
+          "provider": {
+            "type": "string",
+            "description": "LLM provider route for the teammate. Supply together with model after checking list_subagent_models; omit both to use the configured teammate route."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id interpreted by provider. Supply together with provider; omit both to use the configured teammate route."
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort for the teammate route. Omit to use a compatible configured effort or the selected model's default."
           }
         },
         "required": [
