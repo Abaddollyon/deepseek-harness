@@ -168,7 +168,8 @@ export class SandboxPolicyService extends Service {
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
-    const additionalRoots = session === undefined ? [] : session.additionalPaths.map(resolveWorkspaceRoot)
+    // Structural Session doubles that predate multi-root workspaces carry no additionalPaths.
+    const additionalRoots = (session?.additionalPaths ?? []).map(resolveWorkspaceRoot)
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
       workspaceRoot: resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot),
