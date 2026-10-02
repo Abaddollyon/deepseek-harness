@@ -1,3 +1,15 @@
+/* The main Conversation and its asides share the centre column as one row;
+   an aside that renders nothing leaves the Conversation the whole width. */
+.frame {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+}
+
+.frame > .root {
+  flex: 1 1 0;
+}
+
 .root {
   position: relative; /* positioning context for slot-owned absolute chrome */
   display: flex;
@@ -498,6 +510,15 @@ button.crumb:hover {
   right: var(--dsh-scrollbar-width);
   bottom: 0;
   left: 0;
+}
+
+/* A blank Session's landing fills the band above the docked composer, the
+   place the transcript takes once the first turn lands. */
+.landingSeat {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  min-width: 0;
 }
 
 /* Hero phase: the composer stack (hero chrome + workspace row + card) is

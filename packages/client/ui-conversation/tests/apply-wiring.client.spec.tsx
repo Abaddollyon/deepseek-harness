@@ -136,6 +136,23 @@ describe('target-neutral Conversation apply wiring', () => {
     await b.runtime.dispose()
   })
 
+  it('declares the aside and landing seats and publishes the preset ids that have a landing', async () => {
+    const b = await bench()
+    expect(b.runtime.slots.spec('conversation.aside')).toEqual({ kind: 'list', scope: 'session-maybe' })
+    expect(b.runtime.slots.spec('conversation.landing')).toEqual({ kind: 'keyed', scope: 'session' })
+    const root = b.runtime.slots.entries('main.conversation')[0]!
+    const landings = (root.inject!() as { hooks: { conversationLandings: ObservableSnapshot<readonly string[]> } })
+      .hooks.conversationLandings
+    expect(landings.getSnapshot()).toEqual([])
+
+    const disposeLanding = b.runtime.slots.register({ name: 'conversation.landing', key: 'life' }, (() => null) as never)
+    await vi.waitFor(() => { expect(landings.getSnapshot()).toEqual(['life']) })
+
+    disposeLanding()
+    await vi.waitFor(() => { expect(landings.getSnapshot()).toEqual([]) })
+    await b.runtime.dispose()
+  })
+
   it('removes services, entries, and declarations with the plugin fiber', async () => {
     const b = await bench()
     await b.feature.dispose()

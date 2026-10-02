@@ -191,6 +191,22 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'conversation.hero.brand.mark': { kind: 'single'; scope: 'root'; owner: HeroBrandMarkOwnerProps }
     /** Agent-preset control staged for a New Session. */
     'conversation.hero.agentPreset': { kind: 'single'; scope: 'session-maybe'; owner: HeroAgentPresetOwnerProps }
+    /**
+     * Columns beside the whole main Conversation (header, transcript, and
+     * composer), in ascending order from the Conversation's right edge. Each
+     * entry decides whether it shows and how wide it is: one that renders
+     * nothing takes no space. Showing, hiding, and remembering that choice
+     * belong to the entry. Embedded Conversations have no asides.
+     */
+    'conversation.aside': { kind: 'list'; scope: 'session-maybe'; owner: ConversationAsideOwnerProps }
+    /**
+     * A blank Session's landing view, keyed by agent preset id. While the
+     * current Session has no turn yet and the preset it records has an entry
+     * here, the main Conversation shows that entry instead of the blank-session
+     * Hero and docks the composer below it; the first turn replaces it with
+     * the transcript.
+     */
+    'conversation.landing': { kind: 'keyed'; scope: 'session'; owner: ConversationLandingOwnerProps }
     /** Full-width entries above the composer card. */
     'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: InputZone }
     /** Floating entries rendered inside the resident composer card. */
@@ -236,6 +252,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         'conversation.hero.brand.mark': { kind: 'single'; scope: 'root' }
         'conversation.hero.workspace': { kind: 'single'; scope: 'root' }
         'conversation.hero.agentPreset': { kind: 'single'; scope: 'session-maybe' }
+        'conversation.landing': { kind: 'keyed'; scope: 'session' }
       }
       inject: ConversationInjected
       locale: 'conversation'
@@ -268,6 +285,24 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** Input actions are absent without a current Session. */
     inputActions: InputActions | undefined
   }
+}
+
+/** Owner share of the columns beside the main Conversation. */
+export interface ConversationAsideOwnerProps {
+  /** Agent preset recorded by the current Session; undefined without a Session or a recorded preset. */
+  agentPreset: string | undefined
+}
+
+/** Owner share of a blank Session's landing view. */
+export interface ConversationLandingOwnerProps {
+  /** Agent preset recorded by the Session, which is also the entry's key. */
+  agentPreset: string
+}
+
+/** Business face injected into the resident main Conversation shell. */
+export interface ConversationRootInjected {
+  /** Agent preset ids that currently have a `conversation.landing` entry. */
+  readonly hooks: { readonly conversationLandings: ObservableSnapshot<readonly string[]> }
 }
 
 /** Owner share of the Hero agent-preset control. */
@@ -452,14 +487,17 @@ export interface HeroBrandMarkOwnerProps {
 /** Full props of the resident optional-Session Conversation shell. */
 export type ConversationSlotProps =
   PropsRuntime<'main.conversation'>
-  & PropsRenderSlots<'conversation.header'>
+  & PropsRenderSlots<'conversation.header' | 'conversation.aside'>
   & PropsRenderFactories
+  & InjectFace<ConversationRootInjected>
 
 /** Inputs shared by main and embedded Conversation content occurrences. */
 export interface ConversationContentInputProps {
   variant: 'main' | 'embedded'
   phase: 'settling' | 'hero' | 'active'
   hero: boolean
+  /** Agent preset whose `conversation.landing` entry replaces the transcript of this blank Session. */
+  landing?: string
 }
 
 /** Values passed from shared content to its occurrence-selected width controls. */

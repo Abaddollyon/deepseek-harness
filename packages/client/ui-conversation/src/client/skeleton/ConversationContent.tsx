@@ -21,7 +21,7 @@ function NoConversationWidthControls() {
  */
 export function ConversationContent(props: ConversationContentProps) {
   const {
-    sessionId, phase, hero, useSession, useSessions, useSessionStatus,
+    sessionId, phase, hero, landing, useSession, useSessions, useSessionStatus,
     useWorkspaces, useInput, useComposerBlock, renderSlot, renderSlotChain,
     selectWorkspace, t, useFactorySlot,
   } = props
@@ -200,7 +200,15 @@ export function ConversationContent(props: ConversationContentProps) {
       data-content-phase={phase}
     >
       <div className={css.scrollBody} data-conversation-scroll="">
-        {sessionId === undefined ? null : <Views />}
+        {sessionId === undefined
+          ? null
+          : landing === undefined
+            ? <Views />
+            : (
+              <div className={css.landingSeat} data-conversation-landing={landing}>
+                {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
+              </div>
+            )}
         {composerSeat}
       </div>
       <WidthControls container={body} phase={phase} />

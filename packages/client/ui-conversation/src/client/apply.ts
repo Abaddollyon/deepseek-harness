@@ -16,7 +16,7 @@ import type { ShortcutCommandId, ShortcutFixedCommand } from '@deepseek-ai/dsh-c
 import { UiConversation } from './conversation/assembly.ts'
 import type { ViewTab } from './contract/views.ts'
 import type {
-  ComposerBarInjected, ConversationInjected, ConversationSessionHeaderInjected,
+  ComposerBarInjected, ConversationInjected, ConversationRootInjected, ConversationSessionHeaderInjected,
   ConversationSessionInjected, DraftFileUploads,
 } from './contract/slots.ts'
 import type { InputNotice } from './contract/input.ts'
@@ -299,11 +299,28 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     },
   })
 
+  // Preset ids with a live landing entry, so the main panel can choose the
+  // landing over the Hero before rendering; a crashed entry drops out.
+  const landings = createSnapshotStore<readonly string[]>([])
+  ctx.effect(() => {
+    const sync = (): void => {
+      const keys = slots.entriesOfSlot('conversation.landing')
+        .flatMap(entry => entry.options.key === undefined ? [] : [entry.options.key])
+      const current = landings.getSnapshot()
+      if (keys.length !== current.length || keys.some((key, index) => key !== current[index])) landings.set(keys)
+    }
+    sync()
+    return slots.subscribe('conversation.landing', sync)
+  }, 'ui-conversation: landing presets')
+  const rootInjected: ConversationRootInjected = { hooks: { conversationLandings: landings } }
+
   const registerConversationRoot = () => slots.register({
     name: 'main.conversation',
     children: {
       'conversation.header': { kind: 'single', scope: 'session-maybe' },
+      'conversation.aside': { kind: 'list', scope: 'session-maybe' },
     },
+    inject: () => rootInjected,
   }, ConversationRoot)
 
   const registerConversationContent = () => slots.registerFactory({
@@ -318,6 +335,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       'conversation.hero.brand.mark': { kind: 'single', scope: 'root' },
       'conversation.hero.workspace': { kind: 'single', scope: 'root' },
       'conversation.hero.agentPreset': { kind: 'single', scope: 'session-maybe' },
+      'conversation.landing': { kind: 'keyed', scope: 'session' },
     },
     slots: {
       views: { scope: 'session' },
