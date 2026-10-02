@@ -3584,6 +3584,12 @@ export interface Config {
    * `@deepseek-ai/dsh-tool-call-timeout-policy` through `exec.signal`.
    */
   timeoutMs?: number
+  /**
+   * Ripgrep executable spawned through `ctx.subprocess`: an absolute path or a
+   * name resolved by that execution world's PATH. Omitted selects the packaged
+   * Host binary, which a remote execution world cannot run.
+   */
+  rgPath?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-fs-search -->

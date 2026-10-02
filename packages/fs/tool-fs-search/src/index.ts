@@ -92,6 +92,12 @@ export interface Config {
    * `@deepseek-ai/dsh-tool-call-timeout-policy` through `exec.signal`.
    */
   timeoutMs?: number
+  /**
+   * Ripgrep executable spawned through `ctx.subprocess`: an absolute path or a
+   * name resolved by that execution world's PATH. Omitted selects the packaged
+   * Host binary, which a remote execution world cannot run.
+   */
+  rgPath?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -104,10 +110,11 @@ export const Config: z<Config> = z.object({
   graceMs: z.number().default(SEARCH_GRACE_MS),
   stderrMaxBytes: z.number().default(SEARCH_STDERR_MAX_BYTES),
   timeoutMs: z.number().default(SEARCH_TIMEOUT_MS),
+  rgPath: z.string(),
 })
 
 /** The shape after schemastery applied the defaults. */
-type ResolvedConfig = Required<Config>
+type ResolvedConfig = Required<Omit<Config, 'rgPath'>> & Pick<Config, 'rgPath'>
 
 /** Every search cap counts items/bytes/milliseconds — a positive integer, or retention and timeout arithmetic misbehaves silently. */
 function assertPositiveInteger(name: string, value: number): void {
@@ -139,6 +146,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   assertPositiveInteger('stderrMaxBytes', resolved.stderrMaxBytes)
   assertPositiveInteger('timeoutMs', resolved.timeoutMs)
+  if (resolved.rgPath?.trim() === '') throw new Error('tool-fs-search: rgPath must be non-empty when given')
+  const rgPath = resolved.rgPath === undefined ? {} : { rgPath: resolved.rgPath }
   applyGlobTool(ctx, {
     sampleOverCapGlobResults: resolved.sampleOverCapGlobResults,
     maxResults: resolved.globMaxResults,
@@ -147,6 +156,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     graceMs: resolved.graceMs,
     stderrMaxBytes: resolved.stderrMaxBytes,
     timeoutMs: resolved.timeoutMs,
+    ...rgPath,
   })
   applyGrepTool(ctx, {
     maxMatches: resolved.grepMaxMatches,
@@ -156,5 +166,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     graceMs: resolved.graceMs,
     stderrMaxBytes: resolved.stderrMaxBytes,
     timeoutMs: resolved.timeoutMs,
+    ...rgPath,
   })
 }
