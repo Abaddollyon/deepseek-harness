@@ -181,4 +181,38 @@ onGraphChanged(listener: () => void): () => void
 ```
 
 Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)
+
+<a id="ctxclientsurfaces--clientsurfaceregistry"></a>
+
+### `ctx.clientSurfaces` — `ClientSurfaceRegistry`
+
+`ctx.clientSurfaces`: registered client surfaces. A surface index boots only the client-modules bootstrap plus the `inject`/`external` closure of its root plugin and extra roots; a required `inject` package that is not loaded makes the closure fail.
+
+```ts cordis-catalog
+/**
+ * Register one surface. The first graph composition runs immediately, so a
+ * missing root or required dependency throws here.
+ * @param definition - surface id, exact path, root plugin, and extra roots.
+ * @returns the disposer that removes the surface; callers run `register` inside `ctx.effect`.
+ * @throws when the id or path is malformed or already registered, or the graph cannot be composed.
+ */
+register(definition: ClientSurfaceDefinition): () => void
+
+/**
+ * Find the surface served at one exact pathname.
+ * @param path - decoded request pathname.
+ * @returns the surface, or undefined when none is registered there or its graph cannot currently be composed.
+ */
+findByPath(path: string): ClientSurfaceDefinition | undefined
+
+/**
+ * Compose the current boot graph of one registered surface.
+ * @param id - registered surface id.
+ * @returns the graph served as that surface's `window.__DSH_BOOT__`.
+ * @throws when the id is not registered or the graph cannot be composed.
+ */
+graph(id: string): WebBootGraph
+```
+
+Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/src/index.ts)
 <!-- END GENERATED cordis-surface -->

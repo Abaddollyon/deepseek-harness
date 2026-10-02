@@ -745,9 +745,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the operator Peer, or the rejection status.',
       },
       {
-        signature: 'authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean',
+        signature: 'authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, exchangePath?: string): boolean',
         description: 'Authenticate one frontend index request, owning a token redirect or 401.',
-        parameters: [{ name: 'request', description: 'root or configured-index HTTP request.' }, { name: 'response', description: 'response owned when the result is false.' }],
+        parameters: [{ name: 'request', description: 'root or configured-index HTTP request.' }, { name: 'response', description: 'response owned when the result is false.' }, { name: 'exchangePath', description: 'exact pathname that accepts the launch token, such as a client surface path; defaults to `/`.' }],
         returns: 'true only when the frontend may serve index.html.',
       },
       {
@@ -3523,15 +3523,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the transformed body.',
       },
       {
-        signature: 'collectIndexInjections(): IndexInjection[]',
+        signature: 'collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]',
         description: 'Gather the structured injection table: one `webserver/index-inject` emit, every subscriber pushes its current rows. Fresh per call, so subscribers read live state (module graph, theme preference) at emit time.',
-        parameters: [],
+        parameters: [{ name: 'context', description: 'index selection passed to every listener.' }],
         returns: 'rows in subscriber activation order.',
       },
       {
-        signature: 'renderIndex(html: string): string',
+        signature: 'renderIndex(html: string, context: IndexRenderContext = {}): string',
         description: 'Render one index.html body: the structured injection table first, then the raw `tapIndex` transforms over the result.',
-        parameters: [{ name: 'html', description: 'the raw index.html body.' }],
+        parameters: [{ name: 'html', description: 'the raw index.html body.' }, { name: 'context', description: 'index selection passed to injection listeners.' }],
         returns: 'the transformed body.',
       },
     ],
@@ -4336,10 +4336,10 @@ export const EVENT_API: readonly EventApiEntry[] = [
   {
     name: 'webserver/index-inject',
     mode: 'emit',
-    signature: '\'webserver/index-inject\'(table: IndexInjection[]): void',
+    signature: '\'webserver/index-inject\'(table: IndexInjection[], context?: IndexRenderContext): void',
     summary: 'Collect the structured index injection table.',
     description: 'Collect the structured index injection table. Emitted on every index render and every worker boot-payload request; listeners push their current rows, so a row\'s data is read fresh at emit time.',
-    parameters: [{ name: 'table', description: 'Mutable row table; listeners append in activation order.' }],
+    parameters: [{ name: 'table', description: 'Mutable row table; listeners append in activation order.' }, { name: 'context', description: 'Index selected by the rendering owner; absent selects the ordinary index.' }],
   },
   {
     name: 'workflow/agent-end',
@@ -5360,6 +5360,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'IndexInjectionPlacement',
     declaration: 'export type IndexInjectionPlacement = \'head\' | \'body\';',
+  },
+  {
+    name: 'IndexRenderContext',
+    declaration: 'export interface IndexRenderContext {\n    readonly variant?: string;\n}',
   },
   {
     name: 'InspectOptions',

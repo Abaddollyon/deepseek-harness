@@ -94,9 +94,10 @@ admit(request: ConnectionTrustRequest): PeerAdmission
  * Authenticate one frontend index request, owning a token redirect or 401.
  * @param request - root or configured-index HTTP request.
  * @param response - response owned when the result is false.
+ * @param exchangePath - exact pathname that accepts the launch token, such as a client surface path; defaults to `/`.
  * @returns true only when the frontend may serve index.html.
  */
-authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, exchangePath?: string): boolean
 
 /**
  * Add the fresh process token to an ordinary Web application URL.
@@ -162,17 +163,19 @@ applyIndexTaps(html: string): string
  * Gather the structured injection table: one `webserver/index-inject` emit,
  * every subscriber pushes its current rows. Fresh per call, so subscribers
  * read live state (module graph, theme preference) at emit time.
+ * @param context - index selection passed to every listener.
  * @returns rows in subscriber activation order.
  */
-collectIndexInjections(): IndexInjection[]
+collectIndexInjections(context: IndexRenderContext = {}): IndexInjection[]
 
 /**
  * Render one index.html body: the structured injection table first, then
  * the raw `tapIndex` transforms over the result.
  * @param html - the raw index.html body.
+ * @param context - index selection passed to injection listeners.
  * @returns the transformed body.
  */
-renderIndex(html: string): string
+renderIndex(html: string, context: IndexRenderContext = {}): string
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
@@ -217,9 +220,10 @@ Collect the structured index injection table. Emitted on every index render and 
  * render and every worker boot-payload request; listeners push their
  * current rows, so a row's data is read fresh at emit time.
  * @param table - Mutable row table; listeners append in activation order.
+ * @param context - Index selected by the rendering owner; absent selects the ordinary index.
  * @mode emit
  */
-'webserver/index-inject'(table: IndexInjection[]): void
+'webserver/index-inject'(table: IndexInjection[], context?: IndexRenderContext): void
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)

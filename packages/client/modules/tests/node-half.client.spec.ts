@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { Context, FiberState, type Fiber } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { renderIndexInjections, type WebServer, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import { renderIndexInjections, type IndexInjection, type WebServer, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import * as modulesClient from '../src/client/index.ts'
 import { ClientModuleRegistry, bootInjections, orderByModuleGraph } from '../src/index.ts'
 import type { ClientModuleLoaderTarget, WebBootEntry, WebBootGraph } from '../src/client/index.ts'
@@ -1059,6 +1059,65 @@ describe('shared module declarations', () => {
     writeBuiltPackage(packageName, { external: 'react' })
     expect(() => construct([packageName]))
       .toThrow(`client-modules: ${packageName} dsh.client.external must be a string array`)
+  })
+})
+
+describe('client surfaces', () => {
+  const ids = (graph: WebBootGraph): string[] => graph.entries.map(row => row.id)
+
+  /** Ordinary app package, a shared renderer, and an opt-out surface root that injects the renderer. */
+  function surfaceFixture(): { context: Context; service: ClientModuleRegistry; route: Promise<WebRoute> } {
+    writeBuiltPackage(MODULES_ID, { immediately: true })
+    writeBuiltPackage('@fixture/app', {})
+    writeBuiltPackage('@fixture/renderer', { defaultRoot: false })
+    writeBuiltPackage('@fixture/companion', { defaultRoot: false, inject: ['@fixture/renderer'] })
+    return constructWithRoute([MODULES_ID, '@fixture/app', '@fixture/renderer', '@fixture/companion'])
+  }
+
+  it('keeps defaultRoot false packages out of the ordinary graph unless a root depends on them', () => {
+    writeBuiltPackage('@fixture/root', { inject: ['@fixture/needed'] })
+    writeBuiltPackage('@fixture/needed', { defaultRoot: false })
+    writeBuiltPackage('@fixture/unused', { defaultRoot: false })
+    expect(ids(construct(['@fixture/root', '@fixture/needed', '@fixture/unused']).graph()))
+      .toEqual(['@fixture/root', '@fixture/needed'])
+    writeBuiltPackage('@fixture/bad-root', { defaultRoot: 'no' })
+    expect(() => construct(['@fixture/bad-root']))
+      .toThrow('client-modules: @fixture/bad-root dsh.client.defaultRoot must be a boolean')
+  })
+
+  it('serves a registered surface with its own dependency-closed graph until disposed', async () => {
+    const { context, service, route } = surfaceFixture()
+    expect(ids(service.graph())).toEqual([MODULES_ID, '@fixture/app'])
+    const dispose = context.clientSurfaces.register({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
+    const graph = context.clientSurfaces.graph('companion')
+    expect(ids(graph)).toEqual([MODULES_ID, '@fixture/renderer', '@fixture/companion'])
+    expect(context.clientSurfaces.findByPath('/companion')?.id).toBe('companion')
+    for (const batch of graph.batches) expect((await routeRequest(route, batch.url)).status).toBe(200)
+
+    const ordinary: IndexInjection[] = []
+    const surface: IndexInjection[] = []
+    context.emit('webserver/index-inject', ordinary)
+    context.emit('webserver/index-inject', surface, { variant: 'companion' })
+    expect(ordinary.find(row => row.kind === 'global')).toMatchObject({ value: service.graph() })
+    expect(surface.find(row => row.kind === 'global')).toMatchObject({ value: graph })
+
+    dispose()
+    expect(context.clientSurfaces.findByPath('/companion')).toBeUndefined()
+    expect(() => context.clientSurfaces.graph('companion')).toThrow('unknown surface')
+  })
+
+  it('rejects ordinary roots, missing dependencies, and duplicate ids or paths', () => {
+    const { context } = surfaceFixture()
+    const surfaces = context.clientSurfaces
+    expect(() => surfaces.register({ id: 'app', path: '/app', rootPlugin: '@fixture/app' }))
+      .toThrow('must declare dsh.client.defaultRoot false')
+    expect(() => surfaces.register({ id: 'extra', path: '/extra', rootPlugin: '@fixture/companion', roots: ['@fixture/absent'] }))
+      .toThrow('missing client module @fixture/absent')
+    surfaces.register({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
+    expect(() => surfaces.register({ id: 'companion', path: '/other', rootPlugin: '@fixture/companion' }))
+      .toThrow('duplicate id')
+    expect(() => surfaces.register({ id: 'other', path: '/companion', rootPlugin: '@fixture/companion' }))
+      .toThrow('duplicate path')
   })
 })
 
