@@ -117,13 +117,14 @@ export class SessionCommandController {
       }
     }
     const cwd = workspace?.path ?? request.cwd ?? this.defaultCwd
+    const agentPreset = workspace === undefined ? request.agentPreset : this.workspacePreset(workspace, request.agentPreset)
     let adopted: Agent
     try {
       adopted = await this.agents.ensureSession(
         sessionId,
         cwd,
         request.sessionId !== undefined,
-        request.agentPreset,
+        agentPreset,
         workspace?.additionalPaths,
       )
     } catch (error) {
@@ -140,8 +141,32 @@ export class SessionCommandController {
         )
       }
     }
-    const agentPreset = this.agents.presetForSession(adopted.session)
-    return { sessionId, ...(agentPreset === undefined ? {} : { agentPreset }) }
+    const selected = this.agents.presetForSession(adopted.session)
+    return { sessionId, ...(selected === undefined ? {} : { agentPreset: selected }) }
+  }
+
+  /**
+   * Select the preset of a Session created in a Workspace. A Workspace in an
+   * Agent preset's execution world creates its Sessions in that preset; a Host
+   * Workspace refuses a preset that mounts its own filesystem, whose world
+   * does not hold the Workspace directory.
+   * @param workspace - the Workspace the Session joins.
+   * @param requested - the caller's preset, if any.
+   * @returns the preset the Session is created with.
+   */
+  private workspacePreset(workspace: Workspace, requested: string | undefined): string | undefined {
+    if (workspace.agentPreset !== undefined) {
+      if (requested !== undefined && requested !== workspace.agentPreset) {
+        throw new RemoteError('gateway/bad-request',
+          `workspace "${workspace.id}" runs in agent preset "${workspace.agentPreset}", not "${requested}"`, {})
+      }
+      return workspace.agentPreset
+    }
+    if (requested !== undefined && this.ctx.get('agentPresets')?.serviceForPreset(requested, 'fs') !== undefined) {
+      throw new RemoteError('gateway/bad-request',
+        `agent preset "${requested}" runs on another execution host; create its Sessions in a Workspace on that host`, {})
+    }
+    return requested
   }
 
   /**

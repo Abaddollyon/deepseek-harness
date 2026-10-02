@@ -68,6 +68,26 @@ describe('Session creation failures', () => {
     await ctx.fiber.dispose()
   })
 
+  it('creates Sessions in a remote Workspace under its preset and keeps remote presets out of Host Workspaces', async () => {
+    const ctx = await baseContext()
+    const workspaces: Record<string, Workspace> = {
+      remote: { id: 'remote' as WorkspaceId, path: '/srv/app', agentPreset: 'host-x', additionalPaths: [], attachSession: () => Promise.resolve() } as never,
+      local: { id: 'local' as WorkspaceId, path: '/workspace', agentPreset: undefined, additionalPaths: [], attachSession: () => Promise.resolve() } as never,
+    }
+    ctx.provide('workspaceRegistry', { get: (id: string) => workspaces[id], list: () => Object.values(workspaces) } as never)
+    ctx.provide('agentPresets', { serviceForPreset: (id: string) => id === 'host-x' ? {} : undefined } as never)
+    const ensureSession = vi.fn((sessionId: SessionId, cwd: string) =>
+      Promise.resolve({ id: sessionId, session: ctx.sessions.create(sessionId, { meta: { cwd } }) } as Agent))
+    const controller = new SessionCommandController(ctx, controllerAgents({ ensureSession }), '/default')
+
+    await controller.create({ sessionId: SessionId('in-remote'), workspaceId: 'remote' as WorkspaceId })
+    expect(ensureSession).toHaveBeenLastCalledWith(SessionId('in-remote'), '/srv/app', true, 'host-x', [])
+    await expectFailure(controller.create({ workspaceId: 'remote' as WorkspaceId, agentPreset: 'standard' }), 'gateway/bad-request')
+    await expectFailure(controller.create({ workspaceId: 'local' as WorkspaceId, agentPreset: 'host-x' }), 'gateway/bad-request')
+    expect(ensureSession).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
   it('maps missing Workspaces and attachment failures', async () => {
     const missing = await baseContext()
     missing.provide('workspaceRegistry', { get: () => undefined, list: () => [] } as never)
