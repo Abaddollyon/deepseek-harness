@@ -199,14 +199,16 @@ Source: [`packages/client/modules/src/index.ts`](../../packages/client/modules/s
 register(definition: ClientSurfaceDefinition): () => void
 
 /**
- * Find the surface served at one exact pathname.
+ * Find the surface served at one exact pathname without composing its graph,
+ * so a request that has not passed authentication composes nothing.
  * @param path - decoded request pathname.
- * @returns the surface, or undefined when none is registered there or its graph cannot currently be composed.
+ * @returns the surface, or undefined when none is registered there.
  */
 findByPath(path: string): ClientSurfaceDefinition | undefined
 
 /**
- * Compose the current boot graph of one registered surface.
+ * Compose the current boot graph of one registered surface. The graph is
+ * reused until the ordinary graph is next recomposed.
  * @param id - registered surface id.
  * @returns the graph served as that surface's `window.__DSH_BOOT__`.
  * @throws when the id is not registered or the graph cannot be composed.
