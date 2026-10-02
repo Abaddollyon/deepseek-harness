@@ -112,7 +112,10 @@ interface AskUserQuestionRequestEvent {
   questions: AskUserQuestionItem[]
   /** Agent identity projected to the corresponding Client Context in transit. */
   agent?: Agent
-  /** Cancellation lifetime of the pending request. */
+  /**
+   * Aborts when the asker withdraws the request or once its outcome is known;
+   * an answerer still presenting it then withdraws its prompt.
+   */
   signal?: AbortSignal
   /**
    * Tool call the Client card is keyed by. Timed answerers attach to the
@@ -265,6 +268,10 @@ async askTimed( request: AskUserQuestionRequest & { agent: Agent }, callId: Tool
  * decides this boundary: an owned child has no human answerer and would
  * block forever, while a lineage-bearing session resumed as a new runtime
  * root may ask normally.
+ *
+ * Answerers receive a copy of the request whose signal aborts when the
+ * caller's signal aborts or once this method settles, so an answerer still
+ * presenting the question after another listener answered withdraws it.
  *
  * @param request Questions, owner agent, and abort signal.
  * @returns The answer chosen or typed by the human.

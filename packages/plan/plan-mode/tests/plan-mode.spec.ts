@@ -1107,17 +1107,25 @@ describe('exit_plan_mode', () => {
   })
 
   it('forwards the execution abort signal to the review question', async () => {
-    const { ctx, agent, asked } = await setupWithReview({ selected: ['Approve'] })
+    const { ctx, agent } = await setupWithReview()
     const controller = new AbortController()
-    const result = await ctx.tools.execute({
+    const asked: AskUserQuestionRequest[] = []
+    registerQuestionAnswerer(ctx, {
+      ask: (request) => {
+        asked.push(request)
+        controller.abort('turn cancelled')
+        return Promise.resolve({ answers: [{ id: 'plan-review', selected: ['Approve'] }] })
+      },
+    })
+    await ctx.tools.execute({
       callId: ToolCallId(`call-exit-${++callCounter}`),
       name: EXIT_PLAN_MODE,
       arguments: { plan: '# P' },
       agent,
       signal: controller.signal,
     })
-    expect(result.isError).toBe(false)
-    expect(asked[0]?.signal).toBe(controller.signal)
+    // The answerer's signal follows the execution signal.
+    expect(asked[0]?.signal?.reason).toBe('turn cancelled')
   })
 
   it('fails the call when the plugin is disposed while the review awaits (no phantom exit)', async () => {

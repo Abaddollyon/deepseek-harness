@@ -196,7 +196,10 @@ export class ApprovalService extends Service {
 
   /**
    * Ask the composed answerers to decide one readonly same-process request.
-   * The service borrows the request, agent, session, and live signal directly.
+   * The service uses the caller's agent and session objects directly.
+   * Answerers receive a copy of the request whose signal aborts when the
+   * caller's signal aborts or once the outcome is known, so an answerer still
+   * presenting the question after another listener answered withdraws it.
    * The request requires an open turn because the audit pair must be enclosed
    * by the durable log's commit/replay boundary; an idle ask rejects before
    * appending anything. The answerer phase always produces an outcome: an
@@ -260,7 +263,11 @@ export class ApprovalService extends Service {
 
   /**
    * Dispatch the waterfall, contained and raced against the request signal.
-   * @param req - the borrowed public request.
+   * The waterfall receives a copy of the request whose signal follows the
+   * caller's signal and aborts once this method has an outcome, on every
+   * path: an answer, a normalized rogue value, a throwing answerer, or a
+   * caller abort.
+   * @param req - the caller's public request.
    * @param session - the request agent's session used for policy lookup.
    * @returns the normalized closed outcome.
    */
@@ -273,37 +280,50 @@ export class ApprovalService extends Service {
     // documented promise that 'never' rejects deterministically regardless
     // of registration order — only the service's own request path can.
     if (this.effectivePolicy(session) === 'never') return 'rejected'
-    // Enter the promise chain BEFORE dispatching: a listener that throws
-    // SYNCHRONOUSLY (before its first await) must land in the same rejection
-    // path as an async one — `Promise.resolve(call())` would let it escape
-    // the containment into the caller.
-    const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
-      () => this.ctx.waterfall(
-        scopeTarget(req.agent, req.agent), 'approval/request', req,
-        () => Promise.resolve<ApprovalOutcome>('unavailable'),
-      ),
-    ).then(
-      // Normalize a rogue (non-vocabulary) answerer return to the fail-closed
-      // outcome instead of leaking it into callers' closed-union switches.
-      outcome => OUTCOMES.includes(outcome) ? outcome : 'unavailable',
-      // A throwing answerer must fail the QUESTION closed, not the caller's
-      // tool call open — the seam contains its callbacks.
-      () => 'unavailable',
-    )
-    if (signal === undefined) return answer
-    return await new Promise<ApprovalOutcome>((resolve) => {
-      const onAbort = () => {
-        signal.removeEventListener('abort', onAbort)
-        resolve('cancelled')
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      void answer.then((outcome) => {
-        signal.removeEventListener('abort', onAbort)
-        // After an abort won the race this resolve is a settled-promise no-op:
-        // the late answer is discarded by construction.
-        resolve(outcome)
+    // A listener may answer without awaiting `next()`, for example from a
+    // remote device or a deadline. Aborting `settled` tells every answerer
+    // still holding the request, such as a UI prompt further down the chain,
+    // that the outcome is final.
+    const settled = new AbortController()
+    const dispatched: ApprovalRequest = {
+      ...req,
+      signal: signal === undefined ? settled.signal : AbortSignal.any([signal, settled.signal]),
+    }
+    try {
+      // Enter the promise chain BEFORE dispatching: a listener that throws
+      // SYNCHRONOUSLY (before its first await) must land in the same rejection
+      // path as an async one — `Promise.resolve(call())` would let it escape
+      // the containment into the caller.
+      const answer: Promise<ApprovalOutcome> = Promise.resolve().then(
+        () => this.ctx.waterfall(
+          scopeTarget(req.agent, req.agent), 'approval/request', dispatched,
+          () => Promise.resolve<ApprovalOutcome>('unavailable'),
+        ),
+      ).then(
+        // Normalize a rogue (non-vocabulary) answerer return to the fail-closed
+        // outcome instead of leaking it into callers' closed-union switches.
+        outcome => OUTCOMES.includes(outcome) ? outcome : 'unavailable',
+        // A throwing answerer must fail the QUESTION closed, not the caller's
+        // tool call open — the seam contains its callbacks.
+        () => 'unavailable',
+      )
+      if (signal === undefined) return await answer
+      return await new Promise<ApprovalOutcome>((resolve) => {
+        const onAbort = () => {
+          signal.removeEventListener('abort', onAbort)
+          resolve('cancelled')
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        void answer.then((outcome) => {
+          signal.removeEventListener('abort', onAbort)
+          // After an abort won the race this resolve is a settled-promise no-op:
+          // the late answer is discarded by construction.
+          resolve(outcome)
+        })
       })
-    })
+    } finally {
+      settled.abort(new Error('approval request settled'))
+    }
   }
 }
 

@@ -131,7 +131,10 @@ export interface AskUserQuestionRequestEvent {
   questions: AskUserQuestionItem[]
   /** Agent identity projected to the corresponding Client Context in transit. */
   agent?: Agent
-  /** Cancellation lifetime of the pending request. */
+  /**
+   * Aborts when the asker withdraws the request or once its outcome is known;
+   * an answerer still presenting it then withdraws its prompt.
+   */
   signal?: AbortSignal
   /**
    * Tool call the Client card is keyed by. Timed answerers attach to the

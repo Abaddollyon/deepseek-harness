@@ -48,8 +48,8 @@ import {
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-// Side-effect type import: declaration-merges the approval waterfall answered below.
-import type {} from '@deepseek-ai/dsh-user-approval'
+// Type import also declaration-merges the approval waterfall answered below.
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { supportsAcpImagePrompts } from './content.ts'
 import { AcpMcpConfigError } from './mcp.ts'
 import { AcpModelConfigError } from './model-control.ts'
@@ -151,12 +151,17 @@ export function apply(ctx: Context, config: AcpConfig): void {
 
   // Permission requests are a machine policy channel for ACP clients such as
   // dsh-subagent-acp. The bridge offers one-shot choices only and never infers a
-  // durable grant from an unknown client response.
+  // durable grant from an unknown client response. The request signal aborts
+  // when the asker withdraws the request or another answerer settles it, and
+  // `$/cancel_request` then withdraws the client prompt.
   ctx.on('approval/request', (request, next) => {
     const record = ownedRecord(request.agent)
     if (record === undefined || request.callId === undefined) return next()
     const callId = request.callId
-    return record.drainUpdates().then(() => {
+    const signal = request.signal
+    return record.drainUpdates().then(async (): Promise<ApprovalOutcome> => {
+      // A request withdrawn or settled while updates drained never reaches the client.
+      if (signal?.aborted) return 'cancelled'
       const params: RequestPermissionRequest = {
         sessionId: record.agent.session.id,
         toolCall: { toolCallId: callId },
@@ -165,10 +170,20 @@ export function apply(ctx: Context, config: AcpConfig): void {
           { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
         ],
       }
-      return conn.request(methods.client.session.requestPermission, params)
-    }).then(({ outcome }) => {
-      if (outcome.outcome === 'cancelled') return 'cancelled'
-      return outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+      try {
+        const { outcome } = await conn.request(
+          methods.client.session.requestPermission,
+          params,
+          /* v8 ignore next -- ApprovalService, this event's dispatcher, always supplies a signal. */
+          signal === undefined ? undefined : { cancellationSignal: signal },
+        )
+        if (outcome.outcome === 'cancelled') return 'cancelled'
+        return outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+      } catch (error) {
+        // A client may answer `$/cancel_request` with a request-cancelled error.
+        if (signal?.aborted) return 'cancelled'
+        throw error
+      }
     })
   })
 

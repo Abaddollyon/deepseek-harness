@@ -113,7 +113,10 @@ setPolicy(agent: Agent, policy: ApprovalPolicy): void
 
 /**
  * Ask the composed answerers to decide one readonly same-process request.
- * The service borrows the request, agent, session, and live signal directly.
+ * The service uses the caller's agent and session objects directly.
+ * Answerers receive a copy of the request whose signal aborts when the
+ * caller's signal aborts or once the outcome is known, so an answerer still
+ * presenting the question after another listener answered withdraws it.
  * The request requires an open turn because the audit pair must be enclosed
  * by the durable log's commit/replay boundary; an idle ask rejects before
  * appending anything. The answerer phase always produces an outcome: an

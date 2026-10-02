@@ -277,6 +277,10 @@ export class UserQuestionService extends TypertRemoteService {
    * block forever, while a lineage-bearing session resumed as a new runtime
    * root may ask normally.
    *
+   * Answerers receive a copy of the request whose signal aborts when the
+   * caller's signal aborts or once this method settles, so an answerer still
+   * presenting the question after another listener answered withdraws it.
+   *
    * @param request Questions, owner agent, and abort signal.
    * @returns The answer chosen or typed by the human.
    * @throws {UserQuestionError} code `ASK_ABORTED` when the supplied signal
@@ -319,13 +323,20 @@ export class UserQuestionService extends TypertRemoteService {
       'no user-questions answerer accepted the request',
       'NO_PROVIDER',
     ))
+    // A listener may answer without awaiting `next()`, for example from a
+    // remote device. Aborting `settled` tells every answerer still holding the
+    // request, such as a UI card further down the chain, that the answer is final.
+    const settled = new AbortController()
+    const signal = request.signal === undefined
+      ? settled.signal
+      : AbortSignal.any([request.signal, settled.signal])
     try {
       return await (agent === undefined
-        ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
+        ? this.ctx.waterfall('user-questions/request', { ...request, signal }, noAnswerer)
         : this.ctx.waterfall(
           scopeTarget(agent, agent),
           'user-questions/request',
-          { ...request, agent },
+          { ...request, agent, signal },
           noAnswerer,
         ))
     } catch (error) {
@@ -335,6 +346,8 @@ export class UserQuestionService extends TypertRemoteService {
         throw abortedQuestion(error)
       }
       throw restored
+    } finally {
+      settled.abort(new Error('user question settled'))
     }
   }
 }

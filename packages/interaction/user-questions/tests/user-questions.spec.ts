@@ -51,7 +51,10 @@ describe('UserQuestionService', () => {
     const result = await ctx.userQuestions.ask({ questions })
 
     expect(result).toEqual({ answers: [{ id: 'confirm', selected: ['yes'] }] })
-    expect(p.seen).toEqual([{ questions }])
+    expect(p.seen).toHaveLength(1)
+    const { signal, ...forwarded } = p.seen[0]!
+    expect(forwarded).toEqual({ questions })
+    expect(signal).toBeInstanceOf(AbortSignal)
   })
 
   it('rejects ask requests when no provider is registered', async () => {
@@ -109,7 +112,13 @@ describe('UserQuestionService', () => {
     const ctx = new Context()
     await ctx.plugin(UserQuestionService)
     const pending = Promise.withResolvers<never>()
-    registerAnswerer(ctx, { ask: () => pending.promise })
+    let received: AbortSignal | undefined
+    registerAnswerer(ctx, {
+      ask: (request) => {
+        received = request.signal
+        return pending.promise
+      },
+    })
     const controller = new AbortController()
     const abortReason = new DOMException('This operation was aborted', 'AbortError')
 
@@ -118,6 +127,7 @@ describe('UserQuestionService', () => {
       signal: controller.signal,
     })
     controller.abort(abortReason)
+    expect(received?.reason).toBe(abortReason)
     pending.reject(abortReason)
 
     await expect(answer).rejects.toMatchObject({
@@ -125,6 +135,36 @@ describe('UserQuestionService', () => {
       code: 'ASK_ABORTED',
       cause: abortReason,
     })
+  })
+
+  it('withdraws the request from a downstream answerer once an earlier listener answers', async () => {
+    const ctx = new Context()
+    await ctx.plugin(UserQuestionService)
+    let downstream: AbortSignal | undefined
+    registerAnswerer(ctx, {
+      ask: request => new Promise((_resolve, reject) => {
+        downstream = request.signal
+        request.signal?.addEventListener('abort', () => {
+          reject(new Error('question withdrawn', { cause: request.signal?.reason }))
+        }, { once: true })
+      }),
+    })
+    let forwarded: Promise<AskUserQuestionAnswer> | undefined
+    const answer = { answers: [{ id: 'confirm', selected: ['from the phone'] }] }
+    ctx.on('user-questions/request', (_request, next) => {
+      forwarded = next()
+      return Promise.resolve(answer)
+    }, { prepend: true })
+    const controller = new AbortController()
+
+    await expect(ctx.userQuestions.ask({
+      questions: [{ id: 'confirm', question: 'Proceed?' }],
+      signal: controller.signal,
+    })).resolves.toEqual(answer)
+
+    expect(downstream?.aborted).toBe(true)
+    expect(controller.signal.aborted).toBe(false)
+    await expect(forwarded).rejects.toThrow('question withdrawn')
   })
 
   it('preserves a domain rejection when its provider also aborts the signal', async () => {
