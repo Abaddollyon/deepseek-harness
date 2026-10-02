@@ -225,7 +225,8 @@ declare module './types.ts' {
    * Submit steering for the nearest step. An idle driver starts a turn;
    * a running driver consumes it at its next step boundary.
    * A rejected step leaves steering parked in the inbox until the next
-   * wake; cancellation or disposal may discard pending steering.
+   * wake; cancellation without `keepInbox` may discard pending steering,
+   * while lifecycle disposal keeps it for a later lifecycle.
    * @param message - identified steering content and the source that supplied it.
    */
     steer(message: UserMessage): void
@@ -235,7 +236,8 @@ declare module './types.ts' {
    * driver. A running driver claims it at the nearest later step boundary;
    * idle drivers leave it pending until follow-up or steering
    * wakes them. It may miss a request whose pre-step already claimed its
-   * batch. Cancellation or disposal may discard pending context.
+   * batch. Cancellation without `keepInbox` may discard pending context,
+   * while lifecycle disposal keeps it for a later lifecycle.
    * @param message - identified injected context and the source that supplied it.
    */
     inject(message: UserMessage): void
@@ -290,6 +292,8 @@ declare module '@deepseek-ai/cordis' {
      * One message left the inbox inside its open turn. If the proposed step
      * is rejected, the claimed message ends here: it is neither discarded nor
      * re-emitted as a user/message, and the turn closes without a step.
+     * Lifecycle disposal that aborts the pre-step inserts the unstarted batch
+     * again at the front of the lists it came from.
      * @param payload.agent - the agent whose inbox changed.
      * @param payload.message - the claimed message.
      * @param payload.turn - the owning turn.

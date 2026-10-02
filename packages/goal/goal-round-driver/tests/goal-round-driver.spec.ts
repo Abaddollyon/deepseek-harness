@@ -921,6 +921,18 @@ describe('same-session goal driving', () => {
     expect(test.adapter.requests).toHaveLength(1)
   })
 
+  it('keeps queued human input across driver teardown', async () => {
+    const test = await harness(['hang'])
+    test.ctx.goals.create(test.agent, { objective: 'teardown keeps other input' })
+    await waitForRequests(test.adapter, 1)
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'human queued' }], source: { kind: 'user' } }))
+
+    await test.driver.dispose()
+
+    expect(test.agent.inbox.nextTurn.map(message => message.content)).toEqual([[{ type: 'text', text: 'human queued' }]])
+    expect(test.agent.status).toBe('idle')
+  })
+
   it('cancels an accepted queued round and awaits its driver task during teardown', async () => {
     const test = await harness([])
     let unloading: Promise<void> | undefined
