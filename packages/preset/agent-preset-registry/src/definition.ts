@@ -1,5 +1,6 @@
 /** Declarative preset configuration and YAML validation. */
 import type { EntryOptions, JsExpr } from '@deepseek-ai/cordis-plugin-loader'
+import type { AgentPresetDefaults } from './types.ts'
 
 /** Identity, display fields and child Cordis plugins of one preset. */
 export interface PresetDefinition {
@@ -7,6 +8,8 @@ export interface PresetDefinition {
   readonly name?: string
   readonly description?: string
   readonly order?: number
+  /** Initial model route and permission preset for Sessions created under this preset. */
+  readonly defaults?: AgentPresetDefaults
   readonly plugins: readonly (Omit<EntryOptions, 'id' | 'disabled'> & { id?: string; disabled?: EntryOptions['disabled'] | JsExpr })[]
 }
 

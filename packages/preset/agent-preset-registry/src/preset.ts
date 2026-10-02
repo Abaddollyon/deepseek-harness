@@ -1,4 +1,5 @@
 import type { Volatile } from '@deepseek-ai/cordis'
+import type { AgentPresetDefaults } from './types.ts'
 /** Public preset roster and selection configuration. */
 /** One declared preset and its current activation failure, if any. */
 export interface AgentPreset {
@@ -6,6 +7,7 @@ export interface AgentPreset {
   readonly name?: string
   readonly description?: string
   readonly order?: number
+  readonly defaults?: AgentPresetDefaults
   readonly broken?: string
 }
 

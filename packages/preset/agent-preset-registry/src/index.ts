@@ -20,6 +20,7 @@ export { agentPresetProjectionDefinition } from './session.ts'
 export { entryListProblem, type PresetDefinition } from './definition.ts'
 export { auditRows, livePresetMounts, leakedServices, serviceForAgent, standingMountFor, type PresetMount, type RowAudit } from './mount.ts'
 export type { AgentPreset, Config } from './preset.ts'
+export type { AgentPresetDefaults } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -158,6 +159,7 @@ export class AgentPresetRegistry extends TypertRemoteService {
         ...(record.config.name === undefined ? {} : { name: record.config.name }),
         ...(record.config.description === undefined ? {} : { description: record.config.description }),
         ...(record.config.order === undefined ? {} : { order: record.config.order }),
+        ...(record.config.defaults === undefined ? {} : { defaults: record.config.defaults }),
         ...(broken === undefined ? {} : { broken }),
       }
     }))
@@ -175,7 +177,7 @@ export class AgentPresetRegistry extends TypertRemoteService {
 
   /** Resolve an identity without starting an Agent.
    * @param id Explicit preset or the current default.
-   * @returns Current metadata, including failure when activation failed.
+   * @returns Identity, declared Session defaults, and failure when activation failed.
    */
   async resolve(id?: string): Promise<AgentPreset> {
     const wanted = id ?? this.defaultId
@@ -183,7 +185,8 @@ export class AgentPresetRegistry extends TypertRemoteService {
     if (record === undefined) throw new RemoteError('agent-preset/not-found', `Unknown agent preset: ${wanted}`,
       { agentPreset: wanted, available: [...this.definitions.keys()] })
     const broken = await this.diagnostic(record)
-    return { id: wanted, ...(broken === undefined ? {} : { broken }) }
+    const { defaults } = record.config
+    return { id: wanted, ...(defaults === undefined ? {} : { defaults }), ...(broken === undefined ? {} : { broken }) }
   }
 
   /** Read one declaration's child plugin list as YAML, for viewing only.

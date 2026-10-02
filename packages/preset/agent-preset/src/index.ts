@@ -18,6 +18,15 @@ export default class AgentPreset {
     name: z.string(),
     description: z.string(),
     order: z.number(),
+    // The leading `undefined` member keeps an omitted block omitted instead of materializing `{}`.
+    defaults: z.union([z.const(undefined), z.object({
+      model: z.union([z.const(undefined), z.object({
+        provider: z.string().required(),
+        model: z.string().required(),
+        reasoningEffort: z.string(),
+      })]),
+      permission: z.string(),
+    })]),
     // Cordis owns individual plugin schemas; the registry validates entry structure.
     plugins: z.array(z.any()).required(),
   }) as z<Config>

@@ -7,13 +7,15 @@ import type {
   Agent, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection, ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type { AgentPresetDefaults } from '@deepseek-ai/dsh-agent-preset-registry'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import { resolveModelSelection } from './catalog.ts'
 import type { ModelSelection } from './types.ts'
 
 /** Cold Session identity absent from persistence. */
@@ -64,6 +66,12 @@ export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/ag
 export type ApiSessionAgentResult =
   | { readonly agent: Agent }
   | { readonly error: ApiSessionAgentError }
+
+/** Preset defaults that passed validation; an omitted field leaves the Host default in place. */
+interface InitialChoices {
+  readonly model?: AgentModelSelection
+  readonly permission?: string
+}
 
 type InstalledSelection = ModelSelectionRef & {
   current: AgentModelSelection
@@ -142,6 +150,8 @@ export class ApiSessionAgentController {
   private readonly creations = new Map<SessionId, Promise<Agent>>()
   private readonly selections = new WeakMap<Agent, InstalledSelection>()
   private readonly imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /** Preset each Agent composed here was last bound to, so a blank-Session switch knows the replaced defaults. */
+  private readonly boundPresets = new WeakMap<Agent, string>()
 
   /** @param ctx - Host context carrying Agent, model, persistence, and Typert services. */
   constructor(private readonly ctx: Context) {
@@ -159,6 +169,16 @@ export class ApiSessionAgentController {
       const found = await this.resolveAgent(sessionId)
       if ('error' in found) throw found.error
       return found.agent.ctx
+    })
+    ctx.on('agent-preset/selected', (sessionId, agentPreset) => {
+      const agent = ctx.agents.get(sessionId)
+      const previous = agent === undefined ? undefined : this.boundPresets.get(agent)
+      if (agent === undefined || previous === undefined || previous === agentPreset) return
+      this.boundPresets.set(agent, agentPreset)
+      void this.serializeImageAdmission(agent, () => this.switchInitialChoices(agent, previous, agentPreset))
+        .catch((error: unknown) => {
+          ctx.logger.warn(`session-controller: agent preset "${agentPreset}" defaults were not applied to session "${sessionId}": ${String(error)}`)
+        })
     })
   }
 
@@ -395,6 +415,7 @@ export class ApiSessionAgentController {
       setup: async (agentCtx, agent) => {
         this.installSelection(agent)
         await presets.mount(agentCtx, resolvedId)
+        this.boundPresets.set(agent, resolvedId)
       },
     }
   }
@@ -497,21 +518,87 @@ export class ApiSessionAgentController {
       if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
     }
     const composition = await this.composeAgent(presetId)
-    return (await this.ctx.agents.create({
+    const initial = await this.initialChoices(composition.agentPreset)
+    const { agent } = await this.ctx.agents.create({
       sessionId,
-      agentOptions: this.agentOptions(),
+      agentOptions: this.agentOptions(initial.model),
       meta: {
         cwd,
         ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
-    })).agent
+    })
+    if (initial.model !== undefined || initial.permission !== undefined) this.applyInitialChoices(agent, initial, {})
+    return agent
   }
 
-  private agentOptions(): AgentOptions {
-    const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
+  private agentOptions(route = this.ctx.agentDefaultModel.currentSelection()): AgentOptions {
+    const { provider, model } = route
     return { provider, model }
+  }
+
+  /**
+   * Validate one preset's declared Session defaults against the current catalog
+   * and permission table. An unusable value is logged without provider error
+   * text and omitted, so the Host default applies and creation never fails.
+   * @param presetId - preset whose declaration is read; undefined without a roster.
+   * @returns the usable defaults.
+   */
+  private async initialChoices(presetId: string | undefined): Promise<InitialChoices> {
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined || presetId === undefined) return {}
+    let defaults: AgentPresetDefaults | undefined
+    try {
+      defaults = (await presets.resolve(presetId)).defaults
+    } catch {
+      // A preset removed since the Session bound it declares nothing any more.
+      return {}
+    }
+    let model: AgentModelSelection | undefined
+    if (defaults?.model !== undefined) {
+      try {
+        model = await resolveModelSelection(this.ctx, defaults.model)
+      } catch {
+        this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default model "${defaults.model.provider}/${defaults.model.model}" is unavailable or rejects its effort; using the Host default model`)
+      }
+    }
+    const permission = defaults?.permission
+    const known = permission !== undefined && this.ctx.get('permissionPresets')?.names.includes(permission) === true
+    if (permission !== undefined && !known) {
+      this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default permission "${permission}" is not an available permission preset; using the Host default`)
+    }
+    return { ...(model === undefined ? {} : { model }), ...(known ? { permission } : {}) }
+  }
+
+  /**
+   * Move a blank Session's model and permission to `next` wherever each still
+   * equals what `replaced` chose, so an explicit `/model` or permission choice
+   * stays. Changes are recorded through the same events those commands append.
+   * @param agent - live blank Agent.
+   * @param next - defaults now in force; an omitted field means the Host default.
+   * @param replaced - defaults the Session was created or last switched under.
+   */
+  private applyInitialChoices(agent: Agent, next: InitialChoices, replaced: InitialChoices): void {
+    const pending = this.ctx.sessionProjections.stateOf(agent.session, 'modelSelection')?.pending ?? null
+    const model = next.model
+      ?? (replaced.model === undefined ? undefined : this.ctx.agentDefaultModel.currentSelection())
+    if (model !== undefined && sameSelection(pending, replaced.model) && !sameSelection(pending, model)) {
+      this.selectForNextRequest(agent, model)
+    }
+    const permissions = this.ctx.get('permissionPresets')
+    if (permissions === undefined) return
+    const current = permissions.current(agent.session)
+    const permission = next.permission ?? permissions.defaultPreset
+    if (current !== permission && current === (replaced.permission ?? permissions.defaultPreset)) {
+      permissions.set(agent.session, permission)
+    }
+  }
+
+  private async switchInitialChoices(agent: Agent, previous: string, next: string): Promise<void> {
+    const [replaced, chosen] = await Promise.all([this.initialChoices(previous), this.initialChoices(next)])
+    if (this.ctx.sessionProjections.stateOf(agent.session, 'sessionListMetadata')?.blank !== true) return
+    this.applyInitialChoices(agent, chosen, replaced)
   }
 
   private installSelection(agent: Agent): void {
@@ -538,6 +625,12 @@ export class ApiSessionAgentController {
     if (requested === undefined || requested === existing) return
     throw new ApiSessionPresetConflict(sessionId, requested, existing)
   }
+}
+
+function sameSelection(left: ModelSelection | null, right: ModelSelection | undefined): boolean {
+  return left === null
+    ? right === undefined
+    : left.provider === right?.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort
 }
 
 function agentModelSelection(selection: ModelSelection): AgentModelSelection {

@@ -2,6 +2,14 @@
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 
+/** Initial choices a preset declares for Sessions newly created under it. */
+export interface AgentPresetDefaults {
+  /** Initial model route; the Session entry point validates it like a user's model choice. */
+  readonly model?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** Initial permission preset name. */
+  readonly permission?: string
+}
+
 /**
  * One declared preset as a client reads it.
  */
@@ -14,6 +22,8 @@ export interface AgentPresetRow {
   readonly name?: string
   /** One sentence on what this preset is for. */
   readonly description?: string
+  /** Initial choices for new Sessions; absent when the preset declares none. */
+  readonly defaults?: AgentPresetDefaults
   /** Why this preset cannot compose a session; absent when it can. */
   readonly broken?: string
 }
