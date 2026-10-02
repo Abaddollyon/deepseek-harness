@@ -596,7 +596,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
       { timeout: 15_000 },
     ).toBe(3)
     expect(await page.getByRole('tree', { name: 'Sessions' })
-      .getByRole('treeitem', { name: 'Ungrouped', exact: true }).count()).toBe(0)
+      .getByRole('treeitem', { name: 'Chats', exact: true }).count()).toBe(0)
     const hierarchy = page.getByRole('navigation', { name: 'Session hierarchy' })
     // The current crumb is plain text; the fork sits at the root, so no ancestor crumb buttons remain.
     await expect.poll(() => hierarchy.getByText(`${CHILD_TITLE} (1)`, { exact: true }).count()).toBe(1)

@@ -644,6 +644,21 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.retain).not.toHaveBeenCalled()
   })
 
+  it('opens one Session without a Workspace for concurrent new-chat requests', async () => {
+    const b = bench({ workspaces: workspaceState([workspace('a')]), sessions: sessionState() })
+    await vi.waitFor(() => { expect(b.sessions.retain).toHaveBeenCalledOnce() })
+    b.sessions.create.mockClear()
+    b.sessions.retain.mockClear()
+    const created = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValue(created.promise)
+    const first = b.uiWorkspace.openLooseSession()
+    const second = b.uiWorkspace.openLooseSession()
+    expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({})
+    created.resolve(sid('chat'))
+    await Promise.all([first, second])
+    expect(b.sessions.retain).toHaveBeenLastCalledWith(sid('chat'), { source: 'mainView' })
+  })
+
   it('reports a refused explicit Session creation through the Workspace notice', async () => {
     const b = bench({ workspaces: workspaceState([workspace('a')]), sessions: sessionState() })
     // Startup restoration creates its own Session first and stays quiet on failure (pinned above).
