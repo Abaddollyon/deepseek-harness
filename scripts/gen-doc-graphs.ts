@@ -809,6 +809,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Composes the __DSH_BOOT__ entry graph from an incremental dsh.client scan, serves plugin bundles, and notifies rebuilt/graph-changed subscribers.',
   },
   {
+    key: 'clientSurfaces',
+    pkg: 'client-modules',
+    title: 'Dependency-closed client surfaces',
+    mode: 'core',
+    consumers: ['frontend-static'],
+    note: 'Registers extra index paths, each with its own dependency-closed client graph, rendered and authorized separately from the default root.',
+  },
+  {
     key: 'workflowEngine',
     pkg: 'workflow',
     title: 'Workflow script engine',
