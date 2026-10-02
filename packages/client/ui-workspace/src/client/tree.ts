@@ -75,6 +75,8 @@ export interface GroupNode {
   cwd: string | undefined
   /** Additional Workspace directories offered to new Sessions; absent when none. */
   additionalPaths?: readonly string[]
+  /** Display name of the execution host holding a Workspace that is not on this Host; absent otherwise. */
+  host?: string
   /** Workspace creation time (epoch ms); absent only for the ungrouped bucket. */
   createdAt: number | undefined
   label: string
@@ -117,11 +119,15 @@ export interface TreeView {
   ungroupedOrder?: readonly string[]
 }
 
+/** One Workspace as the browser groups it: the Host projection plus the display name of its execution host. */
+export type WorkspaceGroupSource = WorkspaceView & { readonly host?: string }
+
 interface Group {
   key: string
   workspaceId: WorkspaceId | undefined
   cwd: string | undefined
   additionalPaths?: readonly string[]
+  host?: string
   createdAt: number | undefined
   label: string
   sessions: SessionSummary[]
@@ -338,7 +344,7 @@ function orderedUngrouped(
  */
 function groupByWorkspace(
   list: SessionListState,
-  workspaces: readonly WorkspaceView[],
+  workspaces: readonly WorkspaceGroupSource[],
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
   ungroupedOrder: readonly string[] | undefined,
@@ -364,6 +370,7 @@ function groupByWorkspace(
         Date.parse(workspace.createdAt), workspace.title, members,
       ),
       ...workspace.additionalPaths === undefined ? {} : { additionalPaths: workspace.additionalPaths },
+      ...workspace.host === undefined ? {} : { host: workspace.host },
     })
   }
   const stray = list.ids
@@ -445,7 +452,7 @@ function sessionNode(
  */
 export function deriveGroups(
   list: SessionListState,
-  workspaces: readonly WorkspaceView[],
+  workspaces: readonly WorkspaceGroupSource[],
   rowState: SessionRowState,
   statuses: SessionStatuses,
   view: TreeView,
@@ -465,6 +472,7 @@ export function deriveGroups(
       workspaceId: g.workspaceId,
       cwd: g.cwd,
       ...g.additionalPaths === undefined ? {} : { additionalPaths: g.additionalPaths },
+      ...g.host === undefined ? {} : { host: g.host },
       createdAt: g.createdAt,
       label: g.label,
       sessionCount: g.sessions.length,

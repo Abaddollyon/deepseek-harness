@@ -550,6 +550,24 @@ describe('ui-workspace apply', () => {
     const picker = faceOf(b.slots.entries('conversation.hero.workspace')[0]!) as WorkspacePickerInjected
     await picker.createWorkspace({ path: '/tmp/project' })
     expect(b.create).toHaveBeenCalledWith({ path: '/tmp/project' })
+
+    // A new Workspace on another host still titled after its folder takes a title naming the host.
+    const remote = { workspaceId: 'remote', path: '/srv/app', agentPreset: 'host-x', title: 'app' }
+    b.create.mockResolvedValue(remote as never)
+    b.rename.mockResolvedValueOnce({ ...remote, title: 'app · x (SSH)' } as never)
+    await expect(picker.createWorkspace({ path: '/srv/app/', agentPreset: 'host-x', host: 'x (SSH)' }))
+      .resolves.toMatchObject({ title: 'app · x (SSH)' })
+    expect(b.create).toHaveBeenLastCalledWith({ path: '/srv/app/', agentPreset: 'host-x' })
+    expect(b.rename).toHaveBeenLastCalledWith('remote', 'app · x (SSH)')
+    b.rename.mockClear()
+    b.rename.mockRejectedValueOnce(new Error('name taken'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await expect(browser.createWorkspace({ path: '/srv/app', agentPreset: 'host-x', host: 'x (SSH)' })).resolves.toBe(remote)
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
+    b.create.mockResolvedValue({ ...remote, title: 'Renamed earlier' } as never)
+    await browser.createWorkspace({ path: '/srv/app', agentPreset: 'host-x', host: 'x (SSH)' })
+    expect(b.rename).toHaveBeenCalledOnce()
   })
 
   it('declares the browser child slots and reports directory-flow occupancy per surface', async () => {

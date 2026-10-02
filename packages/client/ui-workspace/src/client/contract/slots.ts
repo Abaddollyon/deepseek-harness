@@ -271,8 +271,11 @@ export type WorkspaceBrowserInjected = {
   insertWorkspaceBefore: (workspaceId: WorkspaceId, beforeWorkspaceId?: WorkspaceId) => Promise<void>
   /** Remove a Session from the registry-global archived set (the search results' restore button). */
   unarchiveSession: (sessionId: SessionId) => Promise<void>
-  /** Adopt a picked host directory, or a path on another execution host, as a real Workspace before targeting a Session. */
-  createWorkspace: (input: { path: string; agentPreset?: string }) => Promise<WorkspaceView>
+  /**
+   * Adopt a picked host directory, or a path on another execution host, as a real Workspace before targeting a Session.
+   * `host` is that execution host's display name; a new Workspace titled after its folder is renamed to name it.
+   */
+  createWorkspace: (input: { path: string; agentPreset?: string; host?: string }) => Promise<WorkspaceView>
   /** List the other execution hosts that can hold a Workspace; omitted offers only Host directories. */
   listWorlds?: (() => Promise<readonly WorkspaceWorld[]>) | undefined
 }
@@ -479,8 +482,11 @@ export type WorkspaceBrowserProps =
 export type WorkspacePickerInjected = DirectoryPickingInjected & {
   /** Create and open a Session without a Workspace. */
   createLooseSession: () => void
-  /** Adopt a picked host directory, or a path on another execution host, as a real Workspace before targeting a Session. */
-  createWorkspace: (input: { path: string; agentPreset?: string }) => Promise<WorkspaceView>
+  /**
+   * Adopt a picked host directory, or a path on another execution host, as a real Workspace before targeting a Session.
+   * `host` is that execution host's display name; a new Workspace titled after its folder is renamed to name it.
+   */
+  createWorkspace: (input: { path: string; agentPreset?: string; host?: string }) => Promise<WorkspaceView>
   /** List the other execution hosts that can hold a Workspace; omitted offers only Host directories. */
   listWorlds?: (() => Promise<readonly WorkspaceWorld[]>) | undefined
 }

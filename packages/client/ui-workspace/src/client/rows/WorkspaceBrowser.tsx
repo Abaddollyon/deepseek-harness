@@ -885,12 +885,25 @@ export function WorkspaceBrowser({
   // The resolved name, not `t`, is the memo dependency: the bound seat keeps
   // its identity across a language switch.
   const defaultWorkspaceName = t('workspace.defaultName')
+  // Display names of the execution hosts Workspaces live on; an unlisted (offline) host shows its preset id.
+  const [hostNames, setHostNames] = useState<ReadonlyMap<string, string>>(new Map())
+  const hostPresets = storedWorkspaces.flatMap(workspace => workspace.agentPreset ?? []).join('\n')
+  useEffect(() => {
+    if (hostPresets === '' || listWorlds === undefined) return
+    let live = true
+    listWorlds().then(
+      (worlds) => { if (live) setHostNames(new Map(worlds.map(world => [world.agentPreset, world.name ?? world.agentPreset]))) },
+      () => { if (live) setHostNames(new Map()) },
+    )
+    return () => { live = false }
+  }, [hostPresets, listWorlds])
   const workspaces = useMemo(
     () => storedWorkspaces.map(workspace => ({
       ...workspace,
       title: workspaceDisplayTitle(workspace.title, defaultWorkspaceName),
+      ...workspace.agentPreset === undefined ? {} : { host: hostNames.get(workspace.agentPreset) ?? workspace.agentPreset },
     })),
-    [storedWorkspaces, defaultWorkspaceName],
+    [storedWorkspaces, defaultWorkspaceName, hostNames],
   )
   const workspacePhase = useWorkspaces(state => state.phase)
   const workspaceStreamState = useWorkspaces(state => state.state)
