@@ -154,6 +154,16 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
   )
 }
 
+/**
+ * An optional model-supplied string, with a blank value read as omitted:
+ * strict structured-output providers fill every optional field, often with "".
+ * @param value - the raw optional argument.
+ * @returns the value, or undefined when it is absent or blank.
+ */
+export function presentText(value: string | undefined): string | undefined {
+  return value === undefined || value.trim().length === 0 ? undefined : value
+}
+
 let rgPathPromise: Promise<string> | undefined
 
 /**
