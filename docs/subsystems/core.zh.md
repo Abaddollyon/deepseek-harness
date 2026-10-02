@@ -554,6 +554,15 @@ composedPreset(ctx: Context): string | undefined
  */
 serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): Context[K] | undefined
 
+/** Read a service supplied inside the current revision of a preset, before any Agent joins it.
+ * Callers use the result for the operation at hand and do not retain it: a later
+ * definition update retires that revision.
+ * @param id Preset identity.
+ * @param name Cordis service name.
+ * @returns The service, or undefined when the preset is unknown, not mounted, or publishes none.
+ */
+serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context[K] | undefined
+
 /** Rebind a blank Agent; the caller owns the blank-session check.
  * @param ctx Agent context.
  * @param id Requested preset.

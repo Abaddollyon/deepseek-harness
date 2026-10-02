@@ -13,12 +13,12 @@ import type { AgentPresetDocument, AgentPresetRoster } from './types.ts'
 import { entryListProblem, type PresetDefinition } from './definition.ts'
 import type { AgentPreset, Config } from './preset.ts'
 import { agentPresetProjectionDefinition } from './session.ts'
-import { auditRows, mountPreset, standingMountFor, serviceForAgent, type PresetMount } from './mount.ts'
+import { auditRows, mountPreset, standingMountFor, serviceForAgent, serviceInMount, type PresetMount } from './mount.ts'
 import { definitionComposition, mountedCompositionRows, type AgentPresetComposition } from './composition-inventory.ts'
 
 export { agentPresetProjectionDefinition } from './session.ts'
 export { entryListProblem, type PresetDefinition } from './definition.ts'
-export { auditRows, livePresetMounts, leakedServices, serviceForAgent, standingMountFor, type PresetMount, type RowAudit } from './mount.ts'
+export { auditRows, livePresetMounts, leakedServices, serviceForAgent, serviceInMount, standingMountFor, type PresetMount, type RowAudit } from './mount.ts'
 export type { AgentPreset, Config } from './preset.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -296,6 +296,18 @@ export class AgentPresetRegistry extends TypertRemoteService {
    */
   serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): Context[K] | undefined {
     return serviceForAgent(this.owner, agent, name)
+  }
+
+  /** Read a service supplied inside the current revision of a preset, before any Agent joins it.
+   * Callers use the result for the operation at hand and do not retain it: a later
+   * definition update retires that revision.
+   * @param id Preset identity.
+   * @param name Cordis service name.
+   * @returns The service, or undefined when the preset is unknown, not mounted, or publishes none.
+   */
+  serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context[K] | undefined {
+    const mount = this.definitions.get(id)?.generation?.mount
+    return mount === undefined ? undefined : serviceInMount(this.owner, mount, name)
   }
 
   /** Rebind a blank Agent; the caller owns the blank-session check.

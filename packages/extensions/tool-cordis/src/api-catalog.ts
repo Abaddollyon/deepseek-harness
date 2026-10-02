@@ -190,6 +190,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'The service, or undefined.',
       },
       {
+        signature: 'serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context[K] | undefined',
+        description: 'Read a service supplied inside the current revision of a preset, before any Agent joins it. Callers use the result for the operation at hand and do not retain it: a later definition update retires that revision.',
+        parameters: [{ name: 'id', description: 'Preset identity.' }, { name: 'name', description: 'Cordis service name.' }],
+        returns: 'The service, or undefined when the preset is unknown, not mounted, or publishes none.',
+      },
+      {
         signature: 'async recompose(ctx: Context, id: string): Promise<AgentPreset>',
         description: 'Rebind a blank Agent; the caller owns the blank-session check.',
         parameters: [{ name: 'ctx', description: 'Agent context.' }, { name: 'id', description: 'Requested preset.' }],

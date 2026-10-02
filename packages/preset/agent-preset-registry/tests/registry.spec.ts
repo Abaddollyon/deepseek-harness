@@ -216,6 +216,17 @@ it('allows an isolated service and resolves it through the Agent composition', a
   expect(ctx.agentPresets.serviceFor({ ctx: scope.ctx }, 'loader')).toBeUndefined()
 })
 
+it('resolves an isolated service through a preset revision before any Agent joins it', async () => {
+  const ctx = await setup()
+  await declare(ctx, { id: 'remote', plugins: [{ name: 'cordis:group', group: true,
+    isolate: { fixtureService: true }, config: [{ name: plugin('global-service'), config: { service: 'fixtureService', label: 'remote' } }] }] })
+  await declare(ctx, contribution('standard'))
+  const service = 'fixtureService' as string & keyof Context
+  expect(ctx.agentPresets.serviceForPreset('remote', service)).toEqual({ label: 'remote' })
+  expect(ctx.agentPresets.serviceForPreset('standard', service)).toBeUndefined()
+  expect(ctx.agentPresets.serviceForPreset('missing', service)).toBeUndefined()
+})
+
 it('resolves the saved default over the deployment default, and drops a removed override', async () => {
   const ctx = await harness({ live: true })
   contexts.push(ctx)
