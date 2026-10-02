@@ -4,7 +4,7 @@
  * activation and its resume from the logged request header), and the argument
  * error that carries a deferred tool's declaration.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
@@ -15,7 +15,7 @@ import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-p
 import ToolRuntime, { RUN_CODE_NAME, TOOL_SEARCH_NAME, defineTool, renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
 import type { Config, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { byToolName, compileToolDeferPolicy, firstSentence, searchTools } from '../src/defer.ts'
 import { renderToolDeclarations } from '../src/ts-types.ts'
 import { renderToolDeclarationsPy } from '../src/py-types.ts'
@@ -44,11 +44,12 @@ class FakeRuntime extends PtcRuntime {
 }
 
 /** A logged request header the resume seeding reads, or none for a new Session. */
-type LoggedHeader = { tools?: readonly ToolSchema[] } | undefined
+type LoggedHeader = { tools?: ToolSchema[] } | undefined
 
 function agentWith(id: string, header?: LoggedHeader): Agent {
-  const session = { header: { cwd: '/workspace' }, append: () => {}, requestHeader: () => header } as Agent['session']
-  return { id: SessionId(id), session } as Agent
+  const session = Session.create(SessionId(id))
+  vi.spyOn(session, 'requestHeader').mockReturnValue(header as ReturnType<Session['requestHeader']>)
+  return { id: session.id, session } as Agent
 }
 
 function register(ctx: Context, name: string, description = `The ${name} tool. More detail follows here.`): void {

@@ -238,7 +238,7 @@ describe('renderToolsSdk', () => {
     const mcpTool = (name: string): ToolSdkSchema => ({
       name,
       description: `The ${name} MCP tool.`,
-      parameters: parameterSchemaSpecToJsonSchema({}) as Record<string, unknown>,
+      parameters: { type: 'object', properties: {} },
       output: mcpResult,
     })
     const structured: ToolSdkSchema = {
