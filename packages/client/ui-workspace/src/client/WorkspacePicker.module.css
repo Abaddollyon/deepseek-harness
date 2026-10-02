@@ -18,3 +18,41 @@
 .menuStatus {
   color: var(--dsw-alias-label-secondary);
 }
+
+/* Manage-folders dialog body. */
+.folders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.folderLabel {
+  font-weight: 600;
+}
+
+.folderPath {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.folderHint {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.folderList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.folderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}

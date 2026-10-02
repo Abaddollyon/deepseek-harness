@@ -95,7 +95,7 @@ it('shares menu transparency and blur across palettes and follows native menu bo
   await compareOrRefreshGolden(join(expected, 'materials.expected.json'), JSON.stringify(results, null, 2), webSnapshotMode())
   await compareOrRefreshGolden(join(expected, 'modal-masks.expected.json'), JSON.stringify(masks, null, 2), webSnapshotMode())
 
-  const ungrouped = page.getByText('Ungrouped', { exact: true })
+  const ungrouped = page.getByText('Chats', { exact: true })
   const group = ungrouped.locator('xpath=ancestor::*[@aria-expanded][1]')
   await group.waitFor()
   if (await group.getAttribute('aria-expanded') !== 'true') await ungrouped.click()

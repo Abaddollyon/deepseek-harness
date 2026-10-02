@@ -534,14 +534,15 @@ export class AgentLoop extends Service implements AgentFactory {
       try {
         // Creation listeners retain the session and scope through their awaits.
         if (publication !== undefined) await publication.promise
-        // Disposal IS a disposed-cause cancel followed by quiescence. New work
-        // sent after this point is the sender's bug — the registries are about
-        // to drop the agent, so nothing should still hold it.
+        // Disposal IS a disposed-cause cancel followed by quiescence. Pending
+        // inbox input is durable session state, so it stays for a later resume.
+        // New work sent after this point is the sender's bug — the registries
+        // are about to drop the agent, so nothing should still hold it.
         /* v8 ignore next -- Cordis effect teardown waits for synchronous setup before observing the machine slot. */
         if (machine === undefined) await machineReady.promise
         /* v8 ignore next -- setup failure untracks this disposer before resolving without a machine. */
         if (machine !== undefined) {
-          machine.cancel({ kind: 'disposed' })
+          machine.cancel({ kind: 'disposed' }, { keepInbox: true })
           await machine.whenIdle()
           await machine.scope.dispose()
         }

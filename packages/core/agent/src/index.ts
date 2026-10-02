@@ -66,10 +66,10 @@ export interface CreateAgentOptions {
   /** Live parent Agent for runtime ownership; omit for a root Agent. */
   readonly parentAgent?: Agent
   /**
-   * Session creation metadata: validated absolute `cwd`, `parentSession`
-   * fork lineage, the `isSeeded` fork marker, the coarse `origin`
-   * classification, and the `delegationDepth` recursion budget. Mirrors the
-   * `cwd`/`parentSession`/`isSeeded`/`origin`/`delegationDepth` fields of
+   * Session creation metadata: validated absolute `cwd`, `additionalPaths`
+   * beside it, `parentSession` fork lineage, the `isSeeded` fork marker, the
+   * coarse `origin` classification, and the `delegationDepth` recursion budget.
+   * Mirrors the `cwd`/`additionalPaths`/`parentSession`/`isSeeded`/`origin`/`delegationDepth` fields of
    * {@link CreateSessionOptions.meta} in dsh-session (the internal-only
    * `createdAt`, used when reconstructing a persisted session, is deliberately
    * excluded — a factory caller never sets it). This is durable session data,
@@ -78,6 +78,7 @@ export interface CreateAgentOptions {
    */
   readonly meta?: {
     readonly cwd?: string
+    readonly additionalPaths?: readonly string[]
     readonly parentSession?: SessionId
     readonly isSeeded?: boolean
     readonly origin?: 'subagent'

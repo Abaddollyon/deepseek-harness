@@ -874,13 +874,15 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/inbox/claimed` — emit
 
-One message left the inbox inside its open turn. If the proposed step is rejected, the claimed message ends here: it is neither discarded nor re-emitted as a user/message, and the turn closes without a step.
+One message left the inbox inside its open turn. If the proposed step is rejected, the claimed message ends here: it is neither discarded nor re-emitted as a user/message, and the turn closes without a step. Lifecycle disposal that aborts the pre-step inserts the unstarted batch again at the front of the lists it came from.
 
 ```ts cordis-catalog
 /**
  * One message left the inbox inside its open turn. If the proposed step
  * is rejected, the claimed message ends here: it is neither discarded nor
  * re-emitted as a user/message, and the turn closes without a step.
+ * Lifecycle disposal that aborts the pre-step inserts the unstarted batch
+ * again at the front of the lists it came from.
  * @param payload.agent - the agent whose inbox changed.
  * @param payload.message - the claimed message.
  * @param payload.turn - the owning turn.

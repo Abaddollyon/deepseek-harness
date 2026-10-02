@@ -17,6 +17,7 @@ import type {
   WorkspacePinValue,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
   WorkspaceId,
   WorkspaceView,
@@ -120,6 +121,17 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
    */
   async rename(workspaceId: WorkspaceId, title: string): Promise<RemoteResult<WorkspaceValue>> {
     const result = await this.remote.rename({ workspaceId, title })
+    if (result.ok) this.upsert(result.value.workspace)
+    return result
+  }
+
+  /**
+   * Replace a Workspace's additional directories and merge the unary result immediately.
+   * @param request - target Workspace and complete replacement list.
+   * @returns generated Remote result.
+   */
+  async updatePaths(request: WorkspaceUpdatePathsRequest): Promise<RemoteResult<WorkspaceValue>> {
+    const result = await this.remote.updatePaths(request)
     if (result.ok) this.upsert(result.value.workspace)
     return result
   }

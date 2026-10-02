@@ -85,6 +85,8 @@ export interface DshClientManifest {
   inject?: string[]
   /** Boot phase-one registration barrier; absent means the shared application batch. */
   immediately?: boolean
+  /** Root of the ordinary Web graph; absent means true. A `false` package still loads as a dependency of a root. */
+  defaultRoot?: boolean
   /**
    * Exact module-table requests beyond the implicit client baseline, including
    * subpaths such as `<pkg>/client`; absent means baseline externals only.

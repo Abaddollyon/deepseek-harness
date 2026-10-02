@@ -224,7 +224,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:79`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:80`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -303,7 +303,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-workspace-controller`
 
 - `inject`: `typert` · `workspaceRegistry`
-- `source`: [`packages/api/workspace-controller/src/index.ts:33`](../packages/api/workspace-controller/src/index.ts)
+- `source`: [`packages/api/workspace-controller/src/index.ts:34`](../packages/api/workspace-controller/src/index.ts)
 
 ```ts config-catalog
 /** First-use directory policy for the Host account. */
@@ -1411,7 +1411,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-host-frontend-static`
 
 - `inject`: `webServer` · `connection`
-- `source`: [`packages/host/frontend-static/src/index.ts:30`](../packages/host/frontend-static/src/index.ts)
+- `source`: [`packages/host/frontend-static/src/index.ts:31`](../packages/host/frontend-static/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the dist anchor. */
@@ -1496,7 +1496,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-host-webserver`
 
-- `source`: [`packages/host/webserver/src/index.ts:59`](../packages/host/webserver/src/index.ts)
+- `source`: [`packages/host/webserver/src/index.ts:66`](../packages/host/webserver/src/index.ts)
 
 ```ts config-catalog
 /** Web server listen and response-compression config. */
@@ -1604,7 +1604,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:222`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:270`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1621,6 +1621,25 @@ export interface Config {
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * `provider` (default) keeps pi-ai's provider-native auth: stored sign-ins,
+   * their refresh, and ambient environment discovery. `proxy` declares a
+   * gateway that owns provider accounts itself: the route never reads,
+   * refreshes, or offers a stored or ambient provider credential, sends the
+   * {@link apiKeyEnv} value when one is configured, and otherwise sends no
+   * credential. `proxy` requires an explicit http(s) {@link baseURL} without
+   * embedded credentials.
+   */
+  authMode?: PiAiAuthMode
+  /**
+   * `claude-code` sends Anthropic requests in Claude Code format — identity
+   * headers, beta features, system preamble, and tool names — whatever
+   * credential the route carries, and permits a keyless request. Valid only on
+   * a route whose models speak `anthropic-messages`. Default `provider`.
+   */
+  anthropicRequestMode?: PiAiAnthropicRequestMode
+  /** How the configuration surface's model discovery lists this route. */
+  modelDiscovery?: PiAiModelDiscoveryProfile
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -1709,6 +1728,24 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+}
+
+/** Who authenticates a route's requests: pi-ai's provider-native auth, or a proxy in front of the provider. */
+export type PiAiAuthMode = 'provider' | 'proxy'
+
+/** Anthropic Messages request format: the one the credential selects, or Claude Code's. */
+export type PiAiAnthropicRequestMode = 'provider' | 'claude-code'
+
+/** Model discovery choices for one configured route. */
+export interface PiAiModelDiscoveryProfile {
+  /**
+   * `provider` (default) answers a catalog route from the installed catalog
+   * and lists any other route by its protocol. `openai-compatible` lists
+   * `GET {baseURL}/models` with bearer auth; `anthropic` lists
+   * `GET {root}/v1/models` with `x-api-key`. Both read the route's own
+   * endpoint, headers, and `apiKeyEnv`, independently of its generation API.
+   */
+  source?: PiAiModelDiscoverySource
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1853,6 +1890,9 @@ export interface PiAiCompatProfile {
 
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
+
+/** Listing protocol model discovery uses for a configured route. */
+export type PiAiModelDiscoverySource = 'provider' | 'openai-compatible' | 'anthropic'
 
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
@@ -2467,7 +2507,7 @@ export interface Config {
 
 - `inject`: `sessionProjections`
 - `refs`: [`SandboxMode`](subsystems/sandbox.zh.md)
-- `source`: [`packages/sandbox/sandbox-policy/src/index.ts:71`](../packages/sandbox/sandbox-policy/src/index.ts)
+- `source`: [`packages/sandbox/sandbox-policy/src/index.ts:76`](../packages/sandbox/sandbox-policy/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -3967,14 +4007,14 @@ export interface Config {
 ## `@deepseek-ai/dsh-tool-workflow`
 
 - `inject`: `tools` · `workflowEngine` · `systemPrompt`
-- `source`: [`packages/workflow/tool-workflow/src/index.ts:44`](../packages/workflow/tool-workflow/src/index.ts)
+- `source`: [`packages/workflow/tool-workflow/src/index.ts:46`](../packages/workflow/tool-workflow/src/index.ts)
 
 ```ts config-catalog
 /** Config: the model-facing tool name plus result rendering caps. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Serialized-result ceiling in characters; longer JSON spills through `ctx.spillStore` and returns recovery metadata (default 50000). */
   maxResultChars?: number
   /**
    * Expose `run_in_background` (default true); disabled calls are also

@@ -45,6 +45,8 @@ kind: "package-reference"
 
 根路径与配置的 index 响应会在读取 HTML 前调用 `ctx.connection.authorizeIndex`。有效进程 token 会得到 303 重定向与持久浏览器 cookie；已有有效 cookie 时直接提供 index；其他 index 请求得到 Connection 所有的 401 响应。非 index 文件仍是公开静态资源。Token、cookie、过期时间与签名记录语义都归 Connection 所有。
 
+经 [`ctx.clientSurfaces`](../../client/modules/README.zh.md) 注册的路径同样是 index 入口：它以该 surface 的 id 作为 `renderIndex` 的 variant 渲染同一份 `index.html`，其 `authorizeIndex` 调用只在该确切路径接受启动 token，并重定向到其干净 URL。
+
 ### 可观察的失败
 
 遍历返回 403 而不是错误页。dist 根目录内不存在或不是文件的目标返回空 404，因此失效链接或拼错的 pathname 是显式失败，而不是静默的 SPA 回退。第二次占据席位会抛错，而席位无人占据时 webserver 返回 404——本插件的 fiber 被 dispose（资源释放）后，浏览器看到的就是该响应。

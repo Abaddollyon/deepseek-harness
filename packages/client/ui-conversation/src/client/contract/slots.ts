@@ -516,8 +516,12 @@ export type ComposerAttachmentsProps =
 export interface EmptyWorkspaceOwnerProps {
   open: boolean
   anchorRef?: RefObject<HTMLElement>
+  /** Whether the picker may offer a new Session without a Workspace (the New Session hero). */
+  allowNoWorkspace?: boolean
   /** Currently selected Workspace, when available. */
   selectedId?: WorkspaceId | undefined
   onPick: (workspaceId: WorkspaceId) => void
+  /** The user chose a new Session without a Workspace; the picker creates and opens it. */
+  onChooseNoWorkspace?: () => void
   onClose: () => void
 }

@@ -15,11 +15,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
+import type { ToolCallView, ToolExecution, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
+// Type-only: `ctx.get('spillStore')` resolves when an optional spill backend is composed.
+import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   WorkflowResult, WorkflowRun, WorkflowRunId, WorkflowStopReason,
@@ -44,7 +46,7 @@ export const inject = ['tools', 'workflowEngine', 'systemPrompt']
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Serialized-result ceiling in characters; longer JSON spills through `ctx.spillStore` and returns recovery metadata (default 50000). */
   maxResultChars?: number
   /**
    * Expose `run_in_background` (default true); disabled calls are also
@@ -158,7 +160,7 @@ function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
 const DESCRIPTION = `Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn.
 
 Script-body hooks:
-- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\` LLM target overrides.
+- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\`/\`reasoningEffort\` LLM target overrides (an effort the target model does not offer ends the script).
 - \`pipeline(items, ...stages): Promise<any[]>\` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives \`(prev, item, index)\`. A stage throw drops that ITEM to \`null\` and skips its remaining stages.
 - \`parallel(thunks): Promise<any[]>\` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to \`null\`.
 - \`phase(title)\` — start a progress phase; \`log(message)\` — narrate progress; \`args\` — the tool call's \`args\` input, verbatim.
@@ -211,19 +213,31 @@ function stopReasonError(result: WorkflowResult): string | undefined {
 
 /**
  * Map a settled background run onto the job outcome vocabulary. A completed
- * run carries the rendered return value as the job's result; a
+ * run carries the rendered, bounded return value as the job's result, or fails
+ * when an oversized value cannot be saved; a
  * cancelled run leaves the detail to the registry's kill-reason merge (the
  * cancel reason it forwarded is the same string); an errored run fails with
  * the script's failure message.
  */
-function jobOutcomeOf(result: WorkflowResult, name: string, maxChars: number): JobOutcome {
+async function jobOutcomeOf(
+  result: WorkflowResult,
+  name: string,
+  project: (value: JsonValue) => JsonValue | Promise<JsonValue>,
+): Promise<JobOutcome> {
   switch (result.stopReason) {
-    case 'completed':
+    case 'completed': {
+      let value: JsonValue
+      try {
+        value = await project(result.value as JsonValue)
+      } catch (error: unknown) {
+        return { status: 'failed', detail: `workflow result could not be returned: ${String(error)}` }
+      }
       return {
         status: 'completed',
         detail: `${result.agentsStarted} agent${result.agentsStarted === 1 ? '' : 's'}`,
-        result: renderResult(name, result.agentsStarted, result.value as JsonValue, maxChars),
+        result: renderResult(name, result.agentsStarted, value),
       }
+    }
     case 'cancelled':
       return { status: 'killed' }
     case 'error':
@@ -235,14 +249,68 @@ function jobOutcomeOf(result: WorkflowResult, name: string, maxChars: number): J
   }
 }
 
-/** Render the run's outcome text: the meta name, agent count, and the JSON value (capped). */
-function renderResult(name: string, agentsStarted: number, value: JsonValue, maxChars: number): string {
+/** Recovery metadata that replaces a completed value whose serialized JSON exceeds `maxResultChars`. */
+interface SpilledWorkflowResult {
+  [key: string]: JsonValue
+  truncated: true
+  originalChars: number
+  spillPath: string
+  preview: string
+}
+
+/** The spill request for one call's result, without its content. */
+function resultSpill(parent: Agent, exec: ToolExecution, name: string): Omit<SaveTextSpill, 'content'> {
+  return {
+    owner: { sessionId: parent.session.id },
+    source: { kind: 'tool', toolName: exec.name, callId: exec.callId, label: 'result' },
+    suggestedName: `${name}-result.json`,
+  }
+}
+
+/**
+ * Bound a completed value for the model. A value whose pretty-printed JSON exceeds `maxChars` is saved
+ * whole through `ctx.spillStore` and replaced by {@link SpilledWorkflowResult}; the cap covers the
+ * serialized value only, so the metadata itself may exceed it. A value within the cap returns synchronously.
+ * @param ctx - plugin context; the spill backend is optional until a value is oversized.
+ * @param spill - the owning Session, producing call, and suggested file name.
+ * @param value - the run's JSON return value.
+ * @param maxChars - the serialized-value ceiling.
+ * @returns the value itself, or a promise of its recovery metadata that rejects when the value cannot be saved.
+ */
+function projectResult(
+  ctx: Context,
+  spill: Omit<SaveTextSpill, 'content'>,
+  value: JsonValue,
+  maxChars: number,
+): JsonValue | Promise<SpilledWorkflowResult> {
   // The engine returns JSON data (null for a valueless script), so stringify never yields undefined.
   const rendered = JSON.stringify(value, null, 2)
-  const clipped = rendered.length > maxChars
-    ? `${rendered.slice(0, maxChars)}\n… [truncated: ${rendered.length - maxChars} more characters]`
-    : rendered
-  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${clipped}`
+  return rendered.length <= maxChars ? value : spillResult(ctx, spill, rendered, maxChars)
+}
+
+/** Save one oversized serialized value and return its recovery metadata. */
+async function spillResult(
+  ctx: Context,
+  spill: Omit<SaveTextSpill, 'content'>,
+  rendered: string,
+  maxChars: number,
+): Promise<SpilledWorkflowResult> {
+  const spillStore = ctx.get('spillStore')
+  if (spillStore === undefined) {
+    throw new Error(`workflow result has ${rendered.length} characters, over maxResultChars (${maxChars}), and no ctx.spillStore backend is mounted to save it`)
+  }
+  const ref = await spillStore.saveText({ ...spill, content: rendered })
+  return {
+    truncated: true,
+    originalChars: rendered.length,
+    spillPath: String(ref.locator),
+    preview: rendered.slice(0, maxChars),
+  }
+}
+
+/** Render the run's outcome text: the meta name, agent count, and the bounded JSON value. */
+function renderResult(name: string, agentsStarted: number, value: JsonValue): string {
+  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${JSON.stringify(value, null, 2)}`
 }
 
 /**
@@ -256,7 +324,7 @@ function renderResult(name: string, agentsStarted: number, value: JsonValue, max
  * @param args - the validated tool call.
  * @param parent - the calling agent; owns the job.
  * @param recordsRun - whether this top-level call records durable run events.
- * @param deps - the tool's recorder/mirror taps and the render cap.
+ * @param deps - the tool's recorder/mirror taps, the result cap, and the result spill request.
  * @returns the background result for the tool's output schema.
  */
 function startBackgroundRun(
@@ -264,7 +332,7 @@ function startBackgroundRun(
   args: WorkflowCallArgs,
   parent: Agent,
   recordsRun: boolean,
-  deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number },
+  deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number; spill: Omit<SaveTextSpill, 'content'> },
 ): { kind: 'background'; jobId: JobId; runId: WorkflowRunId } {
   const jobs = ctx.get('jobs')
   if (jobs === undefined) {
@@ -301,7 +369,7 @@ function startBackgroundRun(
           deps.recorder.finish(run.id, result.stopReason)
           deps.recorder.abandon(run.id)
         }
-        return jobOutcomeOf(result, args.meta.name, deps.maxResultChars)
+        return jobOutcomeOf(result, args.meta.name, value => projectResult(ctx, deps.spill, value, deps.maxResultChars))
       })
       return {
         cancel: (reason?: string) => { run.cancel(reason ?? 'background workflow job killed') },
@@ -400,7 +468,7 @@ export function apply(ctx: Context, config: Config): void {
         type: 'text',
         text: value.kind === 'background'
           ? `workflow "${args.meta.name}" started in the background as job ${value.jobId}. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`
-          : renderResult(args.meta.name, value.agentsStarted, value.result, maxResultChars),
+          : renderResult(args.meta.name, value.agentsStarted, value.result),
       }],
     },
     async execute(args, exec) {
@@ -424,6 +492,7 @@ export function apply(ctx: Context, config: Config): void {
           recorder,
           mirror,
           maxResultChars,
+          spill: resultSpill(parent, exec, args.meta.name),
         })
       }
 
@@ -456,11 +525,13 @@ export function apply(ctx: Context, config: Config): void {
           // throw into an isError). Report the reason, not partial output.
           throw new Error(error)
         }
+        // Only an oversized value awaits its spill; an in-cap value returns without an extra turn.
+        const projected = projectResult(ctx, resultSpill(parent, exec, args.meta.name), result.value as JsonValue, maxResultChars)
         return {
           kind: 'foreground' as const,
           runId: run.id,
           agentsStarted: result.agentsStarted,
-          result: result.value as JsonValue,
+          result: projected instanceof Promise ? await projected : projected,
         }
       } finally {
         exec.signal.removeEventListener('abort', onAbort)

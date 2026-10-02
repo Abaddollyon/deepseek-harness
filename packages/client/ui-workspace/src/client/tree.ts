@@ -59,6 +59,8 @@ export interface SessionNode {
   /** In the registry-global archive set: shown grayed in place and not openable. */
   archived: boolean
   updatedAt: number
+  /** Additional directories the Session recorded at creation; absent when none. */
+  additionalPaths?: readonly string[]
 }
 
 /** Session order selected by the Workspace browser. */
@@ -71,6 +73,8 @@ export interface GroupNode {
   /** Backing Workspace id; absent only for the ungrouped bucket. */
   workspaceId: WorkspaceId | undefined
   cwd: string | undefined
+  /** Additional Workspace directories offered to new Sessions; absent when none. */
+  additionalPaths?: readonly string[]
   /** Workspace creation time (epoch ms); absent only for the ungrouped bucket. */
   createdAt: number | undefined
   label: string
@@ -117,6 +121,7 @@ interface Group {
   key: string
   workspaceId: WorkspaceId | undefined
   cwd: string | undefined
+  additionalPaths?: readonly string[]
   createdAt: number | undefined
   label: string
   sessions: SessionSummary[]
@@ -353,10 +358,13 @@ function groupByWorkspace(
     // The archived-only view lists archives, not the Workspace inventory, so
     // a Workspace without archived Sessions contributes no group.
     if (archivedFilter === 'only' && members.length === 0) continue
-    groups.push(buildGroup(
-      workspace.workspaceId, workspace.workspaceId, workspace.path,
-      Date.parse(workspace.createdAt), workspace.title, members,
-    ))
+    groups.push({
+      ...buildGroup(
+        workspace.workspaceId, workspace.workspaceId, workspace.path,
+        Date.parse(workspace.createdAt), workspace.title, members,
+      ),
+      ...workspace.additionalPaths === undefined ? {} : { additionalPaths: workspace.additionalPaths },
+    })
   }
   const stray = list.ids
     .map(id => list.byId[id])
@@ -403,6 +411,7 @@ function sessionNode(
 ): SessionNode {
   const status = statuses.get(s.id)
   const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind)
+  const additionalPaths = s.projectionValues?.additionalPaths
   return {
     id: s.id,
     title: sessionTitle(s),
@@ -414,6 +423,7 @@ function sessionNode(
     archived: archived.has(s.id),
     updatedAt: s.updatedAt,
     ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
+    ...(additionalPaths === undefined || additionalPaths === null ? {} : { additionalPaths }),
   }
 }
 
@@ -454,6 +464,7 @@ export function deriveGroups(
       key: g.key,
       workspaceId: g.workspaceId,
       cwd: g.cwd,
+      ...g.additionalPaths === undefined ? {} : { additionalPaths: g.additionalPaths },
       createdAt: g.createdAt,
       label: g.label,
       sessionCount: g.sessions.length,

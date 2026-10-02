@@ -40,6 +40,7 @@ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
 import { AnimatedRows } from './AnimatedRows.tsx'
 import { FLAT_SESSION_ORDER_KEY, type SessionGroupBy } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
+import { WorkspaceFoldersDialog } from '../WorkspaceFoldersDialog.tsx'
 import css from './WorkspaceBrowser.module.css'
 
 /**
@@ -216,7 +217,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
-  'useSessionStatus' | 'startSession' | 'open'
+  'useSessionStatus' | 'startSession' | 'createLooseSession' | 'open'
   | 'insertWorkspaceBefore' | 't' | 'usePanelInfo'
 > & PropsRenderSlots<
   | 'sidebar.workspaces.session.menu.item'
@@ -251,6 +252,8 @@ type SessionTreeProps = Pick<
   onLeaveArchivedOnly: () => void
   /** Open the browser-owned rename dialog for a real Workspace group. */
   onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
+  /** Open the browser-owned folder dialog for a real Workspace group. */
+  onFoldersRequest: (workspaceId: WorkspaceId) => void
   /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
   onDeleteRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
   /** Open the rename dialog from a row title double-click. */
@@ -279,10 +282,10 @@ function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreePro
 
 /** The scrolling session tree; unmounting drops the sessions subscription and local row limits. */
 function SessionTree({
-  list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds,
+  list, useSessionStatus, startSession, createLooseSession, open, workspaces, ungroupedSessionIds,
   rowState, onLeaveArchivedOnly,
   workspaceReady, animationResetKey, usePanelInfo,
-  onRenameRequest, onDeleteRequest, onSessionRenameRequest,
+  onRenameRequest, onFoldersRequest, onDeleteRequest, onSessionRenameRequest,
   renderSlot,
   insertWorkspaceBefore,
   nestWorkspaces, groupExpansion, setGroupExpanded,
@@ -506,10 +509,9 @@ function SessionTree({
             setGroupExpanded(group.key, !group.expanded)
           }}
           onCreate={() => {
-            if (group.workspaceId !== undefined) {
-              setGroupExpanded(group.key, true)
-              startSession(group.workspaceId)
-            }
+            setGroupExpanded(group.key, true)
+            if (group.workspaceId === undefined) createLooseSession()
+            else startSession(group.workspaceId)
           }}
           drag={workspaceDragProps}
           actions={group.workspaceId === undefined
@@ -518,6 +520,10 @@ function SessionTree({
               rename: () => {
               /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
                 if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
+              },
+              folders: () => {
+              /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+                if (group.workspaceId !== undefined) onFoldersRequest(group.workspaceId)
               },
               delete: () => {
               /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
@@ -843,10 +849,12 @@ export function WorkspaceBrowser({
   useStore,
   actions,
   startSession,
+  createLooseSession,
   open,
   requestSessionRename,
   notifyArchivedNotOpenable,
   renameWorkspace,
+  updateWorkspacePaths,
   deleteWorkspace,
   insertWorkspaceBefore,
   unarchiveSession,
@@ -1131,6 +1139,7 @@ export function WorkspaceBrowser({
   // The stored title decides whether confirming is a real rename; the draft is
   // seeded with the label on screen. They differ for a Workspace still
   // carrying its automatic title, so confirming the prefill pins that name.
+  const [foldersTarget, setFoldersTarget] = useState<WorkspaceView | null>(null)
   const [renameTarget, setRenameTarget] = useState<{ workspaceId: WorkspaceId; storedTitle: string } | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renaming, setRenaming] = useState(false)
@@ -1301,8 +1310,9 @@ export function WorkspaceBrowser({
             </Tooltip>
           )}
         </div>
-        {/* Add flow + its error dialog (same package — direct composition). */}
-        <WorkspacePickFlow
+        {/* Add flow + its error dialog (same package — direct composition). The
+            folder dialog borrows the single directory-flow hole while open. */}
+        {foldersTarget === null && <WorkspacePickFlow
           t={t}
           open={wsPickerOpen}
           anchorRef={wsPlusRef}
@@ -1318,7 +1328,7 @@ export function WorkspaceBrowser({
             startSession(workspaceId)
           }}
           onClose={() => { closeAddWorkspace() }}
-        />
+        />}
       </div>
 
       {/* The collapsed rail keeps search as its own 36px control. */}
@@ -1397,6 +1407,7 @@ export function WorkspaceBrowser({
                 rowState={rowState}
                 onLeaveArchivedOnly={leaveArchivedOnly}
                 startSession={startSession}
+                createLooseSession={createLooseSession}
                 open={guardedOpen}
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 revealSessionId={revealSessionId}
@@ -1411,6 +1422,10 @@ export function WorkspaceBrowser({
                   setRenameDraft(displayTitle)
                   setRenameError(null)
                 }}
+                onFoldersRequest={(workspaceId) => {
+                  closeAddWorkspace()
+                  setFoldersTarget(storedWorkspaces.find(w => w.workspaceId === workspaceId) ?? null)
+                }}
                 onDeleteRequest={(workspaceId, title) => {
                   setDeleteTarget({ workspaceId, title })
                   setDeleteError(null)
@@ -1418,6 +1433,19 @@ export function WorkspaceBrowser({
               />
             ))}
       </div>
+
+      {foldersTarget !== null && (
+        <WorkspaceFoldersDialog
+          key={foldersTarget.workspaceId}
+          path={foldersTarget.path}
+          additionalPaths={foldersTarget.additionalPaths ?? []}
+          flowAvailable={directoryFlowAvailable}
+          renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
+          onSave={paths => updateWorkspacePaths(foldersTarget.workspaceId, paths)}
+          onClose={() => { setFoldersTarget(null) }}
+          t={t}
+        />
+      )}
 
       <Modal
         open={renameTarget !== null}

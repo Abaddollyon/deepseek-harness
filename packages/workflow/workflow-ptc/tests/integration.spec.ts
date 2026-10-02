@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import type { AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -16,6 +18,11 @@ import { mountPtcRuntime } from './setup.ts'
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
+const REASONING = {
+  efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }, { id: ReasoningEffortId('high'), name: 'High' }],
+  defaultEffort: ReasoningEffortId('high'),
+}
+
 async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(InvariantRegistry)
   await ctx.plugin(SessionInvariant)
@@ -23,9 +30,9 @@ async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(AgentLoopInvariant)
 }
 
-async function setup(script: Script) {
+async function setup(script: Script, reasoning?: typeof REASONING, parentOptions: AgentOptions = { provider: 'mock', model: 'mock' }) {
   const ctx = new Context()
-  const adapter = new MockAdapter(script)
+  const adapter = new MockAdapter(script, reasoning)
   await mountAgentLoopTestDependencies(ctx)
   await mountPtcRuntime(ctx)
   await mountInvariants(ctx)
@@ -34,7 +41,7 @@ async function setup(script: Script) {
   await ctx.plugin(spawn, { providerName: 'spawn' })
   await ctx.plugin(PtcWorkflowEngine, {})
   ctx.llm.registerAdapter(['mock'], adapter)
-  const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock' })
+  const parent = await ctx.agentLoop.create(SessionId('parent'), parentOptions)
   return { ctx, parent, adapter }
 }
 
@@ -89,6 +96,48 @@ return { got: judged === null ? 'null' : 'value' }`,
     expect(result.stopReason, result.error?.split('\n')[0]).toBe('completed')
     expect(result.value).toEqual({ got: 'null' })
     await run.dispose()
+  })
+
+  it('applies agent({reasoningEffort}) to the child request; an omitted effort keeps the inherited route', async () => {
+    const { ctx, parent, adapter } = await setup(
+      [textResponse('high child'), textResponse('inherited child')],
+      REASONING,
+      { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+    )
+    const run = ctx.workflowEngine.start({
+      meta: { name: 'effort', description: 'per-child reasoning effort' },
+      script: `const high = await agent('think hard', { reasoningEffort: 'high' })
+const inherited = await agent('think as the parent does')
+return [high, inherited]`,
+      parent,
+    })
+    try {
+      const result = await run.result
+      expect(result.stopReason, result.error?.split('\n')[0]).toBe('completed')
+      expect(result.value).toEqual(['high child', 'inherited child'])
+      expect(adapter.requests.map(request => request.reasoningEffort)).toEqual(['high', 'low'])
+    } finally {
+      await run.dispose()
+    }
+  })
+
+  it('rejects a reasoning effort the effective child model does not offer before starting the child', async () => {
+    const { ctx, parent, adapter } = await setup([textResponse('never sent')], REASONING)
+    const start = vi.spyOn(ctx.subagents, 'start')
+    const run = ctx.workflowEngine.start({
+      meta: { name: 'bad-effort', description: 'unsupported reasoning effort' },
+      script: "return await agent('think', { model: 'other', reasoningEffort: 'max' })",
+      parent,
+    })
+    try {
+      const result = await run.result
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain('provider "mock" model "other" does not support reasoning effort "max"')
+      expect(start).not.toHaveBeenCalled()
+      expect(adapter.requests).toHaveLength(0)
+    } finally {
+      await run.dispose()
+    }
   })
 
   it('keeps real children visible to start observers after a progress burst', async () => {

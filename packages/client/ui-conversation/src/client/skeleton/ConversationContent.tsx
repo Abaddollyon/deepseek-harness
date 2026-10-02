@@ -119,6 +119,7 @@ export function ConversationContent(props: ConversationContentProps) {
       {renderSlot('conversation.hero.workspace', {
         open: pickerOpen,
         anchorRef: pickerAnchor,
+        allowNoWorkspace: true,
         selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
         onPick: (workspaceId) => {
           setPickerOpen(false)
@@ -127,21 +128,25 @@ export function ConversationContent(props: ConversationContentProps) {
             setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
           })
         },
+        onChooseNoWorkspace: () => {
+          setPickerOpen(false)
+          setPendingWorkspaceId(undefined)
+        },
         onClose: () => { setPickerOpen(false) },
       })}
       {renderSlot('conversation.hero.agentPreset', {})}
     </div>
   )
 
-  // The placeholder chip ("Choose workspace") and the Workspace-trigger input travel
-  // together: no workspace picked yet (cold start, no session at all), or a
-  // blank session whose workspace vanished (deleted from the sidebar). The
-  // bar is ONE session-maybe slot rendered unconditionally — inert is a prop,
-  // not a different tree, so the textarea DOM survives the transition.
-  const inert = sessionId === undefined || (hero && chipTitle === undefined)
+  // Only the no-Session state needs the Workspace-trigger input: an existing
+  // blank Session drafts and sends without an owning Workspace (a chat
+  // created without one, or one whose Workspace was deleted). The bar is ONE
+  // session-maybe slot rendered unconditionally — inert is a prop, not a
+  // different tree, so the textarea DOM survives the transition.
+  const inert = sessionId === undefined
   // A raised block is the same inert posture with the blocker's own reason:
-  // one disabled textarea, never a second tree. The no-workspace state wins
-  // when both hold — picking a workspace is the earlier prerequisite.
+  // one disabled textarea, never a second tree. The no-Session state wins
+  // when both hold — choosing where to start is the earlier prerequisite.
   const blocked = !inert && composerBlock !== undefined
   const inputBar = renderSlot('conversation.composer.bar', {
     variant: hero ? 'hero' : 'composer',

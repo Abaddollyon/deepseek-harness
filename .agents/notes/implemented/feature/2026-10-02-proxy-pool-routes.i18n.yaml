@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-proxy-pool-routes.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-proxy-pool-routes.md
+/agent-note-proxy-pool-routes:
+  en: 7c0d0e80fc8963f0
+  zh: 215f1f322afb8aab
+/agent-note-proxy-pool-routes/problem:
+  en: 8609edf8c67e8090
+  zh: 07449211d92553ef
+/agent-note-proxy-pool-routes/decision:
+  en: 53af7acc1be60da8
+  zh: 6e02a03a4551b62f
+/agent-note-proxy-pool-routes/alternatives-considered:
+  en: 0016052ca616dabb
+  zh: f4ba513c90e1ac09
+/agent-note-proxy-pool-routes/consequences:
+  en: 0c95cdd93fbb95f3
+  zh: 694a3ea2f0720fe0

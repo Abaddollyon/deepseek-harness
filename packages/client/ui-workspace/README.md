@@ -45,6 +45,10 @@ Choose **Add workspace** and select a directory to register it and open a Sessio
 
 Hierarchy uses registered canonical paths only. It does not scan for projects or resolve symlink aliases. Nesting does not change Session working directories, logs, or Workspace membership. Deleting a parent Workspace leaves its child Workspaces registered and places them under their next registered ancestor, or at the root.
 
+A Workspace row's **Manage folders…** dialog lists the primary folder and edits the Workspace's additional folders through the same directory flow, saving the complete list with `workspaces.updatePaths()`. Only Sessions created afterwards use a changed list. Workspace hover cards list the additional folders, and Session hover cards list the folders that Session recorded, read from its `additionalPaths` projection.
+
+Sessions outside every Workspace appear under **Chats**. Its new-Session action, and **Don't use a workspace** in the New Session picker, create a Session without a Workspace in the Host's default directory and open it.
+
 ### Search
 
 Collapsed search is one header action beside the view and add actions: activating it expands the field across the header. A non-blank query replaces either browsing mode with one flat result list — case-insensitive title and Workspace substring matches appear immediately, while a 250 ms debounced Host request adds ranked current-conversation content matches and snippets. Each new query aborts the preceding request; a failed content search leaves metadata matches visible without an additional warning. The list is capped at 20. Choosing an unarchived result clears and collapses search, opens the Session, and scrolls its row into view in the configured browsing mode; grouped browsing also expands its Workspace and the full Session list when required. Archived results offer Unarchive; attempting to open one explains that restriction without clearing the query or navigating.

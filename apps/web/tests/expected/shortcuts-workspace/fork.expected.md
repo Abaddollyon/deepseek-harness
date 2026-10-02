@@ -4,6 +4,6 @@
 - button "View options"
 - button "Add workspace"
 - tree "Sessions":
-  - treeitem "Ungrouped" [expanded]
+  - treeitem "Chats" [expanded]
   - treeitem "T4 source (1) now"
   - treeitem "T4 source 1min" [selected]

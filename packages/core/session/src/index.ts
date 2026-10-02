@@ -149,6 +149,31 @@ function validateRestoredSessionHeader(id: SessionId, input: unknown): SessionHe
   return validateSessionHeader(id, input)
 }
 
+const NO_ADDITIONAL_PATHS: readonly string[] = Object.freeze([])
+
+/**
+ * Validate one `workspace/roots` event at its only legal position.
+ * @param event - candidate seed or creation event.
+ * @param subject - event location to include in validation errors.
+ * @returns a frozen copy of its nonempty, unique, absolute paths.
+ */
+function workspaceRootsOf(event: SessionEvent<'workspace/roots'>, subject: string): readonly string[] {
+  if (event.seq !== 0 || event.ignorable !== true) {
+    throw new Error(`${subject} workspace/roots must be the ignorable event at seq 0`)
+  }
+  const paths: unknown = event.data.additionalPaths
+  if (!Array.isArray(paths) || paths.length === 0
+    || paths.some(path => typeof path !== 'string' || !isAbsolute(path))
+    || new Set(paths).size !== paths.length) {
+    throw new Error(`${subject} workspace/roots additionalPaths must be nonempty unique absolute paths`)
+  }
+  return Object.freeze(paths.map(String))
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index])
+}
+
 /** Detach, validate, and freeze the creation metadata published by a session. */
 function snapshotSessionHeader(id: SessionId, source?: SessionHeader): SessionHeader {
   const input: unknown = source === undefined
@@ -466,6 +491,13 @@ export class Session {
   /** Number of leading events inherited from this Session's fork parent. */
   readonly inheritedEventCount: SessionLogOffset
 
+  /**
+   * Absolute directories this Session may use beside `header.cwd`, read from
+   * its seq-0 `workspace/roots` event; empty without one. Fixed for the
+   * Session's lifetime: a seeded Session inherits its seed's roots.
+   */
+  readonly additionalPaths: readonly string[]
+
   /** The session identity, derived from its durable header's single copy. */
   get id(): SessionId {
     return this.header.id
@@ -501,6 +533,8 @@ export class Session {
    * @param header - optional borrowed storage metadata.
    * @param inheritedEventCount - exact fork-inherited prefix length for a seeded header.
    * @param projections - pure interpreters for plugin-owned message changes.
+   * @param additionalPaths - absolute directories beside `cwd`; without a seed a nonempty
+   *   list becomes the seq-0 `workspace/roots` event, with a seed it must equal the seed's.
    * @returns a detached session.
    * @throws when a seed event requires a missing message interpreter or fails validation.
    */
@@ -510,8 +544,9 @@ export class Session {
     header?: SessionHeader,
     inheritedEventCount?: SessionLogOffset,
     projections?: readonly SessionMessageProjection[],
+    additionalPaths?: readonly string[],
   ): Session {
-    return new Session(id, seed, header, 'snapshot', inheritedEventCount, projections)
+    return new Session(id, seed, header, 'snapshot', inheritedEventCount, projections, additionalPaths)
   }
 
   /**
@@ -554,9 +589,11 @@ export class Session {
     mode: 'snapshot' | SessionSeedEventState = 'snapshot',
     suppliedInheritedEventCount?: SessionLogOffset,
     projections: readonly SessionMessageProjection[] = [],
+    suppliedAdditionalPaths?: readonly string[],
   ) {
     this.surfaceManager = new SurfaceManager(this.log, SessionLogOffset(0), projections)
     const restoredHeader = mode === 'snapshot' ? undefined : validateRestoredSessionHeader(id, header)
+    let additionalPaths = NO_ADDITIONAL_PATHS
     if (seed !== undefined) {
       // Validate the seed to the SAME invariants `append` enforces, so a
       // replay/fork (`ctx.sessions.create(id, { seed })`) cannot construct a
@@ -584,10 +621,29 @@ export class Session {
         } catch (error: unknown) {
           throw new Error(`invalid seed event at index ${index}: ${error instanceof Error ? error.message : 'invalid surface metadata'}`)
         }
+        if (snapshot.type === 'workspace/roots') additionalPaths = workspaceRootsOf(snapshot, `seed event at index ${index}`)
         this.log.push(mode === 'snapshot' ? deepFreeze(snapshot) : snapshot)
+      }
+      if (suppliedAdditionalPaths !== undefined && !samePaths(suppliedAdditionalPaths, additionalPaths)) {
+        throw new Error('seeded session additional paths must equal its seed workspace/roots event')
       }
     }
     this.firstLiveSeq = SessionLogOffset(this.log.length)
+    if (seed === undefined && suppliedAdditionalPaths !== undefined && suppliedAdditionalPaths.length > 0) {
+      // Like a seed marker, this constructor event is stored at publication without a session/event notification.
+      const event = snapshotJsonValue({
+        type: 'workspace/roots',
+        seq: SessionSeq(0),
+        time: Date.now(),
+        data: { additionalPaths: suppliedAdditionalPaths },
+        ignorable: true,
+      } satisfies SessionEvent<'workspace/roots'>)
+      if (event === undefined) throw new Error('session additional paths are not losslessly JSON-serializable')
+      additionalPaths = workspaceRootsOf(event, 'session creation')
+      this.surfaceManager.validateNext(event)
+      this.log.push(deepFreeze(event))
+    }
+    this.additionalPaths = additionalPaths
     this.header = restoredHeader ?? snapshotSessionHeader(id, header)
     if (this.header.isSeeded && seed === undefined) {
       throw new Error('seeded session requires an explicit constructor seed')
@@ -717,13 +773,14 @@ export class Session {
    *   of truth, so a bad event fails at the append site rather than later during
    *   a backend flush. A synchronous internal dispatch validation failure or an
    *   append reentered while this acceptance/publication boundary is open also
-   *   rejects before the log changes.
+   *   rejects before the log changes. `workspace/roots` is creation-only and always rejects.
    */
   append<T extends SessionEventType>(
     type: T,
     data: SessionEventMap[T],
     ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent<T>] : []
   ): SessionEvent<T> {
+    if (type === 'workspace/roots') throw new Error('workspace/roots is recorded only when a Session is created')
     const surfaceOpts: SurfaceIntent | undefined = opts[0]
     const surfaceMetadata = {
       ...surfaceOpts?.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
@@ -1057,7 +1114,7 @@ export class SessionStore extends Service {
       ...meta?.delegationDepth === undefined ? {} : { delegationDepth: meta.delegationDepth },
       ...meta?.agentPreset === undefined ? {} : { agentPreset: meta.agentPreset },
     }
-    return Session.create(sessionId, seed, header, options?.inheritedEventCount, this.projections)
+    return Session.create(sessionId, seed, header, options?.inheritedEventCount, this.projections, meta?.additionalPaths)
   }
 
   /**

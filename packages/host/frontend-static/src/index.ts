@@ -18,6 +18,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-client-modules'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 /** Stable Cordis plugin name. */
@@ -114,8 +115,8 @@ export function apply(ctx: Context, config: Config): void {
   const distIndex = config.distIndex
   const distRoot = dirname(distIndex)
   // Insert after all index transforms so the base precedes every resource reference.
-  const renderIndex = async (): Promise<string> => {
-    const body = ctx.webServer.renderIndex(await readFile(distIndex, 'utf8'))
+  const renderIndex = async (variant?: string): Promise<string> => {
+    const body = ctx.webServer.renderIndex(await readFile(distIndex, 'utf8'), variant === undefined ? {} : { variant })
     return body.replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`)
   }
   ctx.effect(() => ctx.webServer.registerFallback(async (req, res) => {
@@ -128,13 +129,16 @@ export function apply(ctx: Context, config: Config): void {
     }
     /* v8 ignore next -- node:http always sets url on server requests */
     const rawPath = new URL(req.url ?? '/', 'http://x').pathname
+    const pathname = decodeURIComponent(rawPath)
+    // A registered client surface path is served as the index with that surface's boot graph.
+    const surface = ctx.get('clientSurfaces')?.findByPath(pathname)
     await serveStatic(
-      decodeURIComponent(rawPath),
+      surface === undefined ? pathname : '/',
       res,
       distRoot,
       distIndex,
-      () => ctx.connection.authorizeIndex(req, res),
-      renderIndex,
+      () => ctx.connection.authorizeIndex(req, res, surface?.path),
+      () => renderIndex(surface?.id),
     )
   }), 'frontend-static: fallback seat')
 }

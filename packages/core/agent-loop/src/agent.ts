@@ -173,11 +173,11 @@ export class ReactLoopAgent implements Agent {
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
-    if (!options.keepInbox) {
-      this.inbox.clear()
-      if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
-    }
-    if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+    if (!options.keepInbox) this.inbox.clear()
+    if (this.phase.kind === 'idle') return
+    // Disposal keeps the inbox for a later lifecycle but never replays a latched wake.
+    if (!options.keepInbox || cause.kind === 'disposed') this.phase.wakeRequested = false
+    this.phase.abort.abort(cause)
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -268,21 +268,44 @@ export class ReactLoopAgent implements Agent {
     /* v8 ignore next -- private callers establish the running phase before proposing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
+    const steeringCount = this.inbox.nextStep.length
     const claimed = this.inbox.claim(target, position.turn)
-    const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
-    signal.throwIfAborted()
-    const sections = renderContextSections(assembly)
-    const context = this.runtimeContext.project(joinContextSections(sections), sections)
-    const decision = await this.dispatch.waterfall(
-      'agent/pre-step', { messages: claimed, ...position, signal },
-      (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
-        kind: 'enter',
-        messages: context === undefined ? claimed : [...claimed, context],
-      }),
-    )
-    signal.throwIfAborted()
-    if (decision.kind === 'reject') return decision
-    return { ...decision, assembly }
+    try {
+      const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
+      signal.throwIfAborted()
+      const sections = renderContextSections(assembly)
+      const context = this.runtimeContext.project(joinContextSections(sections), sections)
+      const decision = await this.dispatch.waterfall(
+        'agent/pre-step', { messages: claimed, ...position, signal },
+        (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({
+          kind: 'enter',
+          messages: context === undefined ? claimed : [...claimed, context],
+        }),
+      )
+      signal.throwIfAborted()
+      if (decision.kind === 'reject') return decision
+      return { ...decision, assembly }
+    } catch (error: unknown) {
+      // No step admitted the claimed batch yet. Lifecycle disposal returns it
+      // for a later lifecycle; other cancellations and pre-step failures end
+      // it here, with listeners restoring what they own.
+      if (abortedCancelCause(signal)?.kind === 'disposed') this.restoreClaimed(claimed, steeringCount)
+      throw error
+    }
+  }
+
+  /**
+   * Return an unstarted claimed batch to the front of the lists it came from,
+   * skipping messages a pre-step listener already queued again.
+   * @param claimed - the batch removed by {@link ReactLoopInbox.claim}.
+   * @param steeringCount - how many leading `claimed` entries came from `next-step`.
+   */
+  private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
+    const pending = new Set([...this.inbox.nextStep, ...this.inbox.nextTurn].map(message => message.id))
+    const unclaimed = (messages: readonly UserMessage[]): UserMessage[] =>
+      messages.filter(message => !pending.has(message.id))
+    this.inbox.splice('next-turn', 0, 0, unclaimed(claimed.slice(steeringCount)))
+    this.inbox.splice('next-step', 0, 0, unclaimed(claimed.slice(0, steeringCount)))
   }
 
   /** Whether the assembled tool schemas differ from the logged request header's. */

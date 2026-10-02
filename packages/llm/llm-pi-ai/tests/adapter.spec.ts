@@ -85,7 +85,8 @@ describe('PiAiAdapter provider routing', () => {
     })
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(result.finish).toEqual({ kind: 'stop' })
-    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4 })
+    // OpenAI-compatible usage always carries the reasoning split (0 here).
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4, reasoningTokens: 0 })
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
@@ -407,7 +408,8 @@ describe('PiAiAdapter provider routing', () => {
     expect(result.finish).toEqual({
       kind: 'error',
       failure: {
-        message: `pi-ai detected context overflow for model "${model.id}"`,
+        message: `pi-ai detected context overflow for model "${model.id}" at resolved context window`
+          + ` ${model.contextWindow} tokens (input ${model.contextWindow + 1}, cache-read 0)`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })

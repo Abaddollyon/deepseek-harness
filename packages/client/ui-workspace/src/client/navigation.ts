@@ -43,6 +43,13 @@ export interface UiWorkspace {
    */
   openWorkspace(workspaceId: WorkspaceId, beforeOpen?: (sessionId: SessionId) => void): Promise<void>
   /**
+   * Create a Session without a Workspace in the Host's default directory and
+   * open it unless a later navigation supersedes it. Concurrent requests share
+   * one creation.
+   * @returns completion; a refused creation is also shown through the Workspace notice.
+   */
+  openLooseSession(): Promise<void>
+  /**
    * Fork a Session without changing the current selection.
    * @param sessionId - source Session.
    * @param onCreated - observer before the optional child-title update.
@@ -126,6 +133,7 @@ export class DirectoryBrowseError extends Error {
 /** Implements Workspace archive and directory UI operations. */
 class UiWorkspaceService extends Service implements UiWorkspace {
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
+  private looseCreation: Promise<SessionId> | undefined
   private readonly lifetime = new AbortController()
   private readonly selection = createSnapshotStore<MainSelection>(
     {}, { persist: { name: 'dsh.sessions.current' } },
@@ -214,6 +222,20 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     }
     if (navigation.aborted) return
     this.replaceMain(sessionId, navigation, 'reveal', beforeOpen)
+  }
+
+  async openLooseSession(): Promise<void> {
+    const navigation = AbortSignal.any([this.ctx.layout.beginNavigation(), this.lifetime.signal])
+    let sessionId: SessionId
+    try {
+      sessionId = await (this.looseCreation ??= this.sessions.create({})
+        .finally(() => { this.looseCreation = undefined }))
+    } catch (error: unknown) {
+      if (!navigation.aborted) this.notify({ kind: 'createFailed', message: creationFailureMessage(error) })
+      throw error
+    }
+    if (navigation.aborted) return
+    this.replaceMain(sessionId, navigation, 'reveal')
   }
 
   async forkSession(sessionId: SessionId, onCreated?: (childId: SessionId) => void): Promise<SessionId> {

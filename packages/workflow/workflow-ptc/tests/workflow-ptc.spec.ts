@@ -237,6 +237,14 @@ describe('dsh-workflow-ptc', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.parent).toBeDefined()
     })
 
+    it('agent({label}) persists the explicit label on the child; an unlabelled call sends none', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted("await agent('named child', { label: 'scout' }); return await agent('anonymous child')"))
+
+      expect(result.stopReason).toBe('completed')
+      expect(provider.runs.map(child => child.request.label)).toEqual(['scout', undefined])
+    })
+
     it('agent({provider}) forwards provider-only agentOptions through PTC bindings', async () => {
       const { ctx, parent, provider } = await setup()
       const result = await run(ctx, parent, scripted("return await agent('route me', { provider: 'openai' })"))
@@ -255,6 +263,18 @@ describe('dsh-workflow-ptc', { timeout: 120_000 }, () => {
       expect(result.value).toEqual(['stub reply', 'remote reply'])
       expect(remote.runs).toHaveLength(1)
       expect(provider.runs).toHaveLength(1)
+    })
+
+    it.each([
+      ["{ reasoningEffort: 'high' }", 'requires an effective child provider and model'],
+      ["{ provider: 'openai', model: 'small', reasoningEffort: 'high' }", '`llm` service is unavailable'],
+    ])('agent(%s) fails before start when the effort cannot be validated', async (options, message) => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`return await agent('route me', ${options})`))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain(message)
+      expect(provider.runs).toHaveLength(0)
     })
 
     it('a start-request provider override selects every child without changing the engine default', async () => {

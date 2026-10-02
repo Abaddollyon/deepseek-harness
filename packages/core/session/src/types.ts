@@ -156,6 +156,13 @@ export interface CreateSessionOptions {
     readonly origin?: 'subagent'
     readonly delegationDepth?: number
     readonly agentPreset?: string
+    /**
+     * Absolute directories the Session may use beside `cwd`. A nonempty list
+     * becomes the Session's `workspace/roots` event at seq 0; a seeded
+     * Session inherits that event from its seed, and a supplied list must
+     * then equal the inherited one. Not a header field.
+     */
+    readonly additionalPaths?: readonly string[]
   }
 }
 
@@ -279,6 +286,13 @@ export type RequestHeaderReason = 'initial' | 'resume' | 'change' | 'series'
  * compact raw streams so persistence stores one durable settlement per attempt.
  */
 export interface SessionEventMap {
+  /**
+   * Absolute directories the Session may use beside its header `cwd`, fixed
+   * when the Session is created. Valid only as seq 0 with `ignorable: true`;
+   * `Session.append()` refuses it. A reader that skips it confines the Session
+   * to `cwd`, and the model-visible policy text is logged separately.
+   */
+  'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**
    * Opens turn `turn` before the loop claims queued input or runs pre-step.
    * Rejection, empty input, cancellation, or failure may close it with no

@@ -37,6 +37,8 @@ ctx.sessions.get(sessionId)      // the live session
 ctx.sessions.list()              // every live session, in creation order
 ```
 
+`meta.additionalPaths` 为新会话提供 `cwd` 之外的绝对目录。会话把非空列表记录为 seq 0 处可忽略的 `workspace/roots` 事件，并通过 `session.additionalPaths` 公开；`append()` 拒绝该事件类型，带种子的会话从种子继承该事件。不认识该事件的读取方会跳过它，并把会话限制在 `cwd` 内。
+
 ### 追加与派生
 
 `session.append(type, data, opts?)` 提交一个类型化事件——它先快照并冻结载荷、校验其为无损 JSON，再通知观察者。`session.deriveMessages()` 把日志投影为模型看到的 `Message[]`，采用增量且有缓存的方式：

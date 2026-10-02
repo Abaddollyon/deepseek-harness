@@ -88,9 +88,11 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
+  extra: Partial<WorkspacePickerProps> = {},
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
+  const createLooseSession = vi.fn()
   const anchorRef = anchor()
   const { probe, renderSlot } = flowProbe()
   const renderPicker = (nextItems: readonly WorkspaceView[]) => (
@@ -104,17 +106,19 @@ function mount(
       useWorkspaces={hook(workspaceState(nextItems))}
       onPick={onPick}
       onClose={onClose}
+      createLooseSession={createLooseSession}
       createWorkspace={createWorkspace}
       useDirectoryFlow={occupancy.useDirectoryFlow}
       renderSlot={renderSlot}
       t={t}
+      {...extra}
     />
   )
   const view = render(
     renderPicker(items),
   )
   return {
-    view, onPick, onClose, createWorkspace, probe, occupancy,
+    view, onPick, onClose, createWorkspace, createLooseSession, probe, occupancy,
     rerenderItems: (nextItems: readonly WorkspaceView[]) => { view.rerender(renderPicker(nextItems)) },
   }
 }
@@ -124,6 +128,19 @@ function chooseAdd(): void {
 }
 
 describe('WorkspacePicker', () => {
+  it('offers a new Session without a Workspace only where the owner allows it', () => {
+    const onChooseNoWorkspace = vi.fn()
+    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), { allowNoWorkspace: true, onChooseNoWorkspace })
+    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
+    expect(b.onClose).toHaveBeenCalled()
+    expect(onChooseNoWorkspace).toHaveBeenCalledOnce()
+    expect(b.createLooseSession).toHaveBeenCalledOnce()
+    expect(b.onPick).not.toHaveBeenCalled()
+    cleanup()
+    mount([workspace('alpha', 'Alpha')])
+    expect(screen.queryByRole('menuitem', { name: '不使用工作区' })).toBeNull()
+  })
+
   it('lists same-title Workspaces separately and forwards the selected id', () => {
     const b = mount([workspace('alpha', 'Shared'), workspace('beta', 'Shared')])
     const entries = screen.getAllByRole('menuitem', { name: 'Shared' })
@@ -224,7 +241,7 @@ describe('WorkspacePicker', () => {
         useSessionStatus={hook(noPendingInteraction)}
         useSessionRetainInfo={() => undefined}
         usePanelInfo={usePanelInfo} useResource={useResource}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )
@@ -242,7 +259,7 @@ describe('WorkspacePicker', () => {
         useSessionStatus={hook(noPendingInteraction)}
         useSessionRetainInfo={() => undefined}
         usePanelInfo={usePanelInfo} useResource={useResource}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )

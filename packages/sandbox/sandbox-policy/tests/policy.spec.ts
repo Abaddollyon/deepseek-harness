@@ -133,6 +133,26 @@ describe('SandboxPolicyService', () => {
     })
   })
 
+  it('grants the session additional roots beside its cwd and lists them in the policy text', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: '/fallback' })
+    const sessionId = SessionId('sess-roots')
+    const active = Session.create(sessionId, undefined, {
+      version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 0, isSeeded: false, cwd: '/projects/app',
+    }, undefined, undefined, ['/projects/lib', '/shared/docs'])
+    expect(ctx.sandboxPolicy.resolve({ session: active })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/app',
+      additionalRoots: ['/projects/lib', '/shared/docs'],
+      sessionId: 'sess-roots',
+    })
+    expect(await policyContext(ctx, active)).toContain(
+      'may modify files under these session workspace roots: ["/projects/app","/projects/lib","/shared/docs"]',
+    )
+  })
+
   it('uses the configured root when a session has no cwd', async () => {
     const ctx = await mounted({ workspaceRoot: '/fallback' })
     expect(ctx.sandboxPolicy.resolve({ session: session('sess-no-cwd') }).workspaceRoot).toBe('/fallback')

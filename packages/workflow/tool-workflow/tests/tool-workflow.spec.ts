@@ -22,8 +22,20 @@ import { mountWorkflowRuntime } from '../../workflow-ptc/tests/setup.ts'
 import * as toolWorkflow from '../src/index.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SpillStore, { SpillLocator } from '@deepseek-ai/dsh-spill'
+import type { SaveTextSpill, SpillRef } from '@deepseek-ai/dsh-spill'
 
 const testToolSignal = new AbortController().signal
+
+/** A spill backend that keeps each saved request in memory. */
+class MemorySpillStore extends SpillStore {
+  saves: SaveTextSpill[] = []
+
+  saveText(input: SaveTextSpill): Promise<SpillRef> {
+    this.saves.push(input)
+    return Promise.resolve({ locator: SpillLocator(`/spill/${input.suggestedName}`), bytes: input.content.length, retrievalHint: 'read it' })
+  }
+}
 
 /** A controllable engine standing in behind ctx.workflowEngine (the tool's only seam). */
 class StubEngine extends WorkflowEngine {
@@ -375,17 +387,35 @@ describe('dsh-tool-workflow', () => {
     expect(engine.disposed).toBe(0)
   })
 
-  it('truncates an oversized rendered value with a notice (maxResultChars)', async () => {
+  it('spills an oversized value whole and returns recovery metadata; without a spill backend it fails (maxResultChars)', async () => {
     const { ctx, engine, parent } = await setup({ maxResultChars: 40 })
-    const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    const value = { blob: 'x'.repeat(500) }
+    const full = JSON.stringify(value, null, 2)
+
+    const unsaved = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
     await vi.waitFor(() => { expect(engine.requests.length).toBe(1) })
-    engine.settle({ value: { blob: 'x'.repeat(500) }, stopReason: 'completed', agentsStarted: 1 })
+    engine.settle({ value, stopReason: 'completed', agentsStarted: 1 })
+    const failed = await unsaved
+    expect(failed.isError).toBe(true)
+    expect((failed.content[0] as { text: string }).text).toContain('no ctx.spillStore backend is mounted')
+
+    await ctx.plugin(MemorySpillStore)
+    const store = ctx.spillStore as MemorySpillStore
+    const pending = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
+    await vi.waitFor(() => { expect(engine.requests.length).toBe(2) })
+    engine.settle({ value, stopReason: 'completed', agentsStarted: 1 })
     const result = await pending
     if (result.isError) throw new Error('expected workflow success')
-    expect(result.value).toEqual({ kind: 'foreground', runId: 'run-1', agentsStarted: 1, result: { blob: 'x'.repeat(500) } })
-    const rendered = (result.content[0] as { text: string }).text
-    expect(rendered).toContain('[truncated:')
-    expect(rendered.length).toBeLessThan(400)
+    expect(store.saves).toEqual([{
+      owner: { sessionId: parent.session.id },
+      source: { kind: 'tool', toolName: 'workflow', callId: 'call-1', label: 'result' },
+      suggestedName: 'audit-result.json',
+      content: full,
+    }])
+    const marker = { truncated: true, originalChars: full.length, spillPath: '/spill/audit-result.json', preview: full.slice(0, 40) }
+    expect(result.value).toEqual({ kind: 'foreground', runId: 'run-2', agentsStarted: 1, result: marker })
+    expect((result.content[0] as { text: string }).text)
+      .toBe(`workflow "audit" completed (1 agent).\nReturn value:\n${JSON.stringify(marker, null, 2)}`)
   })
 
   it('registers under a configured toolName and unregisters on fiber dispose (HMR safety)', async () => {
@@ -442,7 +472,7 @@ describe('dsh-tool-workflow', () => {
 
   describe('run_in_background', () => {
     /** The stub-engine bench plus a live job registry and a registered owner. */
-    async function setupBackground(config?: { enableRunInBackground?: boolean }) {
+    async function setupBackground(config?: { enableRunInBackground?: boolean; maxResultChars?: number }) {
       const ctx = new Context()
       onTestFinished(async () => { await ctx.fiber.dispose() })
       await ctx.plugin(SystemPrompt)
@@ -558,6 +588,16 @@ describe('dsh-tool-workflow', () => {
       engine.settleRun(WorkflowRunId('run-2'), { value: null, stopReason: 'error', agentsStarted: 0 })
       await vi.waitFor(() => { expect(jobs.get('workflow-2' as never, parent.id).status).toBe('failed') })
       expect(jobs.get('workflow-2' as never, parent.id).detail).toBe('unknown error')
+    })
+
+    it('an oversized value that cannot be saved fails the job instead of returning a fragment', async () => {
+      const { ctx, engine, parent } = await setupBackground({ maxResultChars: 40 })
+      const result = await execute(ctx, { script: SCRIPT, meta: META, run_in_background: true }, { agent: parent })
+      if (result.isError) throw new Error('expected background acceptance')
+      engine.settleRun(WorkflowRunId('run-1'), { value: { blob: 'x'.repeat(500) }, stopReason: 'completed', agentsStarted: 1 })
+      const jobs = ctx.jobs
+      await vi.waitFor(() => { expect(jobs.get('workflow-1' as never, parent.id).status).toBe('failed') })
+      expect(jobs.get('workflow-1' as never, parent.id).detail).toContain('no ctx.spillStore backend is mounted')
     })
 
     it('a nested transport call mirrors the ring but records no session events, and a dispose failure still settles', async () => {

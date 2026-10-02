@@ -121,8 +121,8 @@ export function resolveChildAgentOptions(
 }
 
 /**
- * Build the child session's durable creation metadata: the parent's workspace,
- * its direct lineage, coarse product origin, the recursion budget that must
+ * Build the child session's durable creation metadata: the parent's workspace
+ * and additional roots, its direct lineage, coarse product origin, the recursion budget that must
  * survive persistence, the seed boundary that separates inherited parent
  * history from child work, and the composition the child runs under.
  *
@@ -149,6 +149,8 @@ export function childSessionMeta(
   const cwd = target?.cwd ?? parentHeader.cwd
   return {
     ...cwd !== undefined ? { cwd } : {},
+    // Additional roots belong to the parent's execution world; a targeted child starts with its own cwd only.
+    ...target !== undefined || parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: parent.session.additionalPaths },
     ...agentPreset === undefined ? {} : { agentPreset },
     parentSession: parentHeader.id,
     isSeeded,

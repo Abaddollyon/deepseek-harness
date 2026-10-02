@@ -84,9 +84,12 @@ export async function runSshHelper(transport: HelperTransport): Promise<void> {
     lease = setTimeout(() => { peer.close(new Error('SSH helper client lease expired')) }, leaseMs)
   }
   const policy = async (raw: unknown, signal: AbortSignal): Promise<SandboxExecutionPolicy> => {
-    const parsed = policySchema.parse(raw)
+    const { additionalRoots, ...parsed } = policySchema.parse(raw)
     const target = await ctx.fs.resolve(parsed.workspaceRoot, { signal })
-    return { ...parsed, workspaceRoot: ctx.fs.processPath(target) } as SandboxExecutionPolicy
+    const resolved = { ...parsed, workspaceRoot: ctx.fs.processPath(target) } as SandboxExecutionPolicy
+    if (additionalRoots === undefined) return resolved
+    const roots = await Promise.all(additionalRoots.map(async root => await ctx.fs.resolve(root, { signal })))
+    return { ...resolved, additionalRoots: roots.map(root => ctx.fs.processPath(root)) }
   }
   const asTarget = (raw: unknown): FsTarget => targetSchema.parse(raw) as FsTarget
   const peer = new SshRpcPeer(transport.input, transport.output, MAX_FRAME_BYTES, 128, async (method, raw, requestSignal) => {

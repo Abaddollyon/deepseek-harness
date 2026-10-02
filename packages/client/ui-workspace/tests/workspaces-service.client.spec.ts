@@ -191,6 +191,7 @@ class FakeWorkspaces implements IWorkspaces {
 
   declare readonly create: IWorkspaces['create']
   declare readonly rename: IWorkspaces['rename']
+  declare readonly updatePaths: IWorkspaces['updatePaths']
   declare readonly delete: IWorkspaces['delete']
   declare readonly insertBefore: IWorkspaces['insertBefore']
   declare readonly insertSessionBefore: IWorkspaces['insertSessionBefore']
@@ -642,6 +643,21 @@ describe('UiWorkspaceService', () => {
     await expect(Promise.all([first, second])).resolves.toEqual([sid('new'), sid('new')])
     await expect(b.uiWorkspace.connectWorkspace(wid('missing'))).rejects.toThrow('unknown workspace')
     expect(b.sessions.retain).not.toHaveBeenCalled()
+  })
+
+  it('opens one Session without a Workspace for concurrent new-chat requests', async () => {
+    const b = bench({ workspaces: workspaceState([workspace('a')]), sessions: sessionState() })
+    await vi.waitFor(() => { expect(b.sessions.retain).toHaveBeenCalledOnce() })
+    b.sessions.create.mockClear()
+    b.sessions.retain.mockClear()
+    const created = Promise.withResolvers<SessionId>()
+    b.sessions.create.mockReturnValue(created.promise)
+    const first = b.uiWorkspace.openLooseSession()
+    const second = b.uiWorkspace.openLooseSession()
+    expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({})
+    created.resolve(sid('chat'))
+    await Promise.all([first, second])
+    expect(b.sessions.retain).toHaveBeenLastCalledWith(sid('chat'), { source: 'mainView' })
   })
 
   it('reports a refused explicit Session creation through the Workspace notice', async () => {

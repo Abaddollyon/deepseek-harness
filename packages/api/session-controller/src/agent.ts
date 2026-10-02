@@ -1,6 +1,6 @@
 /** Agent activation, composition, and model-selection policy owned by API Session. */
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {
@@ -234,6 +234,8 @@ export class ApiSessionAgentController {
    * @param cwd - directory the Session must own.
    * @param checkPersistedIdentity - whether to inspect a cold identity before creation.
    * @param presetId - optional Agent preset the Session must own.
+   * @param additionalPaths - existing directories a newly created Session records beside `cwd`;
+   *   an adopted Session keeps the roots it recorded at creation.
    * @returns the matching live ordinary Agent.
    */
   async ensureSession(
@@ -241,10 +243,11 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId?: string,
+    additionalPaths: readonly string[] = [],
   ): Promise<Agent> {
     let creation = this.creations.get(sessionId)
     if (creation === undefined) {
-      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId)
+      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId, additionalPaths)
         .catch((error: unknown) => {
           const live = this.ctx.agents.get(sessionId)
           if (live !== undefined) {
@@ -446,6 +449,7 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId: string | undefined,
+    additionalPaths: readonly string[],
   ): Promise<Agent> {
     const attached = this.ctx.sessions.get(sessionId)
     const live = this.ctx.agents.get(sessionId)
@@ -478,12 +482,13 @@ export class ApiSessionAgentController {
     }
 
     const composition = await this.composeAgent(presetId)
-    await this.ensureProjectDirectory(cwd, composition.agentPreset)
+    await this.ensureProjectDirectories(cwd, additionalPaths, composition.agentPreset)
     return (await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
         cwd,
+        ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
@@ -491,24 +496,38 @@ export class ApiSessionAgentController {
   }
 
   /**
-   * Ensure a new Session's cwd in the execution world its preset selects. A
-   * preset that mounts its own `fs` (for example over SSH) owns that world:
-   * the directory must already exist there and nothing is created on the Host.
-   * Otherwise the Host directory is created when missing.
+   * Ensure a new Session's directories in the execution world its preset
+   * selects. A preset that mounts its own `fs` (for example over SSH) owns that
+   * world: the cwd must already exist there and nothing is created on the Host.
+   * Otherwise the Host cwd is created when missing. Additional roots are
+   * recorded permanently, so each must already be a directory in that world.
    * @param cwd - requested project directory.
+   * @param additionalPaths - additional workspace roots recorded beside `cwd`.
    * @param agentPreset - resolved preset identity, when presets are configured.
    */
-  private async ensureProjectDirectory(cwd: string, agentPreset: string | undefined): Promise<void> {
+  private async ensureProjectDirectories(
+    cwd: string,
+    additionalPaths: readonly string[],
+    agentPreset: string | undefined,
+  ): Promise<void> {
     const fs = agentPreset === undefined ? undefined : this.ctx.get('agentPresets')?.serviceForPreset(agentPreset, 'fs')
+    const isDirectory = async (path: string): Promise<boolean> => fs === undefined
+      ? (await stat(path)).isDirectory()
+      : (await fs.stat(await fs.resolve(path)))?.type === 'directory'
     try {
-      if (fs === undefined) {
-        await mkdir(cwd, { recursive: true })
-        return
-      }
-      const info = await fs.stat(await fs.resolve(cwd))
-      if (info?.type !== 'directory') throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
+      if (fs === undefined) await mkdir(cwd, { recursive: true })
+      else if (!await isDirectory(cwd)) throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
     } catch (error: unknown) {
       throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
+    }
+    for (const path of additionalPaths) {
+      let directory: boolean
+      try {
+        directory = await isDirectory(path)
+      } catch (error: unknown) {
+        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
     }
   }
 

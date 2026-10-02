@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-client-surfaces.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-client-surfaces.md
+/agent-note-client-surfaces-boot-a-dependency-closed-graph-at-their-own-path:
+  en: e6fcf1cf7820c2a1
+  zh: 27d80e90733062f9
+/agent-note-client-surfaces-boot-a-dependency-closed-graph-at-their-own-path/problem:
+  en: 42edbecf1746834f
+  zh: 28c1413049c37739
+/agent-note-client-surfaces-boot-a-dependency-closed-graph-at-their-own-path/decision:
+  en: 0459eacea359fa9a
+  zh: a231738d5fa019de
+/agent-note-client-surfaces-boot-a-dependency-closed-graph-at-their-own-path/alternatives-considered:
+  en: c9c84dfcbd91b8b4
+  zh: 2ff14084abda55e2
+/agent-note-client-surfaces-boot-a-dependency-closed-graph-at-their-own-path/consequences:
+  en: 13f6aa5787812a51
+  zh: 9e9a77b01141c826

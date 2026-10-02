@@ -18,6 +18,8 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 与 CC 有一处刻意的严格性差异：钩子误用——未知或延迟的选项（`effort`/`isolation`/`agentType`）、格式错误的参数、超出支持子集的 schema、触发上限、seam 启动失败——会抛出带 `fatal: true` 的 `WorkflowError`，组合器会重新抛出 fatal 错误而非将 item 置为 null。如果不这样做，一个拼错的选项会悄然变成一个与子 agent 失败无法区分的 `null`——这正是本仓库禁止的「被接受后被忽略」的失败模式。另有一处新增：工具的 `args` 参数是一个 JSON 对象（裸列表被包装为一个字段），使协议格式（wire format）保持诚实。
 
+`agent()` 选项也会选择子 agent 的 LLM 路由：`provider`、`model` 和 `reasoningEffort`（沿用 `AgentOptions` 的拼写；Claude Code 的 `effort` 仍为延迟实现）。子 agent 启动前，宿主按 subagent seam 的方式解析有效路由，并要求 `LlmRuntime.resolveCallConfig` 接受所请求的推理强度；因此不受支持的推理强度会使脚本失败，而不会被降级或变成子 agent 失败时的 `null`。
+
 ### seam（dsh-workflow）
 
 `ctx.workflowEngine` 是 bash 形态的抽象 `WorkflowEngine`——每个上下文一个引擎，无命名提供方注册表（引擎是部署级替换，不是共存者）。`start(request)` 对无法启动的脚本同步抛出；返回的 `WorkflowRun` 的 `result` 永不 reject（失败时结算为 `stopReason: 'error' | 'cancelled'`）。`workflow/*` 事件是仅观察的 emit，携带数据快照（id + meta；`workflow/end` 省略 result 值），按监听器隔离，与 `subagent/start`/`subagent/end` 对称——控制权留在 run 的持有者手中。词汇详情见 [subsystems/workflow.md](../../../../docs/subsystems/workflow.zh.md)。
@@ -33,6 +35,8 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 ### Consumer（`dsh-tool-workflow`）
 
 一个 `workflow` 工具，镜像 `dsh-tool-subagent` 的同步形态：启动、await、`try/finally` dispose、abort 桥接 `exec.signal`、非 `completed` → `isError`。渲染意图：一张以调用的 `meta.name` 参数为标题的 `generic` 卡片（展示是参数的纯函数）。工具描述即面向模型的编写规范。使用策略以工具自身的 `tool:<toolName>` 提示词段落随工具发布（显式请求才使用的引导——工具引导存在于工具插件中，从不在部署 persona 中）；harness 没有 ultracode 风格的 effort 门控。
+
+`maxResultChars` 限制序列化返回值。更大的值会通过 `ctx.spillStore` 完整保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`；没有 spill 后端或保存失败时，调用或后台任务会失败，因为被剪裁的 JSON 无法恢复，且可能被误读为完整值。
 
 对于顶层工具执行，同一消费方还会把运行及实际成员生命周期写入调用方父 Session，形成四类 log-only `tool-workflow/*` 事件。记录路径只观察、不控制执行：第一次 append 失败会禁用本运行后续写入并留下合法前缀，不改变工具结果。[`ui-workflow-run`](../../../../packages/client/ui-workflow-run/README.zh.md) 通过 Conversation Node 引擎重建这些事实，形成独立 keyed Chat 行；现有 generic 工具行继续拥有自己的展示。持久化、回放、展开/收起与实时导航的详细决策见 [Chat 中的持久工作流运行](../../archived/feature/2026-08-10-durable-workflow-runs-in-chat.md)。
 
