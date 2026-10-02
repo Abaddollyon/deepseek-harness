@@ -535,8 +535,13 @@ const RECORDED_LISTINGS = [
     file: 'anthropic-reference-example.json',
     api: 'anthropic-messages',
     // The reference example fills both capacities with 0, which is not a
-    // usable capacity, so the row carries the name alone.
-    models: [{ id: 'claude-opus-5', name: 'Claude Opus 5' }],
+    // usable capacity, so the row carries its name and capabilities alone.
+    models: [{
+      id: 'claude-opus-5',
+      name: 'Claude Opus 5',
+      inputModalities: ['text', 'image'],
+      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    }],
   },
 ]
 

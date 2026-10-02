@@ -27,6 +27,7 @@
  */
 
 import type {
+  AnthropicOptions,
   Api,
   AuthContext,
   CredentialStore,
@@ -111,15 +112,45 @@ export interface PiAiAuthInjection {
   authContext: AuthContext
 }
 
+/**
+ * The auth one snapshot's collection resolves through. A proxy route's
+ * gateway owns its provider accounts, so the collection never reads or
+ * refreshes a credential stored under that route's id; every other route
+ * sees the store unchanged.
+ * @param auth - the plugin-wide auth injection.
+ * @param profiles - the snapshot's resolved profiles.
+ * @returns the injection for this snapshot's collection.
+ */
+function snapshotAuth(
+  auth: PiAiAuthInjection,
+  profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+): PiAiAuthInjection {
+  const proxied = new Set([...profiles.values()].flatMap(profile => profile.authMode === 'proxy' ? [profile.provider] : []))
+  if (proxied.size === 0) return auth
+  const { credentials } = auth
+  return {
+    authContext: auth.authContext,
+    credentials: {
+      read: (providerId, options) => proxied.has(providerId) ? Promise.resolve(undefined) : credentials.read(providerId, options),
+      list: options => credentials.list(options),
+      modify: (providerId, mutate, options) => proxied.has(providerId)
+        ? Promise.reject(new LlmError(`llm-pi-ai: proxy route "${providerId}" stores no provider credential`, 'INVALID_CONFIG'))
+        : credentials.modify(providerId, mutate, options),
+      delete: (providerId, options) => credentials.delete(providerId, options),
+    },
+  }
+}
+
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
 function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
   apiKey: string | undefined,
-): SimpleStreamOptions {
+): SimpleStreamOptions & Pick<AnthropicOptions, 'requestMode'> {
   const enabledReasoning: ThinkingLevel | undefined = reasoning === 'off' ? undefined : reasoning
   return {
     ...apiKey === undefined ? {} : { apiKey },
+    ...profile.anthropicRequestMode === 'claude-code' ? { requestMode: 'claude-code' as const } : {},
     ...enabledReasoning === undefined ? {} : { reasoning: enabledReasoning },
     ...profile.thinkingBudgets === undefined ? {} : { thinkingBudgets: profile.thinkingBudgets },
     ...profile.cacheRetention === undefined ? {} : { cacheRetention: profile.cacheRetention },
@@ -232,7 +263,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels(this.config.auth)
+    const models: MutableModels = createModels(snapshotAuth(this.config.auth, profiles))
     for (const profile of profiles.values()) {
       if (profile.piProvider !== undefined) models.setProvider(profile.piProvider)
     }

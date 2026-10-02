@@ -324,6 +324,12 @@ export interface LlmDiscoveredModel {
   maxTokens?: number
   /** Accepted input types when disclosed by the catalog or endpoint; absent means unknown. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Reasoning efforts the endpoint reports, in the adapter's effort
+   * vocabulary; efforts the adapter cannot express are omitted. Absent means
+   * unknown; empty means the endpoint reports no reasoning support.
+   */
+  reasoningEfforts?: readonly ReasoningEffortId[]
 }
 
 /** One adapter-discovered model; catalog membership is advisory, not request validation. */

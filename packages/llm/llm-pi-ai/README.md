@@ -87,6 +87,27 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 | `requestImageMaxBytes` | `1 MiB` | Encoded-byte target for each request image before base64 expansion |
 | `maxRequestImageBytes` | `20 MiB` | Aggregate base64 image-payload bound; a request whose retained images exceed it fails with `IMAGE_OFFLOAD_REQUIRED` |
 | `retryPolicy` | normal, 5 retries | Provider-owned retry policy executed by `dsh-llm-retry` |
+| `authMode` | `provider` | `proxy` sends only the `apiKeyEnv` value, or no credential, and never reads, refreshes, or offers a stored or ambient provider credential; requires an explicit http(s) `baseURL` without embedded credentials |
+| `anthropicRequestMode` | `provider` | `claude-code` sends Claude Code request formatting with any key or none; `anthropic-messages` routes only |
+| `modelDiscovery.source` | `provider` | `openai-compatible` or `anthropic` lists the route's own `baseURL` instead of answering from the installed catalog |
+
+A pool that owns provider accounts keeps its catalog route key, so saved sessions keep their provider, and declares itself a proxy ([rationale](../../../.agents/notes/implemented/feature/2026-10-02-proxy-pool-routes.md)):
+
+```yaml
+providers:
+  openai-codex:
+    api: openai-responses
+    baseURL: http://127.0.0.1:2455/v1
+    apiKeyEnv: CODEX_POOL_API_KEY
+    authMode: proxy
+    modelDiscovery: { source: openai-compatible }
+  anthropic:
+    api: anthropic-messages
+    baseURL: http://127.0.0.1:3456
+    authMode: proxy
+    anthropicRequestMode: claude-code
+    modelDiscovery: { source: anthropic }
+```
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-llm-pi-ai) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -110,7 +131,7 @@ Each operation captures the current `providers` Config reference. New or changed
 
 ### Discover models from endpoints
 
-The plugin answers "which models can this provider serve?" for a route a configuration surface is editing or drafting. A route the installed catalog ships is answered from that catalog with no network call, preserving its `input` array as discovery `inputModalities`; only a route the catalog does not describe is interrogated over the wire. `openai-completions` and `openai-responses` use `GET {baseURL}/models` with bearer auth, while `anthropic-messages` uses native `GET /v1/models?limit=1000` semantics with `x-api-key` and `anthropic-version`; its listing URL accepts the API root with or without a trailing `/v1` because gateway documentation publishes both spellings, and only that listing URL normalizes the segment, so model requests receive the configured `baseURL` unchanged. A named configured route supplies its stored credential and profile `headers` inside the Host, so deployment headers configured through `cordis.patch.yml` or Cordis config reach model discovery without becoming discovery-request or Models-page fields; a key typed into the form still wins over the stored credential. The parser accepts either the standard `data` array or an enriched `models` map, normalizing each candidate's id, display name, context window, and output-token cap; Anthropic's `max_input_tokens` and `max_tokens` feed the same capacity fields, a map key remains the request id even when its entry names a different canonical id, primitive-valued map properties are ignored, and a missing display name falls back to that request id. The reply is candidate metadata a surface may offer for adoption — nothing is stored, and `cordis.patch.yml` remains the only thing that decides what a route serves.
+The plugin answers "which models can this provider serve?" for a route a configuration surface is editing or drafting. A route the installed catalog ships is answered from that catalog with no network call, preserving its `input` array as discovery `inputModalities`; only a route the catalog does not describe is interrogated over the wire. `openai-completions` and `openai-responses` use `GET {baseURL}/models` with bearer auth, while `anthropic-messages` uses native `GET /v1/models?limit=1000` semantics with `x-api-key` and `anthropic-version`; its listing URL accepts the API root with or without a trailing `/v1` because gateway documentation publishes both spellings, and only that listing URL normalizes the segment, so model requests receive the configured `baseURL` unchanged. A named configured route supplies its stored credential and profile `headers` inside the Host, so deployment headers configured through `cordis.patch.yml` or Cordis config reach model discovery without becoming discovery-request or Models-page fields; a key typed into the form still wins over the stored credential. The parser accepts either the standard `data` array or an enriched `models` map, normalizing each candidate's id, display name, context window, and output-token cap; Anthropic's `max_input_tokens` and `max_tokens` feed the same capacity fields, a map key remains the request id even when its entry names a different canonical id, primitive-valued map properties are ignored, and a missing display name falls back to that request id. A configured route whose `modelDiscovery.source` is `openai-compatible` or `anthropic` skips the catalog answer and lists its own `baseURL` with that protocol, its headers, and its `apiKeyEnv` value. Candidates also carry `inputModalities` and `reasoningEfforts` when an entry reports them through top-level fields, Codex-pool `metadata`, or Anthropic `capabilities`; efforts pi-ai cannot express, such as `ultra`, are dropped. The reply is candidate metadata a surface may offer for adoption — nothing is stored, and `cordis.patch.yml` remains the only thing that decides what a route serves.
 
 ### Failures and recovery
 
@@ -229,7 +250,7 @@ These limits define where the adapter stops and future work begins. They are cur
 - **Only a leading in-history `system` message becomes pi-ai's `systemPrompt`** — this adapter uses pi-ai's single `systemPrompt` input, so a later `system` message, or a leading one when `GenerateOptions.system` is also set, folds into a `user` message at its position; provider-specific placement of the prompt follows pi-ai rather than a harness-owned wire override. Images in system or assistant history, including the leading system message, fail with `UNSUPPORTED_CONTENT` on both conversion paths.
 - **Provider HTTP status is unavailable** — pi-ai error events do not expose a stable HTTP status across providers.
 - **Retry policy is provider-owned, not an SDK retry** — pi-ai SDK retries stay disabled so durable agent steps and `llm/retry` events own every visible attempt, and direct `ctx.llm.stream()` calls remain single-attempt.
-- **Streamed tool-call arguments are parsed once, when the call ends** — the installed pi-ai carries [`patches/@earendil-works__pi-ai@0.87.1.patch`](../../../patches/@earendil-works__pi-ai@0.87.1.patch), which removes the per-delta re-parse of the whole accumulated argument JSON in every stream adapter (upstream [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)); unpatched, a multi-megabyte argument stream costs O(n²) CPU on the event loop and stalls every session in the process. Until `toolcall_end`, a pi-ai partial's tool-call `arguments` stays `{}`; this adapter reads only the delta strings and the finalized arguments. Re-apply or retire the patch on every pi-ai upgrade.
+- **Streamed tool-call arguments are parsed once, when the call ends** — the installed pi-ai carries [`patches/@earendil-works__pi-ai@0.87.1.patch`](../../../patches/@earendil-works__pi-ai@0.87.1.patch), which removes the per-delta re-parse of the whole accumulated argument JSON in every stream adapter (upstream [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)); unpatched, a multi-megabyte argument stream costs O(n²) CPU on the event loop and stalls every session in the process. Until `toolcall_end`, a pi-ai partial's tool-call `arguments` stays `{}`; this adapter reads only the delta strings and the finalized arguments. The same patch adds the Anthropic `requestMode` stream option that `anthropicRequestMode: claude-code` sets. Re-apply or retire the patch on every pi-ai upgrade.
 
 <a id="dev-note"></a>
 ### Dev Note

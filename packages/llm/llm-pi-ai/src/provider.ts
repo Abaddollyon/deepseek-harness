@@ -104,6 +104,12 @@ export interface ProviderSpec {
    * request, never at construction.
    */
   namesCredential: boolean
+  /**
+   * `proxy` authenticates with the harness-resolved route key alone, so no
+   * provider-native method — stored OAuth, ambient environment — is offered.
+   * Absent means `provider`.
+   */
+  authMode?: 'provider' | 'proxy'
 }
 
 /**
@@ -124,12 +130,16 @@ export interface ProviderSpec {
  * method beside the provider's own restores that route. A keyless profile adds
  * nothing and still reports the honest refusal, because this adapter resolves
  * credentials through its own seam and holds no OAuth store to fall back on.
+ *
+ * A proxy route takes the harness method alone, catalog or not: the gateway
+ * owns provider accounts, so the catalog's OAuth and ambient methods must
+ * never resolve its requests.
  * @param spec - the resolved route facts.
  * @param catalog - the installed catalog provider, when pi-ai ships one.
  * @returns the auth to construct this route's provider with.
  */
 function routeAuth(spec: ProviderSpec, catalog: Provider | undefined): Provider['auth'] {
-  if (catalog === undefined) return { apiKey: harnessApiKeyAuth(spec.displayName) }
+  if (catalog === undefined || spec.authMode === 'proxy') return { apiKey: harnessApiKeyAuth(spec.displayName) }
   if (catalog.auth.apiKey !== undefined || !spec.namesCredential) return catalog.auth
   return { ...catalog.auth, apiKey: harnessApiKeyAuth(spec.displayName) }
 }

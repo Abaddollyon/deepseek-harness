@@ -8,6 +8,11 @@
  * not disclose. Only a route the catalog does not describe — a gateway, a
  * self-hosted server — is interrogated over the wire.
  *
+ * A configured route whose `modelDiscovery.source` names a listing protocol
+ * skips the catalog and lists its own endpoint with that protocol, which is
+ * how a pool behind a catalog route key reports models and reasoning efforts
+ * the installed catalog does not know.
+ *
  * Neither path is a catalog refresh. Nothing here is stored: the request
  * carries a draft the user is still editing, and the reply is candidate
  * metadata the surface offers for adoption. `cordis.patch.yml` remains the only
@@ -22,10 +27,12 @@
  * @module dsh-llm-pi-ai/discovery
  */
 
-import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai/dsh-llm'
+import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmDiscoveredModel, LlmModelDiscoveryOperation } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
-import { catalogModels } from './catalog.ts'
+import { catalogModels, MODALITIES, THINKING_LEVELS } from './catalog.ts'
+import type { PiAiModality } from './catalog.ts'
+import type { PiAiModelDiscoverySource } from './config.ts'
 
 /**
  * Protocols whose model listing this module can read. OpenAI protocols use
@@ -68,6 +75,25 @@ interface ListingTopProvider {
   max_completion_tokens?: unknown
 }
 
+/** Capability fields an enriched listing (Codex pool, Anthropic) nests under each entry. */
+interface ListingCapabilities {
+  input_modalities?: unknown
+  supports_reasoning?: unknown
+  /** Anthropic: `{ supported }`. */
+  image_input?: { supported?: unknown } | null
+  /** Anthropic: `{ supported, <level>: { supported } }`. */
+  effort?: Record<string, unknown> | null
+}
+
+/** Model metadata the Codex pool nests under each entry. */
+interface ListingMetadata {
+  display_name?: unknown
+  context_window?: unknown
+  max_output_tokens?: unknown
+  input_modalities?: unknown
+  supported_reasoning_levels?: unknown
+}
+
 /** One entry of a supported `GET /models` reply. */
 interface ListingEntry {
   id?: unknown
@@ -85,6 +111,11 @@ interface ListingEntry {
   maxTokens?: unknown
   limit?: ListingLimit | null
   top_provider?: ListingTopProvider | null
+  input_modalities?: unknown
+  supports_reasoning?: unknown
+  supported_reasoning_levels?: unknown
+  capabilities?: ListingCapabilities | null
+  metadata?: ListingMetadata | null
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -101,6 +132,43 @@ function label(...candidates: readonly unknown[]): string | undefined {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate
   }
   return undefined
+}
+
+/** The first modality list a listing entry declares, narrowed to the modalities pi-ai models accept. */
+function modalities(...candidates: readonly unknown[]): PiAiModality[] | undefined {
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue
+    const known = MODALITIES.filter(modality => (candidate as readonly unknown[]).includes(modality))
+    if (known.length > 0) return known
+  }
+  return undefined
+}
+
+/**
+ * The reasoning efforts a listing entry reports, narrowed to pi-ai's levels:
+ * the Codex pool's `supported_reasoning_levels` (`[{ effort }]`, top level
+ * first) or Anthropic's `capabilities.effort.<level>.supported`. An effort pi-ai
+ * cannot express, such as `ultra`, is dropped rather than mapped. An entry
+ * declaring no reasoning support reports none; Anthropic's unsupported
+ * `effort` stays unknown because such a model may still think by budget.
+ */
+function reasoningEfforts(entry: ListingEntry | null): ReasoningEffortId[] | undefined {
+  if (entry?.supports_reasoning === false || entry?.capabilities?.supports_reasoning === false) return []
+  let reported: readonly unknown[] | undefined
+  for (const levels of [entry?.supported_reasoning_levels, entry?.metadata?.supported_reasoning_levels]) {
+    if (Array.isArray(levels)) {
+      reported = (levels as readonly unknown[]).map(level =>
+        typeof level === 'object' && level !== null ? (level as { effort?: unknown }).effort : level)
+      break
+    }
+  }
+  const effort = entry?.capabilities?.effort
+  if (reported === undefined && typeof effort === 'object' && effort !== null && effort.supported === true) {
+    reported = Object.entries(effort).flatMap(([level, support]) =>
+      (support as { supported?: unknown } | null)?.supported === true ? [level] : [])
+  }
+  if (reported === undefined) return undefined
+  return THINKING_LEVELS.filter(level => level !== 'off' && reported.includes(level)).map(level => ReasoningEffortId(level))
 }
 
 /**
@@ -203,13 +271,14 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
     const entry = raw as ListingEntry | null
     const id = label(key, entry?.id)
     if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name, entry?.displayName) ?? id
+    const name = label(entry?.name, entry?.display_name, entry?.displayName, entry?.metadata?.display_name) ?? id
     const contextWindow = capacity(
       entry?.contextWindow,
       entry?.context_window,
       entry?.context_length,
       entry?.max_input_tokens,
       entry?.limit?.context,
+      entry?.metadata?.context_window,
     )
     const maxTokens = capacity(
       entry?.maxOutputTokens,
@@ -218,12 +287,25 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
       entry?.max_tokens,
       entry?.limit?.output,
       entry?.top_provider?.max_completion_tokens,
+      entry?.metadata?.max_output_tokens,
     )
+    const imageInput = entry?.capabilities?.image_input
+    const inputModalities = modalities(
+      entry?.input_modalities,
+      entry?.capabilities?.input_modalities,
+      entry?.metadata?.input_modalities,
+      typeof imageInput === 'object' && imageInput !== null
+        ? imageInput.supported === true ? ['text', 'image'] : ['text']
+        : undefined,
+    )
+    const efforts = reasoningEfforts(entry)
     models.push({
       id,
       name,
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
+      ...inputModalities === undefined ? {} : { inputModalities },
+      ...efforts === undefined ? {} : { reasoningEfforts: efforts },
     })
   }
   return models
@@ -250,6 +332,10 @@ function usableProbeKey(raw: string): string {
 
 /** Host-owned profile inputs that a configuration draft deliberately omits. */
 export interface StoredModelDiscoveryProfile {
+  /** Listing protocol configured on the named route; `provider` keeps catalog and protocol selection. */
+  readonly source: PiAiModelDiscoverySource
+  /** Endpoint configured on the named route, used when the draft names none. */
+  readonly baseURL: string | undefined
   /** Deployment headers configured on the named route. */
   readonly headers: Readonly<Record<string, string>> | undefined
   /** Resolve the named route's credential only when the draft carries none. */
@@ -259,9 +345,9 @@ export interface StoredModelDiscoveryProfile {
 /**
  * Interrogate one draft provider endpoint for the models it advertises.
  * @param request - the endpoint, protocol, and one-shot credential to use.
- * @param storedProfile - Host-owned headers and lazy credential resolution for
- *   the named route. It is read only on the path that reaches the network; the
- *   credential is resolved only when the draft carries none.
+ * @param storedProfile - Host-owned listing source, endpoint, headers, and lazy
+ *   credential resolution for the named route. The credential is resolved only
+ *   on the path that reaches the network, and only when the draft carries none.
  * @returns the advertised models in endpoint order.
  * @throws LlmError when the protocol has no readable listing, the endpoint
  *   refuses or fails the request, or the reply is not a model listing.
@@ -270,9 +356,12 @@ export async function discoverModels(
   request: LlmModelDiscoveryOperation,
   storedProfile?: () => StoredModelDiscoveryProfile | undefined,
 ): Promise<readonly LlmDiscoveredModel[]> {
+  const stored = storedProfile?.()
+  const source = stored?.source ?? 'provider'
   // A catalog route already has its answer, and a better one: the installed
   // entries carry context windows and output caps no listing endpoint reports.
-  if (request.provider !== undefined) {
+  // A route that names a listing source asks its own endpoint instead.
+  if (request.provider !== undefined && source === 'provider') {
     const installed = catalogModels(request.provider)
     if (installed.size > 0) {
       return [...installed.values()].map(model => ({
@@ -284,7 +373,8 @@ export async function discoverModels(
       }))
     }
   }
-  if (request.baseURL === undefined || request.baseURL.length === 0) {
+  const baseURL = request.baseURL ?? (source === 'provider' ? undefined : stored?.baseURL)
+  if (baseURL === undefined || baseURL.length === 0) {
     throw new LlmError(
       `pi-ai ships no catalog for provider "${request.provider ?? ''}", so its models can only come from its`
       + " endpoint; set a baseURL, or enter this provider's models by hand",
@@ -297,20 +387,21 @@ export async function discoverModels(
   // the action from the case it exists for. The cost is a misdirected message
   // when the endpoint speaks something else (an Anthropic gateway answers 401,
   // which reads as a credential problem), and hand-entry remains the way out.
-  const api = request.api ?? 'openai-completions'
+  const api = source === 'openai-compatible'
+    ? 'openai-completions'
+    : source === 'anthropic' ? 'anthropic-messages' : request.api ?? 'openai-completions'
   if (!LISTABLE_PROTOCOLS.has(api)) {
     throw new LlmError(
       `pi-ai protocol "${api}" has no model listing this build can read; enter this provider's models by hand`,
       'DISCOVERY_UNSUPPORTED',
     )
   }
-  const url = listingUrl(request.baseURL, api)
+  const url = listingUrl(baseURL, api)
   // A key typed into the form wins: it may replace the stored key that is
-  // failing. The stored profile is asked past the catalog and protocol checks,
-  // and its credential resolver remains lazy so a typed key cannot fail over a
+  // failing. The stored credential resolver is asked past the catalog and
+  // protocol checks, and remains lazy so a typed key cannot fail over a
   // stored credential it supersedes. A route may still authenticate through a
   // deployment-owned Authorization header when neither key exists.
-  const stored = storedProfile?.()
   const supplied = request.apiKey ?? await stored?.resolveApiKey()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
   let response: Response
