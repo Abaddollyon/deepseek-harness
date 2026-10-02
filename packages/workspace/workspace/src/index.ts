@@ -15,7 +15,8 @@ import { WorkspaceEntity } from './entity.ts'
 import type { WorkspaceEntityHost } from './entity.ts'
 
 export { WorkspaceMoveInvalidError } from './entity.ts'
-import { defaultWorkspaceTitle, fullyQualifiedWorkspacePath, realpathNormalize } from './paths.ts'
+import { defaultWorkspaceTitle, fullyQualifiedWorkspacePath, hostPathWorld, realpathNormalize, workspacePathKey } from './paths.ts'
+import type { WorkspacePathWorld } from './paths.ts'
 import { workspaceDomainSpec } from './spec.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
 import type { SessionActivity, Workspace, WorkspaceId as WorkspaceIdBrand } from './types.ts'
@@ -25,7 +26,8 @@ export type {
 } from './types.ts'
 export { workspaceDomainState, workspaceRecord, workspaceDomainSpec } from './spec.ts'
 export type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
-export { normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
+export { hostPathWorld, normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
+export type { WorkspacePathWorld } from './paths.ts'
 
 /** Identifies one workspace record (see `src/types.ts` for the brand rationale). */
 export type WorkspaceId = WorkspaceIdBrand
@@ -178,10 +180,14 @@ export class WorkspaceRegistry extends Service {
   private readonly sessionPaths = new Map<SessionId, string>()
   private readonly invalidSessionPaths = new Map<SessionId, string>()
   private operationTail: Promise<void> = Promise.resolve()
+  private resolvePathWorld: ((agentPreset: string) => WorkspacePathWorld | undefined) | undefined
+  private pathWorldGeneration = 0
 
   private readonly host: WorkspaceEntityHost = {
     table: () => this.requireTable(),
     sessionPath: id => this.sessionPaths.get(id),
+    world: agentPreset => this.pathWorld(agentPreset),
+    sessionWorld: header => this.sessionWorld(header),
     readSessionHeader: id => this.readSessionHeader(id),
     rememberSessionPath: (id, path) => {
       this.sessionPaths.set(id, path)
@@ -226,6 +232,7 @@ export class WorkspaceRegistry extends Service {
    * Different canonical paths may share a display title.
    * @param path - Existing directory to own, in a fully qualified path spelling.
    * @param title - Display title used only when a new record is created.
+   * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
    * @returns the existing or newly durable workspace.
    */
   // TODO: `title` lost its last production caller when the gateway's
@@ -233,12 +240,53 @@ export class WorkspaceRegistry extends Service {
   // (.agents/notes/archived/simplification/2026-07-31-one-route-to-add-a-workspace.md);
   // drop the parameter with its @param clause and the `create(path, title?)`
   // lines in this package's README pair.
-  async create(path: string, title?: string): Promise<Workspace> {
-    const canonical = await realpathNormalize(path)
-    if (!(await stat(canonical)).isDirectory()) {
+  async create(path: string, title?: string, agentPreset?: string): Promise<Workspace> {
+    const world = this.pathWorld(agentPreset)
+    const canonical = await world.realpath(path)
+    if (!(await world.isDirectory(canonical))) {
       throw new Error(`cannot create a workspace at '${canonical}': path is not a directory`)
     }
-    return await this.enqueueOperation(() => this.createCanonical(canonical, title))
+    return await this.enqueueOperation(() => this.createCanonical(canonical, title, false, agentPreset))
+  }
+
+  /**
+   * Install the resolver for Workspaces whose paths live in an Agent preset's
+   * execution world. Host Workspaces never consult it.
+   * @param resolve - The preset's world, or undefined while the preset is unknown or mounts no filesystem.
+   * @returns a disposer that removes this resolver.
+   */
+  setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void {
+    // A generation number, not the function: Context property reads may wrap function values.
+    const generation = ++this.pathWorldGeneration
+    this.resolvePathWorld = resolve
+    return () => {
+      if (this.pathWorldGeneration === generation) this.resolvePathWorld = undefined
+    }
+  }
+
+  /**
+   * The execution world holding one Workspace's paths.
+   * @param agentPreset - Preset named by the Workspace, or undefined for the Host.
+   * @returns that world; throws when the preset's world is not available.
+   */
+  private pathWorld(agentPreset: string | undefined): WorkspacePathWorld {
+    if (agentPreset === undefined) return hostPathWorld
+    const world = this.resolvePathWorld?.(agentPreset)
+    if (world === undefined) throw new Error(`the execution world of agent preset '${agentPreset}' is not available`)
+    return world
+  }
+
+  /**
+   * Name the world a Session runs in: its header preset when a Workspace
+   * record or the installed resolver binds that preset to its own world.
+   */
+  private sessionWorld(header: SessionHeader): string | undefined {
+    const preset = header.agentPreset
+    if (preset === undefined) return undefined
+    for (const [, record] of this.requireTable().entries()) {
+      if (record.agentPreset === preset) return preset
+    }
+    return this.resolvePathWorld?.(preset) === undefined ? undefined : preset
   }
 
   /**
@@ -495,19 +543,25 @@ export class WorkspaceRegistry extends Service {
    * workspace. A missing path rejects during `realpath`; an existing unowned
    * directory returns `undefined`.
    * @param path - Existing directory path in a fully qualified spelling.
-   * @returns the workspace owning the canonical path, when one exists.
+   * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
+   * @returns the workspace owning the canonical path in that world, when one exists.
    */
-  async resolveByPath(path: string): Promise<Workspace | undefined> {
-    const canonical = await realpathNormalize(path)
+  async resolveByPath(path: string, agentPreset?: string): Promise<Workspace | undefined> {
+    const canonical = await this.pathWorld(agentPreset).realpath(path)
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path === canonical && entity.agentPreset === agentPreset) return entity
     }
     return undefined
   }
 
-  private async createCanonical(canonical: string, title?: string, firstUse = false): Promise<WorkspaceEntity> {
+  private async createCanonical(
+    canonical: string,
+    title?: string,
+    firstUse = false,
+    agentPreset?: string,
+  ): Promise<WorkspaceEntity> {
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path === canonical && entity.agentPreset === agentPreset) return entity
     }
 
     const workspaceName = title ?? defaultWorkspaceTitle(canonical)
@@ -517,6 +571,7 @@ export class WorkspaceRegistry extends Service {
     const now = new Date().toISOString()
     const record: WorkspaceRecord = {
       path: canonical,
+      ...agentPreset === undefined ? {} : { agentPreset },
       title: workspaceName,
       sessionIds: [],
       createdAt: now,
@@ -651,7 +706,8 @@ export class WorkspaceRegistry extends Service {
     const groupsByPath = new Map<string, SessionHeader[]>()
     for (const header of headers) {
       const path = this.sessionPaths.get(header.id)
-      if (path === undefined) continue
+      // Bootstrap groups Host directories only; a remote world's Sessions join Workspaces created in that world.
+      if (path === undefined || this.sessionWorld(header) !== undefined) continue
       const group = groupsByPath.get(path)
       if (group === undefined) groupsByPath.set(path, [header])
       else group.push(header)
@@ -666,7 +722,7 @@ export class WorkspaceRegistry extends Service {
     const byPath = new Map<string, WorkspaceId>()
     const accounted = new Map<SessionId, WorkspaceId>()
     for (const [id, record] of table.entries()) {
-      byPath.set(record.path, id)
+      if (record.agentPreset === undefined) byPath.set(record.path, id)
       for (const sessionId of record.sessionIds) accounted.set(sessionId, id)
     }
 
@@ -761,14 +817,15 @@ export class WorkspaceRegistry extends Service {
     const paths = new Map<string, WorkspaceId>()
     const accounted = new Map<SessionId, WorkspaceId>()
     for (const [id, record] of table.entries()) {
-      const pathHolder = paths.get(record.path)
+      const key = workspacePathKey(record.agentPreset, record.path)
+      const pathHolder = paths.get(key)
       if (pathHolder !== undefined) {
         throw new Error(
           `workspace domain is inconsistent: path '${record.path}' is claimed `
           + `by both workspace '${pathHolder}' and workspace '${id}'`,
         )
       }
-      paths.set(record.path, id)
+      paths.set(key, id)
       for (const sessionId of record.sessionIds) {
         const holder = accounted.get(sessionId)
         if (holder !== undefined) {
@@ -808,6 +865,14 @@ export class WorkspaceRegistry extends Service {
       this.invalidSessionPaths.set(header.id, 'header has no cwd')
       return
     }
+    const world = this.sessionWorld(header)
+    if (world !== undefined) {
+      // A remote world may be offline while the index is built; its Sessions
+      // keep the cwd spelling their Workspace supplied canonically at creation.
+      this.sessionPaths.set(header.id, workspacePathKey(world, header.cwd))
+      this.invalidSessionPaths.delete(header.id)
+      return
+    }
     try {
       const path = await realpathNormalize(header.cwd)
       if (!(await stat(path)).isDirectory()) {
@@ -836,9 +901,10 @@ export class WorkspaceRegistry extends Service {
   private reportFilteredCandidates(): void {
     for (const entity of this.entities.values()) {
       const record = this.requireTable().get(entity.id) as WorkspaceRecord
+      const key = workspacePathKey(record.agentPreset, record.path)
       for (const sessionId of record.sessionIds) {
         const path = this.sessionPaths.get(sessionId)
-        if (path === record.path) continue
+        if (path === key) continue
         const reason = this.invalidSessionPaths.get(sessionId)
           ?? (this.headers.has(sessionId)
             ? `canonical cwd '${path}' differs from workspace path '${record.path}'`

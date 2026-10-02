@@ -56,19 +56,57 @@ export async function realpathNormalize(path: string): Promise<string> {
   return await realpath(path)
 }
 
+/** Directory identity operations of one execution world that holds Workspace paths. */
+export interface WorkspacePathWorld {
+  /**
+   * Canonicalize a fully qualified path where its files exist.
+   * @param path - Candidate path in that world's spelling.
+   * @returns the canonical path; rejects when the path does not resolve.
+   */
+  realpath(path: string): Promise<string>
+  /**
+   * Report whether a canonical path names an existing directory.
+   * @param path - Canonical path.
+   * @returns whether it is a directory; rejects when it cannot be inspected.
+   */
+  isDirectory(path: string): Promise<boolean>
+}
+
+/** The Host filesystem: the world of every Workspace without an Agent preset. */
+export const hostPathWorld: WorkspacePathWorld = {
+  realpath: realpathNormalize,
+  isDirectory: async path => (await stat(path)).isDirectory(),
+}
+
 /**
- * Canonicalize additional Workspace directories with {@link realpathNormalize},
+ * Identity of one directory across execution worlds: Host paths stay plain,
+ * while a path in an Agent preset's world is qualified by that preset.
+ * @param agentPreset - Preset owning the world, or undefined for the Host.
+ * @param path - Canonical path in that world.
+ * @returns the world-qualified key.
+ */
+export function workspacePathKey(agentPreset: string | undefined, path: string): string {
+  return agentPreset === undefined ? path : `${agentPreset}\u0000${path}`
+}
+
+/**
+ * Canonicalize additional Workspace directories in one execution world,
  * keeping first-seen order and dropping duplicates and the primary path.
  * @param paths - Candidate additional directories.
  * @param primary - Canonical primary Workspace path.
+ * @param world - Execution world holding the directories; the Host by default.
  * @returns the canonical additional directories; rejects when any path is not an existing directory.
  */
-export async function normalizeAdditionalWorkspacePaths(paths: readonly string[], primary: string): Promise<string[]> {
+export async function normalizeAdditionalWorkspacePaths(
+  paths: readonly string[],
+  primary: string,
+  world: WorkspacePathWorld = hostPathWorld,
+): Promise<string[]> {
   const seen = new Set([primary])
   const normalized: string[] = []
   for (const path of paths) {
-    const canonical = await realpathNormalize(path)
-    if (!(await stat(canonical)).isDirectory()) {
+    const canonical = await world.realpath(path)
+    if (!(await world.isDirectory(canonical))) {
       throw new Error(`Workspace additional path '${path}' is not a directory`)
     }
     if (seen.has(canonical)) continue

@@ -18,13 +18,15 @@ const sessionId = z.string().transform(value => brandString<SessionId>(value))
 
 /**
  * Durable shape of one workspace record. `path` is the `fs.realpath` canon
- * stamped at create; `additionalPaths` lists further canonical directories
- * offered to new Sessions (absent until first set); `sessionIds` is the
+ * stamped at create; `agentPreset` names the preset whose execution world
+ * holds every path (absent for the Host); `additionalPaths` lists further
+ * canonical directories offered to new Sessions (absent until first set); `sessionIds` is the
  * ordered ownership account (array order is display order); timestamps are
  * ISO-8601 strings.
  */
 export const workspaceRecord = z.object({
   path: z.string(),
+  agentPreset: z.string().optional(),
   additionalPaths: z.array(z.string()).optional(),
   title: z.string(),
   sessionIds: z.array(sessionId),

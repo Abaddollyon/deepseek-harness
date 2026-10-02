@@ -24,6 +24,7 @@ export function workspaceView(workspace: Workspace): WorkspaceView {
   return {
     workspaceId: workspace.id,
     path: workspace.path,
+    ...workspace.agentPreset === undefined ? {} : { agentPreset: workspace.agentPreset },
     ...workspace.additionalPaths.length === 0 ? {} : { additionalPaths: [...workspace.additionalPaths] },
     title: workspace.title,
     sessionIds: [...workspace.sessionIds],
@@ -37,6 +38,7 @@ function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceVie
   return {
     workspaceId: WorkspaceId(workspaceId),
     path: record.path,
+    ...record.agentPreset === undefined ? {} : { agentPreset: record.agentPreset },
     ...record.additionalPaths === undefined || record.additionalPaths.length === 0
       ? {}
       : { additionalPaths: [...record.additionalPaths] },

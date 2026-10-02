@@ -4,7 +4,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
-import type { WorkspaceView } from '../types.ts'
+import type { WorkspaceView, WorkspaceWorld } from '../types.ts'
 import type { ClientWorkspaceModel, WorkspaceSnapshot } from './model.ts'
 
 /** Structured create failure for callers that distinguish Host business errors. */
@@ -49,10 +49,16 @@ export interface IWorkspaces {
   readonly list: WorkspaceSource
   /**
    * Register an existing path as a Workspace.
-   * @param input - Host create payload; `additionalPaths` must match an existing Workspace's.
+   * @param input - Host create payload; `agentPreset` selects another execution host,
+   *   and `additionalPaths` must match an existing Workspace's.
    * @returns the created or idempotently resolved Workspace.
    */
-  create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
+  create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
+  /**
+   * List the Agent presets whose own filesystem can hold a new Workspace, such as SSH hosts.
+   * @returns usable presets in roster order; empty when only the Host is available.
+   */
+  worlds(): Promise<readonly WorkspaceWorld[]>
   /**
    * Replace a Workspace's additional directories; existing Sessions keep their recorded roots.
    * @param workspaceId - target Workspace.
@@ -134,10 +140,16 @@ export class WorkspaceController extends Service implements IWorkspaces {
     this.list = model
   }
 
-  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
+  async create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     const result = await this.model.create(input)
     if (!result.ok) throw new WorkspaceCreateError(result.error)
     return result.value.workspace
+  }
+
+  async worlds(): Promise<readonly WorkspaceWorld[]> {
+    const result = await this.model.worlds()
+    if (!result.ok) throw commandError('list worlds', result.error)
+    return result.value.worlds
   }
 
   async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {

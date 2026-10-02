@@ -72,6 +72,13 @@ export interface Workspace {
   readonly path: string
 
   /**
+   * Agent preset whose execution world (for example an SSH host) holds
+   * {@link path} and every additional directory; undefined for the Host.
+   * Sessions created in this workspace use this preset.
+   */
+  readonly agentPreset: string | undefined
+
+  /**
    * Further canonical directories, excluding {@link path}, that a Session
    * created in this workspace records as its additional roots. Changing them
    * never changes an existing Session's roots.
