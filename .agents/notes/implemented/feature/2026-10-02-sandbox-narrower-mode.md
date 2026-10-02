@@ -18,6 +18,8 @@ A delegated agent can ask for `sandbox_permissions: workspace-write` while its S
 
 **Ignore the request and run at the effective mode.** The call would run with more access than the model asked for, and the result would not match the request.
 
+**Carry a narrowed `run_code` mode into its nested calls as a ceiling.** Nested bash, PowerShell, filesystem, terminal and plugin-manager calls each resolve their policy from the Session, so a ceiling would have to reach every one of those resolution points through the `exec.parent` chain. That is too wide a change for this fix, so `run_code` refuses a narrower mode instead (see Consequences).
+
 ## Consequences
 
-Bash, PowerShell, filesystem, and `run_code` calls run confined at a requested narrower mode without an approval service or agent. The shared unit tests cover each narrower pair, and the bash and PowerShell tests check that the executor receives the narrower mode without a prompt.
+Bash, PowerShell and filesystem calls run confined at a requested narrower mode without an approval service or agent. `run_code` refuses a narrower mode before asking or running: it would confine only the program process, while the program's nested tool calls keep the Session's wider mode and the result would report a confinement they did not have. The model narrows a nested call by passing `sandbox_permissions` on that call. The shared unit tests cover each narrower pair, and the bash and PowerShell tests check that the executor receives the narrower mode without a prompt.

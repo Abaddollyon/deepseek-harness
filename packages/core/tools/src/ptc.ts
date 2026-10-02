@@ -17,7 +17,7 @@ declare module '@deepseek-ai/dsh-llm' {
 
 import type { ContentBlock, ToolCallId, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { PtcBindingFunction, PtcRunResult, PtcRunSandbox, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
-import { approveEscalation, ESCALATION_TARGETS, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
+import { approveEscalation, ESCALATION_TARGETS, validateEscalationArgs, WIDER_MODES } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { deepFreeze, snapshotJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -392,6 +392,12 @@ export function createRunCodeTool(registry: ToolRuntime, options: RunCodeBridgeO
       let policy = standingPolicy
       if (args.sandbox_permissions !== undefined && args.justification !== undefined) {
         if (standingPolicy === undefined) throw new Error('sandbox_permissions is not available for this PTC runtime')
+        // A narrower mode would confine only the program process: nested tool
+        // calls resolve their own policy from the Session and would keep the
+        // wider standing mode, so the result would overstate the confinement.
+        if ((WIDER_MODES[args.sandbox_permissions] ?? []).includes(standingPolicy.mode)) {
+          throw new Error(`sandbox_permissions "${args.sandbox_permissions}" is narrower than this Session's "${standingPolicy.mode}" mode; run_code can only widen, because nested tool calls keep the Session's mode. Pass sandbox_permissions on the nested tool call instead.`)
+        }
         const approvedMode = await approveEscalation({
           requestedMode: args.sandbox_permissions,
           justification: args.justification,
