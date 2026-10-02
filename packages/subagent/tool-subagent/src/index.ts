@@ -77,7 +77,10 @@ export interface Config {
    */
   backgroundMode?: 'one-shot' | 'continuable'
   /**
-   * Agent options applied to every child; omitted fields use child-loop defaults.
+   * Agent options applied to every child; omitted fields use child-loop
+   * defaults. The instance named `subagent` also declares them as its
+   * composition's default child route (`ctx.subagents.defaultChildRoute()`),
+   * which Agent Teams follows when it configures no route of its own.
    */
   agentOptions?: AgentOptions
   /**
@@ -346,6 +349,12 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
 
   const modelSelectionCapable = config.modelSelectionSettings === true
   ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+  // The default-named instance's configured route is the composition's child
+  // default, which delegation paths without their own route (Agent Teams)
+  // follow. Aliases keep their routes to themselves.
+  if (toolName === 'subagent' && config.agentOptions !== undefined) {
+    ctx.subagents.declareDefaultChildRoute(config.agentOptions)
+  }
 
   const assertSubagentProviderConfiguration = (subagentProvider: SubagentProvider): void => {
     if (ctx.subagents.resolveMaxDepth(config.maxDepth) !== undefined && !subagentProvider.capabilities.depthLimit) {

@@ -47,7 +47,7 @@ kind: "package-reference"
 |---|---|---|
 | `freshProvider` | `spawn` | 启动 fresh teammate 的提供方 |
 | `forkProvider` | `fork` | 启动 fork teammate 的提供方 |
-| `agentOptions` | — | teammate 的 LLM 路由默认值（`provider` 与 `model` 须一起配置，另有 `reasoningEffort`、`maxTokens`）；省略的字段沿用提供方的路由默认值和 Lead 的路由 |
+| `agentOptions` | — | teammate 的 LLM 路由默认值（`provider` 与 `model` 须一起配置，另有 `reasoningEffort`、`maxTokens`）。省略时，只要 teammate 的提供方能够应用路由，teammate 就采用 Lead 组合的默认子路由，即默认 `subagent` 工具的 `agentOptions`；省略的字段沿用提供方的路由默认值和 Lead 的路由 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-experimental-tool-agent-team)是每个受支持字段及其 JSDoc 的穷尽式真源。
 

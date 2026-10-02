@@ -47,7 +47,7 @@ The smallest addition to an existing composition is the two-package fragment fro
 |---|---|---|
 | `freshProvider` | `spawn` | Provider that starts fresh teammates |
 | `forkProvider` | `fork` | Provider that starts fork teammates |
-| `agentOptions` | — | Teammate LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`); omitted fields follow the provider's route defaults and the Lead's route |
+| `agentOptions` | — | Teammate LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`). When omitted, teammates follow the Lead composition's default child route, the default `subagent` tool's `agentOptions`, wherever the teammate provider can apply a route; omitted fields follow the provider's route defaults and the Lead's route |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-experimental-tool-agent-team) is the exhaustive source for every accepted field and its JSDoc.
 

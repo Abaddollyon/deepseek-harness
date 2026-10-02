@@ -225,6 +225,16 @@ describe('dsh-tool-subagent', () => {
       .toBe('Review the diff! This call waits for the result by default.')
   })
 
+  it('declares the default-named instance\'s configured route as the composition\'s default child route', async () => {
+    const route = { provider: 'mock', model: 'configured-model', reasoningEffort: ReasoningEffortId('xhigh') }
+    const primary = await setup({ provider: 'mock', agentOptions: route })
+    expect(primary.subagents.defaultChildRoute()).toEqual(route)
+    const alias = await setup({ provider: 'mock', toolName: 'subagent_scout', agentOptions: route })
+    expect(alias.subagents.defaultChildRoute()).toBeUndefined()
+    const unrouted = await setup({ provider: 'mock' })
+    expect(unrouted.subagents.defaultChildRoute()).toBeUndefined()
+  })
+
   it('rejects a blank description at load and on direct apply()', async () => {
     await expect(setup({ provider: 'mock', description: '' })).rejects.toThrow()
     const ctx = await projectedContext()

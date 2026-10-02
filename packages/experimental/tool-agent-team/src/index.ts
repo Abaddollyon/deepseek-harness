@@ -46,7 +46,9 @@ export interface Config {
   /** Continuable-subagent provider used for completed-prefix fork teammates. */
   readonly forkProvider?: string
   /**
-   * Route defaults for every teammate; omitted fields follow the subagent
+   * Route defaults for every teammate. When omitted, teammates follow the
+   * Lead composition's default child route, which the default `subagent`
+   * tool declares from its `agentOptions`; omitted fields follow the subagent
    * provider's route defaults and the Lead's route. A `spawn_teammate` call's
    * own provider, model or reasoning effort overrides them, and a call that
    * changes the route without naming an effort drops the configured effort.
@@ -320,7 +322,13 @@ function install(agent: Agent, ctx: Context, config: ResolvedConfig): () => void
         const agent = callingAgent(exec.agent, 'spawn_teammate')
         const context = args.context ?? 'fresh'
         const provider = context === 'fork' ? config.forkProvider : config.freshProvider
-        const route = await teammateRoute(ctx, agent, provider, config.agentOptions, {
+        // Without a configured teammate route, follow the composition's
+        // default child route, which the default `subagent` tool declares,
+        // wherever the teammate's provider can apply a route.
+        const followsDefault = config.agentOptions === undefined
+          && ctx.subagents.getProvider(provider)?.capabilities.agentOptions === true
+        const configured = followsDefault ? ctx.subagents.defaultChildRoute(agent) : config.agentOptions
+        const route = await teammateRoute(ctx, agent, provider, configured, {
           ...args.provider === undefined ? {} : { provider: args.provider },
           ...args.model === undefined ? {} : { model: args.model },
           ...args.reasoning_effort === undefined ? {} : { reasoning_effort: args.reasoning_effort },

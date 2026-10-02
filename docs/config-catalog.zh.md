@@ -1221,7 +1221,9 @@ export interface Config {
   /** Continuable-subagent provider used for completed-prefix fork teammates. */
   readonly forkProvider?: string
   /**
-   * Route defaults for every teammate; omitted fields follow the subagent
+   * Route defaults for every teammate. When omitted, teammates follow the
+   * Lead composition's default child route, which the default `subagent`
+   * tool declares from its `agentOptions`; omitted fields follow the subagent
    * provider's route defaults and the Lead's route. A `spawn_teammate` call's
    * own provider, model or reasoning effort overrides them, and a call that
    * changes the route without naming an effort drops the configured effort.
@@ -3950,7 +3952,10 @@ export interface Config {
    */
   backgroundMode?: 'one-shot' | 'continuable'
   /**
-   * Agent options applied to every child; omitted fields use child-loop defaults.
+   * Agent options applied to every child; omitted fields use child-loop
+   * defaults. The instance named `subagent` also declares them as its
+   * composition's default child route (`ctx.subagents.defaultChildRoute()`),
+   * which Agent Teams follows when it configures no route of its own.
    */
   agentOptions?: AgentOptions
   /**

@@ -785,6 +785,34 @@ describe('dsh-tool-team', () => {
       ])
     })
 
+    it('follows the composition\'s default child route when the row configures no teammate route', async () => {
+      const declared = { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('xhigh') }
+      const following = await routeSetup({})
+      following.ctx.subagents.declareDefaultChildRoute(declared)
+      const spawned = await execute(following.ctx, following.lead, 'spawn_teammate', { name: 'default-worker', description: 'default route', prompt: 'go' })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      expect(following.start.mock.calls[0]?.[0].request.agentOptions).toEqual(declared)
+
+      // The row's own route wins over the declared default.
+      const own = await routeSetup({ agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'low' } })
+      own.ctx.subagents.declareDefaultChildRoute(declared)
+      await execute(own.ctx, own.lead, 'spawn_teammate', { name: 'own-worker', description: 'own route', prompt: 'go' })
+      expect(own.start.mock.calls[0]?.[0].request.agentOptions).toEqual({ provider: 'mock', model: 'mock', reasoningEffort: 'low' })
+
+      // A provider that cannot apply a route starts teammates without the default.
+      const fixed = await routeSetup({ freshProvider: 'fixed' })
+      fixed.ctx.subagents.declareDefaultChildRoute(declared)
+      fixed.ctx.subagents.registerProvider({
+        name: 'fixed',
+        capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        inheritsParentContext: false,
+        start: () => Promise.reject(new Error('unreachable')),
+      })
+      const result = await execute(fixed.ctx, fixed.lead, 'spawn_teammate', { name: 'fixed-worker', description: 'fixed', prompt: 'go' })
+      expect(text(result)).not.toContain('cannot start a teammate on a chosen LLM route')
+      expect(fixed.start.mock.calls[0]?.[0].request).not.toHaveProperty('agentOptions')
+    })
+
     it('keeps reporting a teammate\'s own route once its Activation is no longer resident', async () => {
       const { ctx, lead } = await routeSetup({}, [{ provider: 'mock', model: 'other' }], [textResponse('done')])
       const spawned = await execute(ctx, lead, 'spawn_teammate', {
