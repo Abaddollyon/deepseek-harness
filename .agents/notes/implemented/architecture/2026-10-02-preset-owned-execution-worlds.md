@@ -16,6 +16,7 @@ An Agent preset that isolates `fs`, `subprocess`, `sandbox` and the tools using 
 - Session creation checks the cwd through the preset's `fs` when it mounts one. The directory must exist in that world and nothing is created on the Host; other presets keep the Host `mkdir`.
 - `workspace-files` reads through the `fs` of the preset named by the Session projection, so a blank-Session preset switch applies. `terminal-controller` spawns through the `subprocess` the Agent's preset isolates.
 - `tool-fs-search` takes an `rgPath` because the packaged ripgrep binary is a Host path.
+- A Workspace record may name an `agentPreset`; its paths are canonicalized through that preset's `fs` and are unique per (preset, path). `workspace-controller` installs these path worlds on the registry, and Sessions created in such a Workspace start under its preset.
 - A child may run under another preset and cwd through `ChildExecutionTarget`, supplied by an in-process provider (`startInProcessRun` options or `ContinuableCreateSpec.target`). The child header records both; `applyChildComposition` mounts the header preset when it differs from the parent's, so cold resume rejoins the same world. Workflow `agent()` selects such a provider per child with `subagentProvider`.
 
 A deployment that wants a workflow script itself to run remotely mounts `ptc-runtime-node` (with an installed bootstrap), `workflow-ptc` and `tool-workflow` inside the same isolate group; a Host PTC runtime cannot start a process in a cwd that exists only remotely.
@@ -30,4 +31,4 @@ A deployment that wants a workflow script itself to run remotely mounts `ptc-run
 
 ## Consequences
 
-Consumers that act for a Session must ask the registry for preset-owned services; a consumer that injects `fs` or `subprocess` directly still sees the Host. `workspace-files` observes the Session projection on each scope lookup. Workspace records still canonicalize paths on the Host, so a remote cwd cannot yet be a Workspace path and Sessions created there are Ungrouped. Upstream `SshConnection` does not reconnect: after a transport loss every operation of that preset revision fails until the deployment recreates the connection.
+Consumers that act for a Session must ask the registry for preset-owned services; a consumer that injects `fs` or `subprocess` directly still sees the Host. `workspace-files` observes the Session projection on each scope lookup. A Workspace on a preset whose revision is broken reports a missing directory until the preset recovers. Upstream `SshConnection` does not reconnect: after a transport loss every operation of that preset revision fails until the deployment recreates the connection.
