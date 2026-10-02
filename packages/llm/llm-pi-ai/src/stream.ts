@@ -48,6 +48,10 @@ function classifyPiAiError(message: string): string {
   if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
+  // An overload reported in-stream without an HTTP status: codex-lb's
+  // `server_is_overloaded` failed response, Anthropic's `overloaded_error` SSE
+  // error, and the OpenAI overload sentence. Unknown failures stay unclassified.
+  if (/\b(?:servers? (?:are|is) (?:currently )?overloaded|overloaded_error|server_is_overloaded)\b/i.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -56,6 +60,26 @@ function classifyPiAiError(message: string): string {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
+  // codex-lb reports a lost upstream WebSocket as a failed response: its
+  // `stream_incomplete` code with an upstream-transport or rejected-anchor
+  // fragment, or `bridge_previous_response_not_found` carrying the close
+  // message. Each is a truncation a fresh attempt can complete; any other
+  // `stream_incomplete` reason (a cancelled scope) stays out of the retry loop.
+  if ((/\bbridge_previous_response_not_found\b/i.test(message)
+    && /upstream websocket closed before response\.completed/i.test(message))
+    || /previous response anchor was rejected upstream/i.test(message)
+    || (/\bstream_incomplete\b/i.test(message) && (/anchor|previous_response/i.test(message)
+      || /upstream websocket (?:closed before response\.completed|closed without a complete handshake|receive failed)/i.test(message)))) {
+    return 'TRANSPORT'
+  }
+  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing, and `received from peer` alone
+  // appears in unrelated wording (TLS certificates). Node renders the reset
+  // code as NGHTTP2_* and intermediaries name the RST_STREAM frame. The peer
+  // reset one stream, not the connection, so resending the request can succeed.
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
@@ -75,7 +99,8 @@ function classifyPiAiError(message: string): string {
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures.
+ *   to non-retryable `PI_AI_ERROR` failures. Known status-less overloads map to
+ *   `SERVER`; unclassified errors remain `PI_AI_ERROR`.
  */
 export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)

@@ -956,6 +956,34 @@ describe('mapStopReason / mapUsage', () => {
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
   })
 
+  it.each([
+    // Status-less overloads: codex-lb failed response, Anthropic SSE error, OpenAI sentence.
+    ['server_is_overloaded: Our servers are currently overloaded. Please try again later.', 'SERVER'],
+    ['{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', 'SERVER'],
+    ['The server is overloaded. Please try again later.', 'SERVER'],
+    // codex-lb upstream WebSocket truncations and rejected continuation anchors.
+    ['stream_incomplete: Upstream websocket closed before response.completed', 'TRANSPORT'],
+    ['stream_incomplete: Upstream websocket closed without a complete handshake', 'TRANSPORT'],
+    ['stream_incomplete: Codex upstream websocket receive failed via proxy endpoint ep_1: OSError', 'TRANSPORT'],
+    ['stream_incomplete: The previous response anchor was rejected upstream; retry the request.', 'TRANSPORT'],
+    ['openai-codex API error (404): {"message":"Upstream websocket closed before response.completed","type":"server_error","code":"bridge_previous_response_not_found"}', 'TRANSPORT'],
+    // HTTP/2 stream resets.
+    ['stream error: stream ID 1; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
+    ['Stream closed with error code NGHTTP2_REFUSED_STREAM', 'TRANSPORT'],
+    ['HTTP/2 stream 0 was reset with RST_STREAM', 'TRANSPORT'],
+    // Look-alikes stay unclassified, and an HTTP status keeps precedence.
+    ['Tool schema has overloaded signatures', 'PI_AI_ERROR'],
+    ['not_overloaded_error', 'PI_AI_ERROR'],
+    ['stream_incomplete: Websocket scope cancelled before response.completed', 'PI_AI_ERROR'],
+    ['bridge_previous_response_not_found: The previous response referenced by this request no longer exists upstream', 'PI_AI_ERROR'],
+    ['stream error: stream ID 1; INTERNAL_ERROR', 'PI_AI_ERROR'],
+    ['certificate received from peer failed validation', 'PI_AI_ERROR'],
+    ['HTTP 401: Our servers are currently overloaded.', 'AUTH'],
+  ] as const)('classifies %j as %s', (errorMessage, code) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code } })
+  })
+
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
     expect(mapStopReason(assistant({
       stopReason: 'error',
