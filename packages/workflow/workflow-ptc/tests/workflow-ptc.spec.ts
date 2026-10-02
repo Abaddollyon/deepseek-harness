@@ -245,6 +245,18 @@ describe('dsh-workflow-ptc', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai' })
     })
 
+    it.each([
+      ["{ reasoningEffort: 'high' }", 'requires an effective child provider and model'],
+      ["{ provider: 'openai', model: 'small', reasoningEffort: 'high' }", '`llm` service is unavailable'],
+    ])('agent(%s) fails before start when the effort cannot be validated', async (options, message) => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`return await agent('route me', ${options})`))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain(message)
+      expect(provider.runs).toHaveLength(0)
+    })
+
     it('a start-request provider override selects every child without changing the engine default', async () => {
       const { ctx, parent, provider } = await setup()
       const selected = new StubProvider('selected', () => text('selected reply'))

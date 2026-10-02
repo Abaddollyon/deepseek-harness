@@ -18,6 +18,8 @@ harness 可以通过 `dsh-tool-subagent` 将一个任务委派给一个子 agent
 
 与 CC 有一处刻意的严格性差异：钩子误用——未知或延迟的选项（`effort`/`isolation`/`agentType`）、格式错误的参数、超出支持子集的 schema、触发上限、seam 启动失败——会抛出带 `fatal: true` 的 `WorkflowError`，组合器会重新抛出 fatal 错误而非将 item 置为 null。如果不这样做，一个拼错的选项会悄然变成一个与子 agent 失败无法区分的 `null`——这正是本仓库禁止的「被接受后被忽略」的失败模式。另有一处新增：工具的 `args` 参数是一个 JSON 对象（裸列表被包装为一个字段），使协议格式（wire format）保持诚实。
 
+`agent()` 选项也会选择子 agent 的 LLM 路由：`provider`、`model` 和 `reasoningEffort`（沿用 `AgentOptions` 的拼写；Claude Code 的 `effort` 仍为延迟实现）。子 agent 启动前，宿主按 subagent seam 的方式解析有效路由，并要求 `LlmRuntime.resolveCallConfig` 接受所请求的推理强度；因此不受支持的推理强度会使脚本失败，而不会被降级或变成子 agent 失败时的 `null`。
+
 ### seam（dsh-workflow）
 
 `ctx.workflowEngine` 是 bash 形态的抽象 `WorkflowEngine`——每个上下文一个引擎，无命名提供方注册表（引擎是部署级替换，不是共存者）。`start(request)` 对无法启动的脚本同步抛出；返回的 `WorkflowRun` 的 `result` 永不 reject（失败时结算为 `stopReason: 'error' | 'cancelled'`）。`workflow/*` 事件是仅观察的 emit，携带数据快照（id + meta；`workflow/end` 省略 result 值），按监听器隔离，与 `subagent/start`/`subagent/end` 对称——控制权留在 run 的持有者手中。词汇详情见 [subsystems/workflow.md](../../../../docs/subsystems/workflow.zh.md)。

@@ -1,9 +1,11 @@
 /** Workflow child ownership and progress over the shared sandboxed PTC executor. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { PtcBindingFunction, PtcJsonValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
@@ -46,6 +48,7 @@ function childRequest(value: unknown): ChildStartRequest {
   const prompt = text(request.prompt, 'prompt')
   const provider = request.provider === undefined ? undefined : text(request.provider, 'provider')
   const model = request.model === undefined ? undefined : text(request.model, 'model')
+  const reasoningEffort = request.reasoningEffort === undefined ? undefined : text(request.reasoningEffort, 'reasoning effort')
   let schema: ObjectJsonSchema | undefined
   if (request.schema !== undefined) {
     const candidate = object(request.schema)
@@ -56,7 +59,18 @@ function childRequest(value: unknown): ChildStartRequest {
     prompt,
     ...provider === undefined ? {} : { provider },
     ...model === undefined ? {} : { model },
+    ...reasoningEffort === undefined ? {} : { reasoningEffort },
     ...schema === undefined ? {} : { schema },
+  }
+}
+
+/** The child's route overrides, or `undefined` when it inherits the parent's route unchanged. */
+function childAgentOptions(request: ChildStartRequest): AgentOptions | undefined {
+  if (request.provider === undefined && request.model === undefined && request.reasoningEffort === undefined) return undefined
+  return {
+    ...request.provider === undefined ? {} : { provider: request.provider },
+    ...request.model === undefined ? {} : { model: request.model },
+    ...request.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) },
   }
 }
 
@@ -194,20 +208,45 @@ export class PtcWorkflowRun implements WorkflowRun {
     return record
   }
 
+  /**
+   * Reject a requested reasoning effort before the child exists. The route resolves as the
+   * subagent seam resolves it: per-call provider and model over the parent's delegation route.
+   * `LlmRuntime.resolveCallConfig` rejects an effort that exact model does not offer and never
+   * substitutes another effort or route.
+   * @param provider - The per-call provider override, if any.
+   * @param model - The per-call model override, if any.
+   * @param reasoningEffort - The requested effort.
+   */
+  private async assertReasoningEffort(
+    provider: string | undefined,
+    model: string | undefined,
+    reasoningEffort: ReasoningEffortId,
+  ): Promise<void> {
+    const parentOptions = parentAgentOptionsForDelegation(this.parent)
+    const effectiveProvider = provider ?? parentOptions.provider
+    const effectiveModel = model ?? parentOptions.model
+    if (effectiveProvider === undefined || effectiveModel === undefined) {
+      throw new Error(`reasoning effort "${reasoningEffort}" requires an effective child provider and model`)
+    }
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) throw new Error('cannot validate the child reasoning effort because the `llm` service is unavailable')
+    await llm.resolveCallConfig({ provider: effectiveProvider, model: effectiveModel, reasoningEffort }, this.controller.signal)
+  }
+
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
     this.requireActive()
+    const agentOptions = childAgentOptions(request)
+    if (agentOptions?.reasoningEffort !== undefined) {
+      await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
+      this.requireActive()
+    }
     const callId = ++this.started
     const run = await this.subagents.start(this.provider, {
       prompt: [{ type: 'text', text: request.prompt }],
       parent: this.parent,
       signal: this.controller.signal,
       ...request.schema === undefined ? {} : { outputSchema: request.schema },
-      ...request.provider === undefined && request.model === undefined ? {} : {
-        agentOptions: {
-          ...request.provider === undefined ? {} : { provider: request.provider },
-          ...request.model === undefined ? {} : { model: request.model },
-        },
-      },
+      ...agentOptions === undefined ? {} : { agentOptions },
     })
     const record: ChildRecord = { callId, run }
     this.children.set(callId, record)

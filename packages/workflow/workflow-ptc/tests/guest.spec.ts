@@ -36,10 +36,10 @@ describe('workflow guest callbacks', () => {
     const test = fixture(`
       phase('Read')
       log('starting')
-      return await agent(args.prompt, { label: 'Answer', provider: 'openai', model: 'small', schema: { type: 'object' } })
+      return await agent(args.prompt, { label: 'Answer', provider: 'openai', model: 'small', reasoningEffort: 'high', schema: { type: 'object' } })
     `, { childResult: async () => ({ output: [], structured: { answer: 42 }, stopReason: 'completed' }) })
     await expect(runWorkflowGuest(test.host)).resolves.toEqual({ value: { answer: 42 }, stopReason: 'completed', agentsStarted: 1 })
-    expect(test.requests).toEqual([{ prompt: 'answer this', provider: 'openai', model: 'small', schema: { type: 'object' } }])
+    expect(test.requests).toEqual([{ prompt: 'answer this', provider: 'openai', model: 'small', reasoningEffort: 'high', schema: { type: 'object' } }])
     expect(test.events).toEqual([
       { type: 'phase', title: 'Read' },
       { type: 'log', message: 'starting' },
