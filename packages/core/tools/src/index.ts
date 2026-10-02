@@ -75,6 +75,18 @@ const DECLARATION_RENDERERS: Record<string, (schemas: readonly ToolSdkSchema[]) 
   python: renderToolDeclarationsPy,
 } satisfies Record<PtcSdkLanguage, (schemas: readonly ToolSdkSchema[]) => string>
 
+/**
+ * The tool names a Session's last logged request header declared. Reads
+ * defensively: a Session before its first request, or a stand-in without
+ * request-header history, seeds no activations.
+ * @param session - the created or resumed agent's Session, as far as it exists.
+ * @returns the declared names, empty when there is no logged header.
+ */
+function loggedToolNames(session: Partial<Pick<Agent['session'], 'requestHeader'>> | undefined): string[] {
+  if (typeof session?.requestHeader !== 'function') return []
+  return session.requestHeader()?.tools?.map(tool => tool.name) ?? []
+}
+
 /** The policy in force without any declaration: only tools that set `deferLoading` are deferred. */
 const DEFER_LOADING_ONLY = compileToolDeferPolicy({})
 
@@ -872,6 +884,10 @@ export class ToolRuntime extends Service {
   )
   /** Presentation for scopes that declare none; {@link presentAs} shadows it per scope. */
   private readonly defaultMode: ToolPresentationMode
+  /** The registry's own context, which owns registry-lifetime prompt sections. */
+  private readonly root: Context
+  /** Whether the global native index section is registered. */
+  private nativeIndexRegistered = false
   /** Defer policy for scopes that declare none; {@link deferAs} shadows it per scope. */
   private readonly defaultDefer: CompiledToolDeferPolicy
   /**
@@ -901,15 +917,29 @@ export class ToolRuntime extends Service {
     // A resumed agent keeps the deferred tools its model was last offered:
     // the logged request header is the record of that declaration list.
     ctx.on('agent/created', ({ agent }) => {
-      const names = agent.session.requestHeader()?.tools?.map(tool => tool.name) ?? []
+      const names = loggedToolNames(agent.session)
       if (names.length > 0) this.activations.set(agent, new Set(names))
       return undefined
     })
-    ctx.systemPrompt.section(this.nativeIndexSection())
+    // The native index exists only where something can be deferred: here for
+    // a deployment policy, per scope in deferAs(), and on the first
+    // deferLoading tool otherwise (see requireNativeIndex).
+    this.root = ctx
+    if (config.defer !== undefined) this.requireNativeIndex()
     if (this.defaultMode !== 'native') {
       ctx.systemPrompt.section(this.collapseSection())
       ctx.systemPrompt.section(this.sdkSection())
     }
+  }
+
+  /**
+   * Register the global native index once, owned by the registry itself so
+   * it lives as long as the registry rather than the first registrant.
+   */
+  private requireNativeIndex(): void {
+    if (this.nativeIndexRegistered) return
+    this.nativeIndexRegistered = true
+    this.root.systemPrompt.section(this.nativeIndexSection())
   }
 
   /**
@@ -1103,17 +1133,24 @@ export class ToolRuntime extends Service {
       throw new Error('tools.deferAs() requires a scoped context (agent.ctx): a context-global policy is the `defer` config field on the tools row')
     }
     const compiled = compileToolDeferPolicy(policy)
-    return this.layers.effect(
-      this.ctx,
-      (layer) => {
-        if (layer.defer !== undefined) {
-          throw new Error('tools.deferAs() is already declared for this scope; one composition selects one defer policy')
-        }
-        layer.defer = compiled
-        return () => { layer.defer = undefined }
-      },
-      { label: 'tools.deferAs()' },
-    )
+    const ctx = this.ctx
+    const dispose = ctx.effect(function* (this: ToolRuntime) {
+      yield this.layers.effect(
+        ctx,
+        (layer) => {
+          if (layer.defer !== undefined) {
+            throw new Error('tools.deferAs() is already declared for this scope; one composition selects one defer policy')
+          }
+          layer.defer = compiled
+          return () => { layer.defer = undefined }
+        },
+        { label: 'tools.deferAs()' },
+      )
+      // Per scope for the same reason as the SDK section in presentAs().
+      yield ctx.systemPrompt.section(this.nativeIndexSection())
+    }.bind(this), 'tools.deferAs()')
+    // oxlint-disable-next-line typescript/no-misused-promises -- synchronous composite teardown
+    return dispose
   }
 
   /**
@@ -1200,6 +1237,7 @@ export class ToolRuntime extends Service {
     if (name === TOOL_SEARCH_NAME) {
       throw new Error(`tool name "${TOOL_SEARCH_NAME}" is reserved for deferred tool lookup and cannot be registered or shadowed`)
     }
+    if (definition.deferLoading === true) this.requireNativeIndex()
     return this.layers.effect(
       this.ctx,
       layer => layer.tools.insert(name, definition),

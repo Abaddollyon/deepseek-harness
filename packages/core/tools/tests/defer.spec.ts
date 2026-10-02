@@ -268,12 +268,39 @@ describe('deferral in the registry', () => {
     expect(await wireNames(ctx, agent)).toContain('mcp__home__light_on')
     expect(await index()).toBe(before)
 
-    // PTC carries the index in its SDK, and nothing deferred renders nothing.
-    const configs: Config[] = [{ mode: 'ptc', defer: { include: ['gbrain_*'] } }, { mode: 'native' }]
-    for (const config of configs) {
-      const other = await setup(config)
-      expect((await other.ctx.systemPrompt.assemble()).sections.find(section => section.name === 'tools:deferred')?.text).toBe('')
+    // PTC carries the index in its SDK, and a registry that cannot defer
+    // anything registers no index section at all.
+    const ptc = await setup({ mode: 'ptc', defer: { include: ['gbrain_*'] } })
+    expect((await ptc.ctx.systemPrompt.assemble()).sections.find(section => section.name === 'tools:deferred')?.text).toBe('')
+    const plain = await setup({ mode: 'native' })
+    expect((await plain.ctx.systemPrompt.assemble()).sections.map(section => section.name)).not.toContain('tools:deferred')
+  })
+
+  it('registers the native index for a scoped policy and on the first deferLoading tool', async () => {
+    const indexOf = async (ctx: Context, scope?: Agent): Promise<string | undefined> =>
+      (await ctx.systemPrompt.assemble(scope === undefined ? {} : { scope })).sections.find(section => section.name === 'tools:deferred')?.text
+    const scoped = await setup({ mode: 'native' })
+    const agent = agentWith('scoped-index')
+    let agentCtx!: Context
+    await scoped.ctx.plugin(Object.assign((inner: Context) => { agentCtx = createScope(inner, agent).ctx }, { inject: ['tools', 'systemPrompt'] }))
+    const dispose = agentCtx.tools.deferAs({ include: ['gbrain_put_page'] })
+    expect(await indexOf(scoped.ctx, agent)).toContain('- `gbrain_put_page` — The gbrain_put_page tool.')
+    expect(await indexOf(scoped.ctx)).toBeUndefined()
+    dispose()
+    expect(await indexOf(scoped.ctx, agent)).toBeUndefined()
+
+    const flagged = await setup({ mode: 'native' })
+    for (const name of ['flagged', 'flagged_too']) {
+      flagged.ctx.tools.register(defineTool({
+        name,
+        description: `The ${name} tool.`,
+        parameters: {},
+        deferLoading: true,
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+        execute: () => Promise.resolve('ok'),
+      }))
     }
+    expect(await indexOf(flagged.ctx)).toContain('- `flagged` — The flagged tool.\n- `flagged_too` — The flagged_too tool.')
   })
 
   it('keeps the SDK unchanged when a direct tool_search under `both` activates a tool for the native list', async () => {
@@ -300,6 +327,17 @@ describe('deferral in the registry', () => {
     }
     expect(await wireNames(ctx, resumed)).toEqual(['bash', 'gbrain_put_page', 'mcp__home__light_on', TOOL_SEARCH_NAME])
     expect(await wireNames(ctx, fresh)).toEqual(['bash', 'mcp__home__light_on', TOOL_SEARCH_NAME])
+  })
+
+  it('seeds nothing from an agent whose Session has no request-header history', async () => {
+    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*'] } })
+    const standIn = { id: SessionId('stand-in'), session: {} as Agent['session'] } as Agent
+    const sessionless = { id: SessionId('sessionless') } as Agent
+    for (const agent of [standIn, sessionless]) {
+      await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
+      await ctx.serial('agent/created', { agent, source: 'create' } as never)
+      expect(await wireNames(ctx, agent)).toEqual(['bash', 'mcp__home__light_on', TOOL_SEARCH_NAME])
+    }
   })
 
   it('shadows the deployment policy per scope and rejects a second declaration or an unscoped one', async () => {
