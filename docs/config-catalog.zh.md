@@ -3884,6 +3884,12 @@ export interface Config {
    */
   toolName?: string
   /**
+   * Model-facing lead of the tool description, replacing the generic
+   * delegation wording, for example a one-line role for an alias instance.
+   * The background and model-selection sentences are still appended.
+   */
+  description?: string
+  /**
    * Sample the Host `subagent-model-selection` setting for each new top-level
    * Session and inherit that decision in its child Sessions.
    */
