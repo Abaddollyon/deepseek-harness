@@ -108,6 +108,13 @@ export function WorkspacePickFlow({
     )
     return () => { live = false }
   }, [open, listWorlds])
+  // A closed menu forgets its hosts, so the next opening waits for its own
+  // read: deciding on the last one would hide a host provisioned since (the
+  // add-only menu would raise the directory flow straight away) or offer one
+  // removed since.
+  useEffect(() => {
+    if (!open) setWorlds(listWorlds === undefined ? [] : undefined)
+  }, [open, listWorlds])
   // One picking interaction at a time: while the flow is open (native chooser
   // pending, browse dialog up) or its pick is being adopted, every other
   // menu action stays disabled — a late outcome must not race a concurrent
