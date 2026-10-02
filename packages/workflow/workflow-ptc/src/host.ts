@@ -9,6 +9,8 @@ import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
+import { assertAllowedModelSelection } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import type { AllowedModelRoute } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { assertNever, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowMeta, WorkflowResult, WorkflowRun, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
@@ -163,6 +165,7 @@ export class PtcWorkflowRun implements WorkflowRun {
     private readonly init: WorkerInit,
     private readonly provider: string,
     private readonly childDefaults: AgentOptions | undefined,
+    private readonly allowedRoutes: readonly AllowedModelRoute[] | undefined,
     private readonly policy: SandboxExecutionPolicy,
     private readonly observer: ExecutionObserver,
     private readonly signal?: AbortSignal,
@@ -252,13 +255,33 @@ export class PtcWorkflowRun implements WorkflowRun {
     await llm.resolveCallConfig({ provider: effectiveProvider, model: effectiveModel, reasoningEffort }, this.controller.signal)
   }
 
+  /**
+   * Limit a call's explicit route to the parent Session's allowed routes, as
+   * the subagent tool does. Without a recorded selection policy any route is
+   * accepted, and configured defaults are not a choice the script made. The
+   * list is read at run start, so the run needs no engine service later.
+   * @param request - the `agent()` call.
+   * @param parentOptions - the parent's current route.
+   * @param agentOptions - the child's merged route.
+   */
+  private assertAllowedRoute(request: ChildStartRequest, parentOptions: AgentOptions, agentOptions: AgentOptions | undefined): void {
+    const routes = this.allowedRoutes
+    assertAllowedModelSelection(routes === undefined ? undefined : { routes }, parentOptions, agentOptions, {
+      ...request.provider === undefined ? {} : { provider: request.provider },
+      ...request.model === undefined ? {} : { model: request.model },
+      ...request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort },
+    })
+  }
+
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
     this.requireActive()
     const providerName = request.subagentProvider ?? this.provider
     // Configured defaults reach only a provider that can apply a route; an
     // explicit per-call route still reaches the provider, which rejects it.
     const defaults = this.subagents.getProvider(providerName)?.capabilities.agentOptions === true ? this.childDefaults : undefined
-    const agentOptions = childAgentOptions(defaults, request, parentAgentOptionsForDelegation(this.parent))
+    const parentOptions = parentAgentOptionsForDelegation(this.parent)
+    const agentOptions = childAgentOptions(defaults, request, parentOptions)
+    this.assertAllowedRoute(request, parentOptions, agentOptions)
     if (agentOptions?.reasoningEffort !== undefined) {
       await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
       this.requireActive()

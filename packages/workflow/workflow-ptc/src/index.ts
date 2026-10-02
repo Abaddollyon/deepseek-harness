@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
+import { subagentModelSelectionPolicy } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { PtcWorkflowRun } from './host.ts'
 import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
@@ -144,7 +145,7 @@ function resolveMaxTotalAgents(requested: number | undefined, ceiling: number): 
  * the seam contract.
  */
 class PtcWorkflowEngine extends WorkflowEngine {
-  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy']
+  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy', 'sessionProjections']
 
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
@@ -217,6 +218,8 @@ class PtcWorkflowEngine extends WorkflowEngine {
       init,
       subagentProvider,
       this.childDefaults,
+      // The policy is recorded once per Session, so the run start reads it.
+      subagentModelSelectionPolicy(runCtx.sessionProjections, request.parent.session),
       runCtx.sandboxPolicy.resolve({ session: request.parent.session }),
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },

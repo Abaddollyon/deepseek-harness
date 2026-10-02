@@ -11,6 +11,7 @@ import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import { recordSubagentModelSelection, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/src/model-selection-state.ts'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent-in-process-driver'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -216,6 +217,33 @@ return [first, second, third, fourth, fifth]`,
         expect(seen[0]).not.toHaveProperty('agentOptions')
       } finally {
         await run.dispose()
+      }
+    })
+
+    it('limits an explicit route to the Session\'s allowed routes when a selection policy is recorded', async () => {
+      const { ctx, parent } = await setup([textResponse('allowed child')], XHIGH)
+      ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+      recordSubagentModelSelection(ctx.sessionProjections, parent.session, [{ provider: 'mock', model: 'mock' }])
+      const start = vi.spyOn(ctx.subagents, 'start')
+      const refused = ctx.workflowEngine.start({
+        meta: { name: 'refused-route', description: 'route outside the pool' },
+        script: "return await agent('go', { model: 'other' })",
+        parent,
+      })
+      const allowed = ctx.workflowEngine.start({
+        meta: { name: 'allowed-route', description: 'route inside the pool' },
+        script: "return await agent('go', { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' })",
+        parent,
+      })
+      try {
+        const result = await refused.result
+        expect(result.stopReason).toBe('error')
+        expect(result.error).toContain('child LLM route "mock/other" is not allowed for this Session')
+        await expect(allowed.result).resolves.toMatchObject({ stopReason: 'completed', value: 'allowed child' })
+        expect(start).toHaveBeenCalledTimes(1)
+      } finally {
+        await refused.dispose()
+        await allowed.dispose()
       }
     })
 

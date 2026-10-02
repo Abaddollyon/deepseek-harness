@@ -14069,6 +14069,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: workspace:*
         version: link:../../core/tools
+      '@deepseek-ai/dsh-tool-subagent':
+        specifier: workspace:*
+        version: link:../../subagent/tool-subagent
       '@deepseek-ai/dsh-workflow':
         specifier: workspace:*
         version: link:../workflow
