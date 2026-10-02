@@ -59,8 +59,8 @@ export interface WorkspaceFileScope {
   readonly sessionId: SessionId
   /** Session workspace root, or the deployment fallback when its header has no cwd. */
   readonly workspaceRoot: string
-  /** Filesystem of the Session's execution world: its Agent preset's own `fs`, else the Host's. */
-  readonly fs: FileSystem
+  /** Filesystem of the Session's execution world (its Agent preset's own `fs`); omitted reads the Host's. */
+  readonly fs?: FileSystem
 }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -243,11 +243,11 @@ export class WorkspaceFiles extends TypertRemoteService {
   ): Promise<WorkspaceFileText> {
     const { offset, limit } = this.resolvePage(range)
     const { target, info } = await this.locateFile(workspaceFileScope, path, signal)
-    const page = await this.cutPage(workspaceFileScope.fs, target, offset, limit, signal, path)
+    const page = await this.cutPage(this.fsOf(workspaceFileScope), target, offset, limit, signal, path)
     if (page.text.includes(NUL)) {
       throw new RemoteError('workspace-file/not-text', `"${path}" contains NUL bytes`, { path })
     }
-    return { ...statOf(workspaceFileScope.fs, target, info), offset, text: page.text, lines: page.lines, eof: page.eof }
+    return { ...statOf(this.fsOf(workspaceFileScope), target, info), offset, text: page.text, lines: page.lines, eof: page.eof }
   }
 
   /**
@@ -270,18 +270,18 @@ export class WorkspaceFiles extends TypertRemoteService {
     const { target, info } = await this.locateFile(workspaceFileScope, resolved, signal)
     if (window !== undefined) {
       const { offset, length } = window
-      const data = await workspaceFileScope.fs.readByteRange(target, window, signal)
+      const data = await this.fsOf(workspaceFileScope).readByteRange(target, window, signal)
       const eof = info.size === undefined ? data.length < length : offset + data.length >= info.size
-      return { ...statOf(workspaceFileScope.fs, target, info), offset, data, eof }
+      return { ...statOf(this.fsOf(workspaceFileScope), target, info), offset, data, eof }
     }
     const limit = this.config.maxFileBytes
-    const data = await workspaceFileScope.fs.readBytes(target, signal, limit).catch((cause: unknown) => {
+    const data = await this.fsOf(workspaceFileScope).readBytes(target, signal, limit).catch((cause: unknown) => {
       if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'FS_TOO_LARGE') {
         throw new RemoteError('workspace-file/too-large', `"${path}" exceeds the ${limit} byte full-file cap`, { path, limit }, { cause })
       }
       throw cause
     })
-    return { ...statOf(workspaceFileScope.fs, target, info), offset: 0, data, eof: true }
+    return { ...statOf(this.fsOf(workspaceFileScope), target, info), offset: 0, data, eof: true }
   }
 
   /**
@@ -294,7 +294,7 @@ export class WorkspaceFiles extends TypertRemoteService {
   @Remote
   async stat(workspaceFileScope: WorkspaceFileScope, path: string, signal: AbortSignal): Promise<WorkspaceFileStat> {
     const { target, info } = await this.locateFile(workspaceFileScope, path, signal)
-    return statOf(workspaceFileScope.fs, target, info)
+    return statOf(this.fsOf(workspaceFileScope), target, info)
   }
 
   /**
@@ -317,7 +317,7 @@ export class WorkspaceFiles extends TypertRemoteService {
         { path, kind: entry.type },
       )
     }
-    const { fs } = workspaceFileScope
+    const fs = this.fsOf(workspaceFileScope)
     const target = await confine(fs, root, workspaceRoot, path, signal)
     if (entry.type === 'symlink') {
       const info = await fs.stat(target, signal)
@@ -344,7 +344,11 @@ export class WorkspaceFiles extends TypertRemoteService {
    */
   @Remote({ mode: 'stream' })
   changes(workspaceFileScope: WorkspaceFileScope, path: string, signal: AbortSignal): AsyncIterable<WorkspaceFileWatchFrame> {
-    return this.feed.follow(workspaceFileScope.fs, workspaceFileScope.workspaceRoot, path, signal)
+    return this.feed.follow(this.fsOf(workspaceFileScope), workspaceFileScope.workspaceRoot, path, signal)
+  }
+
+  private fsOf(scope: WorkspaceFileScope): FileSystem {
+    return scope.fs ?? this.ctx.fs
   }
 
   /**
@@ -370,7 +374,7 @@ export class WorkspaceFiles extends TypertRemoteService {
       throw new RemoteError('gateway/bad-request', 'path must be relative when baseFile is provided', {})
     }
     const { target } = await this.locateFile(scope, baseFile, signal)
-    const absolute = scope.fs.processPath(target)
+    const absolute = this.fsOf(scope).processPath(target)
     const paths = absolute.startsWith('/') ? posix : win32
     return paths.resolve(paths.dirname(absolute), relative)
   }
@@ -411,7 +415,8 @@ export class WorkspaceFiles extends TypertRemoteService {
     signal: AbortSignal,
   ): Promise<{ root: FsTarget; workspaceRoot: string; entry: FsPathInfo }> {
     if (path.length === 0) throw new RemoteError('gateway/bad-request', 'path is required', {})
-    const { workspaceRoot, fs } = workspaceFileScope
+    const { workspaceRoot } = workspaceFileScope
+    const fs = this.fsOf(workspaceFileScope)
     const root = await fs.resolve(workspaceRoot, { signal })
     // Gate on the path itself before anything follows it.
     const entry = await fs.lstat(path, { cwd: workspaceRoot }, signal)
@@ -435,8 +440,8 @@ export class WorkspaceFiles extends TypertRemoteService {
     if (entry.type !== 'file') {
       throw new RemoteError('workspace-file/not-regular-file', `"${path}" is a ${entry.type}`, { path, kind: entry.type })
     }
-    const target = await workspaceFileScope.fs.resolve(path, { cwd: workspaceRoot, signal })
-    const info = await workspaceFileScope.fs.stat(target, signal)
+    const target = await this.fsOf(workspaceFileScope).resolve(path, { cwd: workspaceRoot, signal })
+    const info = await this.fsOf(workspaceFileScope).stat(target, signal)
     if (info === undefined) {
       throw new RemoteError('workspace-file/not-found', `no entry at "${path}"`, { path })
     }
