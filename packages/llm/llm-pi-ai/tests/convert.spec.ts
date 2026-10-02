@@ -1003,16 +1003,21 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(silent, 100)).toEqual({
       kind: 'error',
       failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"',
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
+          + ' (input 101, cache-read 0)',
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
 
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
-    expect(mapStopReason(truncated, 100)).toMatchObject({
+    expect(mapStopReason(truncated, 100)).toEqual({
       kind: 'error',
-      failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
+      failure: {
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
+          + ' (input 80, cache-read 19)',
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      },
     })
   })
 

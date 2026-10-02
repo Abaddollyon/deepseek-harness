@@ -112,10 +112,13 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
+    // Without provider wording, pi-ai detects overflow only from usage against
+    // the resolved window, so the fallback can name both.
     return {
       kind: 'error',
       failure: {
-        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
+        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}" at resolved context`
+          + ` window ${contextWindow} tokens (input ${message.usage.input}, cache-read ${message.usage.cacheRead})`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     }
