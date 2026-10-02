@@ -219,6 +219,13 @@ interface CreateSessionOptions {
     readonly origin?: 'subagent'
     readonly delegationDepth?: number
     readonly agentPreset?: string
+    /**
+     * Absolute directories the Session may use beside `cwd`. A nonempty list
+     * becomes the Session's `workspace/roots` event at seq 0; a seeded
+     * Session inherits that event from its seed, and a supplied list must
+     * then equal the inherited one. Not a header field.
+     */
+    readonly additionalPaths?: readonly string[]
   }
 }
 ```

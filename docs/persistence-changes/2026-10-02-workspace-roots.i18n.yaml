@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for 2026-10-02-workspace-roots.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-10-02-workspace-roots.md
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-10-02-workspace-roots:
+  en: 83c0c35141d9ebb4
+  zh: 94c1afd41b3a8891
+/2026-10-02-workspace-roots/summary:
+  en: 02224abfeddae15e
+  zh: 1a5912e73b5f50e2
+/2026-10-02-workspace-roots/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-10-02-workspace-roots/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-10-02-workspace-roots/compatibility:
+  en: 076eabd59b19bf7c
+  zh: 58c309e5d2aeca01
+/2026-10-02-workspace-roots/verification:
+  en: 66ed723b76934ba5
+  zh: d82603643b131f15
+/2026-10-02-workspace-roots/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269
