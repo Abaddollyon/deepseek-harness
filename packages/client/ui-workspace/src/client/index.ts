@@ -249,6 +249,7 @@ export function apply(ctx: Context): void {
     },
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
     createWorkspace: input => workspaces.create(input),
+    listWorlds: () => workspaces.worlds(),
     requestSearch: shortcutControls.search,
     requestAddWorkspace: shortcutControls.add,
     closeAddWorkspace: shortcutControls.closeAdd,
@@ -259,6 +260,7 @@ export function apply(ctx: Context): void {
   const pickerInjected = (): WorkspacePickerInjected => ({
     createLooseSession,
     createWorkspace: input => workspaces.create(input),
+    listWorlds: () => workspaces.worlds(),
     hooks: { directoryFlow: pickerFlowSource },
   })
   // Each registration declares its owned children in the same call; slot

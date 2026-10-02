@@ -45,7 +45,7 @@ Choose **Add workspace** and select a directory to register it and open a Sessio
 
 Hierarchy uses registered canonical paths only. It does not scan for projects or resolve symlink aliases. Nesting does not change Session working directories, logs, or Workspace membership. Deleting a parent Workspace leaves its child Workspaces registered and places them under their next registered ancestor, or at the root.
 
-A Workspace row's **Manage folders…** dialog lists the primary folder and edits the Workspace's additional folders through the same directory flow, saving the complete list with `workspaces.updatePaths()`. Only Sessions created afterwards use a changed list. Workspace hover cards list the additional folders, and Session hover cards list the folders that Session recorded, read from its `additionalPaths` projection.
+A Workspace row's **Manage folders…** dialog lists the primary folder and edits the Workspace's additional folders through the same directory flow, saving the complete list with `workspaces.updatePaths()`. Only Sessions created afterwards use a changed list. Workspace hover cards list the additional folders, and Session hover cards list the folders that Session recorded, read from its `additionalPaths` projection. When another execution host can hold Workspaces (`workspaces.worlds()`), the add menu also offers **Add workspace on <host>…**, which registers a typed folder path on that host; the folders dialog of such a Workspace adds typed paths instead of opening the Host directory flow.
 
 Sessions outside every Workspace appear under **Chats**. Its new-Session action, and **Don't use a workspace** in the New Session picker, create a Session without a Workspace in the Host's default directory and open it.
 

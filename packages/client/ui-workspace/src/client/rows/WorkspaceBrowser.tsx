@@ -859,6 +859,7 @@ export function WorkspaceBrowser({
   insertWorkspaceBefore,
   unarchiveSession,
   createWorkspace,
+  listWorlds,
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
@@ -1318,6 +1319,7 @@ export function WorkspaceBrowser({
           anchorRef={wsPlusRef}
           useWorkspaces={useWorkspaces}
           createWorkspace={createWorkspace}
+          listWorlds={listWorlds}
           useDirectoryFlow={useDirectoryFlow}
           renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
           addOnly
@@ -1439,6 +1441,7 @@ export function WorkspaceBrowser({
           key={foldersTarget.workspaceId}
           path={foldersTarget.path}
           additionalPaths={foldersTarget.additionalPaths ?? []}
+          remote={foldersTarget.agentPreset !== undefined}
           flowAvailable={directoryFlowAvailable}
           renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
           onSave={paths => updateWorkspacePaths(foldersTarget.workspaceId, paths)}

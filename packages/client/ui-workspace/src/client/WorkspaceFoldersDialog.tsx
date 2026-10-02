@@ -1,11 +1,12 @@
 /**
  * Manage-folders dialog: edits one Workspace's additional directories with the
- * composed directory flow, then saves the complete list in one Host call.
+ * composed directory flow, or by typed path for a Workspace on another
+ * execution host, then saves the complete list in one Host call.
  * Sessions keep the roots they recorded; only new Sessions use the saved list.
  */
 import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from './contract/slots.ts'
 import css from './WorkspacePicker.module.css'
 
@@ -15,6 +16,8 @@ export interface WorkspaceFoldersDialogProps {
   path: string
   /** Additional directories when the dialog opened. */
   additionalPaths: readonly string[]
+  /** The Workspace lives on another execution host: folders are typed paths there, not Host picks. */
+  remote?: boolean
   /** Whether the directory-flow hole is occupied. */
   flowAvailable: boolean
   /** Render the directory-flow hole with this dialog as its owner. */
@@ -33,9 +36,19 @@ export interface WorkspaceFoldersDialogProps {
  * @returns the dialog and the flow hole.
  */
 export function WorkspaceFoldersDialog({
-  path, additionalPaths, flowAvailable, renderDirectoryFlow, onSave, onClose, t,
+  path, additionalPaths, remote = false, flowAvailable, renderDirectoryFlow, onSave, onClose, t,
 }: WorkspaceFoldersDialogProps) {
   const [paths, setPaths] = useState<readonly string[]>(additionalPaths)
+  const [typed, setTyped] = useState('')
+  const addFolder = (folder: string): void => {
+    setPaths(items => folder === path || items.includes(folder) ? items : [...items, folder])
+  }
+  const addTyped = (): void => {
+    const folder = typed.trim()
+    if (folder === '') return
+    addFolder(folder)
+    setTyped('')
+  }
   const [picking, setPicking] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -90,11 +103,27 @@ export function WorkspaceFoldersDialog({
               ))}
             </ul>
           )}
-          <div>
-            <Button variant="outline" disabled={saving || !flowAvailable} onClick={() => { setError(null); setPicking(true) }}>
-              {t('folders.add')}
-            </Button>
-          </div>
+          {remote
+            ? (
+              <div className={css.folderRow}>
+                <Input
+                  aria-label={t('remoteWorkspace.path')}
+                  placeholder={t('remoteWorkspace.placeholder')}
+                  value={typed}
+                  disabled={saving}
+                  onChange={(event) => { setTyped(event.target.value) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter') addTyped() }}
+                />
+                <Button variant="outline" disabled={saving || typed.trim() === ''} onClick={addTyped}>{t('folders.add')}</Button>
+              </div>
+            )
+            : (
+              <div>
+                <Button variant="outline" disabled={saving || !flowAvailable} onClick={() => { setError(null); setPicking(true) }}>
+                  {t('folders.add')}
+                </Button>
+              </div>
+            )}
           <div className={css.folderHint}>{t('folders.newSessions')}</div>
           {error !== null && <div className={css.modalError} role="alert">{error}</div>}
         </div>
@@ -104,7 +133,7 @@ export function WorkspaceFoldersDialog({
         busy: false,
         onPicked: (folder) => {
           setPicking(false)
-          setPaths(items => folder === path || items.includes(folder) ? items : [...items, folder])
+          addFolder(folder)
         },
         onCancel: () => { setPicking(false) },
         onError: (message) => {
