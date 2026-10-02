@@ -90,6 +90,7 @@
     "@deepseek-ai/dsh-fs": "workspace:*",
     "@deepseek-ai/dsh-llm": "workspace:*",
     "@deepseek-ai/dsh-native-command": "workspace:*",
+    "@deepseek-ai/dsh-permission-presets": "workspace:*",
     "@deepseek-ai/dsh-scope": "workspace:*",
     "@deepseek-ai/dsh-session": "workspace:*",
     "@deepseek-ai/dsh-session-persistence": "workspace:*",
@@ -108,6 +109,9 @@
     "@deepseek-ai/dsh-workspace": "workspace:*"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-permission-presets": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-session-persistence": {
       "optional": true
     },

@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-agent-preset-session-defaults.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-agent-preset-session-defaults.md
+/agent-note-agent-presets-declare-initial-session-defaults:
+  en: 228b47f4a58a262a
+  zh: 47b3b7ad3a4f41d8
+/agent-note-agent-presets-declare-initial-session-defaults/problem:
+  en: 76866553b8f99975
+  zh: 370489bc65af31c5
+/agent-note-agent-presets-declare-initial-session-defaults/decision:
+  en: bbb564de54d82470
+  zh: 0fcc43459840109d
+/agent-note-agent-presets-declare-initial-session-defaults/alternatives-considered:
+  en: 37de61e34c799961
+  zh: 8fa0a0856dc26e4a
+/agent-note-agent-presets-declare-initial-session-defaults/consequences:
+  en: 46b9efff61bfe48c
+  zh: c8a44c6a48e97f67

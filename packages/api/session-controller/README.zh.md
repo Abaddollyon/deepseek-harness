@@ -86,6 +86,8 @@ GUI 模型选择要求确切提供方／模型对出现在可用目录中；不�
 
 `selectModel` 成功返回表示会话级模型选择已生效，不等待默认 profile 设置保存。默认设置在后台按提交顺序保存；保存失败会记录警告，并保留会话选择。新会话读取最近一次成功保存的默认值。
 
+preset 声明的 [`defaults`](../../preset/agent-preset/README.zh.md) 会为 `session.create` 在其下创建的 Session 覆盖这些 Host 默认值。创建时，默认模型在通过 `selectModel` 的目录与推理强度检查后记录为 `model/selection` 事件，且不保存为 Host 默认值；权限通过 `ctx.permissionPresets.set` 切换。空白 Session 更换 preset 时，仍等于被替换 preset 默认值（或 Host 默认值）的每个值改为新 preset 的默认值（或回到 Host 默认值）；不同的值视为显式选择并保留。不可用的默认值会记录不含 provider 错误的警告，并保留 Host 默认值。恢复、采用与 fork 不应用任何默认值，webhook 与 subagent Session 不经过此路径。
+
 -----
 
 <a id="configuration"></a>

@@ -519,7 +519,7 @@ async list(): Promise<AgentPreset[]>
 
 /** Resolve an identity without starting an Agent.
  * @param id Explicit preset or the current default.
- * @returns Current metadata, including failure when activation failed.
+ * @returns Identity, declared Session defaults, and failure when activation failed.
  */
 async resolve(id?: string): Promise<AgentPreset>
 

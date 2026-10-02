@@ -86,6 +86,8 @@ GUI model selection requires the exact provider/model pair in the available cata
 
 A successful `selectModel` response acknowledges the Session-local selection without waiting for the default profile setting to save. Default saves run in the background in submission order; a failure logs a warning and leaves the Session selection intact. New Sessions read the last successfully saved default.
 
+A preset's declared [`defaults`](../../preset/agent-preset/README.md) override these Host defaults for a Session that `session.create` makes under it. Creation records the default model as a `model/selection` event, after the `selectModel` catalog and effort checks and without saving it as the Host default, and switches the permission through `ctx.permissionPresets.set`. When a blank Session changes preset, each value that still equals the replaced preset's default (or the Host default) moves to the new preset's default (or back to the Host default); a value that differs is treated as an explicit choice and kept. An unusable default logs a warning without the provider error and leaves the Host default. Resume, adoption, and fork apply nothing, and webhook and subagent Sessions do not pass through this path.
+
 -----
 
 <a id="configuration"></a>

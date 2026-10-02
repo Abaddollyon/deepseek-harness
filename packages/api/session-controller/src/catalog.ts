@@ -3,7 +3,8 @@
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
-import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type LlmModelInfo } from '@deepseek-ai/dsh-llm'
+import type { ModelSelection as AgentModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   ModelCatalog,
@@ -87,6 +88,37 @@ export async function modelAvailable(ctx: Context, selection: ModelSelection): P
       { provider: selection.provider, model: selection.model })
   }
   return models.some(model => model.id === selection.model)
+}
+
+/**
+ * Validate a model choice the way `/model` does: the exact pair must be in the
+ * available catalog and the model must support the effort.
+ * @param ctx - Host LLM registry.
+ * @param selection - requested provider, model, and optional effort.
+ * @returns the selection with any adapter-defaulted effort materialized.
+ * @throws `session/model-unavailable` for a pair outside the catalog, or the
+ *   LLM registry's error for an unsupported effort.
+ */
+export async function resolveModelSelection(
+  ctx: Context,
+  selection: ModelSelection,
+): Promise<AgentModelSelection> {
+  if (!await modelAvailable(ctx, selection)) {
+    throw new RemoteError('session/model-unavailable', 'Select an available model before sending a message.',
+      { provider: selection.provider, model: selection.model })
+  }
+  const resolved = await ctx.llm.resolveCallConfig({
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: ReasoningEffortId(selection.reasoningEffort) }),
+  })
+  return {
+    provider: resolved.provider,
+    model: resolved.model,
+    ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+  }
 }
 
 /**
