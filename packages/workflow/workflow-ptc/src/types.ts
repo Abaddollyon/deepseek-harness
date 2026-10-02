@@ -44,6 +44,8 @@ export interface ChildStartRequest {
   provider?: string
   /** The per-child model override, if the call passed one. */
   model?: string
+  /** The subagent provider starting this child in place of the configured one, for example another execution host. */
+  subagentProvider?: string
 }
 
 /**

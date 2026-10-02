@@ -245,6 +245,18 @@ describe('dsh-workflow-ptc', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai' })
     })
 
+    it('agent({subagentProvider}) starts only that child through the named provider', async () => {
+      const { ctx, parent, provider } = await setup()
+      const remote = new StubProvider('remote-host', () => text('remote reply'))
+      ctx.subagents.registerProvider(remote)
+
+      const result = await run(ctx, parent, scripted("return await parallel([() => agent('here'), () => agent('there', { subagentProvider: 'remote-host' })])"))
+
+      expect(result.value).toEqual(['stub reply', 'remote reply'])
+      expect(remote.runs).toHaveLength(1)
+      expect(provider.runs).toHaveLength(1)
+    })
+
     it('a start-request provider override selects every child without changing the engine default', async () => {
       const { ctx, parent, provider } = await setup()
       const selected = new StubProvider('selected', () => text('selected reply'))
