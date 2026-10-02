@@ -89,8 +89,8 @@ function renderRecordingError(error: unknown): string {
 }
 
 /**
- * Project active top-level workflow runs into their parent Sessions without
- * letting recording failure affect tool execution.
+ * Project active workflow runs into their calling Sessions, top-level and
+ * `run_code`-dispatched alike, without letting recording failure affect tool execution.
  */
 function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
   const active = new Map<WorkflowRunId, Session>()
@@ -330,7 +330,6 @@ function renderResult(name: string, agentsStarted: number, value: JsonValue): st
  * @param ctx - plugin context (engine, optional jobs registry, logger).
  * @param args - the validated tool call.
  * @param parent - the calling agent; owns the job.
- * @param recordsRun - whether this top-level call records durable run events.
  * @param deps - the tool's recorder/mirror taps, the result cap, and the result spill request.
  * @returns the background result for the tool's output schema.
  */
@@ -338,7 +337,6 @@ function startBackgroundRun(
   ctx: Context,
   args: WorkflowCallArgs,
   parent: Agent,
-  recordsRun: boolean,
   deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number; spill: Omit<SaveTextSpill, 'content'> },
 ): { kind: 'background'; jobId: JobId; runId: WorkflowRunId } {
   const jobs = ctx.get('jobs')
@@ -361,7 +359,7 @@ function startBackgroundRun(
         parent,
       })
       deps.mirror.start(run.id, job)
-      if (recordsRun) deps.recorder.start(parent.session, run)
+      deps.recorder.start(parent.session, run)
       const done = run.result.then(async (result): Promise<JobOutcome> => {
         try {
           // Keep member listeners alive through disposal: an engine may
@@ -372,10 +370,8 @@ function startBackgroundRun(
           ctx.logger.warn(`background workflow run ${run.id} dispose failed: ${String(error)}`)
         }
         deps.mirror.stop(run.id)
-        if (recordsRun) {
-          deps.recorder.finish(run.id, result.stopReason)
-          deps.recorder.abandon(run.id)
-        }
+        deps.recorder.finish(run.id, result.stopReason)
+        deps.recorder.abandon(run.id)
         return jobOutcomeOf(result, args.meta.name, value => projectResult(ctx, deps.spill, value, deps.maxResultChars))
       })
       return {
@@ -495,7 +491,7 @@ export function apply(ctx: Context, config: Config): void {
         // jobs.start synchronously from there. The shell tools await a
         // sandbox escalation approval before registering, which is the window
         // their check covers.
-        return startBackgroundRun(ctx, args, parent, exec.parent === undefined, {
+        return startBackgroundRun(ctx, args, parent, {
           recorder,
           mirror,
           maxResultChars,
@@ -513,9 +509,10 @@ export function apply(ctx: Context, config: Config): void {
         parent,
         signal: exec.signal,
       })
-      const recordsRun = exec.parent === undefined
-      // The engine publishes member events after start() returns and this run record is active.
-      if (recordsRun) recorder.start(parent.session, run)
+      // A run_code dispatch (`exec.parent` set) records like a top-level call: in Code Mode it is the
+      // model's only route to this tool. The engine publishes member events after start() returns
+      // and this run record is active.
+      recorder.start(parent.session, run)
 
       // Bridge the tool's abort signal to the run: if the parent step is aborted while the
       // script is in flight, cancel the whole run. The signal also enters the engine directly, but
@@ -546,13 +543,11 @@ export function apply(ctx: Context, config: Config): void {
           // Keep member listeners alive through disposal: an engine may
           // synthesize cancelled member endings while reaching quiescence.
           await run.dispose()
-          if (recordsRun) {
-            /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
-            if (result === undefined) throw new Error('workflow run settled without a result')
-            recorder.finish(run.id, result.stopReason)
-          }
+          /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
+          if (result === undefined) throw new Error('workflow run settled without a result')
+          recorder.finish(run.id, result.stopReason)
         } finally {
-          if (recordsRun) recorder.abandon(run.id)
+          recorder.abandon(run.id)
         }
       }
     },

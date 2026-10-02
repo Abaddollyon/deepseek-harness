@@ -235,16 +235,20 @@ describe('dsh-tool-workflow', () => {
       ])
   })
 
-  it('does not record nested transport executions', async () => {
+  it('records a run_code dispatch in the calling Session like a top-level call', async () => {
     const { ctx, engine, parent, session } = await setup()
     const pending = execute(ctx, { script: SCRIPT, meta: META }, {
       agent: parent,
       parent: Symbol('outer') as ToolExecutionToken,
     })
     await vi.waitFor(() => { expect(engine.requests).toHaveLength(1) })
-    engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 0 })
+    engine.agentStart(WorkflowRunId('run-1'), { seq: 1, label: 'member', childId: SessionId('child-1') })
+    engine.agentEnd(WorkflowRunId('run-1'), { seq: 1, label: 'member', childId: SessionId('child-1'), outcome: 'completed' })
+    engine.settleRun(WorkflowRunId('run-1'), { value: null, stopReason: 'completed', agentsStarted: 1 })
     expect((await pending).isError).toBe(false)
-    expect(session.snapshotEvents()).toEqual([])
+    expect(session.snapshotEvents().map(event => event.type)).toEqual([
+      'tool-workflow/run-start', 'tool-workflow/agent-start', 'tool-workflow/agent-end', 'tool-workflow/run-end',
+    ])
   })
 
   it.each([
@@ -605,7 +609,7 @@ describe('dsh-tool-workflow', () => {
       expect(jobs.get('workflow-1' as never, parent.id).detail).toContain('disk full')
     })
 
-    it('a nested transport call mirrors the ring but records no session events, and a dispose failure still settles', async () => {
+    it('a run_code dispatch mirrors the ring and records its run, and a dispose failure still settles', async () => {
       const { ctx, engine, parent, session } = await setupBackground()
       engine.disposeError = new Error('worker already gone')
       const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
@@ -620,7 +624,7 @@ describe('dsh-tool-workflow', () => {
       await vi.waitFor(() => { expect(jobs.get('workflow-1' as never, parent.id).status).toBe('completed') })
       expect(jobs.get('workflow-1' as never, parent.id).detail).toBe('1 agent')
       expect(warn.mock.calls.map(args => String(args[0])).join('\n')).toContain('dispose failed')
-      expect(session.snapshotEvents()).toEqual([])
+      expect(session.snapshotEvents().map(event => event.type)).toEqual(['tool-workflow/run-start', 'tool-workflow/run-end'])
     })
 
     it('a synchronous engine rejection registers no job', async () => {

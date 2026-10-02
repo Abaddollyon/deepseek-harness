@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-workflow-records-from-run-code.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-02-workflow-records-from-run-code.md
+/agent-note-workflow-records-from-run-code:
+  en: 220752d73608328c
+  zh: a46a96150452fc2c
+/agent-note-workflow-records-from-run-code/problem:
+  en: 8263b3451746ab37
+  zh: 514068bd545c1df6
+/agent-note-workflow-records-from-run-code/decision:
+  en: e1a43663366a9b85
+  zh: 9089a9051a947a76
+/agent-note-workflow-records-from-run-code/alternatives-considered:
+  en: 442a7fdd10cc3f60
+  zh: d901d84b24cf1b93
+/agent-note-workflow-records-from-run-code/consequences:
+  en: c341c03482263465
+  zh: f035ceff81747dce

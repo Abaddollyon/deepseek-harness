@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, LoggerLevel } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import BrowserUse from '@deepseek-ai/dsh-browser-use'
@@ -125,7 +125,7 @@ function registerIndependentTool(ctx: Context) {
 }
 
 async function events(root: string) {
-  return (await readFile(join(root, 'events.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { event: string; pid: number; name?: string })
+  return (await readFile(join(root, 'events.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { event: string; pid: number; name?: string; cwd?: string })
 }
 
 it('requires a browser mode and validates launch and attachment settings', () => {
@@ -294,6 +294,32 @@ describe('Session MCP Loader composition', () => {
     for (const { pid } of (await events(held.root)).filter(event => event.event === 'start')) {
       expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
     }
+  })
+
+  it('starts the browser in a Host directory when the Session cwd is missing here or belongs to another execution world', async () => {
+    const { ctx, root } = await load()
+    const host = await realpath(tmpdir())
+    const local = await realpath(root)
+    await ctx.agents.create({ sessionId: SessionId('local'), meta: { cwd: root } })
+    await ctx.agents.create({ sessionId: SessionId('missing'), meta: { cwd: join(root, 'missing') } })
+    ctx.provide('agentPresets', { composedPreset: () => 'remote', ownsWorld: (id: string) => id === 'remote' } as never)
+    const remote = await ctx.agents.create({ sessionId: SessionId('remote'), meta: { cwd: root } })
+    expect(ctx.tools.schemas(remote.agent).map(tool => tool.name)).toContain(TOOL)
+    expect((await events(root)).filter(event => event.event === 'start').map(event => event.cwd))
+      .toEqual([local, local, host, host, host, host])
+  })
+
+  it('starts a Session in another execution world without browser tools when the browser cannot start', async () => {
+    const { ctx } = await load(false, 'fail')
+    const warnings: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
+    await expect(ctx.agents.create({ sessionId: SessionId('host') })).rejects.toThrow('initial connection')
+    ctx.provide('agentPresets', { composedPreset: () => 'remote', ownsWorld: (id: string) => id === 'remote' } as never)
+    const remote = await ctx.agents.create({ sessionId: SessionId('remote') })
+    expect(ctx.agents.get(SessionId('remote'))).toBe(remote.agent)
+    expect(ctx.tools.schemas(remote.agent).filter(tool => tool.name.startsWith('mcp__browser-fixture__'))).toEqual([])
+    expect((await warm(ctx, remote.agent)).sections.map(section => section.name)).not.toContain('mcp:browser-fixture')
+    expect(warnings.flat().join('\n')).toContain('browser tools are unavailable to Session remote')
   })
 
   it('does not reconnect and silently replace browser state after a process exits', async () => {

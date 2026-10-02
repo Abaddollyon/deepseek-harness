@@ -1,5 +1,7 @@
 /** Session-owned MCP browser processes and provider catalog activation. @module */
 
+import { access, constants, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
@@ -11,6 +13,8 @@ import { SessionResources } from './index.ts'
 import type {} from '@deepseek-ai/dsh-browser-use'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+// Type-only: types `ctx.get('agentPresets')`, which tells a preset-owned execution world from the Host.
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 
 /** Browser launch settings shared by the MCP integrations. */
 export interface BrowserMcpLaunchConfig {
@@ -90,6 +94,30 @@ interface ClientState {
   mask?: Scope
 }
 
+/** Whether the Agent's preset runs it in an execution world other than the Host, such as an SSH host. */
+function inOtherWorld(ctx: Context, agent: Agent): boolean {
+  const presets = ctx.get('agentPresets')
+  const preset = presets?.composedPreset(agent.ctx)
+  return preset !== undefined && presets?.ownsWorld(preset) === true
+}
+
+/**
+ * Choose the Host directory the browser server starts in. It always runs on the Host, so the Session
+ * cwd is used only when it is a searchable Host directory in the Host's world; otherwise the Host's
+ * temporary directory stands in, since another world's path can be missing or inaccessible here.
+ * @param ctx - provider context reading the optional preset registry.
+ * @param agent - live Agent whose Session supplies the cwd.
+ * @returns the Host directory, or undefined to inherit the Host process cwd.
+ */
+async function hostCwd(ctx: Context, agent: Agent): Promise<string | undefined> {
+  const cwd = agent.session.header.cwd
+  if (cwd === undefined) return undefined
+  if (inOtherWorld(ctx, agent)) return tmpdir()
+  // Missing, unsearchable (for example another user's home) and non-directory paths all fall back.
+  const usable = await access(cwd, constants.X_OK).then(async () => (await stat(cwd)).isDirectory()).catch(() => false)
+  return usable ? cwd : tmpdir()
+}
+
 /**
  * Await one MCP client during each future Agent's creation.
  * A busy attachment leaves that activation without browser tools; its other turns continue.
@@ -132,6 +160,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
         const cancel = (): void => { cancellation = scope.dispose() }
         signal.addEventListener('abort', cancel, { once: true })
         try {
+          const cwd = await hostCwd(ctx, agent)
           signal.throwIfAborted()
           scope.ctx.on('tools/execute', async (exec, next) => {
             if (!exec.name.startsWith(toolPrefix)) return next()
@@ -147,7 +176,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
             command: options.command,
             args: options.args,
             ...options.env === undefined ? {} : { env: options.env },
-            ...agent.session.header.cwd === undefined ? {} : { cwd: agent.session.header.cwd },
+            ...cwd === undefined ? {} : { cwd },
             ...options.toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs: options.toolCallTimeoutMs },
             failOnStartupError: true,
             reconnect: { enabled: false },
@@ -185,7 +214,17 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
       refreshBlockedMasks()
       return
     }
-    await resources.get(agent, signal)
+    try {
+      await resources.get(agent, signal)
+    } catch (error) {
+      // The browser runs on the Host: a Host failure must not keep a Session in another world from starting.
+      if (signal?.aborted === true || !inOtherWorld(ctx, agent)) throw error
+      ctx.logger.warn(`${options.name}: browser tools are unavailable to Session ${agent.id}: the browser server failed to start on the Host: ${String(error)}`)
+      state.status = 'blocked'
+      clients.set(agent, state)
+      refreshBlockedMasks()
+      return
+    }
     clients.set(agent, state)
   }, { prepend: true })
   ctx.on('tools/change', refreshBlockedMasks)
