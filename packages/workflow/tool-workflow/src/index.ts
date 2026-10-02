@@ -214,7 +214,7 @@ function stopReasonError(result: WorkflowResult): string | undefined {
 /**
  * Map a settled background run onto the job outcome vocabulary. A completed
  * run carries the rendered, bounded return value as the job's result, or fails
- * when an oversized value cannot be saved; a
+ * when a mounted spill backend cannot save an oversized value; a
  * cancelled run leaves the detail to the registry's kill-reason merge (the
  * cancel reason it forwarded is the same string); an errored run fails with
  * the script's failure message.
@@ -249,12 +249,17 @@ async function jobOutcomeOf(
   }
 }
 
-/** Recovery metadata that replaces a completed value whose serialized JSON exceeds `maxResultChars`. */
+/**
+ * Recovery metadata that replaces a completed value whose serialized JSON exceeds `maxResultChars`.
+ * `spillPath` names the saved complete JSON; without a mounted `ctx.spillStore` it is absent and
+ * `notice` states that only `preview` remains.
+ */
 interface SpilledWorkflowResult {
   [key: string]: JsonValue
   truncated: true
   originalChars: number
-  spillPath: string
+  spillPath?: string
+  notice?: string
   preview: string
 }
 
@@ -269,13 +274,14 @@ function resultSpill(parent: Agent, exec: ToolExecution, name: string): Omit<Sav
 
 /**
  * Bound a completed value for the model. A value whose pretty-printed JSON exceeds `maxChars` is saved
- * whole through `ctx.spillStore` and replaced by {@link SpilledWorkflowResult}; the cap covers the
+ * whole through `ctx.spillStore` and replaced by {@link SpilledWorkflowResult}; without a mounted spill
+ * backend the replacement carries the preview and a notice instead of a path. The cap covers the
  * serialized value only, so the metadata itself may exceed it. A value within the cap returns synchronously.
- * @param ctx - plugin context; the spill backend is optional until a value is oversized.
+ * @param ctx - plugin context; the spill backend is optional.
  * @param spill - the owning Session, producing call, and suggested file name.
  * @param value - the run's JSON return value.
  * @param maxChars - the serialized-value ceiling.
- * @returns the value itself, or a promise of its recovery metadata that rejects when the value cannot be saved.
+ * @returns the value itself, or a promise of its recovery metadata that rejects when a mounted spill backend fails to save it.
  */
 function projectResult(
   ctx: Context,
@@ -296,16 +302,17 @@ async function spillResult(
   maxChars: number,
 ): Promise<SpilledWorkflowResult> {
   const spillStore = ctx.get('spillStore')
+  const preview = rendered.slice(0, maxChars)
   if (spillStore === undefined) {
-    throw new Error(`workflow result has ${rendered.length} characters, over maxResultChars (${maxChars}), and no ctx.spillStore backend is mounted to save it`)
+    return {
+      truncated: true,
+      originalChars: rendered.length,
+      notice: `no ctx.spillStore backend is mounted, so the complete value was not saved; only the first ${maxChars} characters remain in preview`,
+      preview,
+    }
   }
   const ref = await spillStore.saveText({ ...spill, content: rendered })
-  return {
-    truncated: true,
-    originalChars: rendered.length,
-    spillPath: String(ref.locator),
-    preview: rendered.slice(0, maxChars),
-  }
+  return { truncated: true, originalChars: rendered.length, spillPath: String(ref.locator), preview }
 }
 
 /** Render the run's outcome text: the meta name, agent count, and the bounded JSON value. */
