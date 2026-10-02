@@ -14,6 +14,7 @@ import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent-in-process-driver'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import PtcWorkflowEngine from '../src/index.ts'
+import type { Config as PtcWorkflowConfig } from '../src/index.ts'
 import { mountPtcRuntime } from './setup.ts'
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
@@ -30,7 +31,12 @@ async function mountInvariants(ctx: Context): Promise<void> {
   await ctx.plugin(AgentLoopInvariant)
 }
 
-async function setup(script: Script, reasoning?: typeof REASONING, parentOptions: AgentOptions = { provider: 'mock', model: 'mock' }) {
+async function setup(
+  script: Script,
+  reasoning?: typeof REASONING,
+  parentOptions: AgentOptions = { provider: 'mock', model: 'mock' },
+  engineConfig: PtcWorkflowConfig = {},
+) {
   const ctx = new Context()
   const adapter = new MockAdapter(script, reasoning)
   await mountAgentLoopTestDependencies(ctx)
@@ -39,7 +45,7 @@ async function setup(script: Script, reasoning?: typeof REASONING, parentOptions
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(spawn, { providerName: 'spawn' })
-  await ctx.plugin(PtcWorkflowEngine, {})
+  await ctx.plugin(PtcWorkflowEngine, engineConfig)
   ctx.llm.registerAdapter(['mock'], adapter)
   const parent = await ctx.agentLoop.create(SessionId('parent'), parentOptions)
   return { ctx, parent, adapter }
@@ -138,6 +144,100 @@ return [high, inherited]`,
     } finally {
       await run.dispose()
     }
+  })
+
+  describe('configured child route defaults', () => {
+    const XHIGH = {
+      efforts: [...REASONING.efforts, { id: ReasoningEffortId('xhigh'), name: 'Extra high' }],
+      defaultEffort: ReasoningEffortId('high'),
+    }
+
+    it('starts every child on the configured route; a call effort overrides it and a changed route drops it', async () => {
+      const { ctx, parent, adapter } = await setup(
+        ['default child', 'low child', 'other model child', 'other provider child', 'named route child'].map(text => textResponse(text)),
+        XHIGH,
+        { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+        { agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' } },
+      )
+      ctx.llm.registerAdapter(['alt'], adapter)
+      const start = vi.spyOn(ctx.subagents, 'start')
+      const run = ctx.workflowEngine.start({
+        meta: { name: 'defaults', description: 'configured child route' },
+        script: `const first = await agent('use the defaults')
+const second = await agent('think less', { reasoningEffort: 'low' })
+const third = await agent('other model', { model: 'other' })
+const fourth = await agent('other provider', { provider: 'alt', model: 'mock' })
+const fifth = await agent('the configured route by name', { provider: 'mock', model: 'mock' })
+return [first, second, third, fourth, fifth]`,
+        parent,
+      })
+      try {
+        const result = await run.result
+        expect(result.stopReason, result.error?.split('\n')[0]).toBe('completed')
+        expect(start.mock.calls.map(([, request]) => request.agentOptions)).toEqual([
+          { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
+          { provider: 'mock', model: 'mock', reasoningEffort: 'low' },
+          { provider: 'mock', model: 'other' },
+          { provider: 'alt', model: 'mock' },
+          { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
+        ])
+        expect(adapter.requests.map(request => request.reasoningEffort)).toEqual(['xhigh', 'low', 'high', 'high', 'xhigh'])
+      } finally {
+        await run.dispose()
+      }
+    })
+
+    it('fails the workflow before the child starts when the route does not offer the configured effort', async () => {
+      const { ctx, parent, adapter } = await setup(
+        [textResponse('never sent')],
+        REASONING,
+        undefined,
+        { agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' } },
+      )
+      const start = vi.spyOn(ctx.subagents, 'start')
+      const run = ctx.workflowEngine.start({
+        meta: { name: 'bad-default', description: 'unsupported configured effort' },
+        script: "return await agent('think')",
+        parent,
+      })
+      try {
+        const result = await run.result
+        expect(result.stopReason).toBe('error')
+        expect(result.error).toContain('provider "mock" model "mock" does not support reasoning effort "xhigh"')
+        expect(start).not.toHaveBeenCalled()
+        expect(adapter.requests).toHaveLength(0)
+      } finally {
+        await run.dispose()
+      }
+    })
+
+    it('passes a configured effort and token limit without a route, a route without an effort, and rejects a route missing its model', async () => {
+      const { ctx, parent } = await setup(
+        [textResponse('child')],
+        REASONING,
+        undefined,
+        { agentOptions: { reasoningEffort: 'low', maxTokens: 512 } },
+      )
+      const start = vi.spyOn(ctx.subagents, 'start')
+      const run = ctx.workflowEngine.start({ meta: { name: 'effort-only', description: 'effort only' }, script: "return await agent('go')", parent })
+      try {
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
+        expect(start.mock.calls[0]?.[1].agentOptions).toEqual({ reasoningEffort: 'low', maxTokens: 512 })
+      } finally {
+        await run.dispose()
+      }
+      const routed = await setup([textResponse('child')], REASONING, undefined, { agentOptions: { provider: 'mock', model: 'mock' } })
+      const routedStart = vi.spyOn(routed.ctx.subagents, 'start')
+      const routedRun = routed.ctx.workflowEngine.start({ meta: { name: 'route-only', description: 'route only' }, script: "return await agent('go')", parent: routed.parent })
+      try {
+        await expect(routedRun.result).resolves.toMatchObject({ stopReason: 'completed' })
+        expect(routedStart.mock.calls[0]?.[1].agentOptions).toEqual({ provider: 'mock', model: 'mock' })
+      } finally {
+        await routedRun.dispose()
+      }
+      await expect(setup([], undefined, undefined, { agentOptions: { provider: 'mock' } }))
+        .rejects.toThrow('configure `agentOptions.provider` and `agentOptions.model` together')
+    })
   })
 
   it('keeps real children visible to start observers after a progress burst', async () => {

@@ -4348,13 +4348,20 @@ export interface Config {
 ## `@deepseek-ai/dsh-workflow-ptc`
 
 - `inject`: `subagents` · `ptcRuntime` · `sandboxPolicy`
-- `source`: [`packages/workflow/workflow-ptc/src/index.ts:32`](../packages/workflow/workflow-ptc/src/index.ts)
+- `source`: [`packages/workflow/workflow-ptc/src/index.ts:49`](../packages/workflow/workflow-ptc/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config (all optional — `static Config` supplies the defaults). */
 export interface Config {
   /** The `ctx.subagents` provider children run on (default `spawn`). */
   provider?: string
+  /**
+   * Route defaults for every `agent()` child; omitted fields inherit the
+   * parent's route. A call's own provider, model or reasoning effort
+   * overrides them, and a call that changes the route without naming an
+   * effort drops the configured effort.
+   */
+  agentOptions?: ChildAgentDefaults | undefined
   /** Concurrent `agent()` ceiling; `0` (the default) auto-resolves to `min(16, max(1, cores - 2))`. */
   maxConcurrentAgents?: number
   /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1000). */
@@ -4363,6 +4370,21 @@ export interface Config {
   maxItemsPerCall?: number
   /** VM timeout for the script's initial synchronous slice (default 5000 ms). */
   syncTimeoutMs?: number
+}
+
+/**
+ * LLM route defaults for every `agent()` child. Provider and model form one
+ * route and are configured together.
+ */
+export interface ChildAgentDefaults {
+  /** LLM provider id of the child route. */
+  provider?: string
+  /** Model id interpreted by `provider`. */
+  model?: string
+  /** Adapter-owned reasoning effort; checked against the effective route before each child starts. */
+  reasoningEffort?: string
+  /** Positive output-token limit per child request. */
+  maxTokens?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-workflow-ptc -->

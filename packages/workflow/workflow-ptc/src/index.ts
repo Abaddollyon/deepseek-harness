@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto'
 import { availableParallelism } from 'node:os'
 import * as vm from 'node:vm'
 import type { Context } from '@deepseek-ai/cordis'
+import type { AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-ptc-runtime'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import z from '@deepseek-ai/schemastery'
@@ -28,10 +30,32 @@ export type {
   WorkerLimits,
 } from './types.ts'
 
+/**
+ * LLM route defaults for every `agent()` child. Provider and model form one
+ * route and are configured together.
+ */
+export interface ChildAgentDefaults {
+  /** LLM provider id of the child route. */
+  provider?: string
+  /** Model id interpreted by `provider`. */
+  model?: string
+  /** Adapter-owned reasoning effort; checked against the effective route before each child starts. */
+  reasoningEffort?: string
+  /** Positive output-token limit per child request. */
+  maxTokens?: number
+}
+
 /** Plugin config (all optional — `static Config` supplies the defaults). */
 export interface Config {
   /** The `ctx.subagents` provider children run on (default `spawn`). */
   provider?: string
+  /**
+   * Route defaults for every `agent()` child; omitted fields inherit the
+   * parent's route. A call's own provider, model or reasoning effort
+   * overrides them, and a call that changes the route without naming an
+   * effort drops the configured effort.
+   */
+  agentOptions?: ChildAgentDefaults | undefined
   /** Concurrent `agent()` ceiling; `0` (the default) auto-resolves to `min(16, max(1, cores - 2))`. */
   maxConcurrentAgents?: number
   /** Total `agent()` calls one run may start — the runaway-loop backstop (default 1000). */
@@ -42,7 +66,26 @@ export interface Config {
   syncTimeoutMs?: number
 }
 
-type ResolvedConfig = Required<Config>
+type ResolvedConfig = Required<Omit<Config, 'agentOptions'>> & Pick<Config, 'agentOptions'>
+
+/**
+ * Convert configured child defaults into Agent options.
+ * @param defaults - the configured defaults, if any.
+ * @returns the Agent options, or undefined when nothing is configured.
+ * @throws when only one of provider and model is configured.
+ */
+function childAgentDefaults(defaults: ChildAgentDefaults | undefined): AgentOptions | undefined {
+  if (defaults === undefined) return undefined
+  if ((defaults.provider === undefined) !== (defaults.model === undefined)) {
+    throw new Error('workflow-ptc: configure `agentOptions.provider` and `agentOptions.model` together')
+  }
+  return {
+    ...defaults.provider === undefined ? {} : { provider: defaults.provider },
+    ...defaults.model === undefined ? {} : { model: defaults.model },
+    ...defaults.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(defaults.reasoningEffort) },
+    ...defaults.maxTokens === undefined ? {} : { maxTokens: defaults.maxTokens },
+  }
+}
 
 /** A body that still carries the Claude Code-style meta header (meta rides the seam as data here). */
 const META_STATEMENT = /^\s*export\s+const\s+meta\b/
@@ -104,6 +147,13 @@ class PtcWorkflowEngine extends WorkflowEngine {
 
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
+    // A union keeps an omitted field absent instead of an empty object.
+    agentOptions: z.union([z.const(undefined), z.object({
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      reasoningEffort: z.string().min(1),
+      maxTokens: z.natural().min(1),
+    })]),
     maxConcurrentAgents: z.natural().default(0),
     maxTotalAgents: z.natural().min(1).default(1000),
     maxItemsPerCall: z.natural().min(1).default(4096),
@@ -111,6 +161,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
   })
 
   private readonly config: ResolvedConfig
+  private readonly childDefaults: AgentOptions | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -118,6 +169,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
     // schemastery (static Config) has already filled the defaulted fields;
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
+    this.childDefaults = childAgentDefaults(config.agentOptions)
   }
 
   /**
@@ -163,6 +215,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
       request.parent,
       init,
       subagentProvider,
+      this.childDefaults,
       runCtx.sandboxPolicy.resolve({ session: request.parent.session }),
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },

@@ -39,6 +39,7 @@ With those dependencies available, mount the engine and its model-facing consume
 | Field | Default | Meaning |
 |---|---|---|
 | `provider` | `spawn` | Host-side subagent provider used by `agent()` calls. |
+| `agentOptions` | — | Child LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`) for every `agent()` call; omitted fields inherit the parent's route. |
 | `maxConcurrentAgents` | `0` | Concurrent `agent()` ceiling; `0` resolves from available CPU parallelism. |
 | `maxTotalAgents` | `1000` | Total `agent()` calls one run may start. |
 | `maxItemsPerCall` | `4096` | Items accepted by one `parallel()` or `pipeline()` call. |
@@ -50,7 +51,7 @@ The Node PTC provider's `maxPendingCalls` also limits workflow concurrency: chil
 
 ### Results and failures
 
-The script runs with top-level `await`; `meta` and `args` arrive as JSON data. Every `agent()` call uses the run's fixed parent and the configured subagent provider, unless its `subagentProvider` option names another registered provider, for example one that starts the child on a different execution host. An explicit `label` is also stored as the child Session's display label. Its optional `provider`, `model` and `reasoningEffort` override that child's LLM route; a reasoning effort the effective model does not offer fails the workflow before the child starts. The final lossless-JSON return value becomes the run result; an ordinary child failure resolves `agent()` to `null`.
+The script runs with top-level `await`; `meta` and `args` arrive as JSON data. Every `agent()` call uses the run's fixed parent and the configured subagent provider, unless its `subagentProvider` option names another registered provider, for example one that starts the child on a different execution host. An explicit `label` is also stored as the child Session's display label. Its optional `provider`, `model` and `reasoningEffort` override that child's LLM route and the configured `agentOptions`; a call that changes the configured route without naming an effort drops the configured effort. A reasoning effort the effective model does not offer fails the workflow before the child starts. The final lossless-JSON return value becomes the run result; an ordinary child failure resolves `agent()` to `null`.
 
 Invalid metadata, an unparseable body, an unavailable provider route or a per-run cap above the ceiling is rejected before a run is published. During execution, hook misuse and tripped cooperative caps fail the workflow. Process failures, unavailable required confinement and PTC output or control limits also fail the run.
 

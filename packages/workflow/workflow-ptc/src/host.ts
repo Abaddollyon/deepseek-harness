@@ -68,14 +68,25 @@ function childRequest(value: unknown): ChildStartRequest {
   }
 }
 
-/** The child's route overrides, or `undefined` when it inherits the parent's route unchanged. */
-function childAgentOptions(request: ChildStartRequest): AgentOptions | undefined {
-  if (request.provider === undefined && request.model === undefined && request.reasoningEffort === undefined) return undefined
-  return {
+/**
+ * The child's route: the call's own provider, model and effort over the
+ * configured defaults. A call that changes the configured route without naming
+ * an effort drops the configured effort, which belongs to that route.
+ * @param defaults - configured child defaults, if any.
+ * @param request - the `agent()` call.
+ * @returns the child's Agent options, or `undefined` when it inherits the parent's route unchanged.
+ */
+function childAgentOptions(defaults: AgentOptions | undefined, request: ChildStartRequest): AgentOptions | undefined {
+  const perCall: AgentOptions = {
     ...request.provider === undefined ? {} : { provider: request.provider },
     ...request.model === undefined ? {} : { model: request.model },
     ...request.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) },
   }
+  if (defaults === undefined) return Object.keys(perCall).length === 0 ? undefined : perCall
+  const routeChanged = (request.provider !== undefined && request.provider !== defaults.provider)
+    || (request.model !== undefined && request.model !== defaults.model)
+  const { reasoningEffort: _configuredEffort, ...route } = defaults
+  return { ...routeChanged && request.reasoningEffort === undefined ? route : defaults, ...perCall }
 }
 
 function agentInfo(value: unknown): WorkflowAgentInfo {
@@ -148,6 +159,7 @@ export class PtcWorkflowRun implements WorkflowRun {
     private readonly parent: Agent,
     private readonly init: WorkerInit,
     private readonly provider: string,
+    private readonly childDefaults: AgentOptions | undefined,
     private readonly policy: SandboxExecutionPolicy,
     private readonly observer: ExecutionObserver,
     private readonly signal?: AbortSignal,
@@ -239,7 +251,7 @@ export class PtcWorkflowRun implements WorkflowRun {
 
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
     this.requireActive()
-    const agentOptions = childAgentOptions(request)
+    const agentOptions = childAgentOptions(this.childDefaults, request)
     if (agentOptions?.reasoningEffort !== undefined) {
       await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
       this.requireActive()
