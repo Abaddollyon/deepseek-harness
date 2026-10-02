@@ -78,8 +78,12 @@ export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config } from './config.ts'
 export type {
   Options,
+  PiAiAnthropicRequestMode,
+  PiAiAuthMode,
   PiAiCompatProfile,
   PiAiModality,
+  PiAiModelDiscoveryProfile,
+  PiAiModelDiscoverySource,
   PiAiModelOverride,
   PiAiModelProfile,
   PiAiProviderProfile,
@@ -262,6 +266,8 @@ export function apply(ctx: Context, config: Config): void {
     const profile = profiles().get(provider)
     if (profile === undefined) return undefined
     return {
+      source: profile.modelDiscoverySource,
+      baseURL: profile.baseURL,
       headers: profile.headers,
       resolveApiKey: () => resolveApiKey(provider, profile),
     }
