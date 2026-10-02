@@ -269,7 +269,8 @@ describe('deferral in the registry', () => {
     expect(await index()).toBe(before)
 
     // PTC carries the index in its SDK, and nothing deferred renders nothing.
-    for (const config of [{ mode: 'ptc', defer: { include: ['gbrain_*'] } }, { mode: 'native' }] as const) {
+    const configs: Config[] = [{ mode: 'ptc', defer: { include: ['gbrain_*'] } }, { mode: 'native' }]
+    for (const config of configs) {
       const other = await setup(config)
       expect((await other.ctx.systemPrompt.assemble()).sections.find(section => section.name === 'tools:deferred')?.text).toBe('')
     }
