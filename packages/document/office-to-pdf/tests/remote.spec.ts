@@ -1,14 +1,14 @@
 /** Authorized source identity and cancellation survive Host rendering. */
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { WorkspaceFiles } from '@deepseek-ai/dsh-api-workspace-files'
+import type { WorkspaceFiles, WorkspaceFileScope } from '@deepseek-ai/dsh-api-workspace-files'
 import type { FileSystem, FsInfo, FsTarget } from '@deepseek-ai/dsh-fs'
 import { OfficeToPdfError, OfficeToPdfKey, type OfficeToPdfResult } from '../src/index.ts'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import OfficeToPdf from '../src/index.ts'
 
-const scope = { sessionId: SessionId('document-test'), workspaceRoot: '/workspace' }
+let scope: WorkspaceFileScope
 const source = { absolutePath: '/workspace/report.DOCX', version: 'source-v1', bytes: 4 }
 const rawSource = { ...source, data: new Uint8Array([80, 75, 3, 4]) }
 const wireSource = { ...source, offset: 0, eof: true, data: rawSource.data }
@@ -30,7 +30,8 @@ beforeEach(async () => {
   read = vi.fn<FileSystem['readBytes']>().mockResolvedValue(rawSource.data)
   fileInfo = vi.fn<FileSystem['stat']>().mockResolvedValue(sourceInfo)
   processPath = vi.fn<FileSystem['processPath']>().mockReturnValue(source.absolutePath)
-  ctx.provide('fs', { resolve: vi.fn().mockResolvedValue(target), stat: fileInfo, processPath, readBytes: read } as never)
+  const fs = { resolve: vi.fn().mockResolvedValue(target), stat: fileInfo, processPath, readBytes: read }
+  scope = { sessionId: SessionId('document-test'), workspaceRoot: '/workspace', fs: fs as never }
   authorize = vi.fn<WorkspaceFiles['readBytes']>().mockResolvedValue({ ...wireSource, eof: false, data: rawSource.data.subarray(0, 1) })
   metadata = vi.fn<WorkspaceFiles['stat']>().mockResolvedValue(source)
   await ctx.plugin(OfficeToPdf)
@@ -194,13 +195,11 @@ it.each([{ absolutePath: '/workspace/replaced.docx' }, { version: 'v2' }])('refu
     .rejects.toMatchObject({ code: 'document-render/failed', details: { reason: 'source-changed' } })
 })
 
-it.each(['workspaceFiles', 'fs'] as const)('reports unavailable file access when %s is absent', async (missing) => {
+it('reports unavailable file access when workspaceFiles is absent', async () => {
   const independent = new Context()
   try {
     await independent.plugin(OfficeToPdf)
-    if (missing === 'workspaceFiles') independent.provide('fs', {} as never)
-    else independent.provide('workspaceFiles', {} as never)
-    expect(independent.get(missing)).toBeUndefined()
+    expect(independent.get('workspaceFiles')).toBeUndefined()
     await expect(independent.officeToPdf.render(scope, 'report.docx', 'foreground', new AbortController().signal))
       .rejects.toMatchObject({ code: 'document-render/failed', details: { reason: 'unavailable' } })
     expect(() => independent.officeToPdf.getGeneration(AbortSignal.abort())).toThrow()

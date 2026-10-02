@@ -185,8 +185,8 @@ export class OfficeToPdf extends TypertRemoteService {
         throw new OfficeToPdfError('unsupported-format', 'The path must end in doc, docx, xls, xlsx, ppt, or pptx.')
       }
       const files = this.ctx.get('workspaceFiles')
-      const fs = this.ctx.get('fs')
-      if (files === undefined || fs === undefined) throw new OfficeToPdfError('unavailable', 'Office file rendering requires workspaceFiles and fs.')
+      if (files === undefined) throw new OfficeToPdfError('unavailable', 'Office file rendering requires workspaceFiles.')
+      const fs = scope.fs
       const authorized = await files.readBytes(scope, path, { range: { offset: 0, length: 1 } }, signal)
       const source = await files.stat(scope, path, signal)
       const assertUnchanged = (current: WorkspaceFileStat): void => {
