@@ -667,8 +667,8 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     key: 'conversation.hero.agentPreset',
     kind: 'single',
     scope: 'session-maybe',
-    summary: 'Agent-preset control staged for a New Session.',
-    doc: 'Agent-preset control staged for a New Session.',
+    summary: 'Agent-preset control staged for a New Session, shown with the Hero or beside a landing.',
+    doc: 'Agent-preset control staged for a New Session, shown with the Hero or beside a landing.',
     registerOptions: [],
     ownerProps: [
       '/** Owner share of the Hero agent-preset control. */\nexport interface HeroAgentPresetOwnerProps {\n  /** Marker field: the occupant owns its roster and staged selection. */\n  children?: never\n}',
@@ -733,8 +733,8 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     key: 'conversation.hero.workspace',
     kind: 'single',
     scope: 'root',
-    summary: 'Workspace picker shown by the blank-session Hero.',
-    doc: 'Workspace picker shown by the blank-session Hero.',
+    summary: 'Workspace picker shown by the blank-session Hero, or beside a landing.',
+    doc: 'Workspace picker shown by the blank-session Hero, or beside a landing.',
     registerOptions: [],
     ownerProps: [
       '/** Owner share common to blank-session Workspace pickers. */\nexport interface EmptyWorkspaceOwnerProps {\n  open: boolean\n  anchorRef?: RefObject<HTMLElement>\n  /** Whether the picker may offer a new Session without a Workspace (the New Session hero). */\n  allowNoWorkspace?: boolean\n  /** Currently selected Workspace, when available. */\n  selectedId?: WorkspaceId | undefined\n  onPick: (workspaceId: WorkspaceId) => void\n  /** The user chose a new Session without a Workspace; the picker creates and opens it. */\n  onChooseNoWorkspace?: () => void\n  onClose: () => void\n}',

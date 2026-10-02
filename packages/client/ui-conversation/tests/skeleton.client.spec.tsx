@@ -388,7 +388,8 @@ function mount(
   }
   const view = render(<ConversationMainPanel {...props} />)
   return {
-    view, store, wiring, sink, retargetWorkspace, session, conversation, slotCalls, lineageOwners, seatOwners, extensionOwners, open,
+    view, store, wiring, sink, retargetWorkspace, session, sessions, conversation,
+    slotCalls, lineageOwners, seatOwners, extensionOwners, open,
     pickerOwner: () => pickerOwner,
     rerender: () => { view.rerender(<ConversationMainPanel {...props} />) },
   }
@@ -673,6 +674,28 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.container.querySelector('[data-conversation-landing]')).toBeNull()
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
     expect(b.view.getByRole('textbox')).toBe(box)
+  })
+
+  it('keeps the workspace and preset row beside a landing, and a preset switch swaps the landing out', () => {
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, undefined, { agentPreset: 'life', landings: ['life'] })
+    expect(b.view.container.querySelector('[data-conversation-landing="life"]')).not.toBeNull()
+    const seat = b.view.container.querySelector('[data-composer-seat]')
+    const preset = b.view.getByTestId('view-conversation.hero.agentPreset')
+    const chip = b.view.getByRole('button', { name: '选择工作区' })
+    expect(seat?.contains(preset)).toBe(true)
+    expect(seat?.contains(chip)).toBe(true)
+    expect(b.slotCalls).toContain('conversation.hero.workspace')
+
+    // The preset chip records another preset on the blank Session.
+    const current = b.sessions.getSnapshot()
+    const row = current.byId[SID]!
+    act(() => {
+      b.sessions.set({ ...current, byId: { ...current.byId, [SID]: { ...row, projectionValues: { agentPreset: 'code' } } } })
+    })
+    b.rerender()
+    expect(b.view.container.querySelector('[data-conversation-landing]')).toBeNull()
+    expect(b.view.container.querySelector('[data-phase]')?.getAttribute('data-phase')).toBe('hero')
+    expect(b.view.getByText('探索未至之境')).toBeTruthy()
   })
 
   it('a preset without a landing keeps the hero', () => {

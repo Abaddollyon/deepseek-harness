@@ -168,7 +168,10 @@ export function ConversationContent(props: ConversationContentProps) {
   const composerBar = (
     <div className={clsx(css.composerStack, hero && css.composerHero)}>
       {hero && <HeroShell t={t} renderSlot={renderSlot} />}
-      {hero && heroWorkspaceRow}
+      {/* A landing replaces the Hero but not the blank Session's choices:
+          the workspace and preset row stays above the docked card, so the
+          user can still switch the preset (and with it the landing). */}
+      {(hero || landing !== undefined) && heroWorkspaceRow}
       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
       {inputBar}
     </div>
