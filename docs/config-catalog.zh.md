@@ -835,7 +835,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-experimental-agent-team`
 
 - `inject`: `agents` · `sessions` · `sessionPersistence` · `sessionProjections` · `subagents`
-- `source`: [`packages/experimental/agent-team/src/types.ts:152`](../packages/experimental/agent-team/src/types.ts)
+- `source`: [`packages/experimental/agent-team/src/types.ts:154`](../packages/experimental/agent-team/src/types.ts)
 
 ```ts config-catalog
 /** Team-service deployment limits. */
@@ -1189,8 +1189,8 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-experimental-tool-agent-team`
 
-- `inject`: `agents` · `agentTeams` · `tools` · `systemPrompt`
-- `source`: [`packages/experimental/tool-agent-team/src/index.ts:17`](../packages/experimental/tool-agent-team/src/index.ts)
+- `inject`: `agents` · `agentTeams` · `tools` · `systemPrompt` · `subagents` · `sessionProjections` · `llm`
+- `source`: [`packages/experimental/tool-agent-team/src/index.ts:43`](../packages/experimental/tool-agent-team/src/index.ts)
 
 ```ts config-catalog
 /** Tool routing configuration. */
@@ -1199,6 +1199,28 @@ export interface Config {
   readonly freshProvider?: string
   /** Continuable-subagent provider used for completed-prefix fork teammates. */
   readonly forkProvider?: string
+  /**
+   * Route defaults for every teammate; omitted fields follow the subagent
+   * provider's route defaults and the Lead's route. A `spawn_teammate` call's
+   * own provider, model or reasoning effort overrides them, and a call that
+   * changes the route without naming an effort drops the configured effort.
+   */
+  readonly agentOptions?: TeammateDefaults | undefined
+}
+
+/**
+ * LLM route defaults for every teammate. Provider and model form one route
+ * and are configured together.
+ */
+export interface TeammateDefaults {
+  /** LLM provider id of the teammate route. */
+  readonly provider?: string
+  /** Model id interpreted by `provider`. */
+  readonly model?: string
+  /** Adapter-owned reasoning effort; checked against the effective route before each teammate starts. */
+  readonly reasoningEffort?: string
+  /** Positive output-token limit per teammate request. */
+  readonly maxTokens?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-experimental-tool-agent-team -->

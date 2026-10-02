@@ -3,7 +3,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
@@ -18,12 +19,27 @@ import { TeamId } from './types.ts'
 import type {
   SpawnTeammateRequest,
   SpawnTeammateResult,
+  TeammateRoute,
   TeamMemberSnapshot,
   TeamMemberView,
 } from './types.ts'
 import { requiredText } from './validation.ts'
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
+
+/**
+ * Convert a teammate route into child Agent options.
+ * @param route - the validated route.
+ * @returns the Agent options carrying exactly the route's fields.
+ */
+function teammateAgentOptions(route: TeammateRoute): AgentOptions {
+  return {
+    ...route.provider === undefined ? {} : { provider: route.provider },
+    ...route.model === undefined ? {} : { model: route.model },
+    ...route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) },
+    ...route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens },
+  }
+}
 
 /** Caller identity inside one implicit Team. */
 export interface TeamMembership {
@@ -135,6 +151,7 @@ export class TeamRoster {
       role: 'lead',
       status: availability(root),
       ...root.options.model === undefined ? {} : { model: root.options.model },
+      ...root.options.reasoningEffort === undefined ? {} : { reasoningEffort: root.options.reasoningEffort },
       diagnostics: [],
     }]
     for (const member of state.members) {
@@ -153,6 +170,7 @@ export class TeamRoster {
         provider: member.provider,
         context: member.context,
         ...model === undefined ? {} : { model },
+        ...live?.options.reasoningEffort === undefined ? {} : { reasoningEffort: live.options.reasoningEffort },
         diagnostics: member.error === undefined ? [] : [member.error],
       })
     }
@@ -286,6 +304,7 @@ export class TeamRoster {
         request: {
           prompt: request.prompt,
           parent: root,
+          ...request.agentOptions === undefined ? {} : { agentOptions: teammateAgentOptions(request.agentOptions) },
         },
         signal,
       })
@@ -445,6 +464,7 @@ export class TeamRoster {
       provider: member.provider,
       context: member.context,
       ...live?.options.model === undefined ? {} : { model: live.options.model },
+      ...live?.options.reasoningEffort === undefined ? {} : { reasoningEffort: live.options.reasoningEffort },
       diagnostics: [],
     }
   }

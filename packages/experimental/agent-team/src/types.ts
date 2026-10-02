@@ -64,6 +64,8 @@ export interface TeamMemberView {
   readonly provider?: string
   readonly context?: 'fresh' | 'fork'
   readonly model?: string
+  /** Reasoning effort of a live member's route. */
+  readonly reasoningEffort?: string
   readonly diagnostics: string[]
 }
 
@@ -162,6 +164,21 @@ export interface Config {
   readonly disposalTimeoutMs?: number
 }
 
+/**
+ * The LLM route one teammate runs on. Omitted fields follow the subagent
+ * provider's route defaults and the Lead's route.
+ */
+export interface TeammateRoute {
+  /** LLM provider id. */
+  readonly provider?: string
+  /** Model id interpreted by `provider`. */
+  readonly model?: string
+  /** Adapter-owned reasoning effort for the route. */
+  readonly reasoningEffort?: string
+  /** Positive output-token limit per request. */
+  readonly maxTokens?: number
+}
+
 /** Input for creating one durable teammate. */
 export interface SpawnTeammateRequest {
   readonly name: string
@@ -169,6 +186,8 @@ export interface SpawnTeammateRequest {
   readonly prompt: ContentBlock[]
   readonly context: 'fresh' | 'fork'
   readonly provider: string
+  /** The teammate's LLM route; the caller validates it before creation. */
+  readonly agentOptions?: TeammateRoute
   readonly signal: AbortSignal
 }
 

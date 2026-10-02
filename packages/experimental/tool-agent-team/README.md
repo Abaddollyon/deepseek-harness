@@ -47,6 +47,7 @@ The smallest addition to an existing composition is the two-package fragment fro
 |---|---|---|
 | `freshProvider` | `spawn` | Provider that starts fresh teammates |
 | `forkProvider` | `fork` | Provider that starts fork teammates |
+| `agentOptions` | — | Teammate LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`); omitted fields follow the provider's route defaults and the Lead's route |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-experimental-tool-agent-team) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -56,9 +57,9 @@ Try it by asking the Lead model: "create a teammate named reviewer to check the 
 
 The nine tools group into four capabilities:
 
-- **Create a teammate** — `spawn_teammate` takes a name, a description, and the initial task; only the Lead can call it.
+- **Create a teammate** — `spawn_teammate` takes a name, a description, and the initial task; only the Lead can call it. Its optional `provider`, `model` and `reasoning_effort` choose the teammate's LLM route under the same rules as the `subagent` tool: provider and model together, a route from the Session's allowed list, and an effort the route offers. A rejected choice points to `list_subagent_models`, and the parameters need the Session's subagent model-selection setting. Changing the configured route without naming an effort drops the configured effort.
 - **Send messages** — `send_message` steers a running member at its nearest step boundary, starts or resumes an inactive member.
-- **See and wait** — `list_agents` returns each member’s `target` and availability; `wait_agent` waits for the next team change; `interrupt_agent` stops a teammate's current turn (Lead only).
+- **See and wait** — `list_agents` returns each member’s `target` and availability, plus the model and reasoning effort of a live member; `wait_agent` waits for the next team change; `interrupt_agent` stops a teammate's current turn (Lead only).
 - **Manage the task board** — `team_task_create`, `team_task_list`, `team_task_get`, and `team_task_update` add, browse, read, and update shared tasks.
 
 Creation and listing results identify members by `target`, with no member Session ID. Use that value in message and interrupt calls or the task tools’ `owner` parameter; task `ownerName` uses the same value. `inactive` means no turn is executing, whether the member is loaded or must be resumed; it does not describe task completion or outcome. `provisioning` and `failed` describe member creation. Any member can message any other member and use the task board; only the Lead creates and interrupts teammates. Task updates keep the domain's owner and revision checks, so an outdated edit is rejected instead of overwriting newer work.
