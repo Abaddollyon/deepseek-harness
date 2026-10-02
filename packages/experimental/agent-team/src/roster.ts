@@ -70,7 +70,6 @@ export function resolveActiveMember(
   return { id: member.id, name }
 }
 
-/** Owns Team identities and the lifecycle of rostered continuable children. */
 /** A teammate's model and reasoning effort as last observed. */
 interface MemberRoute {
   readonly model?: string
@@ -91,6 +90,7 @@ function memberRoute(options: { readonly model?: string | undefined; readonly re
   }
 }
 
+/** Owns Team identities and the lifecycle of rostered continuable children. */
 export class TeamRoster {
   private readonly inFlightCreations = new Set<Promise<unknown>>()
   /**
