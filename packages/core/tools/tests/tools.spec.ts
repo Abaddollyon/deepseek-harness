@@ -820,7 +820,6 @@ describe('ToolRuntime', () => {
     it('dispatches the tool when the answerer grants allowed-once, forwarding the ask fields', async () => {
       const ctx = await approvalSetup()
       const agent = fakeAgent()
-      const controller = new AbortController()
       const seen: ApprovalRequest[] = []
       ctx.on('approval/request', (req) => {
         seen.push(req)
@@ -830,7 +829,7 @@ describe('ToolRuntime', () => {
         ({ kind: 'ask', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' } }))
 
       const result = await ctx.tools.execute({
-        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: controller.signal,
+        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
       })
 
       expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
@@ -838,7 +837,6 @@ describe('ToolRuntime', () => {
       expect(seen[0]).toMatchObject({
         agent, toolName: 'echo', callId: 'c1', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' },
       })
-      expect(seen[0]?.signal).toBe(controller.signal)
     })
 
     it('denies with the user-rejection reason on rejected', async () => {
@@ -871,7 +869,9 @@ describe('ToolRuntime', () => {
         name: 'approval-probe',
         async execute() { dispatched += 1; return [] },
       })
-      ctx.on('approval/request', () => {
+      let asked: AbortSignal | undefined
+      ctx.on('approval/request', (req) => {
+        asked = req.signal
         entered.resolve(undefined)
         return release.promise
       })
@@ -887,6 +887,8 @@ describe('ToolRuntime', () => {
 
       await entered.promise
       controller.abort('caller cancelled approval')
+      // The answerer's signal follows the execution signal.
+      expect(asked?.reason).toBe('caller cancelled approval')
       release.resolve('allowed-once')
 
       await expect(pending).resolves.toMatchObject({

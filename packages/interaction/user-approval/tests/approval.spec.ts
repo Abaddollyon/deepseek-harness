@@ -83,7 +83,7 @@ describe('ApprovalService.request', () => {
     expect(Object.keys(appended[0]?.data ?? {}).sort()).toEqual(['id', 'toolName'])
   })
 
-  it('borrows the exact readonly request for scoped dispatch and audit', async () => {
+  it('dispatches the request fields scoped to the request agent and audits them', async () => {
     const ctx = await mounted()
     const { agent, appended } = fakeAgent()
     let scope!: Scope
@@ -105,7 +105,7 @@ describe('ApprovalService.request', () => {
 
     await expect(ctx.approval.request(request)).resolves.toBe('allowed-once')
     expect(carrier).toBe(agent)
-    expect(received).toBe(request)
+    expect(received).toMatchObject({ agent, toolName: 'scoped-tool', callId: 'scoped-call', reason: 'scoped reason' })
     expect(appended).toHaveLength(2)
     expect(appended[0]?.data).toMatchObject({
       toolName: 'scoped-tool',
@@ -290,18 +290,47 @@ describe('ApprovalService.request', () => {
     const ctx = await mounted()
     const { agent, appended } = fakeAgent()
     let settleLate: ((outcome: ApprovalOutcome) => void) | undefined
-    ctx.on('approval/request', () => new Promise<ApprovalOutcome>((resolve) => { settleLate = resolve }))
+    let received: AbortSignal | undefined
+    ctx.on('approval/request', (req) => {
+      received = req.signal
+      return new Promise<ApprovalOutcome>((resolve) => { settleLate = resolve })
+    })
     const controller = new AbortController()
 
     const pending = ctx.approval.request(requestOf(agent, { signal: controller.signal }))
-    controller.abort()
+    controller.abort('caller withdrew')
     await expect(pending).resolves.toBe('cancelled')
+    expect(received?.reason).toBe('caller withdrew')
 
     // The answerer settles after the fact: no second decided event appears.
     settleLate?.('allowed-once')
     await Promise.resolve()
     expect(appended.filter(e => e.type === 'approval/decided')).toHaveLength(1)
     expect(appended[1]?.data).toMatchObject({ outcome: 'cancelled' })
+  })
+
+  it('withdraws the request from a downstream answerer once an earlier listener answers', async () => {
+    const ctx = await mounted()
+    const { agent, appended } = fakeAgent()
+    let downstream: AbortSignal | undefined
+    // A desk prompt: it stays pending until the request signal withdraws it.
+    ctx.on('approval/request', req => new Promise<ApprovalOutcome>((resolve) => {
+      downstream = req.signal
+      req.signal?.addEventListener('abort', () => { resolve('cancelled') }, { once: true })
+    }))
+    let forwarded: Promise<ApprovalOutcome> | undefined
+    ctx.on('approval/request', (_req, next) => {
+      forwarded = next()
+      return Promise.resolve<ApprovalOutcome>('rejected')
+    }, { prepend: true })
+    const controller = new AbortController()
+
+    await expect(ctx.approval.request(requestOf(agent, { signal: controller.signal }))).resolves.toBe('rejected')
+
+    expect(downstream?.aborted).toBe(true)
+    expect(controller.signal.aborted).toBe(false)
+    await expect(forwarded).resolves.toBe('cancelled')
+    expect(appended.filter(e => e.type === 'approval/decided').map(e => e.data['outcome'])).toEqual(['rejected'])
   })
 
   it('discards a late REJECTION after abort without an unhandled rejection', async () => {

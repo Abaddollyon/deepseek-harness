@@ -203,7 +203,8 @@ export interface BridgeHarness {
   sessionUpdates: { sessionId: string; update: CapturedUpdate }[]
   permissionRequests: RequestPermissionRequest[]
   persistenceRoot: string
-  onPermission: (request: RequestPermissionRequest) => RequestPermissionResponse
+  /** Answers one permission prompt; `signal` aborts when the server sends `$/cancel_request`. */
+  onPermission: (request: RequestPermissionRequest, signal: AbortSignal) => RequestPermissionResponse | Promise<RequestPermissionResponse>
   onSessionUpdateError: (() => void) | undefined
   registerCatalogProvider: (provider: string) => () => void
   replacePrimaryProviders: (providers: string[]) => void
@@ -279,9 +280,9 @@ export async function makeBridgeHarness(options: {
       if (harness.onSessionUpdateError !== undefined) return Promise.reject(new Error('client update rejected'))
       return Promise.resolve()
     })
-    .onRequest(methods.client.session.requestPermission, ({ params }) => {
+    .onRequest(methods.client.session.requestPermission, ({ params, signal }) => {
       permissionRequests.push(params)
-      return Promise.resolve(harness.onPermission(params))
+      return Promise.resolve(harness.onPermission(params, signal))
     })
 
   const config = { stream: agentStream, ...options.config } as AcpConfig

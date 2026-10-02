@@ -404,13 +404,14 @@ describe('ask_user_question tool', () => {
   it('passes the tool abort signal to the user-questions request', async () => {
     const ctx = await setup()
     const seen: AskUserQuestionRequest[] = []
+    const controller = new AbortController()
     registerQuestionAnswerer(ctx, {
       async ask(request) {
         seen.push(request)
+        controller.abort('turn cancelled')
         return { answers: [{ id: 'continue', selected: ['ok'] }] }
       },
     })
-    const controller = new AbortController()
 
     await ctx.tools.execute({
       callId: ToolCallId('ask-2'),
@@ -419,7 +420,8 @@ describe('ask_user_question tool', () => {
       signal: controller.signal,
     })
 
-    expect(seen[0]?.signal).toBe(controller.signal)
+    // The answerer's signal follows the tool signal.
+    expect(seen[0]?.signal?.reason).toBe('turn cancelled')
   })
 
   it('passes optional header and a resumed runtime root through to the user-questions request', async () => {
