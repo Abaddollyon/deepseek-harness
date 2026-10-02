@@ -661,6 +661,11 @@ describe('ConversationRoot resident composer', () => {
     const seat = b.view.container.querySelector('[data-composer-seat]')
     expect(seat?.contains(box)).toBe(true)
     expect(landing?.compareDocumentPosition(seat!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    // The session views stay mounted beside the landing, so the stored draft
+    // seeds the composer and typing reaches the Conversation store.
+    expect(b.wiring.snapshot.draft).toBe('ordinary draft')
+    act(() => { b.wiring.setDraft('plan my week') })
+    expect(b.store.store.getSnapshot().draft).toBe('plan my week')
 
     // The first turn replaces the landing with the transcript; the composer stays mounted.
     b.session.set(sessionSnapshotOf({ blank: false }))

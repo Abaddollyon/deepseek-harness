@@ -200,15 +200,14 @@ export function ConversationContent(props: ConversationContentProps) {
       data-content-phase={phase}
     >
       <div className={css.scrollBody} data-conversation-scroll="">
-        {sessionId === undefined
-          ? null
-          : landing === undefined
-            ? <Views />
-            : (
-              <div className={css.landingSeat} data-conversation-landing={landing}>
-                {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
-              </div>
-            )}
+        {sessionId !== undefined && landing !== undefined && (
+          <div className={css.landingSeat} data-conversation-landing={landing}>
+            {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
+          </div>
+        )}
+        {/* The views stay mounted beside a landing: they render nothing for a
+            blank Session, but own the stored-draft seed and the draft mirror. */}
+        {sessionId === undefined ? null : <Views />}
         {composerSeat}
       </div>
       <WidthControls container={body} phase={phase} />
