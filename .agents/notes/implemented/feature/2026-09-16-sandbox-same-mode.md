@@ -10,7 +10,7 @@ Models can repeat `sandbox_permissions: danger-full-access` while that mode is a
 
 ## Decision
 
-`approveEscalation` returns the effective mode immediately when the requested mode matches it. Argument pairing remains mandatory at the tool. Wider modes still require approval; narrower and unsupported targets still fail. This partially supersedes the non-widening rejection in the [sandbox decision](2026-07-06-sandbox.md); its confinement and per-call approval decisions remain active.
+`approveEscalation` returns the effective mode immediately when the requested mode matches it. Argument pairing remains mandatory at the tool. Wider modes still require approval; unsupported targets still fail, and narrower modes run confined without approval ([narrower requests](2026-10-02-sandbox-narrower-mode.md)). This partially supersedes the non-widening rejection in the [sandbox decision](2026-07-06-sandbox.md); its confinement and per-call approval decisions remain active.
 
 ## Alternatives considered
 

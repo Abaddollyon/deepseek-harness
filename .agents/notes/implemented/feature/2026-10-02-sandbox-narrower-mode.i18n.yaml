@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-sandbox-narrower-mode.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-sandbox-narrower-mode.md
+/agent-note-narrower-sandbox-requests-run-confined-without-approval:
+  en: b06aa2de5c710416
+  zh: e6e5bdb2d426c559
+/agent-note-narrower-sandbox-requests-run-confined-without-approval/problem:
+  en: 4eb3e9ac97ec1311
+  zh: b9ffbc65fd1c18f4
+/agent-note-narrower-sandbox-requests-run-confined-without-approval/decision:
+  en: 4938aca6b4b9f7dd
+  zh: d130c6fab19b9541
+/agent-note-narrower-sandbox-requests-run-confined-without-approval/alternatives-considered:
+  en: ca94920b4ba26b44
+  zh: 743cacb463c8e7c5
+/agent-note-narrower-sandbox-requests-run-confined-without-approval/consequences:
+  en: 0cf6d8f6ccb0f275
+  zh: e75f979d57c93f11

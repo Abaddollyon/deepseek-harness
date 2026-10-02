@@ -33,8 +33,8 @@
   en: f7f359c89a0e8fd6
   zh: 07d0d551a35716e0
 /agent-note-the-subprocess-sandbox-confinement-seam-native-runners-escalation-and-per-session-modes/decision/design-detail/escalation-one-approved-wider-retry-after-a-denial:
-  en: 035640e276225e97
-  zh: 09fd95921529369b
+  en: 2adf49a32a7c1faf
+  zh: 1af55103625ce30d
 /agent-note-the-subprocess-sandbox-confinement-seam-native-runners-escalation-and-per-session-modes/decision/design-detail/per-session-modes-the-session-log-as-the-store:
   en: 6805c807f584961c
   zh: 687fd4ad687e4dee
@@ -51,8 +51,8 @@
   en: eabe577b837f3de2
   zh: 4ef0167c895766a6
 /agent-note-the-subprocess-sandbox-confinement-seam-native-runners-escalation-and-per-session-modes/consequences:
-  en: c0d8279a677a0ef1
-  zh: 3518fc05f8700c0b
+  en: 3729d4b12a8eb9a7
+  zh: bce6e667bd80c53a
 /agent-note-the-subprocess-sandbox-confinement-seam-native-runners-escalation-and-per-session-modes/faq:
   en: de45c2a398b8abe6
   zh: 93be112960b40736
