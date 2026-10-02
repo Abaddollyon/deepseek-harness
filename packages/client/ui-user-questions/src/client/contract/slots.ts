@@ -19,7 +19,26 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /** Actions for the exact plan under review; approval remains with the question composer. */
     'conversation.plan-review.actions': { kind: 'list'; scope: 'session'; owner: { review: PlanReview; requestKey: PendingQuestion['key'] } }
+    /**
+     * Replacement for the leading label of a question or plan-review card: the
+     * question's header above its title, or the plan card's status. The
+     * occupant presents the request; the card keeps its title, choices, and
+     * every way of answering or dismissing it.
+     */
+    'conversation.question.lead': { kind: 'single'; scope: 'session'; owner: QuestionLeadOwnerProps }
   }
+}
+
+/** Read-only request facts handed to a question card's leading-label replacement. */
+export interface QuestionLeadOwnerProps {
+  /** The card presenting the request. */
+  kind: 'question' | 'plan-review'
+  /** Number of questions in the request. */
+  questionCount: number
+  /** Header of the question on screen, when the asker gave one. */
+  header?: string
+  /** Whether an answer or dismissal is being sent. */
+  busy: boolean
 }
 
 /** One structured answer batch covering every question of the request. */
@@ -568,7 +587,7 @@ export type QuestionWait = PendingQuestion
 export type QuestionComposerProps =
   PropsRuntime<'conversation.composer'>
   & PropsStore<ReturnType<typeof createQuestionDraftStore>>
-  & PropsRenderSlots<'conversation.plan-review.actions'>
+  & PropsRenderSlots<'conversation.plan-review.actions' | 'conversation.question.lead'>
   & InjectFace<{ keyedHooks: { questionCard: (key: string) => PendingQuestion | undefined } }>
   & { matched: QuestionWait }
   & PropsLocale<'question'>

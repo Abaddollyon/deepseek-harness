@@ -110,7 +110,7 @@ const inputState: InputState = {
  *  the composed props type mandates delivery of the rest (framework hooks are
  *  plain stubs per the client testing discipline). */
 const kitBase: Omit<QuestionComposerProps, 'matched' | 'useStore' | 'useQuestionCard' | 'actions'> = {
-  renderSlot: () => null,
+  renderSlot: (_key, _owner, opts) => opts?.fallback ?? null,
   SessionProvider: ({ children }) => children,
   session: undefined,
   sessionId: SID,
@@ -210,6 +210,25 @@ describe('QuestionComposer', () => {
     expect(screen.queryByText('会一直等你回答')).toBeNull()
     expect(screen.queryByRole('button', { name: '慢慢回答' })).toBeNull()
     expect(screen.getByRole('button', { name: '放弃整组问题' })).toBeTruthy()
+  })
+
+  it('shows the question header as the eyebrow, or hands it to a lead occupant with read-only request facts', () => {
+    const { carrier } = wait()
+    const view = render(<QuestionComposer matched={carrier} {...kit} />)
+    expect(screen.getByText('偏好')).toBeTruthy()
+    view.unmount()
+
+    const owners: unknown[] = []
+    const renderSlot: QuestionComposerProps['renderSlot'] = (key, owner, opts) => {
+      if (key !== 'conversation.question.lead') return opts?.fallback ?? null
+      owners.push(owner)
+      return <span>Your call</span>
+    }
+    render(<QuestionComposer matched={carrier} {...kit} renderSlot={renderSlot} />)
+    expect(screen.getByText('Your call')).toBeTruthy()
+    expect(screen.queryByText('偏好')).toBeNull()
+    expect(screen.getByRole('heading', { name: '选择候选人类型' })).toBeTruthy()
+    expect(owners.at(-1)).toEqual({ kind: 'question', questionCount: 3, header: '偏好', busy: false })
   })
 
   it('keeps a recommended default selected without pausing a timed wait', () => {

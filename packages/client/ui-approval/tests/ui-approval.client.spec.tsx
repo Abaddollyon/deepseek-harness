@@ -5,6 +5,7 @@ import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ReactNode } from 'react'
 import { ApprovalPanel } from '../src/client/ApprovalPanel.tsx'
 import type { ApprovalComposerProps, ApprovalInjected } from '../src/client/contract/slots.ts'
 import { PendingApproval } from '../src/client/contract/slots.ts'
@@ -312,9 +313,13 @@ describe('approval Remote Event consumer', () => {
   })
 })
 
+/** Empty seats, as the outlet renders them: the owner's fallback or nothing. */
+const emptySlots = (): ApprovalComposerProps['renderSlot'] =>
+  vi.fn((_key: string, _owner: object, opts?: { fallback?: ReactNode }) => opts?.fallback ?? null) as never
+
 function panelProps(
   pending: PendingApproval,
-  renderSlot: ApprovalComposerProps['renderSlot'] = vi.fn(() => null),
+  renderSlot: ApprovalComposerProps['renderSlot'] = emptySlots(),
 ): ApprovalComposerProps {
   const messages: Record<string, string> = {
     waiting: 'Waiting',
@@ -340,7 +345,7 @@ describe('ApprovalPanel', () => {
     expect(screen.getByText('Tool bash asks')).toBeTruthy()
     expect(document.querySelector('[data-approval-key] [data-state="warning"]')).not.toBeNull()
     expect(screen.getByRole('group', { name: 'Approval details' })).toBeTruthy()
-    expect(props.renderSlot).not.toHaveBeenCalled()
+    expect(props.renderSlot).not.toHaveBeenCalledWith('conversation.approval.detail', expect.anything())
     fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
 
     expect(document.querySelector('[data-approval-key]')?.getAttribute('aria-busy')).toBe('true')
@@ -355,8 +360,9 @@ describe('ApprovalPanel', () => {
       callId: 'call-1' as ToolCallId,
       reason: 'Run this exact command',
     })
-    const renderSlot = vi.fn(() => <code>pnpm test</code>)
-    render(<ApprovalPanel {...panelProps(pending, renderSlot)} />)
+    const renderSlot = vi.fn((key: string, _owner: object, opts?: { fallback?: ReactNode }) =>
+      key === 'conversation.approval.detail' ? <code>pnpm test</code> : opts?.fallback ?? null)
+    render(<ApprovalPanel {...panelProps(pending, renderSlot as never)} />)
 
     expect(screen.getByText('Run this exact command')).toBeTruthy()
     expect(screen.getByText('pnpm test')).toBeTruthy()
@@ -367,6 +373,30 @@ describe('ApprovalPanel', () => {
     expect(document.querySelector('[data-approval-key] [data-state="ongoing"]')).not.toBeNull()
     expect(document.querySelector('[data-approval-key]')?.getAttribute('aria-busy')).toBe('true')
 
+    await expect(pending.result).resolves.toBe('allowed-once')
+  })
+
+  it('hands the status strip to a lead occupant without giving it the answer path', async () => {
+    const pending = new PendingApproval(id('s1'), {
+      toolName: 'bash',
+      callId: 'call-1' as ToolCallId,
+      reason: 'audit reason',
+      displayReason: { en: 'Push the branch', zh: '推送分支' },
+    })
+    const owners: object[] = []
+    const renderSlot = vi.fn((key: string, owner: object) => {
+      if (key !== 'conversation.approval.lead') return null
+      owners.push(owner)
+      return <span>Need your yes</span>
+    })
+    render(<ApprovalPanel {...panelProps(pending, renderSlot as never)} />)
+
+    expect(screen.getByText('Need your yes')).toBeTruthy()
+    expect(screen.queryByText('Waiting')).toBeNull()
+    expect(screen.getByText('Push the branch')).toBeTruthy()
+    expect(owners.at(-1)).toEqual({ toolName: 'bash', callId: 'call-1', reason: 'Push the branch', answered: false })
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(owners.at(-1)).toMatchObject({ answered: true })
     await expect(pending.result).resolves.toBe('allowed-once')
   })
 
@@ -416,8 +446,8 @@ describe('ApprovalPanel', () => {
 
   it('ignores unowned input, modified keys, repeats and IME candidate keys', async () => {
     const pending = new PendingApproval(id('s1'), { toolName: 'bash', callId: 'call-1' as ToolCallId })
-    const renderSlot = () => <input aria-label="Approval input" />
-    render(<ApprovalPanel {...panelProps(pending, renderSlot)} />)
+    const renderSlot = (key: string) => key === 'conversation.approval.detail' ? <input aria-label="Approval input" /> : null
+    render(<ApprovalPanel {...panelProps(pending, renderSlot as never)} />)
     const group = screen.getByRole('group', { name: 'Approval details' })
     fireEvent.keyDown(group, { key: 'Enter', code: 'Enter' })
     expect(pending.answerable).toBe(true)

@@ -58,8 +58,9 @@ export function PlanReviewPanel({ pending, review, t, renderSlot }: PlanReviewPa
     <div className={css.frame} data-plan-review-key={pending.key}>
       <section className={css.card} aria-label={review.question} aria-busy={busy}>
         <div className={css.strip}>
-          <StateDot state={busy ? 'ongoing' : 'warning'} />
-          {t('plan.header')}
+          {renderSlot('conversation.question.lead', { kind: 'plan-review', questionCount: 1, busy }, {
+            fallback: <><StateDot state={busy ? 'ongoing' : 'warning'} />{t('plan.header')}</>,
+          })}
           <div className={css.previewActions}>
             {renderSlot('conversation.plan-review.actions', { review, requestKey: pending.key })}
           </div>

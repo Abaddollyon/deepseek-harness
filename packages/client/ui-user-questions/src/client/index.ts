@@ -33,7 +33,7 @@ import { QuestionReplyView } from './QuestionReplyView.tsx'
 import { en, zh, type QuestionKey } from './locales.ts'
 
 export type {
-  PendingQuestion, PlanReview, QuestionAnswer, QuestionComposerProps, QuestionWait,
+  PendingQuestion, PlanReview, QuestionAnswer, QuestionComposerProps, QuestionLeadOwnerProps, QuestionWait,
 } from './contract/slots.ts'
 export type { QuestionKey } from './locales.ts'
 
@@ -387,7 +387,10 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       store: questionDraftStore,
       inject: () => ({ keyedHooks: { questionCard: (key: string) => cards.source(key) } }),
-      children: { 'conversation.plan-review.actions': { kind: 'list', scope: 'session' } },
+      children: {
+        'conversation.plan-review.actions': { kind: 'list', scope: 'session' },
+        'conversation.question.lead': { kind: 'single', scope: 'session' },
+      },
     },
     QuestionComposer,
   ))

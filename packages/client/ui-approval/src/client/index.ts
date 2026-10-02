@@ -16,6 +16,7 @@ export type {
   ApprovalComposerProps,
   ApprovalDecision,
   ApprovalDetailOwnerProps,
+  ApprovalLeadOwnerProps,
   ApprovalPresentationRequest,
   PendingApproval,
 } from './contract/slots.ts'
@@ -99,6 +100,7 @@ export function apply(ctx: ClientContext): void {
     }),
     children: {
       'conversation.approval.detail': { kind: 'single', scope: 'session' },
+      'conversation.approval.lead': { kind: 'single', scope: 'session' },
     },
   }, ApprovalPanel))
   ctx.remote.$on('approval/request', function (request, next) {

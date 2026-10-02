@@ -15,13 +15,21 @@ export function ApprovalPanel(props: ApprovalComposerProps) {
     ? null
     : props.renderSlot('conversation.approval.detail', { callId: approval.callId })
   const reason = approval.displayReason === undefined ? approval.reason : props.resolveReason(approval.displayReason)
-  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail} t={props.t} />
+  const lead = (answered: boolean): ReactNode => props.renderSlot('conversation.approval.lead', {
+    toolName: approval.toolName,
+    ...(approval.callId === undefined ? {} : { callId: approval.callId }),
+    ...(reason === undefined ? {} : { reason }),
+    answered,
+  }, { fallback: <><StateDot state={answered ? 'ongoing' : 'warning'} />{props.t('waiting')}</> })
+  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail} lead={lead} t={props.t} />
 }
 
-function ApprovalFlow({ pending, reason, detail, t }: {
+function ApprovalFlow({ pending, reason, detail, lead, t }: {
   pending: PendingApproval
   reason: string | undefined
   detail: ReactNode
+  /** The status strip's content for the current answering state. */
+  lead: (answered: boolean) => ReactNode
   t: ApprovalComposerProps['t']
 }) {
   const [answered, setAnswered] = useState(false)
@@ -63,7 +71,7 @@ function ApprovalFlow({ pending, reason, detail, t }: {
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false; compositionEnded.current = true }}>
       <div className={css.card}>
-        <div className={css.strip}><StateDot state={answered ? 'ongoing' : 'warning'} />{t('waiting')}</div>
+        <div className={css.strip}>{lead(answered)}</div>
         <div
           className={css.body}
           data-approval-scroll=""

@@ -160,7 +160,9 @@ root
 │     │     └─ conversation.session.header.corner
 │     ├─ conversation.composer
 │     │  ├─ conversation.approval.detail
-│     │  └─ conversation.plan-review.actions
+│     │  ├─ conversation.approval.lead
+│     │  ├─ conversation.plan-review.actions
+│     │  └─ conversation.question.lead
 │     ├─ conversation.composer.bar
 │     │  ├─ conversation.input.attachments
 │     │  ├─ conversation.input.permission
