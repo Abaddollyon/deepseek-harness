@@ -228,7 +228,7 @@ Prefix-stable while the PTC mode selection, generated SDK, transport schema, and
 
 #### What the model sees
 
-With a defer policy, the PTC SDK ends with a `## More tools` section: one instruction to look up a declaration with `tool_search` before calling a listed tool, then one line per deferred tool with its first sentence (at most 100 characters). A namespaced family of more than eight tools (`<prefix>__*`, or `mcp__<server>__*`) becomes one line of member names. In native mode the deferred tools are absent from the declared list until `tool_search` returns them, and `tool_search` itself is declared.
+With a defer policy, the PTC SDK ends with a `## More tools` section: one instruction to look up a declaration with `tool_search` before calling a listed tool, then one line per deferred tool with its first sentence (at most 100 characters). A namespaced family of more than eight tools (`<prefix>__*`, or `mcp__<server>__*`) becomes one line of member names. In native mode the deferred tools are absent from the declared list until `tool_search` returns them, and `tool_search` itself is declared. A `tools:deferred` section then carries the same `## More tools` index, whose instruction says to call `tool_search` with exact `names` and that found tools are callable from the next step. It lists every deferred tool, activated or not.
 
 #### Token effect
 

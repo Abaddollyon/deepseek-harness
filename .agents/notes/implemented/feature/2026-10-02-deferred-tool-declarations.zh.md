@@ -15,7 +15,7 @@ Status: implemented
 当某个作用域延迟了一个可见工具时，注册表会在 `run_code` 旁插入保留的 `tool_search` 查询工具。延迟的工具仍然注册且可调用：
 
 - 在 PTC 模式下，它们离开 `ToolArgsMap` 与 `ToolOutputMap`。SDK 代码块之后是 `## More tools` 索引，每个工具一行；超过八个工具的命名空间族合并为一行成员名称。程序内的 `tool_search` 以 SDK 自身的语言返回声明，这些声明留在历史中。
-- 在 native 模式下，它们离开已声明的工具列表。直接调用 `tool_search` 会返回其 JSON schema，并为该 agent 激活它们。agent loop 已经会把新声明的工具记录为 `tool-addition`，因此支持工具更新的路由在缓存历史之后加入它，其他路由则重新声明列表。
+- 在 native 模式下，它们离开已声明的工具列表，由 `tools:deferred` 段承载同样的仅列名称索引；该索引列出所有可延迟的工具，因此激活不会改变它。直接调用 `tool_search` 会返回其 JSON schema，并为该 agent 激活它们。agent loop 已经会把新声明的工具记录为 `tool-addition`，因此支持工具更新的路由在缓存历史之后加入它，其他路由则重新声明列表。
 - 延迟工具的参数错误会附带该工具的声明。
 
 激活按 agent 保存在注册表中。在 `agent/created` 时，注册表从 agent 最后一次记录的请求头所声明的工具恢复其激活，因为该请求头已经记录了提供给模型的内容。

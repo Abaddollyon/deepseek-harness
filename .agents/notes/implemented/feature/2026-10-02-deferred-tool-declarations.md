@@ -15,7 +15,7 @@ A preset that composes many tools sends every declaration on every request. In a
 While a scope defers a visible tool, the registry inserts the reserved `tool_search` lookup next to `run_code`. Deferred tools stay registered and callable:
 
 - In PTC mode they leave `ToolArgsMap` and `ToolOutputMap`. A `## More tools` index follows the SDK block with one line per tool, or one line of member names for a namespaced family of more than eight. `tool_search` inside a program returns declarations in the SDK's own language, which stay in the history.
-- In native mode they leave the declared tool list. A direct `tool_search` call returns their JSON schemas and activates them for that agent. The agent loop already logs a newly declared tool as a `tool-addition`, so routes with tool updates add it after the cached history and other routes re-declare the list.
+- In native mode they leave the declared tool list, and a `tools:deferred` section carries the same name-only index, listing every deferrable tool so activations leave it unchanged. A direct `tool_search` call returns their JSON schemas and activates them for that agent. The agent loop already logs a newly declared tool as a `tool-addition`, so routes with tool updates add it after the cached history and other routes re-declare the list.
 - An argument error from a deferred tool carries that tool's declaration.
 
 Activations live in the registry per agent. On `agent/created` the registry seeds an agent's activations from the tools its last logged request header declared, because that header already records what the model was offered.

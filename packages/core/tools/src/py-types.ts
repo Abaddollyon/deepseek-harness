@@ -17,7 +17,7 @@
 import { assertSupportedJsonSchema } from './json-schema.ts'
 import type { JsonSchemaNode, JsonSchemaScalar } from './json-schema.ts'
 import type { ToolSdkSchema } from './ts-types.ts'
-import { renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
+import { programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
 import type { DeferredToolEntry } from './defer.ts'
 
 /**
@@ -766,7 +766,7 @@ The available tools:`
 export function renderToolsSdkPy(schemas: ToolSdkSchema[], deferred: readonly DeferredToolEntry[] = []): string {
   const errorDeclaration = 'class ToolCallError(Exception):\n    toolName: str'
   const declaration = renderToolsStub(schemas, stub => `${stub.imports}\n\n${errorDeclaration}\n\n${stub.body}\n\ntools: Tools`)
-  const index = renderDeferredIndex(deferred, name => `print((await tools.${TOOL_SEARCH_NAME}({"names": ["${name}"]}))["declarations"])`)
+  const index = renderDeferredIndex(deferred, programIndexLead(name => `print((await tools.${TOOL_SEARCH_NAME}({"names": ["${name}"]}))["declarations"])`))
   return `${SDK_INSTRUCTIONS}\n\n\`\`\`python\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
 }
 

@@ -148,19 +148,39 @@ function indexLines(sorted: readonly DeferredToolEntry[]): string[] {
 }
 
 /**
- * Render the index that follows the SDK declarations when a scope defers tools.
- * @param entries - the deferred tools; empty renders nothing.
+ * The index lead for a PTC program: deferred tools are SDK bindings whose
+ * declarations a program prints with `tool_search`.
  * @param call - renders one example `tool_search` call in the SDK's language for a tool name.
+ * @returns the lead sentence for the index's first tool.
+ */
+export function programIndexLead(call: (example: string) => string): (first: string) => string {
+  return first => `These tools are callable from the program but not declared above. Before you call one, look up its declaration with \`${TOOL_SEARCH_NAME}\` (exact \`names\`, or a keyword \`query\`) and print it, for example \`${call(first)}\`.`
+}
+
+/**
+ * The index lead for native tool calling: a direct `tool_search` call adds
+ * the found tools to the declared tool list from the next step.
+ * @param first - the index's first tool name.
+ * @returns the lead sentence.
+ */
+export function nativeIndexLead(first: string): string {
+  return `These tools are available but not in your tool list. Call \`${TOOL_SEARCH_NAME}\` with their exact \`names\` (or a keyword \`query\`) to add their declarations; you can call them from your next step, for example \`${TOOL_SEARCH_NAME}({"names": ["${first}"]})\`.`
+}
+
+/**
+ * Render the name-only index of a scope's deferred tools.
+ * @param entries - the deferred tools; empty renders nothing.
+ * @param lead - the sentence that tells the model how to reach a listed tool, given the first tool's name.
  * @returns the section text, or the empty string without deferred tools.
  */
-export function renderDeferredIndex(entries: readonly DeferredToolEntry[], call: (example: string) => string): string {
+export function renderDeferredIndex(entries: readonly DeferredToolEntry[], lead: (first: string) => string): string {
   const sorted = [...entries].sort(byToolName)
   const [first] = sorted
   if (first === undefined) return ''
   return [
     '## More tools',
     '',
-    `These tools are callable from the program but not declared above. Before you call one, look up its declaration with \`${TOOL_SEARCH_NAME}\` (exact \`names\`, or a keyword \`query\`) and print it, for example \`${call(first.name)}\`.`,
+    lead(first.name),
     '',
     ...indexLines(sorted),
   ].join('\n')

@@ -9,7 +9,7 @@
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { assertSupportedJsonSchema } from './json-schema.ts'
 import type { JsonSchemaNode, JsonSchemaScalar } from './json-schema.ts'
-import { renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
+import { programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
 import type { DeferredToolEntry } from './defer.ts'
 /** Internal PTC mode projection: the model-facing schema plus the canonical output schema. */
 export interface ToolSdkSchema extends ToolSchema {
@@ -375,6 +375,6 @@ export function renderToolsSdk(schemas: ToolSdkSchema[], deferred: readonly Defe
     'type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }',
     ...maps.usesMcpResult ? [`type ${MCP_RESULT_TYPE} = ${jsonSchemaToTs(MCP_RESULT_SCHEMA)}`] : [],
   ].join('\n\n')
-  const index = renderDeferredIndex(deferred, name => `console.log((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`)
+  const index = renderDeferredIndex(deferred, programIndexLead(name => `console.log((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`))
   return `${SDK_INSTRUCTIONS}${renderBashExample(sorted)}\n\n${SDK_PROGRAM_INSTRUCTIONS}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
 }

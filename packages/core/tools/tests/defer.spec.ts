@@ -247,6 +247,34 @@ describe('deferral in the registry', () => {
     expect(await wireNames(ctx)).toEqual(['bash', TOOL_SEARCH_NAME])
   })
 
+  it('lists deferred tools by name for a native agent, unchanged by its activations', async () => {
+    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*', 'mcp__*'] } })
+    const agent = agentWith('native-index')
+    await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
+    const index = async (): Promise<string> => (await ctx.systemPrompt.assemble({ scope: agent })).sections
+      .find(section => section.name === 'tools:deferred')?.text ?? ''
+    const before = await index()
+    expect(before).toBe([
+      '## More tools',
+      '',
+      'These tools are available but not in your tool list. Call `tool_search` with their exact `names` (or a keyword `query`) to add their declarations; you can call them from your next step, for example `tool_search({"names": ["gbrain_put_page"]})`.',
+      '',
+      '- `gbrain_put_page` — The gbrain_put_page tool.',
+      '- `gbrain_query` — The gbrain_query tool.',
+      '- `mcp__home__light_on` — The mcp__home__light_on tool.',
+    ].join('\n'))
+    expect(await sdkOf(ctx, agent)).toBe('')
+    await call(ctx, TOOL_SEARCH_NAME, { names: ['mcp__home__light_on'] }, agent)
+    expect(await wireNames(ctx, agent)).toContain('mcp__home__light_on')
+    expect(await index()).toBe(before)
+
+    // PTC carries the index in its SDK, and nothing deferred renders nothing.
+    for (const config of [{ mode: 'ptc', defer: { include: ['gbrain_*'] } }, { mode: 'native' }] as const) {
+      const other = await setup(config)
+      expect((await other.ctx.systemPrompt.assemble()).sections.find(section => section.name === 'tools:deferred')?.text).toBe('')
+    }
+  })
+
   it('restores a resumed agent\'s activations from the tools its logged request header declared', async () => {
     const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*'] } })
     const resumed = agentWith('resumed', { tools: [{ name: 'bash', description: '', parameters: {} }, { name: 'gbrain_put_page', description: '', parameters: {} }] })

@@ -228,7 +228,7 @@ Program-only SDK bindings:
 
 #### 模型看到什么
 
-存在延迟策略时，PTC SDK 以 `## More tools` 段结尾：先给出一条说明，要求在调用所列工具前用 `tool_search` 查询其声明，然后每个延迟工具一行，附其首句（最多 100 个字符）。超过八个工具的命名空间族（`<prefix>__*` 或 `mcp__<server>__*`）合并为一行成员名称。在 native 模式下，延迟工具在 `tool_search` 返回它们之前不在已声明的列表中，`tool_search` 本身会被声明。
+存在延迟策略时，PTC SDK 以 `## More tools` 段结尾：先给出一条说明，要求在调用所列工具前用 `tool_search` 查询其声明，然后每个延迟工具一行，附其首句（最多 100 个字符）。超过八个工具的命名空间族（`<prefix>__*` 或 `mcp__<server>__*`）合并为一行成员名称。在 native 模式下，延迟工具在 `tool_search` 返回它们之前不在已声明的列表中，`tool_search` 本身会被声明。此时由 `tools:deferred` 段承载同样的 `## More tools` 索引，其说明要求用精确的 `names` 调用 `tool_search`，并说明找到的工具从下一步起可调用。它列出每个延迟工具，无论是否已激活。
 
 #### Token 影响
 

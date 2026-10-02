@@ -28,7 +28,7 @@ import type { PtcSdkLanguage } from './ptc.ts'
 import { renderToolDeclarations, renderToolsSdk } from './ts-types.ts'
 import type { ToolSdkSchema } from './ts-types.ts'
 import { renderToolDeclarationsPy, renderToolsSdkPy } from './py-types.ts'
-import { compileToolDeferPolicy, TOOL_SEARCH_NAME } from './defer.ts'
+import { compileToolDeferPolicy, nativeIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
 import type { CompiledToolDeferPolicy, DeferredToolEntry, ToolDeferConfig, ToolDeferPolicy } from './defer.ts'
 import { createToolSearchTool } from './tool-search.ts'
 
@@ -905,10 +905,43 @@ export class ToolRuntime extends Service {
       if (names.length > 0) this.activations.set(agent, new Set(names))
       return undefined
     })
+    ctx.systemPrompt.section(this.nativeIndexSection())
     if (this.defaultMode !== 'native') {
       ctx.systemPrompt.section(this.collapseSection())
       ctx.systemPrompt.section(this.sdkSection())
     }
+  }
+
+  /**
+   * The name-only index of deferred tools for an agent presenting natively.
+   * Under `ptc` and `both` the SDK section carries the index instead, so this
+   * renders empty there. It lists every deferrable tool, activated or not, so
+   * a `tool_search` activation leaves the prompt unchanged.
+   * @returns the section registration.
+   */
+  private nativeIndexSection(): PromptSection {
+    return {
+      name: 'tools:deferred',
+      order: this.ctx.systemPrompt.getSectionOrder('TOOLS_SDK'),
+      interpolate: false,
+      text: context => this.modeFor(context.scope) === 'native'
+        ? renderDeferredIndex(this.deferredEntries(this.view(context.scope), 'deferrable'), nativeIndexLead)
+        : '',
+    }
+  }
+
+  /**
+   * The index entries for one of a view's deferral sets.
+   * @param view - the calling scope's tool view.
+   * @param set - which set to list.
+   * @returns one entry per tool in the set.
+   */
+  private deferredEntries(view: ToolView, set: 'deferrable' | 'deferred'): DeferredToolEntry[] {
+    return [...view[set]].map((name): DeferredToolEntry => ({
+      name,
+      // The deferrable set is a subset of the visible names.
+      description: (view.visible.get(name) as ToolDefinition).description,
+    }))
   }
 
   /**
@@ -961,13 +994,7 @@ export class ToolRuntime extends Service {
         const render = SDK_RENDERERS[runtime.language]
         /* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
         if (render === undefined) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`)
-        const view = this.view(context.scope)
-        const deferred = [...view.deferred].map((name): DeferredToolEntry => ({
-          name,
-          // The deferred set is a subset of the visible names.
-          description: (view.visible.get(name) as ToolDefinition).description,
-        }))
-        return render(this.sdkSchemas(context.scope), deferred)
+        return render(this.sdkSchemas(context.scope), this.deferredEntries(this.view(context.scope), 'deferred'))
       },
     }
   }
