@@ -318,7 +318,8 @@ export class SessionCommandController {
   }
 
   /**
-   * Reject empty content, then admit one prompt after Agent and attachment validation.
+   * Reject empty content, then admit one prompt after Agent and attachment validation,
+   * ordered after the Agent's earlier admissions, model selections, and preset-default switches.
    * @param request - Session identity, prompt content, source metadata, and delivery mode.
    * @returns acknowledgement that the Agent accepted the prompt.
    */
@@ -341,7 +342,6 @@ export class SessionCommandController {
       )
     }
     const agent = await this.resolveAgent(request.sessionId)
-    if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
     const source: MessageSource = {
       kind: 'user',
       rpcId: request.requestId,
@@ -349,6 +349,7 @@ export class SessionCommandController {
     }
     const hasImage = request.content.some(part => part.type === 'image')
     const admit = async (): Promise<SessionPromptValue> => {
+      if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
       try {
         if (hasImage) {
           const current = this.agents.selectionFor(agent).current
@@ -387,7 +388,7 @@ export class SessionCommandController {
       }
       return { accepted: true }
     }
-    return hasImage ? this.agents.serializeImageAdmission(agent, admit) : admit()
+    return this.agents.serializeImageAdmission(agent, admit)
   }
 
   /**

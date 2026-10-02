@@ -33,7 +33,7 @@ kind: "package-reference"
 
 浏览器插件包在其 `package.json` 中以 `platform: 'web'` 声明 `dsh.client`，导出 `./client` bundle，并在 `dsh.client.external` 下列出任何基座之外的模块请求。宿主半侧把每份声明变成 `/plugins` 下提供的 bundle，并让动态提供方先于其消费方加载。
 
-只服务于某个客户端 surface 的包设置 `dsh.client.defaultRoot: false`；此后只有当普通根包依赖它时，它才进入普通启动图。宿主插件以 `ctx.effect(() => ctx.clientSurfaces.register({ id, path, rootPlugin, roots }))` 注册 surface。随后 [Frontend Static](../../host/frontend-static/README.zh.md) 把 `path` 作为需认证的 index 提供，其启动图只含 client-modules bootstrap 以及 `rootPlugin` 与 `roots` 的 `inject`/`external` 闭包。若根插件是普通根包，或所需的 `inject` 包未加载，注册会失败，该 surface 路径也不再渲染。
+只服务于某个客户端 surface 的包设置 `dsh.client.defaultRoot: false`；此后只有当普通根包依赖它时，它才进入普通启动图。宿主插件以 `ctx.effect(() => ctx.clientSurfaces.register({ id, path, rootPlugin, roots }))` 注册 surface。随后 [Frontend Static](../../host/frontend-static/README.zh.md) 把 `path` 作为需认证的 index 提供，其启动图只含 client-modules bootstrap 以及 `rootPlugin` 与 `roots` 的 `inject`/`external` 闭包。匹配路径时不会组合任何内容；surface 启动图只为通过认证的渲染组合，并在普通启动图重新组合前一直复用。若根插件是普通根包，或所需的 `inject` 包未加载，注册会失败，该 surface 路径也不再渲染。
 
 ### 浏览器加载什么
 

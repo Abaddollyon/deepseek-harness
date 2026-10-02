@@ -971,6 +971,9 @@ describe('mapStopReason / mapUsage', () => {
     ['stream error: stream ID 1; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
     ['Stream closed with error code NGHTTP2_REFUSED_STREAM', 'TRANSPORT'],
     ['HTTP/2 stream 0 was reset with RST_STREAM', 'TRANSPORT'],
+    // A stream id that reads like an HTTP status stays a reset.
+    ['stream error: stream ID 401; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
+    ['HTTP/2 stream 429 was reset with RST_STREAM', 'TRANSPORT'],
     // Look-alikes stay unclassified, and an HTTP status keeps precedence.
     ['Tool schema has overloaded signatures', 'PI_AI_ERROR'],
     ['not_overloaded_error', 'PI_AI_ERROR'],

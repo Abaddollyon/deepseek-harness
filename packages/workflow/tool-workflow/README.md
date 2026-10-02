@@ -46,7 +46,7 @@ While the script runs, the parent turn waits: the tool starts the run, awaits it
 | Field | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`. |
+| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`, or by `{ truncated: true, originalChars, notice, preview }` when no spill backend is mounted. |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; disabled calls are also rejected. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
@@ -67,7 +67,7 @@ The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt g
 
 ### Run lifecycle
 
-`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason; completion returns `{ kind, runId, agentsStarted, result }`. A value whose pretty-printed JSON exceeds `maxResultChars` is saved whole through the session-scoped `ctx.spillStore`, and `result` becomes `{ truncated: true, originalChars, spillPath, preview }`. Without a spill backend, or when the save fails, the call (or background job) fails instead of returning a fragment.
+`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason; completion returns `{ kind, runId, agentsStarted, result }`. A value whose pretty-printed JSON exceeds `maxResultChars` is saved whole through the session-scoped `ctx.spillStore`, and `result` becomes `{ truncated: true, originalChars, spillPath, preview }`. Without a spill backend, `result` becomes `{ truncated: true, originalChars, notice, preview }`, whose `notice` states that the complete JSON was not saved. When a mounted backend fails to save, the call (or background job) fails instead of returning a fragment.
 
 ### Background lifecycle
 
@@ -151,7 +151,7 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. A foreground success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; an oversized value is replaced by `{ truncated: true, originalChars, spillPath, preview }`, whose `spillPath` holds the complete JSON. A background acceptance is exactly `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`, and the same rendered value later reaches the model through the job's completion notice and `job_output`. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
+The full model-written script, metadata, and args remain in the assistant tool call. A foreground success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; an oversized value is replaced by `{ truncated: true, originalChars, spillPath, preview }`, whose `spillPath` holds the complete JSON; without a spill backend, a `notice` that only the preview remains replaces `spillPath`. A background acceptance is exactly `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`, and the same rendered value later reaches the model through the job's completion notice and `job_output`. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
 
 #### Token effect
 

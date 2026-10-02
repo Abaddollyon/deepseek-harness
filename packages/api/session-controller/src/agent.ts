@@ -385,7 +385,7 @@ export class ApiSessionAgentController {
   }
 
   /**
-   * Serialize image admission and model selection for one Agent.
+   * Serialize prompt admission, model selection, and preset-default switches for one Agent.
    * @param agent - live Agent that owns the serialization chain.
    * @param operation - asynchronous operation admitted after prior work settles.
    * @returns the operation result or rejection.

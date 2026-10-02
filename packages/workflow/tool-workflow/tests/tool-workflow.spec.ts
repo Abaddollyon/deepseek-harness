@@ -30,8 +30,10 @@ const testToolSignal = new AbortController().signal
 /** A spill backend that keeps each saved request in memory. */
 class MemorySpillStore extends SpillStore {
   saves: SaveTextSpill[] = []
+  saveError: Error | undefined
 
   saveText(input: SaveTextSpill): Promise<SpillRef> {
+    if (this.saveError) return Promise.reject(this.saveError)
     this.saves.push(input)
     return Promise.resolve({ locator: SpillLocator(`/spill/${input.suggestedName}`), bytes: input.content.length, retrievalHint: 'read it' })
   }
@@ -387,7 +389,7 @@ describe('dsh-tool-workflow', () => {
     expect(engine.disposed).toBe(0)
   })
 
-  it('spills an oversized value whole and returns recovery metadata; without a spill backend it fails (maxResultChars)', async () => {
+  it('spills an oversized value whole and returns recovery metadata; without a spill backend it returns a noticed preview (maxResultChars)', async () => {
     const { ctx, engine, parent } = await setup({ maxResultChars: 40 })
     const value = { blob: 'x'.repeat(500) }
     const full = JSON.stringify(value, null, 2)
@@ -395,9 +397,10 @@ describe('dsh-tool-workflow', () => {
     const unsaved = execute(ctx, { script: SCRIPT, meta: META }, { agent: parent })
     await vi.waitFor(() => { expect(engine.requests.length).toBe(1) })
     engine.settle({ value, stopReason: 'completed', agentsStarted: 1 })
-    const failed = await unsaved
-    expect(failed.isError).toBe(true)
-    expect((failed.content[0] as { text: string }).text).toContain('no ctx.spillStore backend is mounted')
+    const previewed = await unsaved
+    if (previewed.isError) throw new Error('expected workflow success without a spill backend')
+    expect(previewed.value).toMatchObject({ result: { truncated: true, originalChars: full.length, preview: full.slice(0, 40) } })
+    expect((previewed.value as { result: { notice: string } }).result.notice).toContain('no ctx.spillStore backend is mounted')
 
     await ctx.plugin(MemorySpillStore)
     const store = ctx.spillStore as MemorySpillStore
@@ -590,14 +593,16 @@ describe('dsh-tool-workflow', () => {
       expect(jobs.get('workflow-2' as never, parent.id).detail).toBe('unknown error')
     })
 
-    it('an oversized value that cannot be saved fails the job instead of returning a fragment', async () => {
+    it('an oversized value the mounted spill store cannot save fails the job instead of returning a fragment', async () => {
       const { ctx, engine, parent } = await setupBackground({ maxResultChars: 40 })
+      await ctx.plugin(MemorySpillStore)
+      ;(ctx.spillStore as MemorySpillStore).saveError = new Error('disk full')
       const result = await execute(ctx, { script: SCRIPT, meta: META, run_in_background: true }, { agent: parent })
       if (result.isError) throw new Error('expected background acceptance')
       engine.settleRun(WorkflowRunId('run-1'), { value: { blob: 'x'.repeat(500) }, stopReason: 'completed', agentsStarted: 1 })
       const jobs = ctx.jobs
       await vi.waitFor(() => { expect(jobs.get('workflow-1' as never, parent.id).status).toBe('failed') })
-      expect(jobs.get('workflow-1' as never, parent.id).detail).toContain('no ctx.spillStore backend is mounted')
+      expect(jobs.get('workflow-1' as never, parent.id).detail).toContain('disk full')
     })
 
     it('a nested transport call mirrors the ring but records no session events, and a dispose failure still settles', async () => {

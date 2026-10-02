@@ -134,6 +134,38 @@ describe('proxy auth with Claude Code request mode', () => {
   })
 })
 
+/** One plain OpenAI Chat Completions reply. */
+const COMPLETION_REPLY = [
+  ['message', { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'local-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }] }],
+  ['message', { id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'local-model', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }],
+] as const
+
+describe('keyless proxy on an OpenAI protocol', () => {
+  it('sends no Authorization header and reads no ambient key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-openai-key')
+    const pool = await poolServer({ sse: COMPLETION_REPLY })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['local'], new PiAiAdapter({
+      profiles: () => resolveProfiles({
+        local: { api: 'openai-completions', baseURL: `${pool.url}/v1`, authMode: 'proxy', models: [{ id: 'local-model' }] },
+      }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth: memoryAuth({}),
+    }))
+
+    const result = await assemble(ctx, {
+      provider: 'local',
+      model: 'local-model',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'say ok' }], source: { kind: 'user' } })],
+    })
+
+    expect(pool.paths).toEqual(['/v1/chat/completions'])
+    expect(pool.headers[0]?.authorization).toBeUndefined()
+    expect(result.message.content).toContainEqual(expect.objectContaining({ type: 'text', text: 'ok' }))
+  })
+})
+
 describe('pool route configuration', () => {
   it.each([
     ['proxy without an endpoint', { anthropic: { authMode: 'proxy' } }, /authMode proxy/],

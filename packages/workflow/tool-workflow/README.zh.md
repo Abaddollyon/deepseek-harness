@@ -46,7 +46,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
-| `maxResultChars` | `50000` | 序列化返回值上限；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`。 |
+| `maxResultChars` | `50000` | 序列化返回值上限；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`；未挂载 spill 后端时替换为 `{ truncated: true, originalChars, notice, preview }`。 |
 | `enableRunInBackground` | `true` | 公开 `run_in_background`；关闭后调用同样会被拒绝。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-workflow)是每个受支持字段的穷尽式真源。
@@ -67,7 +67,7 @@ kind: "package-reference"
 
 ### 运行生命周期
 
-`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会对运行执行 dispose。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果；完成时返回 `{ kind, runId, agentsStarted, result }`。如果返回值的格式化 JSON 超过 `maxResultChars`，会通过会话范围的 `ctx.spillStore` 完整保存，`result` 变为 `{ truncated: true, originalChars, spillPath, preview }`。没有 spill 后端或保存失败时，调用（或后台任务）会失败，而不会返回残片。
+`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会对运行执行 dispose。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果；完成时返回 `{ kind, runId, agentsStarted, result }`。如果返回值的格式化 JSON 超过 `maxResultChars`，会通过会话范围的 `ctx.spillStore` 完整保存，`result` 变为 `{ truncated: true, originalChars, spillPath, preview }`。没有 spill 后端时，`result` 变为 `{ truncated: true, originalChars, notice, preview }`，其 `notice` 说明完整 JSON 未被保存。已挂载的后端保存失败时，调用（或后台任务）会失败，而不会返回残片。
 
 ### 后台生命周期
 
@@ -151,7 +151,7 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 #### 模型看到什么
 
-由模型编写的完整脚本、元数据与 args 会保留在 assistant 工具调用中。前台成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及美化打印且依赖数据的 JSON；超大值会替换为 `{ truncated: true, originalChars, spillPath, preview }`，其 `spillPath` 保存完整 JSON。后台受理结果精确为 `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`，同样渲染的值稍后经任务完成播报与 `job_output` 抵达模型。失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`。中间子 agent 消息会被省略。
+由模型编写的完整脚本、元数据与 args 会保留在 assistant 工具调用中。前台成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及美化打印且依赖数据的 JSON；超大值会替换为 `{ truncated: true, originalChars, spillPath, preview }`，其 `spillPath` 保存完整 JSON；没有 spill 后端时，以说明仅保留预览的 `notice` 代替 `spillPath`。后台受理结果精确为 `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`，同样渲染的值稍后经任务完成播报与 `job_output` 抵达模型。失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`。中间子 agent 消息会被省略。
 
 #### Token 影响
 
