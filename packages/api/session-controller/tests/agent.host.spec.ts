@@ -530,5 +530,11 @@ describe('ApiSession create or adoption', () => {
         .rejects.toThrow('not a directory in the execution world of agent preset "remote"')
     }
     expect(existsSync(join(parent, 'absent'))).toBe(false)
+    // Additional roots live in the same world: a remote directory is accepted, a remote file is not.
+    const root = join(parent, 'remote-root')
+    types[root] = 'directory'
+    await expect(agents.ensureSession(SessionId('remote-roots'), cwd, false, 'remote', [root])).resolves.toBe(created)
+    await expect(agents.ensureSession(SessionId('remote-file-root'), cwd, false, 'remote', [join(parent, 'file')]))
+      .rejects.toThrow('is not a directory')
   })
 })
