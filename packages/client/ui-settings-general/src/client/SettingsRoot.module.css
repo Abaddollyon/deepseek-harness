@@ -242,6 +242,58 @@
   white-space: nowrap;
 }
 
+/* Narrow viewports: the nav rail becomes a scrolling row of section tabs under
+   the title, the close control moves to the panel's top corner, and the
+   selected section keeps the panel's whole width. */
+@media (max-width: 639px) {
+  .panel {
+    flex-direction: column;
+    max-width: calc(100vw - 24px);
+  }
+
+  .nav {
+    gap: 10px;
+    width: auto;
+    padding: 18px 12px 0;
+  }
+
+  .navTitle {
+    padding-right: 96px;
+  }
+
+  .navList {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .navCell {
+    flex: none;
+    height: 36px;
+    padding: 7px 12px 7px 10px;
+  }
+
+  .navLabel {
+    flex: none;
+  }
+
+  .content {
+    min-height: 0;
+  }
+
+  .header {
+    position: absolute;
+    top: 14px;
+    right: 12px;
+    height: auto;
+    padding: 0;
+  }
+
+  .options {
+    padding: 16px 16px 24px;
+  }
+}
+
 /* No app-region rule here: the overlay portals beside #root (SettingsRoot), so
    ui-web base.css's `body > :not(#root)` subtraction covers it wherever it
    overlaps a chrome row's drag — including above every column, which an in-root
