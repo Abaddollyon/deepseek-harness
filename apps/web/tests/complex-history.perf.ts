@@ -197,6 +197,7 @@ function appendTitle(session: Session, title: string, messageSeq: SessionSeq): v
   })
 }
 
+// The protected system head must be the first surface node, before any user surface.
 function appendSystemPrompt(session: Session, turn: number, step: number): void {
   session.append('system/message', {
     turn,
@@ -336,13 +337,13 @@ function smallSidebarFixture(): string {
   session.append('turn/start', {
     turn: 1,
   })
+  session.append('step/start', { turn: 1, step: 1 })
+  appendSystemPrompt(session, 1, 1)
   const user = session.append('user/message', createUserMessage({
     content: text('Inspect this compact synthetic session.'),
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   appendTitle(session, 'Synthetic sidebar session', user.seq)
-  session.append('step/start', { turn: 1, step: 1 })
-  appendSystemPrompt(session, 1, 1)
   appendRequestHeader(session, 1, 1)
   appendToolStep(session, 1, 1, 2)
   session.append('step/end', { turn: 1, step: 1 })
@@ -360,6 +361,8 @@ function longHistoryFixture(): string {
     session.append('turn/start', {
       turn,
     })
+    session.append('step/start', { turn, step: 1 })
+    if (turn === 1) appendSystemPrompt(session, turn, 1)
     const user = session.append('user/message', createUserMessage({
       content: text(
         `LONG_PERF_SENTINEL turn ${String(turn)}: analyze payload ${'u'.repeat(200)}`,
@@ -368,8 +371,6 @@ function longHistoryFixture(): string {
     }), { surfaceOp: 'append' })
     if (turn === 1) appendTitle(session, LONG_SESSION_TITLE, user.seq)
 
-    session.append('step/start', { turn, step: 1 })
-    if (turn === 1) appendSystemPrompt(session, turn, 1)
     appendRequestHeader(session, turn, 1)
     if (turn % TOOL_TURN_INTERVAL === 0) {
       appendToolStep(session, turn, 1, TOOLS_PER_TOOL_TURN)
