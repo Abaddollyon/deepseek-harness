@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -483,5 +483,32 @@ describe('ApiSession create or adoption', () => {
     writeFileSync(file, 'not a directory')
     await expect(agents.ensureSession(SessionId('mkdir-failure'), join(file, 'child'), false))
       .rejects.toThrow('failed to ensure project directory')
+  })
+
+  it('checks the cwd through a preset-owned filesystem without creating a Host directory', async () => {
+    const { ctx, agents } = await harness()
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-remote-'))
+    tempDirs.push(parent)
+    const cwd = join(parent, 'remote-only')
+    const types: Record<string, 'directory' | 'file'> = { [cwd]: 'directory', [join(parent, 'file')]: 'file' }
+    ctx.provide('agentPresets', {
+      resolve: (id?: string) => Promise.resolve({ id: id ?? 'remote' }),
+      mount: () => Promise.resolve(),
+      serviceForPreset: () => ({
+        resolve: (path: string) => Promise.resolve(path),
+        stat: (path: string) => Promise.resolve(types[path] === undefined ? undefined : { type: types[path] }),
+      }),
+    } as never)
+    const created = agent(ctx, { ...header('remote-cwd', cwd), agentPreset: 'remote' })
+    const create = vi.spyOn(ctx.agents, 'create').mockResolvedValue({ agent: created, dispose: () => Promise.resolve() })
+
+    await expect(agents.ensureSession(created.id, cwd, false, 'remote')).resolves.toBe(created)
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd, agentPreset: 'remote' } }))
+    expect(existsSync(cwd)).toBe(false)
+    for (const missing of [join(parent, 'absent'), join(parent, 'file')]) {
+      await expect(agents.ensureSession(SessionId('remote-missing'), missing, false, 'remote'))
+        .rejects.toThrow('not a directory in the execution world of agent preset "remote"')
+    }
+    expect(existsSync(join(parent, 'absent'))).toBe(false)
   })
 })

@@ -477,12 +477,8 @@ export class ApiSessionAgentController {
       }
     }
 
-    try {
-      await mkdir(cwd, { recursive: true })
-    } catch (error: unknown) {
-      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
-    }
     const composition = await this.composeAgent(presetId)
+    await this.ensureProjectDirectory(cwd, composition.agentPreset)
     return (await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
@@ -492,6 +488,28 @@ export class ApiSessionAgentController {
       },
       setup: composition.setup,
     })).agent
+  }
+
+  /**
+   * Ensure a new Session's cwd in the execution world its preset selects. A
+   * preset that mounts its own `fs` (for example over SSH) owns that world:
+   * the directory must already exist there and nothing is created on the Host.
+   * Otherwise the Host directory is created when missing.
+   * @param cwd - requested project directory.
+   * @param agentPreset - resolved preset identity, when presets are configured.
+   */
+  private async ensureProjectDirectory(cwd: string, agentPreset: string | undefined): Promise<void> {
+    const fs = agentPreset === undefined ? undefined : this.ctx.get('agentPresets')?.serviceForPreset(agentPreset, 'fs')
+    try {
+      if (fs === undefined) {
+        await mkdir(cwd, { recursive: true })
+        return
+      }
+      const info = await fs.stat(await fs.resolve(cwd))
+      if (info?.type !== 'directory') throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
+    } catch (error: unknown) {
+      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
+    }
   }
 
   private agentOptions(): AgentOptions {

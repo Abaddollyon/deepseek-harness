@@ -44,6 +44,7 @@ function roster(ids: readonly string[]): unknown {
       return Promise.resolve(presetOf(wanted))
     },
     mount: (_ctx: Context, id?: string) => Promise.resolve(presetOf(id ?? ids[0] ?? '')),
+    serviceForPreset: () => undefined,
   }
 }
 
