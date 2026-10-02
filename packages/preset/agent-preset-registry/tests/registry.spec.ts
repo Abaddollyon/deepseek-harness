@@ -8,6 +8,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import AgentPresets from '../src/index.ts'
 import type { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 const contexts: Context[] = []
 afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.fiber.dispose() })
@@ -108,6 +109,20 @@ describe('declarative preset revisions', () => {
     expect(ctx.sessionProjections.stateOf(agent.session, 'agentPreset')).toBe('minimal')
     agent.session.append('turn/start', { turn: 1 })
     await expect(ctx.agentPresets.select(agent, 'standard')).rejects.toThrow('already started')
+  })
+
+  it('selects a preset owning its filesystem only when the cwd exists in that world', async () => {
+    const ctx = await setup()
+    await declare(ctx, contribution('standard'))
+    await declare(ctx, { id: 'remote', plugins: [{ name: 'cordis:group', group: true, isolate: { fs: true },
+      config: [{ name: plugin('world-fs'), config: { directories: ['/srv/app'] } }] }] })
+    const sessionIn = async (id: string, cwd: string) => (await ctx.agents.create({
+      sessionId: SessionId(id), meta: { cwd },
+      setup: async (agentCtx: Context) => { await ctx.agentPresets.mount(agentCtx) },
+    })).agent
+    await expect(ctx.agentPresets.select(await sessionIn('local-cwd', '/home/me/app'), 'remote'))
+      .rejects.toMatchObject({ code: 'agent-preset/invalid' })
+    expect(await ctx.agentPresets.select(await sessionIn('remote-cwd', '/srv/app'), 'remote')).toBe('remote')
   })
 
   it('inventories active and disabled child entries and declared display metadata', async () => {

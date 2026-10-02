@@ -9,6 +9,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 // Type-only: the optional `settings` service this registry keeps off the generated pages.
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-fs'
 import type { AgentPresetDocument, AgentPresetRoster } from './types.ts'
 import { entryListProblem, type PresetDefinition } from './definition.ts'
 import type { AgentPreset, Config } from './preset.ts'
@@ -322,7 +323,9 @@ export class AgentPresetRegistry extends TypertRemoteService {
     return preset
   }
 
-  /** Select a preset before a session starts its first turn.
+  /** Select a preset before a session starts its first turn. A preset that
+   * mounts its own filesystem (for example over SSH) is accepted only when the
+   * Session's cwd is a directory in that execution world.
    * @param agent Target Agent.
    * @param agentPreset Requested identity.
    * @returns Committed preset identity.
@@ -334,6 +337,7 @@ export class AgentPresetRegistry extends TypertRemoteService {
       if (boundary !== undefined && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)) {
         throw new RemoteError('agent-preset/locked', 'This session has already started', { sessionId: agent.id, agentPreset })
       }
+      await this.assertCwdInWorld(agent, agentPreset)
       const preset = await this.recompose(agent.ctx, agentPreset)
       agent.session.append('agent-preset/selected', { agentPreset: preset.id })
       return preset.id
@@ -342,6 +346,24 @@ export class AgentPresetRegistry extends TypertRemoteService {
     this.switches.set(agent.id, guard)
     try { return await turn } finally {
       if (this.switches.get(agent.id) === guard) this.switches.delete(agent.id)
+    }
+  }
+
+  private async assertCwdInWorld(agent: Agent, agentPreset: string): Promise<void> {
+    await this.resolve(agentPreset)
+    const fs = this.serviceForPreset(agentPreset, 'fs')
+    const cwd = agent.session.header.cwd
+    if (fs === undefined || cwd === undefined) return
+    let directory: boolean
+    try {
+      directory = (await fs.stat(await fs.resolve(cwd)))?.type === 'directory'
+    } catch (error) {
+      throw new RemoteError('agent-preset/invalid', `cannot inspect "${cwd}" in agent preset "${agentPreset}": ${String(error)}`,
+        { agentPreset, reason: String(error) }, { cause: error })
+    }
+    if (!directory) {
+      const reason = `"${cwd}" is not a directory in the execution world of agent preset "${agentPreset}"`
+      throw new RemoteError('agent-preset/invalid', reason, { agentPreset, reason })
     }
   }
 
