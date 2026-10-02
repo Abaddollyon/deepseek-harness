@@ -106,9 +106,9 @@ const RUN_CODE_DESCRIPTION_PARAM_DESCRIPTION
     + '"Read failing test and its fixture"; "Rename config key in every cordis.yml".'
 
 const RUN_CODE_CONTROLS = {
-  timeoutMs: { type: 'number', description: 'Positive elapsed-time budget in milliseconds, capped by the deployment maximum.' },
-  sandbox_permissions: { type: 'string', enum: [...ESCALATION_TARGETS], description: 'Wider sandbox mode for this complete program execution; requires justification and approval.' },
-  justification: { type: 'string', description: 'Reason this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request.' },
+  timeoutMs: { type: 'number', description: 'Optional; positive elapsed-time budget in milliseconds, capped by the deployment maximum.' },
+  sandbox_permissions: { type: 'string', enum: [...ESCALATION_TARGETS], description: 'Optional; wider sandbox mode for this complete program execution. Requires justification and approval.' },
+  justification: { type: 'string', description: 'Optional; required with sandbox_permissions: why this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request.' },
 } as const
 
 function controlParameters(runtime: PtcRuntime | undefined) {
@@ -117,7 +117,7 @@ function controlParameters(runtime: PtcRuntime | undefined) {
   return {
     ...runtime.timeout === undefined ? {} : {
       timeoutMs: { ...RUN_CODE_CONTROLS.timeoutMs,
-        description: `Positive elapsed-time budget in milliseconds, including nested tool and approval waits. Default ${runtime.timeout.defaultMs}; capped at ${runtime.timeout.maxMs}. Zero does not disable the deadline.` },
+        description: `Optional; positive elapsed-time budget in milliseconds, including nested tool and approval waits. Default ${runtime.timeout.defaultMs}; capped at ${runtime.timeout.maxMs}. Zero does not disable the deadline.` },
     },
     ...runtime.sandboxMode === undefined ? {} : {
       sandbox_permissions: RUN_CODE_CONTROLS.sandbox_permissions,

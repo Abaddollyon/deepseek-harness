@@ -539,11 +539,11 @@ Execute a TypeScript program against the available tools. Takes two required arg
     },
     "timeoutMs": {
       "type": "number",
-      "description": "Positive elapsed-time budget in milliseconds, capped by the deployment maximum."
+      "description": "Optional; positive elapsed-time budget in milliseconds, capped by the deployment maximum."
     },
     "sandbox_permissions": {
       "type": "string",
-      "description": "Wider sandbox mode for this complete program execution; requires justification and approval.",
+      "description": "Optional; wider sandbox mode for this complete program execution. Requires justification and approval.",
       "enum": [
         "workspace-write",
         "danger-full-access"
@@ -551,7 +551,7 @@ Execute a TypeScript program against the available tools. Takes two required arg
     },
     "justification": {
       "type": "string",
-      "description": "Reason this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request."
+      "description": "Optional; required with sandbox_permissions: why this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request."
     }
   },
   "required": [
