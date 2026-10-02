@@ -243,8 +243,10 @@
 }
 
 /* Narrow viewports: the nav rail becomes a scrolling row of section tabs under
-   the title, the close control moves to the panel's top corner, and the
-   selected section keeps the panel's whole width. */
+   the title, the close control moves to the panel's top corner, the section
+   actions take an in-flow row above the options (so a long action or its error
+   can never paint over the title), and the selected section keeps the panel's
+   whole width. */
 @media (max-width: 639px) {
   .panel {
     flex-direction: column;
@@ -258,7 +260,7 @@
   }
 
   .navTitle {
-    padding-right: 96px;
+    padding-right: 48px;
   }
 
   .navList {
@@ -282,11 +284,18 @@
   }
 
   .header {
+    height: auto;
+    padding: 8px 16px 0;
+  }
+
+  .actions {
+    flex-wrap: wrap;
+  }
+
+  .close {
     position: absolute;
     top: 14px;
     right: 12px;
-    height: auto;
-    padding: 0;
   }
 
   .options {
