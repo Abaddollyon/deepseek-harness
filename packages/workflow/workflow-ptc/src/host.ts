@@ -46,6 +46,7 @@ function json(value: unknown): PtcJsonValue {
 function childRequest(value: unknown): ChildStartRequest {
   const request = object(value)
   const prompt = text(request.prompt, 'prompt')
+  const label = request.label === undefined ? undefined : text(request.label, 'label')
   const provider = request.provider === undefined ? undefined : text(request.provider, 'provider')
   const model = request.model === undefined ? undefined : text(request.model, 'model')
   const reasoningEffort = request.reasoningEffort === undefined ? undefined : text(request.reasoningEffort, 'reasoning effort')
@@ -57,6 +58,7 @@ function childRequest(value: unknown): ChildStartRequest {
   }
   return {
     prompt,
+    ...label === undefined ? {} : { label },
     ...provider === undefined ? {} : { provider },
     ...model === undefined ? {} : { model },
     ...reasoningEffort === undefined ? {} : { reasoningEffort },
@@ -245,6 +247,7 @@ export class PtcWorkflowRun implements WorkflowRun {
       prompt: [{ type: 'text', text: request.prompt }],
       parent: this.parent,
       signal: this.controller.signal,
+      ...request.label === undefined ? {} : { label: request.label },
       ...request.schema === undefined ? {} : { outputSchema: request.schema },
       ...agentOptions === undefined ? {} : { agentOptions },
     })
