@@ -51,6 +51,22 @@ describe('Cua Driver native provider', () => {
     expect(fixture.destroys).toBe(1)
   })
 
+  it.each([
+    ['darwin', true],
+    ['linux', false],
+  ] as const)('shows the cursor-overlay note only on macOS (%s)', async (platform, shown) => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: platform })
+    try {
+      await ctx.plugin(NativeProvider)
+      const prompt = (await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n')
+      expect(prompt).toContain('Cua Driver native computer-use tools operate the host desktop.')
+      expect(prompt.includes('On macOS, cursor-overlay operations may return facility_unavailable')).toBe(shown)
+    } finally {
+      if (original !== undefined) Object.defineProperty(process, 'platform', original)
+    }
+  })
+
   it('rejects another provider before importing or creating a native runtime', async () => {
     const release = ctx.computerUse.register(ComputerUseProviderName('another-driver'))
     await expect(ctx.plugin(NativeProvider)).rejects.toThrow('already registered')

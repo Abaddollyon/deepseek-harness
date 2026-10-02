@@ -87,7 +87,7 @@ env -u NODE_USE_ENV_PROXY DSH_COMPUTER_USE_NATIVE_E2E=1 node node_modules/vitest
 
 #### 模型看到什么
 
-在原生工具挂载期间，此提供者加入以下电脑操作指导文本。
+在原生工具挂载期间，此提供者加入以下电脑操作指导文本。最后一段关于光标叠加层的说明仅在 macOS 上加入。
 
 ##### 原生 Cua Driver 指导文本
 

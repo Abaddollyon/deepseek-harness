@@ -87,7 +87,7 @@ Tool definitions reuse the existing MCP result adapter. Cua Driver's JSON catalo
 
 #### What the model sees
 
-The provider contributes the following computer-use guidance while its native tools are mounted.
+The provider contributes the following computer-use guidance while its native tools are mounted. The final cursor-overlay paragraph is added on macOS only.
 
 ##### Native Cua Driver guidance
 
