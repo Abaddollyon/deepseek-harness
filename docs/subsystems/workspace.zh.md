@@ -367,6 +367,13 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('create') create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue>
 
 /**
+ * List the Agent presets whose own filesystem can hold a new Workspace,
+ * such as SSH hosts; the Host itself is always available and not listed.
+ * @returns usable presets in roster order.
+ */
+@Remote('worlds') async worlds(): Promise<WorkspaceWorldsValue>
+
+/**
  * Initialize or reuse the default Workspace during first-use startup. The
  * directory name is fixed, so the Host never renames or relocates an
  * existing default; its initial title is that same name, which browser
@@ -524,9 +531,18 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
  * @returns the existing or newly durable workspace.
  */
-async create(path: string, title?: string): Promise<Workspace>
+async create(path: string, title?: string, agentPreset?: string): Promise<Workspace>
+
+/**
+ * Install the resolver for Workspaces whose paths live in an Agent preset's
+ * execution world. Host Workspaces never consult it.
+ * @param resolve - The preset's world, or undefined while the preset is unknown or mounts no filesystem.
+ * @returns a disposer that removes this resolver.
+ */
+setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void
 
 /**
  * Initialize the default Workspace only while both the registry and Session
@@ -631,9 +647,10 @@ unpinSession(sessionId: SessionId): Promise<void>
  * workspace. A missing path rejects during `realpath`; an existing unowned
  * directory returns `undefined`.
  * @param path - Existing directory path in a fully qualified spelling.
- * @returns the workspace owning the canonical path, when one exists.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
+ * @returns the workspace owning the canonical path in that world, when one exists.
  */
-async resolveByPath(path: string): Promise<Workspace | undefined>
+async resolveByPath(path: string, agentPreset?: string): Promise<Workspace | undefined>
 ```
 
 Types: [SessionId](core.zh.md)

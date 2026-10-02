@@ -572,7 +572,9 @@ serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context
  */
 async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
-/** Select a preset before a session starts its first turn.
+/** Select a preset before a session starts its first turn. A preset that
+ * mounts its own filesystem (for example over SSH) is accepted only when the
+ * Session's cwd is a directory in that execution world.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.

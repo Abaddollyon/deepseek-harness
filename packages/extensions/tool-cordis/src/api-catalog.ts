@@ -203,7 +203,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'select\') async select(agent: Agent, agentPreset: string): Promise<string>',
-        description: 'Select a preset before a session starts its first turn.',
+        description: 'Select a preset before a session starts its first turn. A preset that mounts its own filesystem (for example over SSH) is accepted only when the Session\'s cwd is a directory in that execution world.',
         parameters: [{ name: 'agent', description: 'Target Agent.' }, { name: 'agentPreset', description: 'Requested identity.' }],
         returns: 'Committed preset identity.',
       },
@@ -3587,6 +3587,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the Workspace and whether this call created it.',
       },
       {
+        signature: '@Remote(\'worlds\') async worlds(): Promise<WorkspaceWorldsValue>',
+        description: 'List the Agent presets whose own filesystem can hold a new Workspace, such as SSH hosts; the Host itself is always available and not listed.',
+        parameters: [],
+        returns: 'usable presets in roster order.',
+      },
+      {
         signature: '@Remote(\'initializeDefault\') async initializeDefault(signal: AbortSignal): Promise<WorkspaceValue | undefined>',
         description: 'Initialize or reuse the default Workspace during first-use startup. The directory name is fixed, so the Host never renames or relocates an existing default; its initial title is that same name, which browser consumers label in the reader\'s language.',
         parameters: [{ name: 'signal', description: 'caller lifetime; cancels native directory lookup.' }],
@@ -3698,10 +3704,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Durable workspace registry. Startup waits for `sessionPersistence`, builds one canonical-cwd header index, and completes the one-time history bootstrap before the service becomes active. The persistence dependency is mandatory so an unavailable peer can never be mistaken for an empty history and commit the initialized marker.',
     methods: [
       {
-        signature: 'async create(path: string, title?: string): Promise<Workspace>',
+        signature: 'async create(path: string, title?: string, agentPreset?: string): Promise<Workspace>',
         description: 'Create or reuse a workspace for an existing directory. The fully qualified path is canonicalized through `fs.realpath`; a relative, nonexistent, or non-directory path rejects. Repeated calls for the same canonical path return the existing entity without changing its title. A newly created workspace is prepended to the durable registry order. Different canonical paths may share a display title.',
-        parameters: [{ name: 'path', description: 'Existing directory to own, in a fully qualified path spelling.' }, { name: 'title', description: 'Display title used only when a new record is created.' }],
+        parameters: [{ name: 'path', description: 'Existing directory to own, in a fully qualified path spelling.' }, { name: 'title', description: 'Display title used only when a new record is created.' }, { name: 'agentPreset', description: 'Preset whose execution world holds the directory; omitted selects the Host.' }],
         returns: 'the existing or newly durable workspace.',
+      },
+      {
+        signature: 'setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void',
+        description: 'Install the resolver for Workspaces whose paths live in an Agent preset\'s execution world. Host Workspaces never consult it.',
+        parameters: [{ name: 'resolve', description: 'The preset\'s world, or undefined while the preset is unknown or mounts no filesystem.' }],
+        returns: 'a disposer that removes this resolver.',
       },
       {
         signature: 'initializeDefault(resolveDirectory: () => Promise<string>): Promise<Workspace | undefined>',
@@ -3758,10 +3770,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'resolution after durability.',
       },
       {
-        signature: 'async resolveByPath(path: string): Promise<Workspace | undefined>',
+        signature: 'async resolveByPath(path: string, agentPreset?: string): Promise<Workspace | undefined>',
         description: 'Resolve by canonical directory path without creating or mutating a workspace. A missing path rejects during `realpath`; an existing unowned directory returns `undefined`.',
-        parameters: [{ name: 'path', description: 'Existing directory path in a fully qualified spelling.' }],
-        returns: 'the workspace owning the canonical path, when one exists.',
+        parameters: [{ name: 'path', description: 'Existing directory path in a fully qualified spelling.' }, { name: 'agentPreset', description: 'Preset whose execution world holds the directory; omitted selects the Host.' }],
+        returns: 'the workspace owning the canonical path in that world, when one exists.',
       },
     ],
   },
@@ -8039,7 +8051,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Workspace',
-    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly additionalPaths: readonly string[];\n    readonly title: string;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
+    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly agentPreset: string | undefined;\n    readonly additionalPaths: readonly string[];\n    readonly title: string;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
   },
   {
     name: 'WorkspaceArchiveSessionRequest',
@@ -8071,7 +8083,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkspaceCreateRequest',
-    declaration: 'export interface WorkspaceCreateRequest {\n    readonly path: string;\n    readonly additionalPaths?: readonly string[];\n}',
+    declaration: 'export interface WorkspaceCreateRequest {\n    readonly path: string;\n    readonly agentPreset?: string;\n    readonly additionalPaths?: readonly string[];\n}',
   },
   {
     name: 'WorkspaceCreateValue',
@@ -8150,6 +8162,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkspaceOrderValue {\n    readonly workspaceIds: readonly WorkspaceId[];\n}',
   },
   {
+    name: 'WorkspacePathWorld',
+    declaration: 'export interface WorkspacePathWorld {\n    realpath(path: string): Promise<string>;\n    isDirectory(path: string): Promise<boolean>;\n}',
+  },
+  {
     name: 'WorkspacePinSessionRequest',
     declaration: 'export interface WorkspacePinSessionRequest {\n    readonly sessionId: SessionId;\n}',
   },
@@ -8179,7 +8195,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkspaceView',
-    declaration: 'export interface WorkspaceView {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n    readonly additionalPaths?: readonly string[];\n    readonly title: string;\n    readonly sessionIds: readonly SessionId[];\n    readonly createdAt: string;\n    readonly updatedAt: string;\n}',
+    declaration: 'export interface WorkspaceView {\n    readonly workspaceId: WorkspaceId;\n    readonly path: string;\n    readonly agentPreset?: string;\n    readonly additionalPaths?: readonly string[];\n    readonly title: string;\n    readonly sessionIds: readonly SessionId[];\n    readonly createdAt: string;\n    readonly updatedAt: string;\n}',
+  },
+  {
+    name: 'WorkspaceWorld',
+    declaration: 'export interface WorkspaceWorld {\n    readonly agentPreset: string;\n    readonly name?: string;\n}',
+  },
+  {
+    name: 'WorkspaceWorldsValue',
+    declaration: 'export interface WorkspaceWorldsValue {\n    readonly worlds: readonly WorkspaceWorld[];\n}',
   },
 ]
 
