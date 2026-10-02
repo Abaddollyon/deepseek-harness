@@ -26,6 +26,13 @@ interface UserMessage extends MessageBase {
  */
 interface SessionEventMap {
   /**
+   * Absolute directories the Session may use beside its header `cwd`, fixed
+   * when the Session is created. Valid only as seq 0 with `ignorable: true`;
+   * `Session.append()` refuses it. A reader that skips it confines the Session
+   * to `cwd`, and the model-visible policy text is logged separately.
+   */
+  'workspace/roots': { readonly additionalPaths: readonly string[] }
+  /**
    * Opens turn `turn` before the loop claims queued input or runs pre-step.
    * Rejection, empty input, cancellation, or failure may close it with no
    * step; otherwise the following identified `user/message` event or batch
@@ -470,6 +477,12 @@ declare class Session {
   readonly header: SessionHeader;
   /** Number of leading events inherited from this Session's fork parent. */
   readonly inheritedEventCount: SessionLogOffset;
+  /**
+   * Absolute directories this Session may use beside `header.cwd`, read from
+   * its seq-0 `workspace/roots` event; empty without one. Fixed for the
+   * Session's lifetime: a seeded Session inherits its seed's roots.
+   */
+  readonly additionalPaths: readonly string[];
   /** The session identity, derived from its durable header's single copy. */
   get id(): SessionId;
   /**
@@ -501,6 +514,8 @@ declare class Session {
    * @param header - optional borrowed storage metadata.
    * @param inheritedEventCount - exact fork-inherited prefix length for a seeded header.
    * @param projections - pure interpreters for plugin-owned message changes.
+   * @param additionalPaths - absolute directories beside `cwd`; without a seed a nonempty
+   *   list becomes the seq-0 `workspace/roots` event, with a seed it must equal the seed's.
    * @returns a detached session.
    * @throws when a seed event requires a missing message interpreter or fails validation.
    */
@@ -510,6 +525,7 @@ declare class Session {
     header?: SessionHeader,
     inheritedEventCount?: SessionLogOffset,
     projections?: readonly SessionMessageProjection[],
+    additionalPaths?: readonly string[],
     ): Session;
   /**
    * Restore a detached session by adopting an independently owned or deeply frozen seed.
@@ -606,7 +622,7 @@ declare class Session {
    *   of truth, so a bad event fails at the append site rather than later during
    *   a backend flush. A synchronous internal dispatch validation failure or an
    *   append reentered while this acceptance/publication boundary is open also
-   *   rejects before the log changes.
+   *   rejects before the log changes. `workspace/roots` is creation-only and always rejects.
    */
   append<T extends SessionEventType>(
     type: T,

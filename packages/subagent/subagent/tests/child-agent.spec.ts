@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { resolveChildAgentOptions } from '../src/child-agent.ts'
+import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { childSessionMeta, resolveChildAgentOptions } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
   const id = SessionId('parent')
@@ -72,5 +73,19 @@ describe('child Agent options', () => {
       maxTokens: 512,
       subagentDepth: 1,
     })
+  })
+})
+
+describe('child Session metadata', () => {
+  it('gives a fresh child the parent Session additional roots', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const parentSession = ctx.sessions.prepare(SessionId('rooted-parent'), {
+      meta: { cwd: '/work/app', additionalPaths: ['/work/lib'] },
+    })
+    const parent = { id: parentSession.id, session: parentSession, ctx } as Agent
+    const child = ctx.sessions.prepare(SessionId('rooted-child'), { meta: childSessionMeta(parent, 1, false) })
+    expect(child.header.cwd).toBe('/work/app')
+    expect(child.additionalPaths).toEqual(['/work/lib'])
   })
 })

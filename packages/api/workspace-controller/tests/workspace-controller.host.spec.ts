@@ -127,6 +127,27 @@ describe('WorkspaceController commands', () => {
       .rejects.toMatchObject({ code: 'workspace/not-found' })
   })
 
+  it('validates and replaces additional paths, keeping the primary path out of the list', async () => {
+    const { controller, root } = await harness()
+    const app = stageDir(root, 'app')
+    const lib = stageDir(root, 'lib')
+    const docs = stageDir(root, 'docs')
+    const created = await controller.create({ path: app, additionalPaths: [lib, `${lib}/`, app] })
+    const workspaceId = created.workspace.workspaceId
+    expect(created.workspace.additionalPaths).toEqual([lib])
+    await expect(controller.create({ path: app, additionalPaths: [docs] })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
+    expect((await controller.create({ path: app, additionalPaths: [lib] })).created).toBe(false)
+
+    await expect(controller.updatePaths({ workspaceId, additionalPaths: [docs, join(root, 'missing')] }))
+      .rejects.toMatchObject({ code: 'workspace/invalid-path' })
+    await expect(controller.updatePaths({ workspaceId, additionalPaths: ['relative'] }))
+      .rejects.toMatchObject({ code: 'workspace/invalid-path' })
+    await expect(controller.updatePaths({ workspaceId: 'missing' as WorkspaceId, additionalPaths: [] }))
+      .rejects.toMatchObject({ code: 'workspace/not-found' })
+    expect((await controller.updatePaths({ workspaceId, additionalPaths: [docs, lib] })).workspace.additionalPaths).toEqual([docs, lib])
+    expect((await controller.updatePaths({ workspaceId, additionalPaths: [] })).workspace).not.toHaveProperty('additionalPaths')
+  })
+
   it('preserves Remote failures and propagates unexpected registry failures', async () => {
     const { controller, ctx, root } = await harness()
     const remoteFailure = new RemoteError('fixture/failure', 'already mapped', {})

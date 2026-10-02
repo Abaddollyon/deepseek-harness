@@ -49,10 +49,17 @@ export interface IWorkspaces {
   readonly list: WorkspaceSource
   /**
    * Register an existing path as a Workspace.
-   * @param input - Host create payload.
+   * @param input - Host create payload; `additionalPaths` must match an existing Workspace's.
    * @returns the created or idempotently resolved Workspace.
    */
-  create(input: { path: string }): Promise<WorkspaceView>
+  create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView>
+  /**
+   * Replace a Workspace's additional directories; existing Sessions keep their recorded roots.
+   * @param workspaceId - target Workspace.
+   * @param additionalPaths - complete replacement list; empty removes all.
+   * @returns the updated Workspace.
+   */
+  updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView>
   /**
    * Initialize or reuse the default Workspace.
    * @param signal - caller lifetime.
@@ -127,9 +134,15 @@ export class WorkspaceController extends Service implements IWorkspaces {
     this.list = model
   }
 
-  async create(input: { path: string }): Promise<WorkspaceView> {
+  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     const result = await this.model.create(input)
     if (!result.ok) throw new WorkspaceCreateError(result.error)
+    return result.value.workspace
+  }
+
+  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    const result = await this.model.updatePaths({ workspaceId, additionalPaths })
+    if (!result.ok) throw commandError('update paths', result.error)
     return result.value.workspace
   }
 

@@ -3,6 +3,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import {
+  normalizeAdditionalWorkspacePaths,
+  realpathNormalize,
   WorkspaceActiveSessionError,
   WorkspaceArchivedSessionPinError,
   WorkspaceId,
@@ -27,6 +29,7 @@ import type {
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
 } from './types.ts'
 
@@ -38,18 +41,27 @@ export class WorkspaceCommands {
   constructor(private readonly ctx: Context) {}
 
   /**
-   * Create or resolve one Workspace over an existing directory.
-   * @param request - directory path to register.
+   * Create or resolve one Workspace over an existing directory. Requested
+   * additional directories are validated before a new Workspace is written;
+   * an existing Workspace must already hold the same canonical set.
+   * @param request - directory path to register and optional additional directories.
    * @returns the Workspace and whether this call created it.
    */
   create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue> {
     return this.enqueue(async () => {
       try {
+        const additionalPaths = request.additionalPaths === undefined
+          ? undefined
+          : await normalizeAdditionalWorkspacePaths(request.additionalPaths, await realpathNormalize(request.path))
         const existing = await this.ctx.workspaceRegistry.resolveByPath(request.path)
         if (existing !== undefined) {
+          if (additionalPaths !== undefined && !samePathSet(existing.additionalPaths, additionalPaths)) {
+            throw new Error('the Workspace already exists with different additional paths; update them with updatePaths')
+          }
           return { workspace: workspaceView(existing), created: false }
         }
         const workspace = await this.ctx.workspaceRegistry.create(request.path)
+        if (additionalPaths !== undefined) await workspace.setAdditionalPaths(additionalPaths)
         return { workspace: workspaceView(workspace), created: true }
       } catch (error) {
         if (remoteErrorOf(error) !== undefined) throw error
@@ -85,6 +97,29 @@ export class WorkspaceCommands {
           )
         }
         await workspace.setTitle(title)
+      }
+      return { workspace: workspaceView(workspace) }
+    })
+  }
+
+  /**
+   * Replace one Workspace's additional directories. Existing Sessions keep the
+   * roots they recorded; only Sessions created afterwards use the new list.
+   * @param request - Workspace identity and complete replacement list.
+   * @returns the updated Workspace projection.
+   */
+  updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue> {
+    return this.enqueue(async () => {
+      const workspace = this.requireWorkspace(request.workspaceId)
+      try {
+        await workspace.setAdditionalPaths(request.additionalPaths)
+      } catch (error) {
+        throw new RemoteError(
+          'workspace/invalid-path',
+          `cannot update the additional paths of Workspace "${request.workspaceId}": ${errorMessage(error)}`,
+          { path: workspace.path },
+          { cause: error },
+        )
       }
       return { workspace: workspaceView(workspace) }
     })
@@ -245,6 +280,10 @@ function workspaceNotFound(workspaceId: WorkspaceId): RemoteError<'workspace/not
     `Workspace "${workspaceId}" not found`,
     { workspaceId },
   )
+}
+
+function samePathSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(path => right.includes(path))
 }
 
 function errorMessage(error: unknown): string {

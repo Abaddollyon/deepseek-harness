@@ -20,6 +20,8 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     imageLimits: null
     /** Durable model selection already used by a request and still pending for a later request. */
     modelSelection: ModelSelectionProjectionState
+    /** Additional workspace roots recorded at Session creation; null without any. */
+    additionalPaths: readonly string[] | null
   }
   interface SessionProjectionMap {
     /** Persisted facts used to summarize a Session without activating it. */
@@ -28,6 +30,8 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     imageLimits: ImageAttachmentLimits
     /** Durable model selection already used and selected for the next request. */
     modelSelection: ModelSelectionProjection
+    /** Directories the Session may use beside its `cwd`, fixed at creation; null without any. */
+    additionalPaths: readonly string[] | null
   }
 }
 

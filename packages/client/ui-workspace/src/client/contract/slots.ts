@@ -240,6 +240,8 @@ export type WorkspaceBrowserInjected = {
    * Workspace, then the recent Workspace, or clear into the New Session view.
    */
   startSession: (workspaceId?: WorkspaceId) => void
+  /** Create and open a Session without a Workspace: the new-Session action of the Chats group. */
+  createLooseSession: () => void
   /** Open a real Session. */
   open: (sessionId: SessionId) => void
   /**
@@ -258,6 +260,8 @@ export type WorkspaceBrowserInjected = {
   notifyArchivedNotOpenable: () => void
   /** Rename a Host Workspace (rejects on name conflict; resolves on durability). */
   renameWorkspace: (workspaceId: WorkspaceId, title: string) => Promise<void>
+  /** Replace a Workspace's additional directories for new Sessions (rejects with the Host failure). */
+  updateWorkspacePaths: (workspaceId: WorkspaceId, additionalPaths: readonly string[]) => Promise<void>
   /** Delete only a Host Workspace registration; directory and Session logs remain. */
   deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
   /**
@@ -471,6 +475,8 @@ export type WorkspaceBrowserProps =
  * supplies the implicit index signature required by the registry.
  */
 export type WorkspacePickerInjected = DirectoryPickingInjected & {
+  /** Create and open a Session without a Workspace. */
+  createLooseSession: () => void
   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
 }

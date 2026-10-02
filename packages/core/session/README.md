@@ -37,6 +37,8 @@ ctx.sessions.get(sessionId)      // the live session
 ctx.sessions.list()              // every live session, in creation order
 ```
 
+`meta.additionalPaths` gives a new session absolute directories beside `cwd`. The session records a nonempty list as its ignorable `workspace/roots` event at seq 0 and exposes it as `session.additionalPaths`; `append()` refuses that event type, and a seeded session inherits the event from its seed. A reader that does not know the event skips it and confines the session to `cwd`.
+
 ### Append and derive
 
 `session.append(type, data, opts?)` commits one typed event — it snapshots and freezes the payload, validates it as lossless JSON, and notifies observers. `session.deriveMessages()` projects the log into the `Message[]` the model sees, incrementally and cached:

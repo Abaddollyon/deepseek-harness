@@ -1,6 +1,6 @@
 /** Agent activation, composition, and model-selection policy owned by API Session. */
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {
@@ -234,6 +234,8 @@ export class ApiSessionAgentController {
    * @param cwd - directory the Session must own.
    * @param checkPersistedIdentity - whether to inspect a cold identity before creation.
    * @param presetId - optional Agent preset the Session must own.
+   * @param additionalPaths - existing directories a newly created Session records beside `cwd`;
+   *   an adopted Session keeps the roots it recorded at creation.
    * @returns the matching live ordinary Agent.
    */
   async ensureSession(
@@ -241,10 +243,11 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId?: string,
+    additionalPaths: readonly string[] = [],
   ): Promise<Agent> {
     let creation = this.creations.get(sessionId)
     if (creation === undefined) {
-      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId)
+      creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId, additionalPaths)
         .catch((error: unknown) => {
           const live = this.ctx.agents.get(sessionId)
           if (live !== undefined) {
@@ -446,6 +449,7 @@ export class ApiSessionAgentController {
     cwd: string,
     checkPersistedIdentity: boolean,
     presetId: string | undefined,
+    additionalPaths: readonly string[],
   ): Promise<Agent> {
     const attached = this.ctx.sessions.get(sessionId)
     const live = this.ctx.agents.get(sessionId)
@@ -482,12 +486,23 @@ export class ApiSessionAgentController {
     } catch (error: unknown) {
       throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
     }
+    // The Session records these roots permanently, so a vanished directory fails creation here.
+    for (const path of additionalPaths) {
+      let directory: boolean
+      try {
+        directory = (await stat(path)).isDirectory()
+      } catch (error: unknown) {
+        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
+    }
     const composition = await this.composeAgent(presetId)
     return (await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
         cwd,
+        ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,

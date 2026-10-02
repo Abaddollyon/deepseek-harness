@@ -23,6 +23,7 @@ import type {
   WorkspaceRenameRequest,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
+  WorkspaceUpdatePathsRequest,
   WorkspaceValue,
 } from './types.ts'
 
@@ -79,7 +80,9 @@ export class WorkspaceController extends TypertRemoteService {
 
   /**
    * Create or idempotently resolve one Workspace over an existing directory.
-   * @param request - directory path to register.
+   * Optional additional directories are stored on a new Workspace and must
+   * match an existing one's.
+   * @param request - directory path to register and optional additional directories.
    * @returns the Workspace and whether this call created it.
    */
   @Remote('create')
@@ -114,6 +117,16 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('rename')
   rename(request: WorkspaceRenameRequest): Promise<WorkspaceValue> {
     return this.commands.rename(request)
+  }
+
+  /**
+   * Replace one Workspace's additional directories; existing Sessions keep their recorded roots.
+   * @param request - Workspace identity and complete replacement list.
+   * @returns the updated Workspace projection.
+   */
+  @Remote('updatePaths')
+  updatePaths(request: WorkspaceUpdatePathsRequest): Promise<WorkspaceValue> {
+    return this.commands.updatePaths(request)
   }
 
   /**

@@ -71,6 +71,13 @@ export interface Workspace {
    */
   readonly path: string
 
+  /**
+   * Further canonical directories, excluding {@link path}, that a Session
+   * created in this workspace records as its additional roots. Changing them
+   * never changes an existing Session's roots.
+   */
+  readonly additionalPaths: readonly string[]
+
   /** Display title. Defaults to the final path segment, or a filesystem root's own spelling; duplicates are allowed. */
   readonly title: string
 
@@ -96,6 +103,16 @@ export interface Workspace {
    * @returns resolution after durability.
    */
   setTitle(title: string): Promise<void>
+
+  /**
+   * Replace the additional directories durably. Each path must be fully
+   * qualified and resolve to an existing directory; paths are canonicalized
+   * like {@link path}, deduplicated in request order, and the primary path is
+   * dropped. Rejects without writing when any path is invalid.
+   * @param additionalPaths - Complete replacement list; empty removes all.
+   * @returns resolution after durability.
+   */
+  setAdditionalPaths(additionalPaths: readonly string[]): Promise<void>
 
   /**
    * Prepend a session to this workspace's candidate account. An already

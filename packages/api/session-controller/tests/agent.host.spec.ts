@@ -18,6 +18,7 @@ import {
   ApiSessionSubagentOwnership,
   inspectApiSession,
 } from '../src/agent.ts'
+import { installAdditionalPathsProjection } from '../src/additional-paths-projection.ts'
 import { installModelSelectionProjection } from '../src/model-selection-projection.ts'
 import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
 
@@ -473,6 +474,25 @@ describe('ApiSession create or adoption', () => {
     })
     await expect(conflict.agents.ensureSession(stored.id, '/requested', true))
       .rejects.toBeInstanceOf(ApiSessionCwdConflict)
+  })
+
+  it('records workspace additional roots on a new Session, projects them, and refuses a vanished root', async () => {
+    const { ctx, agents } = await harness()
+    installAdditionalPathsProjection(ctx)
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-roots-'))
+    tempDirs.push(cwd)
+    const create = vi.spyOn(ctx.agents, 'create').mockImplementation((options) => {
+      const session = ctx.sessions.create(options.sessionId, { meta: options.meta ?? {} })
+      return Promise.resolve({ agent: { id: options.sessionId, session, status: 'idle', ctx } as Agent, dispose: () => Promise.resolve() })
+    })
+
+    const created = await agents.ensureSession(SessionId('rooted-create'), cwd, false, undefined, [tmpdir()])
+    expect(create.mock.calls[0]?.[0].meta).toMatchObject({ cwd, additionalPaths: [tmpdir()] })
+    expect(created.session.additionalPaths).toEqual([tmpdir()])
+    expect(ctx.sessionProjections.snapshot(created.session).values['additionalPaths']).toEqual([tmpdir()])
+    await expect(agents.ensureSession(SessionId('vanished-root'), cwd, false, undefined, [join(cwd, 'missing')]))
+      .rejects.toThrow('is unavailable')
+    expect(create).toHaveBeenCalledOnce()
   })
 
   it('surfaces directory creation failure', async () => {

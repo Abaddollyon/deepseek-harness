@@ -28,7 +28,7 @@ describe('web e2e: archived sessions are restored from the sidebar filter', () =
    * @returns the expanded Ungrouped section locator.
    */
   async function ungroupedSection(): Promise<Locator> {
-    const header = page.getByText('Ungrouped', { exact: true })
+    const header = page.getByText('Chats', { exact: true })
     const groupRow = header.locator('..').locator('..')
     await expect.poll(async () => {
       if (await groupRow.count() === 0) return 'absent'
@@ -94,7 +94,7 @@ describe('web e2e: archived sessions are restored from the sidebar filter', () =
     await clickHoverAction(sessionRow, `Session actions for ${title}`)
     await page.getByRole('menuitem', { name: 'Archive session' }).click()
     await expect.poll(() => sessionRow.count(), { timeout: 10_000 }).toBe(0)
-    await expect.poll(() => page.getByText('Ungrouped', { exact: true }).count(), { timeout: 10_000 }).toBe(0)
+    await expect.poll(() => page.getByText('Chats', { exact: true }).count(), { timeout: 10_000 }).toBe(0)
     // Durable on the host: the registry-global set carries the id while the
     // Session log itself stays in persistence untouched.
     expect([...scaffold.ctx.workspaceRegistry.archivedSessionIds]).toEqual([SessionId(SEED_ID)])

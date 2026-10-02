@@ -157,10 +157,11 @@ function createdLabel(createdAt: number, t: RowTranslate): string {
   return t('hover.created', { time: `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` })
 }
 
-/** Hover-card body: workspace title, display directory path, absolute creation time. */
-function WorkspaceHoverContent({ label, cwd, createdAt, t }: {
+/** Hover-card body: workspace title, display directory paths, absolute creation time. */
+function WorkspaceHoverContent({ label, cwd, additionalPaths, createdAt, t }: {
   label: string
   cwd: string | undefined
+  additionalPaths: readonly string[]
   createdAt: number
   t: RowTranslate
 }) {
@@ -168,7 +169,19 @@ function WorkspaceHoverContent({ label, cwd, createdAt, t }: {
     <div className={css.hoverContent}>
       <div className={css.hoverTitle}>{label}</div>
       <div className={css.hoverPath}>{cwd}</div>
+      <AdditionalFolders paths={additionalPaths} t={t} />
       <div className={css.hoverTime}>{createdLabel(createdAt, t)}</div>
+    </div>
+  )
+}
+
+/** Hover-card section listing additional directories; renders nothing without any. */
+function AdditionalFolders({ paths, t }: { paths: readonly string[]; t: RowTranslate }) {
+  if (paths.length === 0) return null
+  return (
+    <div className={css.hoverPath}>
+      <div>{t('hover.additionalFolders')}</div>
+      {paths.map(path => <div key={path}>{path}</div>)}
     </div>
   )
 }
@@ -223,7 +236,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   onToggle: () => void
   onCreate: () => void
   /** Real-Workspace actions; absent for the ungrouped bucket (no menu shown). */
-  actions?: { rename: () => void; delete: () => void } | undefined
+  actions?: { rename: () => void; folders?: () => void; delete: () => void } | undefined
   /** Present only for real Workspace rows in the grouped view. */
   drag?: WorkspaceRowDragProps | undefined
   /** Host account home; POSIX home-rooted hover paths display as `~`. */
@@ -237,6 +250,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
   const [menuOpen, setMenuOpen] = useState(false)
   const workspaceMenuItems = [
     { id: 'rename', label: t('rename'), icon: <IconEditOutlineRegular /> },
+    ...actions?.folders === undefined ? [] : [{ id: 'folders', label: t('folders.menu'), icon: <IconFolderCloseRegular /> }],
     { id: 'delete', label: t('delete.workspace'), icon: <IconTrashOutlineRegular />, danger: true },
   ]
   const ownRow = (
@@ -275,9 +289,10 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
               setMenuOpen(false)
               // Unknown ids leave before the dispatch: a future menu row must
               // not inherit the destructive branch as an else fallback.
-              /* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */
-              if (id !== 'rename' && id !== 'delete') return
+              /* v8 ignore next -- Menu can emit only the rows supplied above. */
+              if (id !== 'rename' && id !== 'folders' && id !== 'delete') return
               if (id === 'rename') actions.rename()
+              else if (id === 'folders') actions.folders?.()
               else actions.delete()
             }}
             portal
@@ -316,6 +331,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
       content={<WorkspaceHoverContent
         label={row.label}
         cwd={row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home)}
+        additionalPaths={(row.additionalPaths ?? []).map(path => abbreviateHomePath(path, home))}
         createdAt={row.createdAt}
         t={t}
       />}
@@ -439,6 +455,7 @@ function SessionHoverContent({ node, now, renderSlot, t }: {
       {/* Same placeholder rule as the row's trailing cell: no timestamp
           before the first prompt. */}
       {!node.blank && <div className={css.hoverTime}>{hoverTimeLabel(node.updatedAt, now, t)}</div>}
+      <AdditionalFolders paths={node.additionalPaths ?? []} t={t} />
       {renderSlot('sidebar.session.row.hover', { sessionId: node.id })}
       {statuses.map(status => (
         <div className={css.hoverStatus} key={status.label}>

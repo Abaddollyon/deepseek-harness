@@ -784,6 +784,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   WorkspaceRenameRequest: 'workspace.md',
   WorkspaceUnarchiveSessionRequest: 'workspace.md',
   WorkspaceUnpinSessionRequest: 'workspace.md',
+  WorkspaceUpdatePathsRequest: 'workspace.md',
   WorkspaceValue: 'workspace.md',
   ClientArtifactBaseline: 'client-modules.md',
   ClientSurfaceDefinition: 'client-modules.md',

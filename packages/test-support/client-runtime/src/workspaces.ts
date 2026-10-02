@@ -68,7 +68,7 @@ export class TestWorkspaces implements IWorkspaces {
    * @param input - the Host create payload.
    * @returns the created Workspace view.
    */
-  async create(input: { path: string }): Promise<WorkspaceView> {
+  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     this.calls.push({ method: 'create', args: [input] })
     const stub = this.stubs.get('create')
     if (stub !== undefined) return await (stub(input) as Promise<WorkspaceView>)
@@ -78,6 +78,22 @@ export class TestWorkspaces implements IWorkspaces {
       path: input.path,
       sessionIds: [],
     } as unknown as WorkspaceView
+  }
+
+  /**
+   * Replace a Workspace's additional directories (recorded). The default
+   * echoes the listed fixture row with the new list.
+   * @param workspaceId - target workspace; must be in the fixture list unless stubbed.
+   * @param additionalPaths - complete replacement list.
+   * @returns the updated view.
+   */
+  async updatePaths(workspaceId: WorkspaceId, additionalPaths: readonly string[]): Promise<WorkspaceView> {
+    this.calls.push({ method: 'updatePaths', args: [workspaceId, additionalPaths] })
+    const stub = this.stubs.get('updatePaths')
+    if (stub !== undefined) return await (stub(workspaceId, additionalPaths) as Promise<WorkspaceView>)
+    const workspace = this.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+    if (workspace === undefined) throw new Error(`unknown fixture workspace ${workspaceId}`)
+    return { ...workspace, additionalPaths }
   }
 
   /**
