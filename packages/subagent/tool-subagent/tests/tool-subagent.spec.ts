@@ -212,6 +212,37 @@ describe('dsh-tool-subagent', () => {
     expect(text(viaAcp)).toBe('from acp')
   })
 
+  it('replaces the generic delegation lead with a configured description and keeps the behavior sentences', async () => {
+    const generic = await setup({ provider: 'mock' })
+    const genericDescription = generic.tools.schemas().find(schema => schema.name === 'subagent')?.description
+    expect(genericDescription).toMatch(/^Delegate a self-contained task to a subagent .* This call waits for the result by default\.$/u)
+
+    const ctx = await setup({ provider: 'mock', toolName: 'subagent_scout', description: 'Scout: fast read-only research in a fresh context' })
+    expect(ctx.tools.schemas().find(schema => schema.name === 'subagent_scout')?.description)
+      .toBe('Scout: fast read-only research in a fresh context. This call waits for the result by default.')
+    const punctuated = await setup({ provider: 'mock', description: '  Review the diff!  ' })
+    expect(punctuated.tools.schemas().find(schema => schema.name === 'subagent')?.description)
+      .toBe('Review the diff! This call waits for the result by default.')
+  })
+
+  it('declares the default-named instance\'s configured route as the composition\'s default child route', async () => {
+    const route = { provider: 'mock', model: 'configured-model', reasoningEffort: ReasoningEffortId('xhigh') }
+    const primary = await setup({ provider: 'mock', agentOptions: route })
+    expect(primary.subagents.defaultChildRoute()).toEqual(route)
+    const alias = await setup({ provider: 'mock', toolName: 'subagent_scout', agentOptions: route })
+    expect(alias.subagents.defaultChildRoute()).toBeUndefined()
+    const unrouted = await setup({ provider: 'mock' })
+    expect(unrouted.subagents.defaultChildRoute()).toBeUndefined()
+  })
+
+  it('rejects a blank description at load and on direct apply()', async () => {
+    await expect(setup({ provider: 'mock', description: '' })).rejects.toThrow()
+    const ctx = await projectedContext()
+    expect(() => {
+      tool.apply(ctx, { provider: 'unused', maxDepth: 'provider-managed', description: '   ' })
+    }).toThrow('`description` is configured but blank')
+  })
+
   it('treats an unknown (plugin-added) stop reason as an isError result', async () => {
     // SubagentStopReason is merge-extensible; the tool's stopReasonError default
     // arm must treat an unrecognized terminal reason as a failure, not success.

@@ -160,10 +160,11 @@ export interface EscalationRequest {
 
 /**
  * Resolve a sandbox permission request before execution. Repeating the call's
- * effective mode returns it without approval. A strictly wider mode requires
- * approval and applies only to this call. Narrower or unsupported targets,
- * missing approval services or agents for widening, and non-grant outcomes
- * throw before execution.
+ * effective mode returns it without approval. A strictly narrower mode is
+ * returned without approval, so the call runs confined at that mode. A
+ * strictly wider mode requires approval and applies only to this call.
+ * Unsupported targets, missing approval services or agents for widening, and
+ * non-grant outcomes throw before execution.
  * @param request - the escalation to judge (see {@link EscalationRequest}).
  * @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
  * @returns the granted mode, consumed by the one call that asked.
@@ -171,11 +172,13 @@ export interface EscalationRequest {
 export async function approveEscalation<A, C>(request: EscalationRequest, approval: EscalationApproval<A, C>): Promise<SandboxMode> {
   const { requestedMode: mode, effectiveMode, justification, subject } = request
   if (mode === effectiveMode) return effectiveMode
-  // Strict widening is an EXECUTION check against the call's effective mode —
-  // deliberately not a schema constraint (the enum is the closed target
-  // vocabulary; the effective mode is per-call truth).
+  // Both directions are EXECUTION checks against the call's effective mode —
+  // deliberately not schema constraints (the enum is the closed target
+  // vocabulary; the effective mode is per-call truth). Asking for less access
+  // only confines the call further.
+  if ((WIDER_MODES[mode] ?? []).includes(effectiveMode)) return mode as SandboxMode
   if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode)) {
-    throw new Error(`sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
+    throw new Error(`sandbox_permissions "${mode}" is not a supported mode for this call's current "${effectiveMode}" mode`)
   }
   if (approval.approver === undefined) {
     throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval service is composed`)

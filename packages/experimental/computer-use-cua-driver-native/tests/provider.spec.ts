@@ -51,6 +51,28 @@ describe('Cua Driver native provider', () => {
     expect(fixture.destroys).toBe(1)
   })
 
+  it.each([
+    ['darwin', true],
+    ['linux', false],
+  ] as const)('shows the cursor-overlay note only for a macOS platform (%s)', async (platform, shown) => {
+    await ctx.plugin(NativeProvider, { platform })
+    const prompt = (await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n')
+    expect(prompt).toContain('Cua Driver native computer-use tools operate the host desktop.')
+    expect(prompt.includes('On macOS, cursor-overlay operations may return facility_unavailable')).toBe(shown)
+  })
+
+  it('describes the running platform when none is configured', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    try {
+      await ctx.plugin(NativeProvider)
+      const prompt = (await ctx.systemPrompt.assemble()).sections.map(section => section.text).join('\n')
+      expect(prompt).toContain('On macOS, cursor-overlay operations may return facility_unavailable')
+    } finally {
+      if (original !== undefined) Object.defineProperty(process, 'platform', original)
+    }
+  })
+
   it('rejects another provider before importing or creating a native runtime', async () => {
     const release = ctx.computerUse.register(ComputerUseProviderName('another-driver'))
     await expect(ctx.plugin(NativeProvider)).rejects.toThrow('already registered')

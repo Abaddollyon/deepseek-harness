@@ -204,6 +204,9 @@ describe('Team identity and provisioning', () => {
       diagnostics: [],
     }))
     expect(service.listMembers(lead)[1]).not.toHaveProperty('model')
+    // A resident member without a model still reports none, not the Lead's.
+    await ctx.agentLoop.create(provisioning.id, {})
+    expect(service.listMembers(lead)[1]).not.toHaveProperty('model')
     await Promise.resolve()
   })
 

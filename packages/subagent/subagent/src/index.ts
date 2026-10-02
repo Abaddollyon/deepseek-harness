@@ -33,11 +33,11 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-attachment'
-import { scopeTarget } from '@deepseek-ai/dsh-scope'
-import type { Scoped } from '@deepseek-ai/dsh-scope'
+import { ScopedLayers, scopeTarget } from '@deepseek-ai/dsh-scope'
+import type { ScopeKey, ScopeLayer, Scoped } from '@deepseek-ai/dsh-scope'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -197,6 +197,15 @@ export interface Config {
   maxDepth: Volatile<number>
 }
 
+/** One scope's declared default child route. */
+class ChildRouteLayer implements ScopeLayer {
+  route: AgentOptions | undefined
+
+  isEmpty(): boolean {
+    return this.route === undefined
+  }
+}
+
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
 export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
@@ -211,6 +220,11 @@ export class SubagentRuntime extends TypertRemoteService {
    * composes into the carrier.
    */
   private readonly emitLifecycle: LifecycleEmitter
+  /**
+   * Default child routes declared per scope; see {@link declareDefaultChildRoute}.
+   * Readers resolve the route at each delegation, so a change needs no event.
+   */
+  private readonly childRoutes = new ScopedLayers(() => new ChildRouteLayer(), () => {})
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'subagents')
@@ -235,6 +249,38 @@ export class SubagentRuntime extends TypertRemoteService {
     // Archive admission: this runtime is the owner that knows which live
     // children descend from a Session and how a parent stops them.
     ctx.inject(['agents'], (agentsCtx: Context) => { installSubagentArchiveAdmission(agentsCtx) })
+  }
+
+  /**
+   * Declare the calling scope's default child route: the LLM route a
+   * delegation path without its own configured route starts children on.
+   * The default `subagent` tool declares its configured `agentOptions` here,
+   * so other delegation tools in the same composition, such as Agent Teams,
+   * follow it. Nearest scope on the chain wins; one declaration per scope.
+   * @param route - the child Agent options.
+   * @returns the exact disposer that removes the declaration.
+   * @throws when the scope already declared a default child route.
+   */
+  declareDefaultChildRoute(route: AgentOptions): () => void {
+    return this.childRoutes.effect(this.ctx, (layer) => {
+      if (layer.route !== undefined) {
+        throw new Error('subagents.declareDefaultChildRoute() is already declared for this scope; one composition declares one default child route')
+      }
+      layer.route = { ...route }
+      return () => { layer.route = undefined }
+    }, { label: 'subagents.declareDefaultChildRoute()' })
+  }
+
+  /**
+   * The default child route a scope sees: the nearest declaration on its
+   * chain, else the context-global one.
+   * @param scope - the delegating agent, or undefined for the global view.
+   * @returns a detached copy of the route, or undefined when none is declared.
+   */
+  defaultChildRoute(scope?: ScopeKey): AgentOptions | undefined {
+    const layers = [this.childRoutes.global, ...this.childRoutes.chainLayers(scope)]
+    const route = layers.findLast(layer => layer.route !== undefined)?.route
+    return route === undefined ? undefined : { ...route }
   }
 
   /**

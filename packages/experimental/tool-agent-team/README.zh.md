@@ -47,6 +47,7 @@ kind: "package-reference"
 |---|---|---|
 | `freshProvider` | `spawn` | 启动 fresh teammate 的提供方 |
 | `forkProvider` | `fork` | 启动 fork teammate 的提供方 |
+| `agentOptions` | — | teammate 的 LLM 路由默认值（`provider` 与 `model` 须一起配置，另有 `reasoningEffort`、`maxTokens`）。省略时，只要 teammate 的提供方能够应用路由，teammate 就采用 Lead 组合的默认子路由，即默认 `subagent` 工具的 `agentOptions`；省略的字段沿用提供方的路由默认值和 Lead 的路由 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-experimental-tool-agent-team)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
@@ -56,9 +57,9 @@ kind: "package-reference"
 
 九个工具分为四类能力：
 
-- **创建 teammate**——`spawn_teammate` 接收名字、描述与初始任务；只有 Lead 可以调用它。
+- **创建 teammate**——`spawn_teammate` 接收名字、描述与初始任务；只有 Lead 可以调用它。可选的 `provider`、`model` 与 `reasoning_effort` 按与 `subagent` 工具相同的规则选择 teammate 的 LLM 路由：provider 与 model 须一起提供，路由须在 Session 的允许列表中，推理强度须为该路由所提供。被拒绝的选择会指向 `list_subagent_models`，且这些参数需要 Session 启用 subagent 模型选择设置。若改变配置的路由却未指定推理强度，则丢弃配置的推理强度。
 - **发送消息**——`send_message` 在最近的步骤边界对运行中的成员进行 steering（中途引导）、启动或恢复非活动成员。
-- **查看与等待**——`list_agents` 返回各成员的 `target` 与可用状态；`wait_agent` 等待下一次团队变化；`interrupt_agent` 停止 teammate 的当前轮次（仅限 Lead）。
+- **查看与等待**——`list_agents` 返回各成员的 `target` 与可用状态，以及已知时各成员的模型与推理强度；`wait_agent` 等待下一次团队变化；`interrupt_agent` 停止 teammate 的当前轮次（仅限 Lead）。
 - **管理任务板**——`team_task_create`、`team_task_list`、`team_task_get` 与 `team_task_update` 添加、浏览、读取与更新共享任务。
 
 创建和列表结果使用 `target` 标识成员，不包含成员 Session ID。可将该值用于消息和中断调用，或任务工具的 `owner` 参数；任务的 `ownerName` 使用相同值。`inactive` 表示没有轮次在执行，包括已加载和需要恢复的成员；它不表示任务完成或结果。`provisioning` 与 `failed` 描述成员创建状态。任何成员都可以给任何其他成员发消息并使用任务板；只有 Lead 可以创建与中断 teammate。任务更新保留领域的 owner 与 revision 校验，因此过期的编辑会被拒绝，而不是覆盖更新的成果。

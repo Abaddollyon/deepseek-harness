@@ -8,22 +8,23 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
-import { MockAdapter, textResponse } from './mock-adapter.ts'
+import ToolRuntime, { defineContentToolFixture, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools'
+import type { Config as ToolsConfig } from '@deepseek-ai/dsh-tools'
+import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 const contexts: Context[] = []
 afterEach(async () => {
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
 })
 
-async function harness(adapter: MockAdapter) {
+async function harness(adapter: MockAdapter, toolsConfig: ToolsConfig = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, { personaPrefix: '', personaSuffix: '' })
-  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(ToolRuntime, toolsConfig)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -110,5 +111,28 @@ describe('tool update emission', () => {
       [{ type: 'tool-addition', toolName: 'fetch' }], [{ type: 'tool-removal', toolName: 'fetch' }],
     ])
     expect(agent.session.requestHeader()?.tools?.map(schema => schema.name)).toEqual(['search'])
+  })
+
+  it('declares a deferred tool through a recorded addition once tool_search activates it', async () => {
+    const adapter = new MockAdapter([
+      toolCallResponse('search-1', TOOL_SEARCH_NAME, { names: ['fetch'] }),
+      textResponse('found it'),
+      textResponse('ok'),
+    ])
+    adapter.toolUpdate = 'in-history'
+    const { ctx, agent } = await harness(adapter, { defer: { include: ['fetch'] } })
+    tool(ctx, 'search')
+    tool(ctx, 'fetch')
+    await send(agent, 'find fetch')
+    await send(agent, 'again')
+
+    const [first, second, third] = adapter.requests
+    expect(first?.tools?.map(schema => schema.name)).toEqual(['search', TOOL_SEARCH_NAME])
+    expect(second?.tools?.map(schema => [schema.name, schema.deferLoading])).toEqual([
+      ['search', undefined], [TOOL_SEARCH_NAME, undefined], ['fetch', true],
+    ])
+    expect(developerContent(second!)).toEqual([[{ type: 'tool-addition', toolName: 'fetch' }]])
+    expect(third?.tools).toEqual(second?.tools)
+    expect(agent.session.requestHeader()?.tools?.map(schema => schema.name)).toEqual(['fetch', 'search', TOOL_SEARCH_NAME])
   })
 })

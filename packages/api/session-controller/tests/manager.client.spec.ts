@@ -1019,6 +1019,8 @@ describe('remaining branches', () => {
     expect(manager.getListSnapshot().items[0]).toMatchObject({ sessionId: S1, cwd: '/tmp/w' })
     await manager.create({ cwd: '/tmp/w' }) // same id returned: no duplicate row
     expect(manager.getListSnapshot().items).toHaveLength(1)
+    await manager.create({ workspaceId: 'w1' as never, agentPreset: 'life' })
+    expect(remote.session.create).toHaveBeenLastCalledWith({ workspaceId: 'w1', agentPreset: 'life' })
     remote.session.create.mockRejectedValue(new Error('create wire down'))
     await expect(manager.create()).rejects.toThrow('create wire down')
     // Business error passes through untouched.

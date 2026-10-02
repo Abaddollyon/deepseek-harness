@@ -44,10 +44,11 @@ kind: "package-reference"
 |---|---|---|
 | `provider` | 必填 | `ctx.subagents` 上的提供方名称（如 `spawn`、`fork`、`acp`） |
 | `toolName` | `subagent` | 面向模型的工具名称；每个已加载实例必须不同 |
+| `description` | — | 工具描述的开头，替换通用的委派说明（例如为别名实例写一行角色说明）；后台与模型选择相关的句子仍会追加在后面 |
 | `modelSelectionSettings` | `false` | 为每个顶层 Session 读取宿主的精确路由授权偏好；常驻 preset 观察匹配 Session，直接 Agent setup 则显式传入其 Session；要求提供方支持 `agentOptions` |
 | `enableRunInBackground` | `true` | 公开 `run_in_background`；禁用时也会拒绝强制后台调用 |
 | `backgroundMode` | `one-shot` | 后台策略：`one-shot` 默认前台调用；`continuable` 默认后台调用，并要求提供方具备 `prepareContinuable` 能力 |
-| `agentOptions` | — | 配置的子级 `provider`、`model`、适配器所有的 `reasoningEffort` 与正整数 `maxTokens` 默认值；要求提供方支持 `agentOptions`，并会覆盖提供方持有的路由默认值 |
+| `agentOptions` | — | 配置的子级 `provider`、`model`、适配器所有的 `reasoningEffort` 与正整数 `maxTokens` 默认值；要求提供方支持 `agentOptions`，并会覆盖提供方持有的路由默认值。名为 `subagent` 的实例还会把它们声明为组合的默认子路由，Agent Teams 随之采用 |
 | `persona` | — | 每个子 agent 独立的 persona；要求提供方具备 `persona` 能力 |
 | `toolFilter` | — | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力 |
 | `maxDepth` | Host 设置（`1`） | 绝对委派深度上限（`0` 禁止委派）；`'provider-managed'` 不向进程外提供方发送上限 |
@@ -103,6 +104,7 @@ kind: "package-reference"
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | 为新 Session 读取的宿主所有 opt-in 设置 |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | 记录并继承已读取决定的 Session 事件 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` 导出，供 `spawn_teammate` 等其他委派工具复用路由规则 |
 
 </details>
 

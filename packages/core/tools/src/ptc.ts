@@ -17,7 +17,7 @@ declare module '@deepseek-ai/dsh-llm' {
 
 import type { ContentBlock, ToolCallId, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { PtcBindingFunction, PtcRunResult, PtcRunSandbox, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
-import { approveEscalation, ESCALATION_TARGETS, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
+import { approveEscalation, ESCALATION_TARGETS, validateEscalationArgs, WIDER_MODES } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { deepFreeze, snapshotJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -106,9 +106,9 @@ const RUN_CODE_DESCRIPTION_PARAM_DESCRIPTION
     + '"Read failing test and its fixture"; "Rename config key in every cordis.yml".'
 
 const RUN_CODE_CONTROLS = {
-  timeoutMs: { type: 'number', description: 'Positive elapsed-time budget in milliseconds, capped by the deployment maximum.' },
-  sandbox_permissions: { type: 'string', enum: [...ESCALATION_TARGETS], description: 'Wider sandbox mode for this complete program execution; requires justification and approval.' },
-  justification: { type: 'string', description: 'Reason this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request.' },
+  timeoutMs: { type: 'number', description: 'Optional; positive elapsed-time budget in milliseconds, capped by the deployment maximum.' },
+  sandbox_permissions: { type: 'string', enum: [...ESCALATION_TARGETS], description: 'Optional; wider sandbox mode for this complete program execution. Requires justification and approval.' },
+  justification: { type: 'string', description: 'Optional; required with sandbox_permissions: why this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request.' },
 } as const
 
 function controlParameters(runtime: PtcRuntime | undefined) {
@@ -117,7 +117,7 @@ function controlParameters(runtime: PtcRuntime | undefined) {
   return {
     ...runtime.timeout === undefined ? {} : {
       timeoutMs: { ...RUN_CODE_CONTROLS.timeoutMs,
-        description: `Positive elapsed-time budget in milliseconds, including nested tool and approval waits. Default ${runtime.timeout.defaultMs}; capped at ${runtime.timeout.maxMs}. Zero does not disable the deadline.` },
+        description: `Optional; positive elapsed-time budget in milliseconds, including nested tool and approval waits. Default ${runtime.timeout.defaultMs}; capped at ${runtime.timeout.maxMs}. Zero does not disable the deadline.` },
     },
     ...runtime.sandboxMode === undefined ? {} : {
       sandbox_permissions: RUN_CODE_CONTROLS.sandbox_permissions,
@@ -392,6 +392,12 @@ export function createRunCodeTool(registry: ToolRuntime, options: RunCodeBridgeO
       let policy = standingPolicy
       if (args.sandbox_permissions !== undefined && args.justification !== undefined) {
         if (standingPolicy === undefined) throw new Error('sandbox_permissions is not available for this PTC runtime')
+        // A narrower mode would confine only the program process: nested tool
+        // calls resolve their own policy from the Session and would keep the
+        // wider standing mode, so the result would overstate the confinement.
+        if ((WIDER_MODES[args.sandbox_permissions] ?? []).includes(standingPolicy.mode)) {
+          throw new Error(`sandbox_permissions "${args.sandbox_permissions}" is narrower than this Session's "${standingPolicy.mode}" mode; run_code can only widen, because nested tool calls keep the Session's mode. Pass sandbox_permissions on the nested tool call instead.`)
+        }
         const approvedMode = await approveEscalation({
           requestedMode: args.sandbox_permissions,
           justification: args.justification,

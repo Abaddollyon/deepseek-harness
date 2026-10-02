@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-在 [agent preset](../../preset/agent-preset-registry/README.zh.md) 中使用 `dsh-agent-tool-presentation`，可固定模型看到全部原生工具 schema、只有带生成 SDK 的 `run_code`，还是同时看到两种形态。每个 preset 可独立选择，因此 native 与 PTC agent 可以共享同一进程，而不共享工具目录。选择 `ptc` 或 `both` 需要兼容的 PTC 运行时；没有该运行时的部署会在挂载时拒绝 preset，不会等到收到第一条提示词。使用本包时 `mode` 字段为必填；省略本包则沿用部署默认值。
+在 [agent preset](../../preset/agent-preset-registry/README.zh.md) 中使用 `dsh-agent-tool-presentation`，可固定模型看到全部原生工具 schema、只有带生成 SDK 的 `run_code`，还是同时看到两种形态。每个 preset 可独立选择，因此 native 与 PTC agent 可以共享同一进程，而不共享工具目录。选择 `ptc` 或 `both` 需要兼容的 PTC 运行时；没有该运行时的部署会在挂载时拒绝 preset，不会等到收到第一条提示词。preset 也可以用 `defer` 只列出工具名称，模型再通过 `tool_search` 展开。这一行必须设置 `mode`、`defer` 或两者；省略本包则沿用部署默认值。
 
 ## 目录
 
@@ -33,13 +33,17 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-agent-tool-presentation'
   config:
     mode: ptc
+    defer:
+      include: ['mcp__*', 'cua_driver_native__*']
+      exclude: []
 ```
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `mode` | 必填 | `native`——每个 schema；`ptc`——`run_code` 加生成 SDK；`both`——两种形态 |
+| `mode` | 部署默认值 | `native`——每个 schema；`ptc`——`run_code` 加生成 SDK；`both`——两种形态 |
+| `defer` | 部署默认值 | 只列名称的工具：带 `*` 通配的 `include` 与 `exclude` 名称模式，与 [`dsh-tools`](../tools/README.zh.md#defer-tool-declarations) 那一行相同 |
 
-生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-tool-presentation)是每个受支持字段的穷尽式真源。`mode` 是必填而非有默认值，因为不带这一行的 preset 会继承部署默认值。
+生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-tool-presentation)是每个受支持字段的穷尽式真源。两个字段都未设置的行会在挂载时失败，因为不带这一行的 preset 已经继承部署默认值。
 
 ### PTC 模式需要什么
 
@@ -47,7 +51,7 @@ kind: "package-reference"
 
 ### 每个 agent 只声明一次呈现方式
 
-一个 agent 只声明一次呈现方式。同一份组装里的第二次声明会被拒绝而不是合并：对「模型看到哪种形态」给出两个答案是矛盾，不是覆盖。
+一个 agent 只声明一次呈现方式和一次延迟策略。同一份组装里对其中任一项的第二次声明会被拒绝而不是合并：对「模型看到哪种形态」给出两个答案是矛盾，不是覆盖。
 
 -----
 
@@ -67,12 +71,12 @@ kind: "package-reference"
 
 | 文件 | 职责 |
 |---|---|
-| [`src/index.ts`](src/index.ts) | 插件入口：`mode` 配置、把 `ctx.tools.presentAs` 接到挂载作用域的 `apply` |
-| — | 不发布运行时不变式伴生入口；本包只对 `ctx.tools` 发起一次 scoped 调用，不持有自己的事件或快照；它建立的是「某个 agent 的组装采用哪种呈现方式」这一关系，该关系由工具注册表持有，`dsh-tools` 会在工具注册表中观察该关系。 |
+| [`src/index.ts`](src/index.ts) | 插件入口：`mode` 与 `defer` 配置、把 `ctx.tools.presentAs` 与 `ctx.tools.deferAs` 接到挂载作用域的 `apply` |
+| — | 不发布运行时不变式伴生入口；本包最多对 `ctx.tools` 发起两次 scoped 调用，不持有自己的事件或快照；它建立的是「某个 agent 的组装采用哪种呈现方式与延迟策略」这一关系，该关系由工具注册表持有，`dsh-tools` 会在工具注册表中观察该关系。 |
 
 ### 行为说明
 
-`native` 立即生效。PTC 模式则等待 `ctx.ptcRuntime`——这是一个宿主平面服务：针对未组装运行时的部署选择 PTC mode 的 preset 会让这一行停在 pending，`dsh-agent-preset-registry` 会指名此 id 拒绝挂载。`presentAs` 本身就是 effect，因此该声明随这一行撤销，无需第二个包装层拥有它。
+`native` 与 `defer` 立即生效。PTC 模式则等待 `ctx.ptcRuntime`——这是一个宿主平面服务：针对未组装运行时的部署选择 PTC mode 的 preset 会让这一行停在 pending，`dsh-agent-preset-registry` 会指名此 id 拒绝挂载。`presentAs` 与 `deferAs` 本身就是 effect，因此这些声明随这一行撤销，无需第二个包装层拥有它们。
 
 </details>
 
@@ -94,7 +98,7 @@ kind: "package-reference"
 <a id="model-experience"></a>
 ## 模型体验
 
-通过在 `dsh-tools` 中选择的工具呈现方式间接影响——这一行只在 `dsh-tools` 拥有的两种投影之间选择，本身不注册任何提示词、schema 或结果。
+通过在 `dsh-tools` 中选择的工具呈现方式与延迟策略间接影响——这一行只配置 `dsh-tools` 拥有的投影，本身不注册任何提示词、schema 或结果。
 
 #### KV Cache 影响
 

@@ -2879,6 +2879,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Named provider registry with one-shot runs, durable discovery, and continuable-child operations.',
     methods: [
       {
+        signature: 'declareDefaultChildRoute(route: AgentOptions): () => void',
+        description: 'Declare the calling scope\'s default child route: the LLM route a delegation path without its own configured route starts children on. The default `subagent` tool declares its configured `agentOptions` here, so other delegation tools in the same composition, such as Agent Teams, follow it. Nearest scope on the chain wins; one declaration per scope.',
+        parameters: [{ name: 'route', description: 'the child Agent options.' }],
+        returns: 'the exact disposer that removes the declaration.',
+        throws: ['when the scope already declared a default child route.'],
+      },
+      {
+        signature: 'defaultChildRoute(scope?: ScopeKey): AgentOptions | undefined',
+        description: 'The default child route a scope sees: the nearest declaration on its chain, else the context-global one.',
+        parameters: [{ name: 'scope', description: 'the delegating agent, or undefined for the global view.' }],
+        returns: 'a detached copy of the route, or undefined when none is declared.',
+      },
+      {
         signature: 'resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined',
         description: 'Resolve a delegation tool\'s depth policy against the current user setting.',
         parameters: [{ name: 'configured', description: 'Explicit tool limit, or provider-managed for external delegation.' }],
@@ -3283,6 +3296,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Present the calling scope\'s tools in `mode` instead of the deployment default. Nearest scope on the chain wins, so a preset\'s standing declaration covers every agent joined under it.\n\nScoped only, and one declaration per scope: this is how an agent preset composes PTC mode agents beside native ones in the same process, and a process-global override would be the `mode` config field instead.',
         parameters: [{ name: 'mode', description: 'the presentation the covered agents\' models see.' }],
         returns: 'the exact disposer that restores the deployment default.',
+      },
+      {
+        signature: 'deferAs(policy: ToolDeferPolicy): () => void',
+        description: 'List the calling scope\'s tools named by `policy` by name only instead of applying the deployment default policy. Nearest scope on the chain wins, like presentAs, so a preset\'s standing declaration covers every agent joined under it. Scoped only, and one declaration per scope.',
+        parameters: [{ name: 'policy', description: 'include and exclude name patterns.' }],
+        returns: 'the exact disposer that restores the deployment default.',
+        throws: ['when called on an unscoped context, a pattern is empty, or the scope already declared a policy.'],
       },
       {
         signature: 'register(definition: ToolDefinition): () => void',
@@ -7153,7 +7173,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SpawnTeammateRequest',
-    declaration: 'export interface SpawnTeammateRequest {\n    readonly name: string;\n    readonly description: string;\n    readonly prompt: ContentBlock[];\n    readonly context: \'fresh\' | \'fork\';\n    readonly provider: string;\n    readonly signal: AbortSignal;\n}',
+    declaration: 'export interface SpawnTeammateRequest {\n    readonly name: string;\n    readonly description: string;\n    readonly prompt: ContentBlock[];\n    readonly context: \'fresh\' | \'fork\';\n    readonly provider: string;\n    readonly agentOptions?: TeammateRoute;\n    readonly signal: AbortSignal;\n}',
   },
   {
     name: 'SpawnTeammateResult',
@@ -7337,7 +7357,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    constructor(ctx: Context, private config: Config);\n    resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined;\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentCatalogEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\'): SubagentInterruptReceipt;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
+    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    constructor(ctx: Context, private config: Config);\n    declareDefaultChildRoute(route: AgentOptions): () => void;\n    defaultChildRoute(scope?: ScopeKey): AgentOptions | undefined;\n    resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined;\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentCatalogEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\'): SubagentInterruptReceipt;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: str /* …truncated — full shape in source */',
   },
   {
     name: 'SubagentSendMessageOptions',
@@ -7464,12 +7484,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type TeamId = Branded<\'TeamId\'>;',
   },
   {
+    name: 'TeammateRoute',
+    declaration: 'export interface TeammateRoute {\n    readonly provider?: string;\n    readonly model?: string;\n    readonly reasoningEffort?: string;\n    readonly maxTokens?: number;\n}',
+  },
+  {
     name: 'TeamMembership',
     declaration: 'export interface TeamMembership {\n    readonly root: Agent;\n    readonly id: TeamId;\n    readonly role: \'lead\' | \'teammate\';\n    readonly name: string;\n}',
   },
   {
     name: 'TeamMemberView',
-    declaration: 'export interface TeamMemberView {\n    readonly id: SessionId;\n    readonly name: string;\n    readonly role: \'lead\' | \'teammate\';\n    readonly status: \'running\' | \'inactive\' | \'provisioning\' | \'failed\';\n    readonly description?: string;\n    readonly provider?: string;\n    readonly context?: \'fresh\' | \'fork\';\n    readonly model?: string;\n    readonly diagnostics: string[];\n}',
+    declaration: 'export interface TeamMemberView {\n    readonly id: SessionId;\n    readonly name: string;\n    readonly role: \'lead\' | \'teammate\';\n    readonly status: \'running\' | \'inactive\' | \'provisioning\' | \'failed\';\n    readonly description?: string;\n    readonly provider?: string;\n    readonly context?: \'fresh\' | \'fork\';\n    readonly model?: string;\n    readonly reasoningEffort?: string;\n    readonly diagnostics: string[];\n}',
   },
   {
     name: 'TeamMessageId',
@@ -7644,6 +7668,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ToolCallView = GenericCallView | TerminalCallView | DiffCallView;',
   },
   {
+    name: 'ToolDeferPolicy',
+    declaration: 'export interface ToolDeferPolicy {\n    readonly include?: readonly string[];\n    readonly exclude?: readonly string[];\n}',
+  },
+  {
     name: 'ToolDefinition',
     declaration: 'export interface ToolDefinition extends ToolSchema {\n    readonly output: ToolOutputDefinition;\n    execute(args: unknown, exec: ToolRunContext): Promise<unknown>;\n    projectContent?(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): ContentBlock[] | undefined;\n    finalizeContent?(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): ContentBlock[] | undefined;\n    timeoutMs?: number;\n    isConcurrencySafe?(args: unknown): boolean;\n    presentCall?(args: unknown): ToolCallView | undefined;\n    presentResult?(args: unknown, result: ToolResult): ToolResultView | undefined;\n}',
   },
@@ -7737,7 +7765,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ToolRuntime',
-    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    register(definition: ToolDefinition): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
+    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    deferAs(policy: ToolDeferPolicy): () => void;\n    register(definition: ToolDefinition): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
   },
   {
     name: 'ToolRuntimeScheduler',

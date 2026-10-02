@@ -3464,6 +3464,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: workspace:*
         version: link:../../core/agent
+      '@deepseek-ai/dsh-agent-preset-registry':
+        specifier: workspace:*
+        version: link:../../preset/agent-preset-registry
       '@deepseek-ai/dsh-api-remotes':
         specifier: workspace:*
         version: link:../../api/remotes
@@ -8080,6 +8083,9 @@ importers:
       '@deepseek-ai/dsh-system-prompt':
         specifier: workspace:*
         version: link:../../core/system-prompt
+      '@deepseek-ai/dsh-tool-subagent':
+        specifier: workspace:*
+        version: link:../../subagent/tool-subagent
       '@deepseek-ai/dsh-tool-subagent-control':
         specifier: workspace:*
         version: link:../../subagent/tool-subagent-control
@@ -14063,6 +14069,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: workspace:*
         version: link:../../core/tools
+      '@deepseek-ai/dsh-tool-subagent':
+        specifier: workspace:*
+        version: link:../../subagent/tool-subagent
       '@deepseek-ai/dsh-workflow':
         specifier: workspace:*
         version: link:../workflow

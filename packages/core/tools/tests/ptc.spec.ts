@@ -2190,10 +2190,10 @@ describe('PTC standing file policy and sandbox outcomes', () => {
 })
 
 describe('per-program execution controls', () => {
-  async function controlledSetup(approval = true) {
+  async function controlledSetup(approval = true, mode: 'read-only' | 'workspace-write' | 'danger-full-access' = 'read-only') {
     const state = await setup()
     await state.ctx.plugin(SessionProjections)
-    await state.ctx.plugin(SandboxPolicy, { mode: 'read-only', workspaceRoot: process.cwd() })
+    await state.ctx.plugin(SandboxPolicy, { mode, workspaceRoot: process.cwd() })
     if (approval) await state.ctx.plugin(ApprovalService, { policy: 'ask' })
     Object.defineProperties(state.runtime, {
       sandboxMode: { get: () => 'read-only' },
@@ -2280,6 +2280,26 @@ describe('per-program execution controls', () => {
       expect(ask).not.toHaveBeenCalled()
       expect(runtime.lastRequest).toBeUndefined()
     } finally { await ctx.fiber.dispose() }
+  })
+
+  it('refuses a narrower mode, which nested tool calls would not honor, before asking or running', async () => {
+    const { ctx, runtime, execute } = await controlledSetup(true, 'danger-full-access')
+    const ask = vi.fn(() => Promise.resolve<ApprovalOutcome>('allowed-once'))
+    ctx.on('approval/request', ask)
+    try {
+      const result = await execute({ sandbox_permissions: 'workspace-write', justification: 'Confine this program' })
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain('sandbox_permissions \\"workspace-write\\" is narrower than this Session\'s \\"danger-full-access\\" mode; run_code can only widen')
+      expect(ask).not.toHaveBeenCalled()
+      expect(runtime.lastRequest).toBeUndefined()
+    } finally { await ctx.fiber.dispose() }
+    // The widest target is never narrower: it goes to approval as before.
+    const widest = await controlledSetup(true, 'workspace-write')
+    widest.ctx.on('approval/request', () => Promise.resolve<ApprovalOutcome>('allowed-once'))
+    try {
+      expect((await widest.execute({ sandbox_permissions: 'danger-full-access', justification: 'Reach the network' })).isError).toBe(false)
+      expect(widest.runtime.lastRequest?.sandboxPolicy?.mode).toBe('danger-full-access')
+    } finally { await widest.ctx.fiber.dispose() }
   })
 
   it.each(['rejected', 'cancelled', 'unavailable'] as const)('does not start a program after approval returns %s', async (outcome) => {

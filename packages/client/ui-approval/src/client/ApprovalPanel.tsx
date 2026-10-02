@@ -15,13 +15,21 @@ export function ApprovalPanel(props: ApprovalComposerProps) {
     ? null
     : props.renderSlot('conversation.approval.detail', { callId: approval.callId })
   const reason = approval.displayReason === undefined ? approval.reason : props.resolveReason(approval.displayReason)
-  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail} t={props.t} />
+  const lead = (answered: boolean): ReactNode => props.renderSlot('conversation.approval.lead', {
+    toolName: approval.toolName,
+    ...(approval.callId === undefined ? {} : { callId: approval.callId }),
+    ...(reason === undefined ? {} : { reason }),
+    answered,
+  }, { fallback: <><StateDot state={answered ? 'ongoing' : 'warning'} />{props.t('waiting')}</> })
+  return <ApprovalFlow key={approval.key} pending={approval} reason={reason} detail={detail} lead={lead} t={props.t} />
 }
 
-function ApprovalFlow({ pending, reason, detail, t }: {
+function ApprovalFlow({ pending, reason, detail, lead, t }: {
   pending: PendingApproval
   reason: string | undefined
   detail: ReactNode
+  /** The status strip's content for the current answering state. */
+  lead: (answered: boolean) => ReactNode
   t: ApprovalComposerProps['t']
 }) {
   const [answered, setAnswered] = useState(false)
@@ -49,6 +57,10 @@ function ApprovalFlow({ pending, reason, detail, t }: {
       || element.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]') !== null) return
     if (event.key !== 'Enter' && event.key !== 'Escape') return
     if (event.key === 'Enter' && element.closest('button, a[href], [role="button"]') !== null) return
+    // Plugin-owned seat content (a <summary>, an anchor without href, a
+    // tabIndex element) keeps its own keys: answering from inside it would
+    // approve on a key the user meant for that element.
+    if (element.closest('[data-approval-lead], [data-approval-detail]') !== null) return
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     event.preventDefault()
     event.stopPropagation()
@@ -63,7 +75,7 @@ function ApprovalFlow({ pending, reason, detail, t }: {
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false; compositionEnded.current = true }}>
       <div className={css.card}>
-        <div className={css.strip}><StateDot state={answered ? 'ongoing' : 'warning'} />{t('waiting')}</div>
+        <div className={css.strip} data-approval-lead="">{lead(answered)}</div>
         <div
           className={css.body}
           data-approval-scroll=""
@@ -72,7 +84,7 @@ function ApprovalFlow({ pending, reason, detail, t }: {
           aria-label={t('detail.aria')}
         >
           <div className={css.headline}>{reason ?? t('escalation', { toolName: pending.toolName })}</div>
-          {detail !== null && <div className={css.command}>{detail}</div>}
+          {detail !== null && <div className={css.command} data-approval-detail="">{detail}</div>}
         </div>
         <div className={css.actionRow}>
           <Button variant="outline" className={css.reject} disabled={answered} onClick={() => { answer('rejected') }}>

@@ -20,7 +20,19 @@ export const name = 'experimental-computer-use-cua-driver-native'
 export const inject = ['computerUse', 'tools', 'systemPrompt']
 
 /** The native provider uses the installed SDK's same-process defaults. */
-export const Config = Schema.object({})
+export interface Config {
+  /**
+   * Host platform the model guidance describes, as `process.platform` names
+   * it; defaults to the running platform. A snapshot composition pins it so
+   * the prompt does not depend on the machine.
+   */
+  platform?: string
+}
+
+/** Loader schema for the native provider. */
+export const Config: Schema<Config> = Schema.object({
+  platform: Schema.string(),
+})
 
 const ToolCatalog = z.object({
   tools: z.array(z.object({
@@ -36,18 +48,21 @@ const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u
 
 const GUIDANCE = `Cua Driver native computer-use tools operate the host desktop. Discover the exact app and window, then get a fresh window snapshot before acting. Use element_token from that snapshot, or coordinates from its screenshot. A new snapshot of that window invalidates its earlier element tokens. Select either target or the legacy pid/window_id fields; do not combine them.
 
-Prefer background delivery. A refusal does not authorize a foreground retry. Verify the requested outcome from fresh state after an action; a delivered click alone does not prove the outcome. After cancellation, inspect current state before retrying because completed input is not rolled back. Other sessions and applications may change the same desktop.
+Prefer background delivery. A refusal does not authorize a foreground retry. Verify the requested outcome from fresh state after an action; a delivered click alone does not prove the outcome. After cancellation, inspect current state before retrying because completed input is not rolled back. Other sessions and applications may change the same desktop.`
 
-On macOS, cursor-overlay operations may return facility_unavailable even when screenshots and input work.`
+/** Appended on macOS only, the platform whose cursor overlay can be unavailable. */
+const MACOS_GUIDANCE = 'On macOS, cursor-overlay operations may return facility_unavailable even when screenshots and input work.'
 
 /**
  * Own one native runtime and expose its catalog through the MCP result adapter.
  * Startup failures roll back every registration. Unload removes tools, aborts
  * calls and image admission, awaits settlement and SDK shutdown, then releases computer use.
  * @param ctx - context providing the exclusive registration and tool services.
+ * @param config - provider configuration.
  * @returns after native import, runtime creation, and tool discovery complete.
  */
-export async function apply(ctx: Context): Promise<void> {
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  const platform = config.platform ?? process.platform
   const lifetime = new AbortController()
   const pending = new Set<Promise<unknown>>()
   let driver: NativeDriver | undefined
@@ -132,7 +147,7 @@ export async function apply(ctx: Context): Promise<void> {
     inner.systemPrompt.section({
       name: 'computer-use:cua-driver-native',
       order: inner.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
-      text: GUIDANCE,
+      text: platform === 'darwin' ? `${GUIDANCE}\n\n${MACOS_GUIDANCE}` : GUIDANCE,
     })
   }
 }

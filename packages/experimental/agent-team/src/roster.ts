@@ -3,7 +3,8 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
@@ -18,12 +19,27 @@ import { TeamId } from './types.ts'
 import type {
   SpawnTeammateRequest,
   SpawnTeammateResult,
+  TeammateRoute,
   TeamMemberSnapshot,
   TeamMemberView,
 } from './types.ts'
 import { requiredText } from './validation.ts'
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
+
+/**
+ * Convert a teammate route into child Agent options.
+ * @param route - the validated route.
+ * @returns the Agent options carrying exactly the route's fields.
+ */
+function teammateAgentOptions(route: TeammateRoute): AgentOptions {
+  return {
+    ...route.provider === undefined ? {} : { provider: route.provider },
+    ...route.model === undefined ? {} : { model: route.model },
+    ...route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) },
+    ...route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens },
+  }
+}
 
 /** Caller identity inside one implicit Team. */
 export interface TeamMembership {
@@ -54,9 +70,35 @@ export function resolveActiveMember(
   return { id: member.id, name }
 }
 
+/** A teammate's model and reasoning effort as last observed. */
+interface MemberRoute {
+  readonly model?: string
+  readonly reasoningEffort?: string
+}
+
+/**
+ * The route fields of an Agent's options or a requested teammate route.
+ * @param options - the options or route.
+ * @param options.model - the model id, if any.
+ * @param options.reasoningEffort - the reasoning effort, if any.
+ * @returns the present model and effort.
+ */
+function memberRoute(options: { readonly model?: string | undefined; readonly reasoningEffort?: string | undefined }): MemberRoute {
+  return {
+    ...options.model === undefined ? {} : { model: options.model },
+    ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
+  }
+}
+
 /** Owns Team identities and the lifecycle of rostered continuable children. */
 export class TeamRoster {
   private readonly inFlightCreations = new Set<Promise<unknown>>()
+  /**
+   * The route each teammate was last seen on in this process, so a teammate
+   * whose Activation is no longer resident still reports its own route
+   * instead of the Lead's. A teammate never seen here reports none.
+   */
+  private readonly knownRoutes = new Map<SessionId, MemberRoute>()
 
   /**
    * @param ctx - Team service context with Agent, Session, persistence, and subagent services.
@@ -135,11 +177,12 @@ export class TeamRoster {
       role: 'lead',
       status: availability(root),
       ...root.options.model === undefined ? {} : { model: root.options.model },
+      ...root.options.reasoningEffort === undefined ? {} : { reasoningEffort: root.options.reasoningEffort },
       diagnostics: [],
     }]
     for (const member of state.members) {
       const live = this.ctx.agents.get(member.id)
-      const model = live?.options.model ?? root.options.model
+      const route = this.routeOf(member.id, live)
       result.push({
         id: member.id,
         name: member.name,
@@ -152,7 +195,7 @@ export class TeamRoster {
         description: member.description,
         provider: member.provider,
         context: member.context,
-        ...model === undefined ? {} : { model },
+        ...route,
         diagnostics: member.error === undefined ? [] : [member.error],
       })
     }
@@ -277,6 +320,7 @@ export class TeamRoster {
       await this.journal.appendAndFlush(root, 'team/member', { version: 2, teamId: TeamId(root.id), member })
     })
 
+    if (request.agentOptions?.model !== undefined) this.knownRoutes.set(childId, memberRoute(request.agentOptions))
     let started: ContinuableStart
     try {
       started = await this.ctx.subagents.startContinuable({
@@ -286,6 +330,7 @@ export class TeamRoster {
         request: {
           prompt: request.prompt,
           parent: root,
+          ...request.agentOptions === undefined ? {} : { agentOptions: teammateAgentOptions(request.agentOptions) },
         },
         signal,
       })
@@ -444,9 +489,23 @@ export class TeamRoster {
       description: member.description,
       provider: member.provider,
       context: member.context,
-      ...live?.options.model === undefined ? {} : { model: live.options.model },
+      ...this.routeOf(member.id, live),
       diagnostics: [],
     }
+  }
+
+  /**
+   * One teammate's route: a resident member's own options, remembered for
+   * when it is no longer resident, else the route last seen in this process.
+   * @param id - the teammate Session.
+   * @param live - its resident Agent, if any.
+   * @returns the known model and effort, or none.
+   */
+  private routeOf(id: SessionId, live: Agent | undefined): MemberRoute {
+    if (live === undefined) return this.knownRoutes.get(id) ?? {}
+    const route = memberRoute(live.options)
+    this.knownRoutes.set(id, route)
+    return route
   }
 
   /** Validate a never-reused model-facing teammate name. */

@@ -10,7 +10,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import ToolRuntime, {
   defineContentToolFixture, defineTool, JsonSchemaError, parameterSchemaSpecToJsonSchema, validateArgs, ToolArgsError, ToolNotFoundError,
-  TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH,
+  TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, TOOL_SEARCH_NAME,
   type InferArgs, type ParameterSchemaSpec, type PreToolDecision, type PostToolDecision,
   type JsonSchemaNode, type ToolDefinition, type ToolDispatchExecution, type ToolExecutionResult, type ToolExecutionToken,
 } from '@deepseek-ai/dsh-tools'
@@ -52,12 +52,16 @@ const echoTool = defineTool({
 })
 
 describe('ToolRuntime', () => {
-  it('preserves deferred loading through registry and prompt schema projection', async () => {
+  it('lists a deferLoading tool by name only until tool_search activates it, then declares it with the flag', async () => {
     const ctx = await setup()
     try {
       ctx.tools.register(defineContentToolFixture({ name: 'deferred', description: '', parameters: {}, deferLoading: true, async execute() { return [] } }))
       expect(ctx.tools.schemas()[0]?.deferLoading).toBe(true)
-      expect((await ctx.systemPrompt.assemble()).tools[0]?.deferLoading).toBe(true)
+      expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toEqual([TOOL_SEARCH_NAME])
+      const agent = { id: SessionId('deferred-agent'), session: {} as Agent['session'] } as Agent
+      await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('search'), name: TOOL_SEARCH_NAME, arguments: { names: ['deferred'] }, agent })
+      const activated = (await ctx.systemPrompt.assemble({ scope: agent })).tools
+      expect(activated.map(tool => [tool.name, tool.deferLoading])).toEqual([['deferred', true], [TOOL_SEARCH_NAME, undefined]])
     } finally {
       await ctx.fiber.dispose()
     }

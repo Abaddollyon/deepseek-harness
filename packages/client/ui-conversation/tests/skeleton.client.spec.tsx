@@ -140,6 +140,10 @@ function mount(
     composerBlock?: { reason: string }
     /** Mutable view ledger used by registration-order regressions. */
     viewTabs?: ViewTab[]
+    /** Agent preset the session's summary row records. */
+    agentPreset?: string
+    /** Agent preset ids with a registered `conversation.landing` entry. */
+    landings?: readonly string[]
   } = {},
 ) {
   const sessionId = 'sessionId' in options ? options.sessionId : SID
@@ -154,6 +158,7 @@ function mount(
     id: SID, displayTitle: 'Child', parentId: options.nestedSubagent === true ? parent : root,
     cwd: '/projects/one', running: false, retainedBy: { mainView: 1 }, blank: options.summaryBlank ?? false, updatedAt: 3,
     ...(options.summaryOrigin === undefined ? {} : { origin: options.summaryOrigin }),
+    ...(options.agentPreset === undefined ? {} : { projectionValues: { agentPreset: options.agentPreset } }),
   }
   const listed = options.omitSummaryRow !== true
   const sessions = createSnapshotStore<SessionListState>({
@@ -191,9 +196,14 @@ function mount(
   const useConversationViews: SessionSlotProps['useConversationViews'] = selector => selector(viewTabs)
   /** Owner share handed to the two composer tool-row seats, per render. */
   const seatOwners: { key: string; owner: unknown }[] = []
+  /** Owner share and dispatch key handed to the aside and landing seats, per render. */
+  const extensionOwners: { key: string; owner: unknown; entryKey: string | undefined }[] = []
   let pickerOwner: unknown
-  const renderSlot = ((key: string, owner: object, opts?: { only?: string; fallback?: ReactNode }) => {
+  const renderSlot = ((key: string, owner: object, opts?: { only?: string; fallback?: ReactNode; entryKey?: string }) => {
     slotCalls.push(key)
+    if (key === 'conversation.aside' || key === 'conversation.landing') {
+      extensionOwners.push({ key, owner, entryKey: opts?.entryKey })
+    }
     if (key === 'conversation.input.model' || key === 'conversation.input.plan') {
       seatOwners.push({ key, owner })
     }
@@ -370,10 +380,16 @@ function mount(
     useInput,
     inputActions,
   }
-  const props: ConversationSlotProps = { ...runtimeProps, renderSlot, renderFactorySlot }
+  const props: ConversationSlotProps = {
+    ...runtimeProps,
+    renderSlot,
+    renderFactorySlot,
+    useConversationLandings: bindSnapshotSelector(createSnapshotStore(options.landings ?? [])),
+  }
   const view = render(<ConversationMainPanel {...props} />)
   return {
-    view, store, wiring, sink, retargetWorkspace, session, conversation, slotCalls, lineageOwners, seatOwners, open,
+    view, store, wiring, sink, retargetWorkspace, session, sessions, conversation,
+    slotCalls, lineageOwners, seatOwners, extensionOwners, open,
     pickerOwner: () => pickerOwner,
     rerender: () => { view.rerender(<ConversationMainPanel {...props} />) },
   }
@@ -631,6 +647,74 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.container.querySelector('[data-conversation-scroll]')?.contains(after)).toBe(true)
     expect(b.view.queryByTestId('hero-headline')).toBeNull()
     expect(b.view.getByTestId('view-chat')).toBeTruthy()
+  })
+
+  it('a blank session whose preset has a landing shows it instead of the hero, above the docked composer', () => {
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, undefined, { agentPreset: 'life', landings: ['life'] })
+    const root = b.view.container.querySelector('[data-phase]')
+    const landing = b.view.container.querySelector('[data-conversation-landing="life"]')
+    expect(root?.getAttribute('data-phase')).toBe('active')
+    expect(landing?.contains(b.view.getByTestId('view-conversation.landing'))).toBe(true)
+    expect(b.extensionOwners).toContainEqual({ key: 'conversation.landing', owner: { agentPreset: 'life' }, entryKey: 'life' })
+    expect(b.view.queryByText('探索未至之境')).toBeNull()
+    expect(b.view.queryByTestId('view-chat')).toBeNull()
+    const box = b.view.getByRole('textbox')
+    const seat = b.view.container.querySelector('[data-composer-seat]')
+    expect(seat?.contains(box)).toBe(true)
+    expect(landing?.compareDocumentPosition(seat!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    // The session views stay mounted beside the landing, so the stored draft
+    // seeds the composer and typing reaches the Conversation store.
+    expect(b.wiring.snapshot.draft).toBe('ordinary draft')
+    act(() => { b.wiring.setDraft('plan my week') })
+    expect(b.store.store.getSnapshot().draft).toBe('plan my week')
+
+    // The first turn replaces the landing with the transcript; the composer stays mounted.
+    b.session.set(sessionSnapshotOf({ blank: false }))
+    b.rerender()
+    expect(b.view.container.querySelector('[data-conversation-landing]')).toBeNull()
+    expect(b.view.getByTestId('view-chat')).toBeTruthy()
+    expect(b.view.getByRole('textbox')).toBe(box)
+  })
+
+  it('keeps the workspace and preset row beside a landing, and a preset switch swaps the landing out', () => {
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, undefined, { agentPreset: 'life', landings: ['life'] })
+    expect(b.view.container.querySelector('[data-conversation-landing="life"]')).not.toBeNull()
+    const seat = b.view.container.querySelector('[data-composer-seat]')
+    const preset = b.view.getByTestId('view-conversation.hero.agentPreset')
+    const chip = b.view.getByRole('button', { name: '选择工作区' })
+    expect(seat?.contains(preset)).toBe(true)
+    expect(seat?.contains(chip)).toBe(true)
+    expect(b.slotCalls).toContain('conversation.hero.workspace')
+
+    // The preset chip records another preset on the blank Session.
+    const current = b.sessions.getSnapshot()
+    const row = current.byId[SID]!
+    act(() => {
+      b.sessions.set({ ...current, byId: { ...current.byId, [SID]: { ...row, projectionValues: { agentPreset: 'code' } } } })
+    })
+    b.rerender()
+    expect(b.view.container.querySelector('[data-conversation-landing]')).toBeNull()
+    expect(b.view.container.querySelector('[data-phase]')?.getAttribute('data-phase')).toBe('hero')
+    expect(b.view.getByText('探索未至之境')).toBeTruthy()
+  })
+
+  it('a preset without a landing keeps the hero', () => {
+    const b = mount(sessionSnapshotOf({ blank: true }), undefined, undefined, { agentPreset: 'code', landings: ['life'] })
+    expect(b.view.container.querySelector('[data-phase]')?.getAttribute('data-phase')).toBe('hero')
+    expect(b.view.getByText('探索未至之境')).toBeTruthy()
+    expect(b.slotCalls).not.toContain('conversation.landing')
+  })
+
+  it('renders the asides beside the whole conversation with the session preset', () => {
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { agentPreset: 'life' })
+    const root = b.view.container.querySelector('[data-phase]')
+    const aside = b.view.getByTestId('view-conversation.aside')
+    expect(root?.contains(aside)).toBe(false)
+    expect(root?.parentElement?.contains(aside)).toBe(true)
+    expect(b.extensionOwners).toContainEqual({ key: 'conversation.aside', owner: { agentPreset: 'life' }, entryKey: undefined })
+
+    const sessionless = mount(sessionSnapshotOf(), undefined, undefined, { sessionId: undefined })
+    expect(sessionless.extensionOwners).toContainEqual({ key: 'conversation.aside', owner: { agentPreset: undefined }, entryKey: undefined })
   })
 
   it('keeps the Chat fallback selected by id when a view is inserted before it', () => {

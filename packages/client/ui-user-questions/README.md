@@ -77,6 +77,8 @@ This package fills `userQuestionPanels`, the optional capability `dsh-client-ui-
 
 The card accepts one question declaring the intent, carrying the plan as `detail`, and offering the named approve label, with at most one alternative and no multi-select. Its secondary action returns to the composer for change requests. Larger choices and multi-select questions remain in the generic flow. A plan review exposes `conversation.plan-review.actions` with its request key, full text, and optional invocation identity; the plan plugin opens logged plans from history and unlogged reviews as temporary sidebar previews, and opening a document does not answer or dismiss the review.
 
+A `conversation.question.lead` occupant replaces a card's leading label: the question header above the title, or the plan card's status. It receives the card kind, the question count, the header on screen, and whether an answer is being sent; it receives no way to answer, and the card keeps its title, choices, and every answer and dismissal path.
+
 ### Copy and locale
 
 Composer chrome copy (pager, buttons, placeholders, validation feedback) is bilingual: the plugin registers zh/en dictionaries under the `question` namespace of `dsh-client-locale` and hands the entry its bound translator plus the locale snapshot source through the inject face, so a locale switch re-renders a mounted composer. Question and option text arrives from the model and renders verbatim; carrier failure messages also display untranslated.

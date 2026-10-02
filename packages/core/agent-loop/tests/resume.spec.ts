@@ -9,14 +9,15 @@ import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionLogOffset, SessionSeq, Session, SessionId, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineContentToolFixture, TOOL_RUNTIME_SCHEDULER } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineContentToolFixture, TOOL_RUNTIME_SCHEDULER, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools'
+import type { Config as ToolsConfig } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { MockAdapter, textResponse } from './mock-adapter.ts'
+import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -27,19 +28,19 @@ declare module '@deepseek-ai/dsh-llm' {
 const dirs: string[] = []
 afterEach(async () => { for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }) })
 
-async function persistentHarness(adapter: MockAdapter): Promise<{ ctx: Context; root: string }> {
+async function persistentHarness(adapter: MockAdapter, toolsConfig: ToolsConfig = {}): Promise<{ ctx: Context; root: string }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-resume-'))
   dirs.push(root)
-  return { ctx: await mountPersistentHarness(root, adapter), root }
+  return { ctx: await mountPersistentHarness(root, adapter, undefined, toolsConfig), root }
 }
 
-async function mountPersistentHarness(root: string, adapter: MockAdapter, compression?: 'none'): Promise<Context> {
+async function mountPersistentHarness(root: string, adapter: MockAdapter, compression?: 'none', toolsConfig: ToolsConfig = {}): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(ToolRuntime, toolsConfig)
   await ctx.plugin(AgentRegistry)
   // The backend mounts BEFORE the loop so root teardown unwinds the loop
   // first: live agents drain their writers into still-open handles.
@@ -187,6 +188,34 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     expect(stored.some(event => event.type === 'turn/end' && event.data.turn === 2)).toBe(true)
     expect(JSON.stringify(stored)).toContain('stored')
     await ctx.fiber.dispose()
+  })
+
+  it('a resumed agent keeps the deferred tools its logged request header declared', async () => {
+    const defer = { defer: { include: ['fetch'] } }
+    const fixture = (ctx: Context, name: string) => ctx.tools.register(defineContentToolFixture({
+      name, description: `${name} tool`, parameters: {}, execute: async () => [{ type: 'text', text: 'done' }],
+    }))
+    const { ctx: ctx1, root } = await persistentHarness(new MockAdapter([
+      toolCallResponse('search-1', TOOL_SEARCH_NAME, { names: ['fetch'] }),
+      textResponse('found it'),
+    ]), defer)
+    fixture(ctx1, 'fetch')
+    const sessionId = SessionId('deferred-resume')
+    const created = await ctx1.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    created.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'find fetch' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx1, created.agent)
+    await created.dispose()
+    await ctx1.fiber.dispose()
+
+    const adapter = new MockAdapter([textResponse('resumed')])
+    const ctx2 = await mountPersistentHarness(root, adapter, undefined, defer)
+    fixture(ctx2, 'fetch')
+    const resumed = await ctx2.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    resumed.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx2, resumed.agent)
+    expect(adapter.requests[0]?.tools?.map(schema => schema.name)).toEqual(['fetch', TOOL_SEARCH_NAME])
+    await resumed.dispose()
+    await ctx2.fiber.dispose()
   })
 
   it('a rejecting final writer close releases the registries, then rejects disposal', async () => {

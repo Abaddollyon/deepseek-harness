@@ -34,7 +34,7 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'
 ```
 
-此提供者没有配置字段。它加载 [package.json](package.json) 声明的确切 Cua Driver npm 版本，并采用其进程内默认配置。原生模块导入、运行时初始化、目录格式、工具重名或电脑操作注册冲突会使激活失败，并回滚所拥有的资源。注册的提供者名称为 `cua-driver-native`。
+此提供者唯一的可选字段 `platform` 指定模型指导文本所描述的宿主平台，取值与 `process.platform` 相同；默认为当前运行的平台，快照组合会固定该值。此提供者加载 [package.json](package.json) 声明的确切 Cua Driver npm 版本，并采用其进程内默认配置。原生模块导入、运行时初始化、目录格式、工具重名或电脑操作注册冲突会使激活失败，并回滚所拥有的资源。注册的提供者名称为 `cua-driver-native`。
 
 挂载附件存储并使用明确声明支持图像输入的模型路由，才能接收截图。[MCP 结果适配器](../../mcp/mcp-client/README.zh.md) 负责图像接纳和诊断行为；模型无法接收图像时，程序调用方仍保留规范原始结果。调用采用 Cua Driver 上游的工具参数和结果。
 
@@ -87,7 +87,7 @@ env -u NODE_USE_ENV_PROXY DSH_COMPUTER_USE_NATIVE_E2E=1 node node_modules/vitest
 
 #### 模型看到什么
 
-在原生工具挂载期间，此提供者加入以下电脑操作指导文本。
+在原生工具挂载期间，此提供者加入以下电脑操作指导文本。最后一段关于光标叠加层的说明仅在 macOS 上加入。
 
 ##### 原生 Cua Driver 指导文本
 

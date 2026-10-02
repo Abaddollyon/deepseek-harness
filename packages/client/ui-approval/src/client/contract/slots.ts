@@ -39,6 +39,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       scope: 'session'
       owner: ApprovalDetailOwnerProps
     }
+    /**
+     * Replacement for the approval card's status strip, which otherwise shows
+     * a state dot and the waiting label. The occupant presents the request;
+     * the card keeps its headline, detail, decisions, and keyboard answers.
+     */
+    'conversation.approval.lead': {
+      kind: 'single'
+      scope: 'session'
+      owner: ApprovalLeadOwnerProps
+    }
   }
 }
 
@@ -46,6 +56,18 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export interface ApprovalDetailOwnerProps {
   /** Tool call correlated with the request. */
   callId: ToolCallId
+}
+
+/** Read-only request facts handed to an approval status-strip replacement. */
+export interface ApprovalLeadOwnerProps {
+  /** Tool requesting the decision. */
+  toolName: string
+  /** Tool call correlated with the request, when the asker supplied one. */
+  callId?: ToolCallId
+  /** The headline's reason in the current UI language, when the asker supplied one. */
+  reason?: string
+  /** Whether the user has answered and the card is waiting for the answer to settle. */
+  answered: boolean
 }
 
 /** Client-visible fields of an approval request projected through Remote Events. */
@@ -188,7 +210,7 @@ export interface ApprovalInjected {
 /** Full props of the approval composer takeover. */
 export type ApprovalComposerProps =
   PropsRuntime<'conversation.composer'>
-  & PropsRenderSlots<'conversation.approval.detail'>
+  & PropsRenderSlots<'conversation.approval.detail' | 'conversation.approval.lead'>
   & { matched: PendingApproval }
   & PropsLocale<'approval'>
   & ApprovalInjected

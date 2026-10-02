@@ -177,6 +177,25 @@ interface ToolRestriction {
 }
 ```
 
+## `ToolDeferPolicy` — 只列名称的工具
+
+`ToolDeferPolicy` 使工具声明不进入某个作用域的提示词，而工具仍然注册且可调用。部署默认值是 `dsh-tools` 那一行的 `defer` 字段；`ToolRuntime.deferAs()` 为一条作用域链遮蔽它，方式与 `presentAs()` 遮蔽 `mode` 相同。当某个作用域延迟了一个可见工具时，注册表会在保留的 `run_code` 传输旁边插入保留的 `tool_search` 查询工具。直接调用 `tool_search` 会为该 agent 激活找到的工具，下一次请求头即声明它们；在 `agent/created` 时，注册表从 agent 最后一次记录的请求头恢复其激活。
+
+```ts type-equiv
+/**
+ * Which visible tools a scope defers. A tool is deferred when its definition
+ * sets `deferLoading` or its name matches `include`, and its name matches no
+ * `exclude` pattern. Patterns match whole tool names; `*` matches any run of
+ * characters, including none.
+ */
+interface ToolDeferPolicy {
+  /** Name patterns of tools listed by name only. */
+  readonly include?: readonly string[]
+  /** Name patterns kept fully declared even when `include` or `deferLoading` defers them. */
+  readonly exclude?: readonly string[]
+}
+```
+
 ## 执行：可扩展的 waterfall（瀑布式事件）加单调策略
 
 `ctx.tools.execute()` 接受由调用方拥有且包含必需 readonly `signal` 的 `ToolExecutionInput`，将其解析后的 JSON 参数一次性物化为流水线拥有的 `ToolExecution`，然后让调用依次经过 `tools/pre-execute`（可重排的 allow/deny/ask waterfall）→ 已注册的单调 guard → `tools/execute`（环绕分派包装层）→ `projectContent` → `tools/post-execute`（检查/替换结果）→ 可选且由定义拥有的 `finalizeContent` → `tools/result`（不可变的权威结果）。只有 `tools/execute` 视图可以替换必需的 signal。最终产出为 `ToolExecutionResult`。
@@ -520,6 +539,17 @@ Tool registry and execution pipeline. Scoped registrations shadow globals; one v
  * @returns the exact disposer that restores the deployment default.
  */
 presentAs(mode: ToolPresentationMode): () => void
+
+/**
+ * List the calling scope's tools named by `policy` by name only instead of
+ * applying the deployment default policy. Nearest scope on the chain wins,
+ * like {@link presentAs}, so a preset's standing declaration covers every
+ * agent joined under it. Scoped only, and one declaration per scope.
+ * @param policy - include and exclude name patterns.
+ * @returns the exact disposer that restores the deployment default.
+ * @throws when called on an unscoped context, a pattern is empty, or the scope already declared a policy.
+ */
+deferAs(policy: ToolDeferPolicy): () => void
 
 /**
  * Register globally or in the calling agent scope. Scoped tools shadow

@@ -148,15 +148,16 @@ export function QuestionComposer(props: QuestionComposerProps) {
         useStore={props.useStore}
         useQuestionCard={props.useQuestionCard}
         actions={props.actions}
+        renderSlot={props.renderSlot}
       />
     )
     : <PlanReviewPanel key={question.key} pending={question} review={review} t={props.t} renderSlot={props.renderSlot} />
 }
 
 type QuestionFlowProps =
-  { pending: PendingQuestion } & Pick<QuestionComposerProps, 't' | 'useStore' | 'useQuestionCard' | 'actions'>
+  { pending: PendingQuestion } & Pick<QuestionComposerProps, 't' | 'useStore' | 'useQuestionCard' | 'actions' | 'renderSlot'>
 
-function QuestionFlow({ pending, t, useStore, useQuestionCard, actions }: QuestionFlowProps) {
+function QuestionFlow({ pending, t, useStore, useQuestionCard, actions, renderSlot }: QuestionFlowProps) {
   const questions = pending.questions
   // A read-only card built from a settled call's transcript: the same panel
   // over the recorded answers, with nothing left to submit.
@@ -437,7 +438,12 @@ function QuestionFlow({ pending, t, useStore, useQuestionCard, actions }: Questi
       >
         <header className={css.header}>
           <div className={css.headingBlock}>
-            {question.header !== undefined && <div className={css.eyebrow}>{question.header}</div>}
+            {renderSlot('conversation.question.lead', {
+              kind: 'question',
+              questionCount: questions.length,
+              ...(question.header === undefined ? {} : { header: question.header }),
+              busy: busy !== null,
+            }, { fallback: question.header === undefined ? null : <div className={css.eyebrow}>{question.header}</div> })}
             <h2 className={css.title} id={`question-${pending.key}-${String(index)}`}>
               {question.question}
             </h2>

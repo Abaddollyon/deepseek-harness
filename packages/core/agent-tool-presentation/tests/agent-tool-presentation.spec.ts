@@ -123,9 +123,40 @@ describe('the tool-presentation row', () => {
     expect(assembly.tools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
   })
 
-  it('requires a mode rather than defaulting one', () => {
-    // An omitted value would mean the row was composed for nothing: a preset
-    // without this row already gets the deployment default.
-    expect(() => Config({} as never)).toThrow()
+  it('keeps an omitted defer policy absent so the deployment default applies', () => {
+    expect(Config({ mode: 'ptc' })).toEqual({ mode: 'ptc' })
+    expect(Config({ defer: { include: ['echo'] } })).toEqual({ defer: { include: ['echo'], exclude: [] } })
+  })
+
+  it('requires a mode or a defer policy', () => {
+    // A row with neither would be composed for nothing: a preset without this
+    // row already gets the deployment default.
+    expect(() => { apply(new Context(), {}) }).toThrow(/set `mode`, `defer`, or both/)
+  })
+
+  it('lists its own agent\'s matching tools by name only and leaves the rest declared', async () => {
+    const ctx = await host()
+    const deferring = await mount(ctx, { mode: 'ptc', defer: { include: ['ec*'] } }, 'deferring')
+    const plain = await mount(ctx, { mode: 'ptc' }, 'plain')
+
+    const deferringSdk = (await ctx.systemPrompt.assemble({ scope: deferring.agent }))
+      .sections.find(section => section.name === 'tools:sdk')?.text
+    const plainSdk = (await ctx.systemPrompt.assemble({ scope: plain.agent }))
+      .sections.find(section => section.name === 'tools:sdk')?.text
+
+    expect(deferringSdk).not.toContain('  echo: {')
+    expect(deferringSdk).toContain('- `echo` — Echo tool.')
+    expect(deferringSdk).toContain('  tool_search: {')
+    expect(plainSdk).toContain('  echo: {')
+    expect(plainSdk).not.toContain('tool_search')
+  })
+
+  it('defers without changing the presentation', async () => {
+    const ctx = await host()
+    const { agent } = await mount(ctx, { defer: { include: ['echo'] } })
+
+    const assembly = await ctx.systemPrompt.assemble({ scope: agent })
+
+    expect(assembly.tools.map(tool => tool.name)).toEqual(['tool_search'])
   })
 })

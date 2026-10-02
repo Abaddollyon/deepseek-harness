@@ -16,4 +16,5 @@ export default defineConfig([
   entry('lib/types/index.js'),
   entry('lib/types/model-selection-settings.js'),
   entry('lib/types/invariant.js'),
+  entry('lib/types/route-selection.js'),
 ])

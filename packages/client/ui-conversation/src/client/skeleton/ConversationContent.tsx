@@ -21,7 +21,7 @@ function NoConversationWidthControls() {
  */
 export function ConversationContent(props: ConversationContentProps) {
   const {
-    sessionId, phase, hero, useSession, useSessions, useSessionStatus,
+    sessionId, phase, hero, landing, useSession, useSessions, useSessionStatus,
     useWorkspaces, useInput, useComposerBlock, renderSlot, renderSlotChain,
     selectWorkspace, t, useFactorySlot,
   } = props
@@ -168,7 +168,10 @@ export function ConversationContent(props: ConversationContentProps) {
   const composerBar = (
     <div className={clsx(css.composerStack, hero && css.composerHero)}>
       {hero && <HeroShell t={t} renderSlot={renderSlot} />}
-      {hero && heroWorkspaceRow}
+      {/* A landing replaces the Hero but not the blank Session's choices:
+          the workspace and preset row stays above the docked card, so the
+          user can still switch the preset (and with it the landing). */}
+      {(hero || landing !== undefined) && heroWorkspaceRow}
       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
       {inputBar}
     </div>
@@ -200,6 +203,13 @@ export function ConversationContent(props: ConversationContentProps) {
       data-content-phase={phase}
     >
       <div className={css.scrollBody} data-conversation-scroll="">
+        {sessionId !== undefined && landing !== undefined && (
+          <div className={css.landingSeat} data-conversation-landing={landing}>
+            {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
+          </div>
+        )}
+        {/* The views stay mounted beside a landing: they render nothing for a
+            blank Session, but own the stored-draft seed and the draft mirror. */}
         {sessionId === undefined ? null : <Views />}
         {composerSeat}
       </div>

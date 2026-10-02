@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-agent-preset-registry/types'
 import type { ConversationSlotProps } from '../contract/slots.ts'
 import { conversationPhase } from '../contract/snapshot.ts'
 import { ConversationWidthControls } from './ConversationWidthControls.tsx'
@@ -6,12 +7,13 @@ import css from './ConversationRoot.module.css'
 const CONTENT_SLOTS = { widthControls: ConversationWidthControls }
 
 /**
- * Render the existing main Conversation frame around the extracted content.
+ * Render the existing main Conversation frame around the extracted content,
+ * with the registered asides beside it.
  * @param props - the original `main.conversation` Slot props.
- * @returns the unchanged root, Header, content, and width-control subtree.
+ * @returns the root, Header, content, width controls, and asides.
  */
 export function ConversationMainPanel(props: ConversationSlotProps) {
-  const { sessionId, useSession, useSessions, useConversation, renderSlot, renderFactorySlot } = props
+  const { sessionId, useSession, useSessions, useConversation, useConversationLandings, renderSlot, renderFactorySlot } = props
   const session = useSession(s => s)
   const conversation = useConversation(s => s)
   const shellPhase = session === undefined || conversation === undefined
@@ -19,6 +21,9 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
     : conversationPhase(session, conversation)
   const openState = session?.openState
   const summaryBlank = useSessions(s => sessionId === undefined ? undefined : s.byId[sessionId]?.blank)
+  const agentPreset = useSessions(s =>
+    sessionId === undefined ? undefined : s.byId[sessionId]?.projectionValues?.agentPreset ?? undefined)
+  const hasLanding = useConversationLandings(keys => agentPreset !== undefined && keys.includes(agentPreset))
 
   // While a session is still replaying (loading + blank) the hero/docked
   // choice is unknowable — render the composer hidden instead of flashing
@@ -38,20 +43,28 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
     (shellPhase === 'blank' && openState === 'loading' && summaryBlank !== true)
     || parentAvailabilityPending
   )
-  const hero = sessionId === undefined
+  const blank = sessionId === undefined
     || (shellPhase === 'blank' && (openState === 'open' || summaryBlank === true))
+  // A landing replaces the Hero of a blank Session whose preset registered
+  // one; the composer then docks below it exactly as below a transcript.
+  const landing = blank && sessionId !== undefined && hasLanding ? agentPreset : undefined
+  const hero = blank && landing === undefined
   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
 
   return (
-    <div className={css.root} data-phase={phase}>
-      {renderSlot('conversation.header', {})}
-      {renderFactorySlot('conversation.content', {
-        variant: 'main',
-        phase,
-        hero,
-      }, {
-        slots: CONTENT_SLOTS,
-      })}
+    <div className={css.frame}>
+      <div className={css.root} data-phase={phase}>
+        {renderSlot('conversation.header', {})}
+        {renderFactorySlot('conversation.content', {
+          variant: 'main',
+          phase,
+          hero,
+          ...(landing === undefined ? {} : { landing }),
+        }, {
+          slots: CONTENT_SLOTS,
+        })}
+      </div>
+      {renderSlot('conversation.aside', { agentPreset })}
     </div>
   )
 }

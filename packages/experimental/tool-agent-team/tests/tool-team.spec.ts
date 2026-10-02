@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -16,6 +16,7 @@ import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import * as ToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
+import { recordSubagentModelSelection, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/src/model-selection-state.ts'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { serialize } from '@deepseek-ai/dsh-llm-deepseek/src/serialize.ts'
@@ -716,7 +717,7 @@ describe('dsh-tool-team', () => {
     expect(text(result)).toContain('unknown tool "list_agents"')
     expect('default' in toolTeam).toBe(false)
     expect(toolTeam.name).toBe('tool-agent-team')
-    expect(toolTeam.inject).toEqual(['agents', 'agentTeams', 'tools', 'systemPrompt'])
+    expect(toolTeam.inject).toEqual(['agents', 'agentTeams', 'tools', 'systemPrompt', 'subagents', 'sessionProjections', 'llm'])
   })
 
   it('uses configured fresh and fork provider names', async () => {
@@ -731,5 +732,180 @@ describe('dsh-tool-team', () => {
     const childId = spawnedChildId(ctx, lead, result)
     await vi.waitFor(() => { expect(ctx.agents.get(childId)).toBeUndefined() }, { timeout: 5_000 })
     expect(ctx.agentTeams.listMembers(lead)[1]).toMatchObject({ provider: 'team-fresh' })
+  })
+
+  describe('teammate LLM routes', () => {
+    const XHIGH = {
+      efforts: [
+        { id: ReasoningEffortId('low'), name: 'Low' },
+        { id: ReasoningEffortId('high'), name: 'High' },
+        { id: ReasoningEffortId('xhigh'), name: 'Extra high' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    }
+    const SOL_XHIGH = { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' }
+
+    async function routeSetup(
+      config: toolTeam.Config,
+      allowed?: Array<{ provider: string; model: string }>,
+      script: ConstructorParameters<typeof MockAdapter>[0] = ['hang', 'hang', 'hang'],
+    ) {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await mountAgentLoopTestDependencies(ctx)
+      const storageRoot = mkdtempSync(join(tmpdir(), 'dsh-tool-team-route-'))
+      roots.push(storageRoot)
+      await ctx.plugin(JsonlSessionPersistence, { root: storageRoot })
+      await ctx.plugin(TestSessionQuery)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      await ctx.plugin(SubagentService)
+      await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+      await ctx.plugin(SubagentFork, { providerName: 'fork' })
+      await ctx.plugin(TeamService)
+      ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+      await ctx.plugin(toolTeam, config)
+      const adapter = new MockAdapter(script, XHIGH)
+      ctx.llm.registerAdapter(['mock'], adapter)
+      const lead = await ctx.agentLoop.create(SessionId('tool-team-route-lead'), { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') })
+      if (allowed !== undefined) recordSubagentModelSelection(ctx.sessionProjections, lead.session, allowed)
+      const start = vi.spyOn(ctx.subagents, 'startContinuable')
+      return { ctx, lead, start }
+    }
+
+    it('starts teammates on the configured route and lists their effort', async () => {
+      const { ctx, lead, start } = await routeSetup({ agentOptions: SOL_XHIGH })
+      const spawned = await execute(ctx, lead, 'spawn_teammate', { name: 'deep-worker', description: 'deep work', prompt: 'go' })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      expect(start.mock.calls[0]?.[0].request.agentOptions).toEqual({ provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' })
+      await waitRunning(ctx, spawnedChildId(ctx, lead, spawned))
+      const listed = JSON.parse(text(await execute(ctx, lead, 'list_agents', {}))) as Array<{ target: string; model?: string; reasoningEffort?: string }>
+      expect(listed).toEqual([
+        expect.objectContaining({ target: 'lead', model: 'mock', reasoningEffort: 'low' }),
+        expect.objectContaining({ target: 'deep-worker', model: 'mock', reasoningEffort: 'xhigh' }),
+      ])
+    })
+
+    it('follows the composition\'s default child route when the row configures no teammate route', async () => {
+      const declared = { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('xhigh') }
+      const following = await routeSetup({})
+      following.ctx.subagents.declareDefaultChildRoute(declared)
+      const spawned = await execute(following.ctx, following.lead, 'spawn_teammate', { name: 'default-worker', description: 'default route', prompt: 'go' })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      expect(following.start.mock.calls[0]?.[0].request.agentOptions).toEqual(declared)
+
+      // The row's own route wins over the declared default.
+      const own = await routeSetup({ agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'low' } })
+      own.ctx.subagents.declareDefaultChildRoute(declared)
+      await execute(own.ctx, own.lead, 'spawn_teammate', { name: 'own-worker', description: 'own route', prompt: 'go' })
+      expect(own.start.mock.calls[0]?.[0].request.agentOptions).toEqual({ provider: 'mock', model: 'mock', reasoningEffort: 'low' })
+
+      // A provider that cannot apply a route starts teammates without the default.
+      const fixed = await routeSetup({ freshProvider: 'fixed' })
+      fixed.ctx.subagents.declareDefaultChildRoute(declared)
+      fixed.ctx.subagents.registerProvider({
+        name: 'fixed',
+        capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        inheritsParentContext: false,
+        start: () => Promise.reject(new Error('unreachable')),
+      })
+      const result = await execute(fixed.ctx, fixed.lead, 'spawn_teammate', { name: 'fixed-worker', description: 'fixed', prompt: 'go' })
+      expect(text(result)).not.toContain('cannot start a teammate on a chosen LLM route')
+      expect(fixed.start.mock.calls[0]?.[0].request).not.toHaveProperty('agentOptions')
+    })
+
+    it('keeps reporting a teammate\'s own route once its Activation is no longer resident', async () => {
+      const { ctx, lead } = await routeSetup({}, [{ provider: 'mock', model: 'other' }], [textResponse('done')])
+      const spawned = await execute(ctx, lead, 'spawn_teammate', {
+        name: 'other-worker', description: 'other model', prompt: 'go', provider: 'mock', model: 'other', reasoning_effort: 'xhigh',
+      })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      const childId = spawnedChildId(ctx, lead, spawned)
+      await waitNoAgent(ctx, childId)
+      expect(ctx.agentTeams.listMembers(lead)[1]).toMatchObject({ status: 'inactive', model: 'other', reasoningEffort: 'xhigh' })
+    })
+
+    it('lets the Lead choose an allowed route and effort, and drops the configured effort on a changed route', async () => {
+      const { ctx, lead, start } = await routeSetup({ agentOptions: SOL_XHIGH }, [{ provider: 'mock', model: 'mock' }, { provider: 'mock', model: 'other' }])
+      const chosen = await execute(ctx, lead, 'spawn_teammate', {
+        name: 'light-worker', description: 'light work', prompt: 'go', provider: 'mock', model: 'mock', reasoning_effort: 'low',
+      })
+      expect(chosen.isError, text(chosen)).toBe(false)
+      const changed = await execute(ctx, lead, 'spawn_teammate', {
+        name: 'other-worker', description: 'other model', prompt: 'go', provider: 'mock', model: 'other',
+      })
+      expect(changed.isError, text(changed)).toBe(false)
+      expect(start.mock.calls.map(([request]) => request.request.agentOptions)).toEqual([
+        { provider: 'mock', model: 'mock', reasoningEffort: 'low' },
+        { provider: 'mock', model: 'other' },
+      ])
+    })
+
+    it.each([
+      [{ provider: 'mock' }, 'child LLM `provider` and `model` must be supplied together.'],
+      [{ provider: 'mock', model: 'nope' }, 'child LLM route "mock/nope" is not allowed for this Session.'],
+      [{ reasoning_effort: 'max' }, 'does not support reasoning effort "max".'],
+    ])('rejects the explicit route %j before creating a teammate and points to list_subagent_models', async (route, message) => {
+      const { ctx, lead, start } = await routeSetup({}, [{ provider: 'mock', model: 'mock' }])
+      const result = await execute(ctx, lead, 'spawn_teammate', { name: 'bad-route', description: 'bad route', prompt: 'go', ...route })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain(message)
+      expect(text(result)).toContain('Call list_subagent_models to see the routes and reasoning efforts you may choose.')
+      expect(start).not.toHaveBeenCalled()
+      expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+    })
+
+    it('resolves a choice over the provider route defaults and keeps a non-Error rejection readable', async () => {
+      const { ctx, lead, start } = await routeSetup({ freshProvider: 'routed' }, [{ provider: 'mock', model: 'mock' }])
+      ctx.subagents.registerProvider({
+        name: 'routed',
+        capabilities: { agentOptions: true, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        inheritsParentContext: false,
+        agentRouteDefaults: { provider: 'mock', model: 'mock' },
+        start: () => Promise.reject(new Error('unreachable')),
+      })
+      const unsupported = await execute(ctx, lead, 'spawn_teammate', { name: 'routed-worker', description: 'routed', prompt: 'go', reasoning_effort: 'max' })
+      expect(text(unsupported)).toContain('does not support reasoning effort "max". Call list_subagent_models')
+      vi.spyOn(ctx.llm, 'resolveCallConfig').mockRejectedValueOnce('adapter offline')
+      const offline = await execute(ctx, lead, 'spawn_teammate', { name: 'offline-worker', description: 'offline', prompt: 'go', reasoning_effort: 'low' })
+      expect(text(offline)).toContain('adapter offline. Call list_subagent_models')
+      expect(start).not.toHaveBeenCalled()
+    })
+
+    it('rejects an explicit route when the Session has no model-selection policy', async () => {
+      const { ctx, lead, start } = await routeSetup({})
+      const result = await execute(ctx, lead, 'spawn_teammate', { name: 'no-policy', description: 'no policy', prompt: 'go', model: 'mock', provider: 'mock' })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('teammate model selection is not enabled for this Session')
+      expect(text(result)).not.toContain('list_subagent_models')
+      expect(start).not.toHaveBeenCalled()
+    })
+
+    it('keeps the configured route error free of the selection hint and passes a token-only default through', async () => {
+      const unsupported = await routeSetup({ agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'max' } })
+      const failed = await execute(unsupported.ctx, unsupported.lead, 'spawn_teammate', { name: 'max-worker', description: 'max', prompt: 'go' })
+      expect(failed.isError).toBe(true)
+      expect(text(failed)).toContain('does not support reasoning effort "max"')
+      expect(text(failed)).not.toContain('list_subagent_models')
+
+      const tokens = await routeSetup({ agentOptions: { maxTokens: 512 } })
+      const spawned = await execute(tokens.ctx, tokens.lead, 'spawn_teammate', { name: 'token-worker', description: 'tokens', prompt: 'go' })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      expect(tokens.start.mock.calls[0]?.[0].request.agentOptions).toEqual({ maxTokens: 512 })
+    })
+
+    it('rejects a route for a provider that cannot apply one, and a configured route missing its model', async () => {
+      const { ctx, lead } = await routeSetup({ agentOptions: SOL_XHIGH, freshProvider: 'fixed' })
+      ctx.subagents.registerProvider({
+        name: 'fixed',
+        capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        inheritsParentContext: false,
+        start: () => Promise.reject(new Error('unreachable')),
+      })
+      const result = await execute(ctx, lead, 'spawn_teammate', { name: 'fixed-worker', description: 'fixed', prompt: 'go' })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('subagent provider "fixed" cannot start a teammate on a chosen LLM route')
+      await expect(routeSetup({ agentOptions: { provider: 'mock' } }))
+        .rejects.toThrow('configure `agentOptions.provider` and `agentOptions.model` together')
+    })
   })
 })

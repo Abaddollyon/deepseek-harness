@@ -160,7 +160,9 @@ root
 │     │     └─ conversation.session.header.corner
 │     ├─ conversation.composer
 │     │  ├─ conversation.approval.detail
-│     │  └─ conversation.plan-review.actions
+│     │  ├─ conversation.approval.lead
+│     │  ├─ conversation.plan-review.actions
+│     │  └─ conversation.question.lead
 │     ├─ conversation.composer.bar
 │     │  ├─ conversation.input.attachments
 │     │  ├─ conversation.input.permission
@@ -174,7 +176,9 @@ root
 │     ├─ conversation.hero.brand.mark
 │     ├─ conversation.hero.workspace
 │     │  └─ conversation.hero.workspace.directoryFlow
-│     └─ conversation.hero.agentPreset
+│     ├─ conversation.hero.agentPreset
+│     ├─ conversation.landing
+│     └─ conversation.aside
 ├─ rightbar
 │  └─ rightbar.session
 │     ├─ sidebar.right.pane.tab

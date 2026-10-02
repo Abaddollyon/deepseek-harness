@@ -177,6 +177,25 @@ interface ToolRestriction {
 }
 ```
 
+## `ToolDeferPolicy` — tools listed by name only
+
+`ToolDeferPolicy` keeps tool declarations out of a scope's prompt while the tools stay registered and callable. The deployment default is the `defer` field of the `dsh-tools` row; `ToolRuntime.deferAs()` shadows it for one scope chain the way `presentAs()` shadows `mode`. While a scope defers a visible tool, the registry inserts the reserved `tool_search` lookup beside the reserved `run_code` transport. A direct `tool_search` call activates the found tools for that agent, and the next request header declares them; on `agent/created` the registry restores an agent's activations from its last logged request header.
+
+```ts type-equiv
+/**
+ * Which visible tools a scope defers. A tool is deferred when its definition
+ * sets `deferLoading` or its name matches `include`, and its name matches no
+ * `exclude` pattern. Patterns match whole tool names; `*` matches any run of
+ * characters, including none.
+ */
+interface ToolDeferPolicy {
+  /** Name patterns of tools listed by name only. */
+  readonly include?: readonly string[]
+  /** Name patterns kept fully declared even when `include` or `deferLoading` defers them. */
+  readonly exclude?: readonly string[]
+}
+```
+
 ## Execution: extensible waterfalls plus monotonic policy
 
 `ctx.tools.execute()` accepts a caller-owned `ToolExecutionInput` with a required readonly `signal`, materializes its parsed JSON arguments once into a pipeline-owned `ToolExecution`, and runs that call through `tools/pre-execute` (the reorderable allow/deny/ask waterfall) → registered monotonic guards → `tools/execute` (around-dispatch wrappers) → `projectContent` → `tools/post-execute` (inspect/replace the result) → optional definition-owned `finalizeContent` → `tools/result` (the immutable authoritative outcome). Only the `tools/execute` view may replace the required signal. The outcome is a `ToolExecutionResult`.
@@ -520,6 +539,17 @@ Tool registry and execution pipeline. Scoped registrations shadow globals; one v
  * @returns the exact disposer that restores the deployment default.
  */
 presentAs(mode: ToolPresentationMode): () => void
+
+/**
+ * List the calling scope's tools named by `policy` by name only instead of
+ * applying the deployment default policy. Nearest scope on the chain wins,
+ * like {@link presentAs}, so a preset's standing declaration covers every
+ * agent joined under it. Scoped only, and one declaration per scope.
+ * @param policy - include and exclude name patterns.
+ * @returns the exact disposer that restores the deployment default.
+ * @throws when called on an unscoped context, a pattern is empty, or the scope already declared a policy.
+ */
+deferAs(policy: ToolDeferPolicy): () => void
 
 /**
  * Register globally or in the calling agent scope. Scoped tools shadow

@@ -54,6 +54,12 @@ export interface Config {
    */
   toolName?: string
   /**
+   * Model-facing lead of the tool description, replacing the generic
+   * delegation wording, for example a one-line role for an alias instance.
+   * The background and model-selection sentences are still appended.
+   */
+  description?: string
+  /**
    * Sample the Host `subagent-model-selection` setting for each new top-level
    * Session and inherit that decision in its child Sessions.
    */
@@ -71,7 +77,10 @@ export interface Config {
    */
   backgroundMode?: 'one-shot' | 'continuable'
   /**
-   * Agent options applied to every child; omitted fields use child-loop defaults.
+   * Agent options applied to every child; omitted fields use child-loop
+   * defaults. The instance named `subagent` also declares them as its
+   * composition's default child route (`ctx.subagents.defaultChildRoute()`),
+   * which Agent Teams follows when it configures no route of its own.
    */
   agentOptions?: AgentOptions
   /**
@@ -106,6 +115,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   provider: z.string().required(),
   toolName: z.string().default('subagent'),
+  description: z.string().min(1),
   modelSelectionSettings: z.boolean().default(false),
   enableRunInBackground: z.boolean().default(true),
   backgroundMode: z.union(['one-shot', 'continuable'] as const).default('one-shot'),
@@ -275,6 +285,16 @@ function providerWording(inheritsConversation: boolean): { description: string; 
   }
 }
 
+/**
+ * End a description lead with sentence punctuation so the appended
+ * behavior sentences read as separate sentences.
+ * @param lead - the configured or generic description lead.
+ * @returns the lead, with a period added when it ends without one.
+ */
+function leadSentence(lead: string): string {
+  return /[.!?]$/u.test(lead) ? lead : `${lead}.`
+}
+
 interface DelegationRunRequest {
   readonly run_in_background?: boolean
 }
@@ -318,12 +338,23 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
   if (config.toolFilter !== undefined && config.toolFilter.allow === undefined && config.toolFilter.deny === undefined) {
     throw new Error('tool-subagent: `toolFilter` is configured but names neither `allow` nor `deny` — remove the key or fill the filter')
   }
+  // Direct apply() also bypasses the schema's non-empty description check.
+  const descriptionLead = config.description?.trim()
+  if (descriptionLead?.length === 0) {
+    throw new Error('tool-subagent: `description` is configured but blank — remove the key or write the tool\'s role')
+  }
   const backgroundEnabled = config.enableRunInBackground !== false
   const continuable = (config.backgroundMode ?? 'one-shot') === 'continuable'
   const toolName = config.toolName ?? 'subagent'
 
   const modelSelectionCapable = config.modelSelectionSettings === true
   ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+  // The default-named instance's configured route is the composition's child
+  // default, which delegation paths without their own route (Agent Teams)
+  // follow. Aliases keep their routes to themselves.
+  if (toolName === 'subagent' && config.agentOptions !== undefined) {
+    ctx.subagents.declareDefaultChildRoute(config.agentOptions)
+  }
 
   const assertSubagentProviderConfiguration = (subagentProvider: SubagentProvider): void => {
     if (ctx.subagents.resolveMaxDepth(config.maxDepth) !== undefined && !subagentProvider.capabilities.depthLimit) {
@@ -378,7 +409,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             : '')
       const disposeTool = runtimeCtx.tools.register(defineTool({
         name: toolName,
-        description: wording.description + (backgroundEnabled
+        description: leadSentence(descriptionLead ?? wording.description) + (backgroundEnabled
           // The completion notice is the continuation service's own behavior, not
           // a separately installed capability, so this promise holds whenever the
           // continuable background path is reachable at all.

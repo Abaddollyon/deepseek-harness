@@ -9,6 +9,8 @@
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { assertSupportedJsonSchema } from './json-schema.ts'
 import type { JsonSchemaNode, JsonSchemaScalar } from './json-schema.ts'
+import { programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
+import type { DeferredToolEntry } from './defer.ts'
 /** Internal PTC mode projection: the model-facing schema plus the canonical output schema. */
 export interface ToolSdkSchema extends ToolSchema {
   /** Validated canonical value returned by the tool binding. */
@@ -282,9 +284,74 @@ function renderBashExample(schemas: ToolSdkSchema[]): string {
   return ` When no separate \`bash\` schema is supplied, invoke a declared \`bash\` binding inside \`run_code\`:\n\n\`run_code({ code: "return await tools.bash({ command: 'pwd'${description} })", description: "Show current directory" })\``
 }
 
+/** Sort schemas by name; the visible-capability map never carries a duplicate name. */
+function byName<T extends { readonly name: string }>(schemas: readonly T[]): T[] {
+  return [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+}
+
+/** The SDK alias for the result every MCP tool without its own output schema returns. */
+const MCP_RESULT_TYPE = 'McpToolResult'
+
+/**
+ * The canonical result of an MCP tool that declares no output schema, as
+ * `@deepseek-ai/dsh-mcp-client` builds it. Every such tool renders the same
+ * output type, so the SDK declares it once under {@link MCP_RESULT_TYPE}.
+ */
+const MCP_RESULT_SCHEMA: JsonSchemaNode = {
+  type: 'object',
+  properties: { content: { type: 'array', items: {} }, structuredContent: {} },
+  required: ['content'],
+  additionalProperties: false,
+}
+
+/** Rendered `ToolArgsMap` and `ToolOutputMap` declarations. */
+interface ToolMaps {
+  readonly text: string
+  /** Whether an output member names the shared MCP result alias. */
+  readonly usesMcpResult: boolean
+}
+
+/**
+ * The `ToolArgsMap` and `ToolOutputMap` interface declarations for the given tools, in name order.
+ * @param schemas - the tools to declare.
+ * @param aliasMcpResult - name the shared MCP result alias instead of repeating its shape.
+ * @returns the declarations and whether they use the alias.
+ */
+function renderToolMaps(schemas: readonly ToolSdkSchema[], aliasMcpResult: boolean): ToolMaps {
+  const mcpResult = aliasMcpResult ? jsonSchemaToTs(MCP_RESULT_SCHEMA, 1) : undefined
+  const argsMembers: string[] = []
+  const outputMembers: string[] = []
+  let usesMcpResult = false
+  for (const schema of byName(schemas)) {
+    argsMembers.push(...docLines(schema.description, 1))
+    argsMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.parameters, 1)};`)
+    const output = jsonSchemaToTs(schema.output, 1)
+    const shared = output === mcpResult
+    usesMcpResult ||= shared
+    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${shared ? MCP_RESULT_TYPE : output};`)
+  }
+  const argsMap = `interface ToolArgsMap {${argsMembers.length > 0 ? `\n${argsMembers.join('\n')}\n` : ''}}`
+  const outputMap = `interface ToolOutputMap {${outputMembers.length > 0 ? `\n${outputMembers.join('\n')}\n` : ''}}`
+  return { text: `${argsMap}\n\n${outputMap}`, usesMcpResult }
+}
+
+/**
+ * Render deferred tools' declarations as a TypeScript fragment that merges
+ * into the SDK's `ToolArgsMap` and `ToolOutputMap` interfaces — the format
+ * `tool_search` returns inside a program.
+ * @param schemas - the tools to declare.
+ * @returns the fenced declaration fragment.
+ */
+export function renderToolDeclarations(schemas: readonly ToolSdkSchema[]): string {
+  // A fragment spells every output out: the SDK declares the shared MCP
+  // result alias only when a declared tool uses it.
+  return `\`\`\`ts\n${renderToolMaps(schemas, false).text}\n\`\`\``
+}
+
 /**
  * Render the full `tools:sdk` prompt section: the fixed usage instructions
- * plus one `declare const tools` interface covering every given tool.
+ * plus one `declare const tools` interface covering every given tool, and,
+ * when tools are deferred, the index that names them.
  * Deterministic — tools are emitted in lexicographic name order, so an
  * unchanged tool set produces byte-identical text across assemblies. The sort
  * is not a total order on byte-equal names, so two schemas sharing a name
@@ -292,26 +359,22 @@ function renderBashExample(schemas: ToolSdkSchema[]): string {
  * by name, so the input never carries a duplicate.
  * @param schemas - the tool schemas to declare (the caller excludes
  *   `run_code` itself).
+ * @param deferred - tools listed by name only after the declarations.
  * @returns the complete section text.
  */
-export function renderToolsSdk(schemas: ToolSdkSchema[]): string {
-  const sorted = [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-  const argsMembers: string[] = []
-  const outputMembers: string[] = []
-  for (const schema of sorted) {
-    argsMembers.push(...docLines(schema.description, 1))
-    argsMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.parameters, 1)};`)
-    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.output, 1)};`)
-  }
-  const argsMap = `interface ToolArgsMap {${argsMembers.length > 0 ? `\n${argsMembers.join('\n')}\n` : ''}}`
-  const outputMap = `interface ToolOutputMap {${outputMembers.length > 0 ? `\n${outputMembers.join('\n')}\n` : ''}}`
+export function renderToolsSdk(schemas: ToolSdkSchema[], deferred: readonly DeferredToolEntry[] = []): string {
+  const sorted = byName(schemas)
+  const maps = renderToolMaps(sorted, true)
   const declaration = [
-    argsMap,
-    outputMap,
+    maps.text,
     'type ToolName = keyof ToolOutputMap',
     ['declare class ToolCallError extends Error {', '  readonly name: "ToolCallError";', '  readonly toolName: ToolName;', '}'].join('\n'),
     ['declare const tools: {', '  [K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>;', '}'].join('\n'),
   ].join('\n\n')
-  const jsonValue = 'type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }'
-  return `${SDK_INSTRUCTIONS}${renderBashExample(sorted)}\n\n${SDK_PROGRAM_INSTRUCTIONS}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\``
+  const jsonValue = [
+    'type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }',
+    ...maps.usesMcpResult ? [`type ${MCP_RESULT_TYPE} = ${jsonSchemaToTs(MCP_RESULT_SCHEMA)}`] : [],
+  ].join('\n\n')
+  const index = renderDeferredIndex(deferred, programIndexLead(name => `console.log((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`))
+  return `${SDK_INSTRUCTIONS}${renderBashExample(sorted)}\n\n${SDK_PROGRAM_INSTRUCTIONS}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
 }

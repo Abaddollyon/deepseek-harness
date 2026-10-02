@@ -3,7 +3,10 @@
   display: grid;
   grid-template-rows: 100%;
   height: 100%;
-  overflow: hidden;
+  /* clip, not hidden: a collapsed column's content overflows the frame, and a
+     hidden overflow is still a scroll container that focus or scrollIntoView
+     inside that column would scroll, shifting the whole app sideways. */
+  overflow: clip;
   background: var(--dsw-alias-bg-base);
 }
 

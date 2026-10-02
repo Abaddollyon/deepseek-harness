@@ -44,10 +44,11 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 |---|---|---|
 | `provider` | required | Provider name on `ctx.subagents` (e.g. `spawn`, `fork`, `acp`) |
 | `toolName` | `subagent` | Model-facing tool name; distinct for every loaded instance |
+| `description` | — | Lead of the tool description, replacing the generic delegation wording (for example a one-line role for an alias instance); the background and model-selection sentences are still appended |
 | `modelSelectionSettings` | `false` | Sample the Host's exact-route authorization preference for each top-level Session; a standing preset observes matching Sessions, while direct Agent setup passes its Session explicitly; requires provider `agentOptions` support |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; disabling also rejects forced background calls |
 | `backgroundMode` | `one-shot` | Background policy: `one-shot` defaults calls to foreground; `continuable` defaults them to background and requires the provider's `prepareContinuable` capability |
-| `agentOptions` | — | Configured child `provider`, `model`, adapter-owned `reasoningEffort`, and positive `maxTokens` defaults; requires provider `agentOptions` support and overlays any provider-owned route defaults |
+| `agentOptions` | — | Configured child `provider`, `model`, adapter-owned `reasoningEffort`, and positive `maxTokens` defaults; requires provider `agentOptions` support and overlays any provider-owned route defaults. The instance named `subagent` also declares them as the composition's default child route, which Agent Teams follows |
 | `persona` | — | Per-child persona; requires the provider's `persona` capability |
 | `toolFilter` | — | Per-child global-tool restriction; requires the `toolFilter` capability |
 | `maxDepth` | Host setting (`1`) | Absolute delegation-depth cap (`0` forbids delegation); `'provider-managed'` sends no cap to an out-of-process provider |
@@ -103,6 +104,7 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | Host-owned opt-in setting sampled for new Sessions |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | Session event that records and inherits the sampled decision |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` export of the route rules for other delegation tools, such as `spawn_teammate` |
 
 </details>
 

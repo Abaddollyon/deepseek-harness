@@ -513,6 +513,26 @@ Named provider registry with one-shot runs, durable discovery, and continuable-c
 
 ```ts cordis-catalog
 /**
+ * Declare the calling scope's default child route: the LLM route a
+ * delegation path without its own configured route starts children on.
+ * The default `subagent` tool declares its configured `agentOptions` here,
+ * so other delegation tools in the same composition, such as Agent Teams,
+ * follow it. Nearest scope on the chain wins; one declaration per scope.
+ * @param route - the child Agent options.
+ * @returns the exact disposer that removes the declaration.
+ * @throws when the scope already declared a default child route.
+ */
+declareDefaultChildRoute(route: AgentOptions): () => void
+
+/**
+ * The default child route a scope sees: the nearest declaration on its
+ * chain, else the context-global one.
+ * @param scope - the delegating agent, or undefined for the global view.
+ * @returns a detached copy of the route, or undefined when none is declared.
+ */
+defaultChildRoute(scope?: ScopeKey): AgentOptions | undefined
+
+/**
  * Resolve a delegation tool's depth policy against the current user setting.
  * @param configured - Explicit tool limit, or provider-managed for external delegation.
  * @returns The numeric limit, or undefined when the provider owns depth enforcement.
@@ -688,7 +708,7 @@ list(): string[]
 async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 ```
 
-Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
+Types: [Agent](core.md) · [AgentOptions](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [ScopeKey](scope.md) · [SessionId](core.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 

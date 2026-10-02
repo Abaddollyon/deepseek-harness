@@ -111,7 +111,7 @@ const questionDraftStore = createQuestionDraftStore().create(SID)
 /** Framework standard-kit stubs: the panel consumes only the locale seat. */
 const kit: Omit<QuestionComposerProps, 'matched'> = {
   useQuestionCard: () => { throw new Error('plan review does not read question card state') },
-  renderSlot: () => null,
+  renderSlot: (_key, _owner, opts) => opts?.fallback ?? null,
   SessionProvider: ({ children }) => children,
   sessionId: SID,
   session: undefined,
@@ -239,6 +239,21 @@ describe('PlanReviewPanel', () => {
     expect(first.answer).not.toHaveBeenCalled()
     expect(second.answer).not.toHaveBeenCalled()
   })
+  it('hands the status label to a lead occupant and keeps the review actions', () => {
+    const { carrier } = wait()
+    const leads: unknown[] = []
+    const renderSlot: QuestionComposerProps['renderSlot'] = (key, owner) => {
+      if (key !== 'conversation.question.lead') return null
+      leads.push(owner)
+      return <span>Read this first</span>
+    }
+    render(<QuestionComposer matched={carrier} {...kit} renderSlot={renderSlot} />)
+    expect(screen.getByText('Read this first')).toBeTruthy()
+    expect(screen.queryByText(zh['plan.header'])).toBeNull()
+    expect(screen.getByRole('button', { name: zh['plan.approve'] })).toBeTruthy()
+    expect(leads.at(-1)).toEqual({ kind: 'plan-review', questionCount: 1, busy: false })
+  })
+
   it('shows the plan title and summary above two review actions', () => {
     const { carrier } = wait()
     render(<QuestionComposer matched={carrier} {...kit} />)
