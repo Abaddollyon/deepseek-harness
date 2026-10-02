@@ -16,6 +16,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
+import type { ClientSurfaceDefinition, ClientSurfaceRegistry } from '@deepseek-ai/dsh-client-modules'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
 import * as FrontendStatic from '../src/index.ts'
 
@@ -30,7 +31,7 @@ afterEach(async () => {
 })
 
 /** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
-async function loadComposition(): Promise<Context> {
+async function loadComposition(surface?: ClientSurfaceDefinition): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-frontend-static-'))
   const dist = join(root, 'dist')
   await mkdir(dist)
@@ -60,6 +61,12 @@ async function loadComposition(): Promise<Context> {
 
   context = new Context()
   context.baseUrl = pathToFileURL(root).href + '/'
+  if (surface !== undefined) {
+    const surfaces: Pick<ClientSurfaceRegistry, 'findByPath'> = {
+      findByPath: path => path === surface.path ? surface : undefined,
+    }
+    context.provide('clientSurfaces', surfaces)
+  }
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
@@ -94,6 +101,28 @@ async function request(port: number, path: string, init?: RequestInit): Promise<
 }
 
 describe('real Loader composition', () => {
+  it('serves a registered client surface path as an index with its own token exchange and variant', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
+    loaded.on('webserver/index-inject', (rows, renderContext) => {
+      rows.push({ kind: 'global', name: '__VARIANT__', value: renderContext?.variant ?? 'ordinary' })
+    })
+    const port = loaded.webServer.port
+    const launch = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}/companion`)
+    const exchange = await fetch(launch, { redirect: 'manual' })
+    expect(exchange.status).toBe(303)
+    expect(exchange.headers.get('location')).toBe('./companion')
+    const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
+    if (cookie === undefined) throw new Error('surface exchange did not set a cookie')
+
+    expect((await request(port, '/companion')).status).toBe(401)
+    const page = await request(port, '/companion', { headers: { cookie } })
+    expect(page).toMatchObject({ status: 200, type: 'text/html; charset=utf-8' })
+    expect(page.body).toContain('globalThis["__VARIANT__"] = "companion"')
+    expect(page.body).toContain('<base href="./">')
+    expect((await request(port, '/', { headers: { cookie } })).body).toContain('globalThis["__VARIANT__"] = "ordinary"')
+    expect((await request(port, '/other', { headers: { cookie } })).status).toBe(404)
+  })
+
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
     const unloaded = [...loaded.loader.entries()]

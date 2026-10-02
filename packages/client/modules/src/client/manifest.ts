@@ -172,11 +172,15 @@ export function parseDshClient(pkgName: string, value: unknown): DshClientManife
   if (decl.immediately !== undefined && typeof decl.immediately !== 'boolean') {
     throw new Error(`client-modules: ${pkgName} dsh.client.immediately must be a boolean`)
   }
+  if (decl.defaultRoot !== undefined && typeof decl.defaultRoot !== 'boolean') {
+    throw new Error(`client-modules: ${pkgName} dsh.client.defaultRoot must be a boolean`)
+  }
   return {
     platform: decl.platform,
     ...(inject !== undefined ? { inject } : {}),
     ...(external !== undefined ? { external } : {}),
     ...(decl.immediately !== undefined ? { immediately: decl.immediately } : {}),
+    ...(decl.defaultRoot !== undefined ? { defaultRoot: decl.defaultRoot } : {}),
   }
 }
 

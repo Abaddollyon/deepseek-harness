@@ -33,6 +33,8 @@ kind: "package-reference"
 
 浏览器插件包在其 `package.json` 中以 `platform: 'web'` 声明 `dsh.client`，导出 `./client` bundle，并在 `dsh.client.external` 下列出任何基座之外的模块请求。宿主半侧把每份声明变成 `/plugins` 下提供的 bundle，并让动态提供方先于其消费方加载。
 
+只服务于某个客户端 surface 的包设置 `dsh.client.defaultRoot: false`；此后只有当普通根包依赖它时，它才进入普通启动图。宿主插件以 `ctx.effect(() => ctx.clientSurfaces.register({ id, path, rootPlugin, roots }))` 注册 surface。随后 [Frontend Static](../../host/frontend-static/README.zh.md) 把 `path` 作为需认证的 index 提供，其启动图只含 client-modules bootstrap 以及 `rootPlugin` 与 `roots` 的 `inject`/`external` 闭包。若根插件是普通根包，或所需的 `inject` 包未加载，注册会失败，该 surface 路径也不再渲染。
+
 ### 浏览器加载什么
 
 application combo 脚本只携带每个插件的 `client.js` 入口，并在启动时仅注册一次这些 factory；模块主体仍保持惰性，只在首次 import 或物化时运行。经 tsdown 拆分的源码 `import()` 会编译为 `require.async("./client.<name>.js")`；只有执行该表达式时，对应的带版本同级脚本才会到达。共享 combo URL 的 row 共用一个进行中的脚本任务。`<script>` 加载失败的 combo 会再请求一次；加载成功但没有注册某条 row 的 combo 绝不会重新执行，因为批量脚本按顺序注册各个包，重放会在第一个重复注册处停止。两种情况下，每条仍缺失的 row 随后加载自己的单资源 combo URL，因此一个失败的 batch 对每条缺失 row 最多花费三次请求，且不影响它已经注册的 row。模块系统按 row 记录最后一次 import 失败（传输、注册、依赖级联或 factory 执行）；Web 启动审计按条目报告该文本。HMR（热模块替换）会让一条发生变化的 row 改用带 revision 的单资源 combo URL。`<id>/client` 与裸 id 解析到同一组导出，因为插件 bundle 就是其包的客户端半侧。

@@ -225,9 +225,10 @@ export interface HostConnectionHandle {
    * Authenticate one frontend index request, owning a token redirect or 401.
    * @param request - root or configured-index HTTP request.
    * @param response - response owned when the result is false.
+   * @param exchangePath - exact pathname that accepts the launch token, such as a client surface path; defaults to `/`.
    * @returns true only when the frontend may serve index.html.
    */
-  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean
+  authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse, exchangePath?: string): boolean
 
   /**
    * Add the fresh process token to an ordinary Web application URL.
