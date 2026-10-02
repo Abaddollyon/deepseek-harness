@@ -13,7 +13,7 @@ import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { WorkspaceRecord } from './spec.ts'
 import type { Workspace, WorkspaceId } from './types.ts'
-import { realpathNormalize } from './paths.ts'
+import { normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
 
 /** An insertSessionBefore request named a session or anchor not on the account (storage failures stay plain errors). */
 export class WorkspaceMoveInvalidError extends Error {
@@ -86,6 +86,10 @@ export class WorkspaceEntity implements Workspace {
     return this.record.path
   }
 
+  get additionalPaths(): readonly string[] {
+    return this.record.additionalPaths ?? []
+  }
+
   get title(): string {
     return this.record.title
   }
@@ -104,6 +108,16 @@ export class WorkspaceEntity implements Workspace {
 
   async setTitle(title: string): Promise<void> {
     await this.mutate(record => ({ ...record, title }))
+  }
+
+  async setAdditionalPaths(additionalPaths: readonly string[]): Promise<void> {
+    const normalized = await normalizeAdditionalWorkspacePaths(additionalPaths, this.record.path)
+    await this.mutate((record) => {
+      const current = record.additionalPaths ?? []
+      return current.length === normalized.length && current.every((path, index) => path === normalized[index])
+        ? record
+        : { ...record, additionalPaths: normalized }
+    })
   }
 
   async attachSession(sessionId: SessionId): Promise<void> {

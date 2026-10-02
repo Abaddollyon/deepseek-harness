@@ -124,6 +124,7 @@ export class SessionCommandController {
         cwd,
         request.sessionId !== undefined,
         request.agentPreset,
+        workspace?.additionalPaths,
       )
     } catch (error) {
       this.rejectCreation(sessionId, error)

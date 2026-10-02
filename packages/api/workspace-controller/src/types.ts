@@ -19,6 +19,8 @@ export interface WorkspaceView {
   readonly workspaceId: WorkspaceId
   /** Canonical host directory path. */
   readonly path: string
+  /** Further canonical directories new Sessions in this Workspace record beside `path`; omitted when there are none. */
+  readonly additionalPaths?: readonly string[]
   /** User-visible title. */
   readonly title: string
   /** Sessions accounted to this Workspace in manual order. */
@@ -64,12 +66,24 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 /** Existing directory requested for Workspace adoption. */
 export interface WorkspaceCreateRequest {
   readonly path: string
+  /**
+   * Existing directories new Sessions also record. A new Workspace stores
+   * them; an existing one must already hold the same canonical set.
+   */
+  readonly additionalPaths?: readonly string[]
 }
 
 /** Created or previously registered Workspace. */
 export interface WorkspaceCreateValue {
   readonly workspace: WorkspaceView
   readonly created: boolean
+}
+
+/** Complete replacement of a Workspace's additional directories. */
+export interface WorkspaceUpdatePathsRequest {
+  readonly workspaceId: WorkspaceId
+  /** Existing directories; empty removes all. Existing Sessions keep the roots they recorded. */
+  readonly additionalPaths: readonly string[]
 }
 
 /** Workspace title mutation. */

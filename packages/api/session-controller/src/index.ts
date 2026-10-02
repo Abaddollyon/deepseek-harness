@@ -24,6 +24,7 @@ import { SessionHistoryController } from './history.ts'
 import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog, hasProviderApiKey } from './catalog.ts'
+import { installAdditionalPathsProjection } from './additional-paths-projection.ts'
 import { installModelSelectionProjection } from './model-selection-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
@@ -135,6 +136,7 @@ export class SessionController extends TypertRemoteService {
   constructor(ctx: Context, config: Config, internals: SessionControllerInternals = {}) {
     super(ctx, 'sessionController', { namespace: 'session' })
     installModelSelectionProjection(ctx)
+    installAdditionalPathsProjection(ctx)
     this.agents = new ApiSessionAgentController(ctx)
     this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
     ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
