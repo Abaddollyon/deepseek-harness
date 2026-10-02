@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-`dsh-llm-pi-ai` 路由接受三个显式选项，省略时均保持原行为。`authMode: proxy` 只用 Harness 的 api-key 方法构建路由，适配器集合对该路由 id 回答「未存储」并拒绝凭据写入，因此不会读取或刷新任何已存授权，也不会查询环境变量；请求携带 `apiKeyEnv` 的值或不带凭据。代理模式要求显式且不含内嵌凭据的 http(s) `baseURL`。`anthropicRequestMode: claude-code` 仅对 `anthropic-messages` 路由有效，设置 pi-ai Anthropic 的 `requestMode` 流选项。`modelDiscovery.source` 让现有发现操作以 OpenAI 兼容或 Anthropic 列表协议列出路由自己的端点，并映射报告的输入类型与推理等级，丢弃 pi-ai 无法表达的等级。
+`dsh-llm-pi-ai` 路由接受三个显式选项，省略时均保持原行为。`authMode: proxy` 只用 Harness 的 api-key 方法构建路由，适配器集合对该路由 id 回答「未存储」并拒绝凭据写入，因此不会读取或刷新任何已存授权，也不会查询环境变量；请求携带 `apiKeyEnv` 的值或不带凭据。代理模式要求显式且不含内嵌凭据的 http(s) `baseURL`。`anthropicRequestMode: claude-code` 仅对 `anthropic-messages` 路由有效，设置 pi-ai Anthropic 的 `requestMode` 流选项。`modelDiscovery.source` 让现有发现操作以 OpenAI 兼容或 Anthropic 列表协议列出路由自己的端点，并映射报告的输入类型、推理等级与 Anthropic 自适应思考（作为 `compat.forceAdaptiveThinking`），丢弃 pi-ai 无法表达的等级。
 
 `requestMode` 选项是现有 pi-ai pnpm 补丁中的一个 hunk。它应用 OAuth 令牌所选择的身份标头、beta 特性、系统前导与工具名映射，把非 OAuth 密钥作为 `X-Api-Key` 发送；无密钥请求则传入空 bearer 令牌并将两个鉴权标头置空，使 Anthropic SDK 既不解析环境凭据也不发送凭据。
 
@@ -26,4 +26,4 @@ Status: implemented
 
 - 号池路由在已发布运行时上通过配置即可工作，无需改写已安装的 JavaScript。
 - pi-ai 补丁文件现在承载两项改动，在 pi-ai 提供等效选项之前，每次升级都必须重新应用。
-- `LlmDiscoveredModel` 新增 `reasoningEfforts`；发现仍不存储任何内容，因此刷新绝不会改变默认值、凭据或会话的模型。
+- `LlmDiscoveredModel` 新增 `reasoningEfforts` 与按适配器命名的 `compat` 开关；发现仍不存储任何内容，因此刷新绝不会改变默认值、凭据或会话的模型。

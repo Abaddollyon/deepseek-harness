@@ -83,6 +83,8 @@ interface ListingCapabilities {
   image_input?: { supported?: unknown } | null
   /** Anthropic: `{ supported, <level>: { supported } }`. */
   effort?: Record<string, unknown> | null
+  /** Anthropic: `{ supported, types: { adaptive: { supported }, enabled: { supported } } }`. */
+  thinking?: { types?: { adaptive?: { supported?: unknown } | null } | null } | null
 }
 
 /** Model metadata the Codex pool nests under each entry. */
@@ -299,6 +301,9 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
         : undefined,
     )
     const efforts = reasoningEfforts(entry)
+    // Anthropic reports adaptive thinking per model; pi-ai selects it only
+    // through this compat switch for a model its installed catalog lacks.
+    const adaptive = entry?.capabilities?.thinking?.types?.adaptive?.supported === true
     models.push({
       id,
       name,
@@ -306,6 +311,7 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
       ...maxTokens === undefined ? {} : { maxTokens },
       ...inputModalities === undefined ? {} : { inputModalities },
       ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+      ...adaptive ? { compat: { forceAdaptiveThinking: true } } : {},
     })
   }
   return models

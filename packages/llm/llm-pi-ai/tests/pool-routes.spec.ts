@@ -167,7 +167,7 @@ const CODEX_POOL_LISTING = {
   }],
 }
 
-/** Two TeamClaude rows: one reporting efforts, one supporting only budget thinking. */
+/** Two TeamClaude rows: one with efforts and adaptive thinking, one supporting only budget thinking. */
 const TEAMCLAUDE_LISTING = {
   data: [
     {
@@ -178,11 +178,16 @@ const TEAMCLAUDE_LISTING = {
           ...Object.fromEntries(['low', 'medium', 'high', 'xhigh', 'max'].map(level => [level, { supported: true }])),
         },
         image_input: { supported: true },
+        thinking: { supported: true, types: { adaptive: { supported: true }, enabled: { supported: false } } },
       },
     },
     {
       type: 'model', id: 'claude-haiku-4-5-20251001', display_name: 'Claude Haiku 4.5', max_input_tokens: 200000, max_tokens: 64000,
-      capabilities: { effort: { supported: false }, image_input: { supported: true } },
+      capabilities: {
+        effort: { supported: false },
+        image_input: { supported: true },
+        thinking: { supported: true, types: { adaptive: { supported: false }, enabled: { supported: true } } },
+      },
     },
   ],
   has_more: false,
@@ -224,7 +229,7 @@ describe('pool model discovery', () => {
     expect(JSON.stringify(models)).not.toContain('untrusted')
   })
 
-  it('lists a keyless Anthropic pool with its reported efforts', async () => {
+  it('lists a keyless Anthropic pool with its reported efforts and thinking mode', async () => {
     const pool = await poolServer({ json: TEAMCLAUDE_LISTING })
     const ctx = await mount(teamClaude(pool.url, { modelDiscovery: { source: 'anthropic' } }))
 
@@ -241,6 +246,7 @@ describe('pool model discovery', () => {
         maxTokens: 128000,
         inputModalities: ['text', 'image'],
         reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        compat: { forceAdaptiveThinking: true },
       },
       { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200000, maxTokens: 64000, inputModalities: ['text', 'image'] },
     ])

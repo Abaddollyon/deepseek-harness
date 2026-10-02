@@ -541,6 +541,7 @@ const RECORDED_LISTINGS = [
       name: 'Claude Opus 5',
       inputModalities: ['text', 'image'],
       reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      compat: { forceAdaptiveThinking: true },
     }],
   },
 ]

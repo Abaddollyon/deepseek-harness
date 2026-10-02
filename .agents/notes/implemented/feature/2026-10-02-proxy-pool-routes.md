@@ -10,7 +10,7 @@ A pool that owns provider accounts — a Codex pool or a Claude subscription poo
 
 ## Decision
 
-`dsh-llm-pi-ai` routes take three explicit options, each defaulting to the previous behavior. `authMode: proxy` builds the route with the Harness api-key method alone, and the adapter's collection answers "nothing stored" for that route id and refuses a credential write, so no stored grant is read or refreshed and no ambient variable is consulted; the request carries the `apiKeyEnv` value or nothing. Proxy mode requires an explicit http(s) `baseURL` without embedded credentials. `anthropicRequestMode: claude-code`, valid only on `anthropic-messages` routes, sets pi-ai's Anthropic `requestMode` stream option. `modelDiscovery.source` makes the existing discovery operation list the route's own endpoint with an OpenAI-compatible or Anthropic listing and map reported modalities and reasoning efforts, dropping efforts pi-ai cannot express.
+`dsh-llm-pi-ai` routes take three explicit options, each defaulting to the previous behavior. `authMode: proxy` builds the route with the Harness api-key method alone, and the adapter's collection answers "nothing stored" for that route id and refuses a credential write, so no stored grant is read or refreshed and no ambient variable is consulted; the request carries the `apiKeyEnv` value or nothing. Proxy mode requires an explicit http(s) `baseURL` without embedded credentials. `anthropicRequestMode: claude-code`, valid only on `anthropic-messages` routes, sets pi-ai's Anthropic `requestMode` stream option. `modelDiscovery.source` makes the existing discovery operation list the route's own endpoint with an OpenAI-compatible or Anthropic listing and map reported modalities, reasoning efforts, and Anthropic adaptive thinking (as `compat.forceAdaptiveThinking`), dropping efforts pi-ai cannot express.
 
 The `requestMode` option is a hunk in the existing pnpm patch for pi-ai. It applies the identity headers, beta features, system preamble, and tool-name mapping an OAuth token selects, sends a non-OAuth key as `X-Api-Key`, and for a keyless request passes an empty bearer token with both auth headers nulled so the Anthropic SDK neither resolves ambient credentials nor sends one.
 
@@ -26,4 +26,4 @@ The `requestMode` option is a hunk in the existing pnpm patch for pi-ai. It appl
 
 - Pool routes work from configuration on the released runtime without rewriting installed JavaScript.
 - The pi-ai patch file now carries two changes and must be re-applied on every pi-ai upgrade until pi-ai ships an equivalent option.
-- `LlmDiscoveredModel` gains `reasoningEfforts`; discovery still stores nothing, so a refresh never changes defaults, credentials, or a session's model.
+- `LlmDiscoveredModel` gains `reasoningEfforts` and adapter-named `compat` switches; discovery still stores nothing, so a refresh never changes defaults, credentials, or a session's model.

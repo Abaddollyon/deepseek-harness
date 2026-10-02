@@ -330,6 +330,12 @@ export interface LlmDiscoveredModel {
    * unknown; empty means the endpoint reports no reasoning support.
    */
   reasoningEfforts?: readonly ReasoningEffortId[]
+  /**
+   * Wire-compatibility switches the listing implies for this model, named as
+   * the owning adapter's model configuration names them, so a surface
+   * adopting the model can copy them into its entry unchanged.
+   */
+  compat?: Readonly<Record<string, boolean | number | string>>
 }
 
 /** One adapter-discovered model; catalog membership is advisory, not request validation. */
