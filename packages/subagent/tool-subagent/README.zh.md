@@ -104,6 +104,7 @@ kind: "package-reference"
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | 为新 Session 读取的宿主所有 opt-in 设置 |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | 记录并继承已读取决定的 Session 事件 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` 导出，供 `spawn_teammate` 等其他委派工具复用路由规则 |
 
 </details>
 

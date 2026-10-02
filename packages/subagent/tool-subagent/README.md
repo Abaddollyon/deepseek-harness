@@ -104,6 +104,7 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | Host-owned opt-in setting sampled for new Sessions |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | Session event that records and inherits the sampled decision |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` export of the route rules for other delegation tools, such as `spawn_teammate` |
 
 </details>
 
