@@ -120,8 +120,9 @@ export interface PiAiProviderProfile {
    * gateway that owns provider accounts itself: the route never reads,
    * refreshes, or offers a stored or ambient provider credential, sends the
    * {@link apiKeyEnv} value when one is configured, and otherwise sends no
-   * credential. `proxy` requires an explicit http(s) {@link baseURL} without
-   * embedded credentials.
+   * credential, which `openai-completions`, `openai-responses`, and
+   * `anthropic-messages` in `claude-code` mode serve. `proxy` requires an
+   * explicit http(s) {@link baseURL} without embedded credentials.
    */
   authMode?: PiAiAuthMode
   /**

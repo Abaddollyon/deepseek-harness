@@ -125,6 +125,7 @@ export class Session implements SessionFace {
   /** New Session display state; unknown bare sessions begin conservatively blank. */
   private blankBit = true
   private removed = false
+  private disposed = false
   private promptError: PromptError | null = null
   private lastAgentError: string | null = null
   /** Local submission echoes, insertion-ordered (see SessionSnapshot.pendingSubmissions). */
@@ -580,10 +581,14 @@ export class Session implements SessionFace {
   /**
    * Host-generation relay: reopen a journal whose follow stream failed
    * terminally, keeping its window until the replacement snapshot lands.
-   * Live and still-opening streams resume through API Gateway instead.
+   * Live and still-opening streams resume through API Gateway instead; a
+   * removed or disposed Session stays closed. A failed reopen is logged.
    */
   handleConnected(): void {
-    if (this.openState === 'error') void this.open()
+    if (this.openState !== 'error' || this.removed || this.disposed) return
+    this.open().catch((error: unknown) => {
+      console.error('[session-controller] reconnect reopen failed:', error)
+    })
   }
 
   /** `api-session/removed` relay: flag the snapshot while retaining the resident instance. */
@@ -606,6 +611,7 @@ export class Session implements SessionFace {
    * @returns when the Remote iterator has completed teardown.
    */
   async dispose(): Promise<void> {
+    this.disposed = true
     this.stopObservingInbox()
     // Unsettled echoes retire as failed so their owners can restore or
     // release browser resources; admitted echoes keep their observed outcome.

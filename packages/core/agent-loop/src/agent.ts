@@ -118,6 +118,8 @@ export class ReactLoopAgent implements Agent {
   private readonly systemPrompt: SystemPromptProjection
   /** Identities fully frozen by this loop; weak references do not retain replaced history. */
   private readonly frozenMessages = new WeakSet<Message>()
+  /** Activities cancelled by disposal or with `wake: false`: no wake replays or latches behind them. */
+  private readonly parkedActivities = new WeakSet<AbortController>()
 
   constructor(
     private loopCtx: Context,
@@ -175,8 +177,10 @@ export class ReactLoopAgent implements Agent {
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
     if (!options.keepInbox) this.inbox.clear()
     if (this.phase.kind === 'idle') return
-    // Disposal keeps the inbox for a later lifecycle but never replays a latched wake.
-    if (!options.keepInbox || cause.kind === 'disposed') this.phase.wakeRequested = false
+    // Disposal and `wake: false` keep the inbox for later work but never replay or latch a wake.
+    const parked = cause.kind === 'disposed' || options.wake === false
+    if (parked) this.parkedActivities.add(this.phase.abort)
+    if (!options.keepInbox || parked) this.phase.wakeRequested = false
     this.phase.abort.abort(cause)
   }
 
@@ -215,9 +219,8 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'idle') {
       // Maintenance and aborted drivers cannot deliver the wake: latch it for
       // replay at convergence. Live drivers claim queued work themselves;
-      // disposal never latches, so teardown waits on no model turn.
-      const reason = abortedCancelCause(this.phase.abort.signal)
-      if (reason?.kind !== 'disposed' && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
+      // a parked activity never latches, so teardown waits on no model turn.
+      if (!this.parkedActivities.has(this.phase.abort) && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
         this.phase.wakeRequested = true
       }
       return

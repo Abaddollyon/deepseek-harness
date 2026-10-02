@@ -933,6 +933,23 @@ describe('same-session goal driving', () => {
     expect(test.agent.status).toBe('idle')
   })
 
+  it('starts no new turn for input that arrives while teardown cancels the round', async () => {
+    const test = await harness(['hang', textResponse('late reply')])
+    test.ctx.goals.create(test.agent, { objective: 'teardown starts nothing' })
+    await waitForRequests(test.adapter, 1)
+    const cancel = test.agent.cancel.bind(test.agent)
+    vi.spyOn(test.agent, 'cancel').mockImplementation((cause, options) => {
+      cancel(cause, options)
+      test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'late human' }], source: { kind: 'user' } }))
+    })
+
+    await test.driver.dispose()
+
+    expect(test.adapter.requests).toHaveLength(1)
+    expect(test.agent.inbox.nextTurn.map(message => message.content)).toEqual([[{ type: 'text', text: 'late human' }]])
+    expect(test.agent.status).toBe('idle')
+  })
+
   it('cancels an accepted queued round and awaits its driver task during teardown', async () => {
     const test = await harness([])
     let unloading: Promise<void> | undefined

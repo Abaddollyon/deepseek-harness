@@ -993,6 +993,25 @@ describe('resync', () => {
 
   })
 
+  it('reconnect reopens only a resident errored journal and contains a failed reopen', async ({ mock, start }) => {
+    const removed = await sessionBench(mock, start, SID)
+    const disposed = await sessionBench(mock, start, SID)
+    const live = await sessionBench(mock, start, SID)
+    mock.stream(FOLLOW, followScript(err(new RemoteError('session/not-found', 'gone', { sessionId: SID }))))
+    await Promise.all([removed.open(), disposed.open(), live.open()])
+    removed.handleRemoved()
+    await disposed.dispose()
+    const reopen = vi.spyOn(SessionEventStream.prototype, 'open').mockRejectedValue(new Error('reopen bug'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => { reopen.mockRestore(); logged.mockRestore() })
+
+    for (const session of [removed, disposed, live]) session.handleConnected()
+
+    expect([removed, disposed].map(session => session.getSnapshot().openState)).toEqual(['error', 'error'])
+    expect(reopen).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => { expect(logged).toHaveBeenCalledWith('[session-controller] reconnect reopen failed:', expect.any(Error)) })
+  })
+
   it('does not resync a cold Session', async ({ mock, start }) => {
     const session = await sessionBench(mock, start, SID)
     await session.resync()

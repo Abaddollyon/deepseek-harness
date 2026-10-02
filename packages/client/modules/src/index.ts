@@ -646,26 +646,21 @@ export class ClientSurfaceRegistry extends Service {
   }
 
   /**
-   * Find the surface served at one exact pathname.
+   * Find the surface served at one exact pathname without composing its graph,
+   * so a request that has not passed authentication composes nothing.
    * @param path - decoded request pathname.
-   * @returns the surface, or undefined when none is registered there or its graph cannot currently be composed.
+   * @returns the surface, or undefined when none is registered there.
    */
   findByPath(path: string): ClientSurfaceDefinition | undefined {
     for (const surface of this.surfaces.values()) {
-      if (surface.path !== path) continue
-      try {
-        this.composeGraph(surface)
-      } catch (error) {
-        this.ctx.logger.warn(error)
-        return undefined
-      }
-      return surface
+      if (surface.path === path) return surface
     }
     return undefined
   }
 
   /**
-   * Compose the current boot graph of one registered surface.
+   * Compose the current boot graph of one registered surface. The graph is
+   * reused until the ordinary graph is next recomposed.
    * @param id - registered surface id.
    * @returns the graph served as that surface's `window.__DSH_BOOT__`.
    * @throws when the id is not registered or the graph cannot be composed.
@@ -702,6 +697,11 @@ export class ClientModuleRegistry extends Service {
   private flushQueued = false
   private composed: WebBootGraph
   private readonly surfaces: ClientSurfaceRegistry
+  /**
+   * Each surface's graph and the ordinary graph it was composed beside; it stays
+   * valid while `composed`, and with it the response table holding its batches, is unchanged.
+   */
+  private readonly surfaceGraphs = new WeakMap<ClientSurfaceDefinition, { readonly base: WebBootGraph; readonly graph: WebBootGraph }>()
 
   /**
    * Build the service: subscribe, seed, and run the activation flush.
@@ -922,11 +922,15 @@ export class ClientModuleRegistry extends Service {
   }
 
   private surfaceGraph(surface: ClientSurfaceDefinition): WebBootGraph {
+    const cached = this.surfaceGraphs.get(surface)
+    if (cached?.base === this.composed) return cached.graph
     if (this.table.get(surface.rootPlugin)?.meta.defaultRoot === true) {
       throw new Error(`client-surfaces: root plugin ${surface.rootPlugin} must declare dsh.client.defaultRoot false`)
     }
     const selected = this.dependencyClosure([CLIENT_MODULES_ID, surface.rootPlugin, ...surface.roots ?? []], true)
-    return this.compose([...this.table.values()].filter(record => selected.has(record.entry.id)), true)
+    const graph = this.compose([...this.table.values()].filter(record => selected.has(record.entry.id)), true)
+    this.surfaceGraphs.set(surface, { base: this.composed, graph })
+    return graph
   }
 
   /**

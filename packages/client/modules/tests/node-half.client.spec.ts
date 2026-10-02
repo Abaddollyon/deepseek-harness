@@ -1066,12 +1066,13 @@ describe('client surfaces', () => {
   const ids = (graph: WebBootGraph): string[] => graph.entries.map(row => row.id)
 
   /** Ordinary app package, a shared renderer, and an opt-out surface root that injects the renderer. */
-  function surfaceFixture(): { context: Context; service: ClientModuleRegistry; route: Promise<WebRoute> } {
+  function surfaceFixture(): { context: Context; service: ClientModuleRegistry; route: Promise<WebRoute>; entries: string[] } {
     writeBuiltPackage(MODULES_ID, { immediately: true })
     writeBuiltPackage('@fixture/app', {})
     writeBuiltPackage('@fixture/renderer', { defaultRoot: false })
     writeBuiltPackage('@fixture/companion', { defaultRoot: false, inject: ['@fixture/renderer'] })
-    return constructWithRoute([MODULES_ID, '@fixture/app', '@fixture/renderer', '@fixture/companion'])
+    const entries = [MODULES_ID, '@fixture/app', '@fixture/renderer', '@fixture/companion']
+    return { ...constructWithRoute(entries), entries }
   }
 
   it('keeps defaultRoot false packages out of the ordinary graph unless a root depends on them', () => {
@@ -1104,6 +1105,26 @@ describe('client surfaces', () => {
     dispose()
     expect(context.clientSurfaces.findByPath('/companion')).toBeUndefined()
     expect(() => context.clientSurfaces.graph('companion')).toThrow('unknown surface')
+  })
+
+  it('matches surface paths without composing and recomposes a surface graph only after the module graph changes', async () => {
+    const { context, service, entries } = surfaceFixture()
+    context.clientSurfaces.register({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
+    const graph = context.clientSurfaces.graph('companion')
+    expect(context.clientSurfaces.graph('companion')).toBe(graph)
+
+    const rendererPath = service.clientPath('@fixture/renderer')!
+    const before = statSync(rendererPath)
+    writeFileSync(rendererPath, 'module.exports = { generation: 2 }\n')
+    utimesSync(rendererPath, before.atime, new Date(before.mtimeMs + 1_000))
+    service.rebuilt('@fixture/renderer')
+    expect(context.clientSurfaces.graph('companion').rev).not.toBe(graph.rev)
+
+    entries.splice(entries.indexOf('@fixture/renderer'), 1)
+    emitLoaderEntryChange(context, '@fixture/renderer')
+    await Promise.resolve()
+    expect(context.clientSurfaces.findByPath('/companion')?.id).toBe('companion')
+    expect(() => context.clientSurfaces.graph('companion')).toThrow('missing client module @fixture/renderer')
   })
 
   it('rejects ordinary roots, missing dependencies, and duplicate ids or paths', () => {

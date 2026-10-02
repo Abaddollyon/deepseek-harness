@@ -232,6 +232,23 @@ function reasoningInfo(
   }
 }
 
+/**
+ * pi-ai's OpenAI protocols refuse a request that carries neither a key nor an
+ * `Authorization` header. A keyless proxy route hands them this placeholder and
+ * removes the `Authorization` header the OpenAI SDK builds from it, so the
+ * gateway receives no credential and the SDK never reads an ambient key.
+ */
+const KEYLESS_PROXY_KEY = 'keyless-proxy'
+
+/** Protocols whose keyless proxy requests go through {@link KEYLESS_PROXY_KEY}. */
+const KEYLESS_PROXY_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
+
+/** Whether one request is a keyless proxy request on a protocol that needs {@link KEYLESS_PROXY_KEY}. */
+function isKeylessProxyRequest(profile: ResolvedPiAiProviderProfile, model: Model<Api>, apiKey: string | undefined): boolean {
+  return apiKey === undefined && profile.authMode === 'proxy' && KEYLESS_PROXY_APIS.has(model.api)
+    && !Object.keys(profile.headers ?? {}).some(name => name.toLowerCase() === 'authorization')
+}
+
 /** Merge deployment headers while removing case-insensitive attribution collisions. */
 function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
   const attribution = attributionHeaders()
@@ -376,7 +393,9 @@ export class PiAiAdapter extends LlmAdapter {
       model,
       options.reasoningEffort ?? profile.reasoning,
     )
-    const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    const resolvedKey = await this.config.resolveApiKey(options.provider, profile)
+    const keyless = isKeylessProxyRequest(profile, model, resolvedKey)
+    const apiKey = keyless ? KEYLESS_PROXY_KEY : resolvedKey
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -416,7 +435,7 @@ export class PiAiAdapter extends LlmAdapter {
         signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
         // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        headers: keyless ? { ...requestHeaders(profile.headers), Authorization: null } : requestHeaders(profile.headers),
       })
       const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
       let exhausted = false

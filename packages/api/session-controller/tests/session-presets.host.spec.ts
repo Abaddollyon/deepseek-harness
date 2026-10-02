@@ -13,6 +13,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SessionRequestId } from '../src/types.ts'
 import { createSessionTestRemote } from './test-remote.ts'
 
 /** Booted contexts and their temp roots, torn down after each test. */
@@ -292,6 +293,21 @@ describe('agent preset Session defaults', () => {
     switchPreset('d5', 'standard')
     await vi.waitFor(() => { expect(permissions.current(sessionOf('d5'))).toBe('workspace-write') })
     expect(pending('d5')).toEqual({ provider: 'test', model: 'test-model' })
+  })
+
+  it('admits a text prompt sent right after a preset switch under the new defaults', async () => {
+    const { ctx, remote, permissions, sessionOf, pending, switchPreset } = await defaultsHarness({ arro })
+    await remote.create({ sessionId: SessionId('d9'), agentPreset: 'standard' })
+    const seen: unknown[] = []
+    Object.assign(ctx.agents.get(SessionId('d9')) as Agent, {
+      inbox: { nextTurn: [], nextStep: [] },
+      followup: () => { seen.push([permissions.current(sessionOf('d9')), pending('d9')]) },
+    })
+
+    switchPreset('d9', 'arro')
+    await remote.prompt({ sessionId: SessionId('d9'), requestId: 'r1' as SessionRequestId, content: [{ type: 'text', text: 'go' }], mode: 'queue' })
+
+    expect(seen).toEqual([['read-only', { provider: 'pool', model: 'astra', reasoningEffort: 'high' }]])
   })
 
   it('keeps explicit model and permission choices across a preset switch', async () => {
