@@ -62,6 +62,16 @@ describe('TerminalController', () => {
     await controller.close(agent, id)
   })
 
+  it('spawns through the subprocess provider an Agent preset isolates', async () => {
+    const { ctx, controller, agent, subprocess, handle } = fixture()
+    const remote = { ...subprocess, spawnTerminal: vi.fn(async () => handle) }
+    ctx.provide('agentPresets', { serviceFor: (_agent: Agent, name: string) => name === 'subprocess' ? remote : undefined } as never)
+    await controller.create(agent, request, signal())
+    expect(remote.spawnTerminal).toHaveBeenCalledOnce()
+    expect(subprocess.spawnTerminal).not.toHaveBeenCalled()
+    await controller.close(agent, id)
+  })
+
   it('creates the environment default shell and keeps an existing identity when that default changes', async () => {
     const { controller, agent, subprocess } = fixture({ shell: undefined })
     subprocess.terminalEnvironment.mockResolvedValue({ platform: 'posix', defaultShell: '/usr/local/bin/zsh' })

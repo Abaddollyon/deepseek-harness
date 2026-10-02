@@ -18,8 +18,8 @@ import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { WorkspaceFiles, type Config, type WorkspaceFileScope } from '../src/index.ts'
 
 /** Build the header-derived scope that direct service calls receive after Typert lookup. */
-function fileScope(workspaceRoot: string): WorkspaceFileScope {
-  return { sessionId: SessionId('s-test'), workspaceRoot }
+function fileScope(workspaceRoot: string, fs: Context['fs']): WorkspaceFileScope {
+  return { sessionId: SessionId('s-test'), workspaceRoot, fs }
 }
 
 export const signal = (): AbortSignal => new AbortController().signal
@@ -61,7 +61,7 @@ export async function openWorkspace(prefix: string): Promise<Harness> {
     workspace,
     outside,
     ctx,
-    scope: fileScope(workspace),
+    scope: fileScope(workspace, ctx.fs),
     endpoint: (caps) => {
       if (service !== undefined) {
         if (caps !== undefined) throw new Error('the harness serves one WorkspaceFiles per test; hoist the endpoint')
