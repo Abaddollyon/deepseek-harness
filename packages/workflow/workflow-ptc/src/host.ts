@@ -251,13 +251,17 @@ export class PtcWorkflowRun implements WorkflowRun {
 
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
     this.requireActive()
-    const agentOptions = childAgentOptions(this.childDefaults, request)
+    const providerName = request.subagentProvider ?? this.provider
+    // Configured defaults reach only a provider that can apply a route; an
+    // explicit per-call route still reaches the provider, which rejects it.
+    const defaults = this.subagents.getProvider(providerName)?.capabilities.agentOptions === true ? this.childDefaults : undefined
+    const agentOptions = childAgentOptions(defaults, request)
     if (agentOptions?.reasoningEffort !== undefined) {
       await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
       this.requireActive()
     }
     const callId = ++this.started
-    const run = await this.subagents.start(request.subagentProvider ?? this.provider, {
+    const run = await this.subagents.start(providerName, {
       prompt: [{ type: 'text', text: request.prompt }],
       parent: this.parent,
       signal: this.controller.signal,

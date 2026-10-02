@@ -39,7 +39,7 @@ With those dependencies available, mount the engine and its model-facing consume
 | Field | Default | Meaning |
 |---|---|---|
 | `provider` | `spawn` | Host-side subagent provider used by `agent()` calls. |
-| `agentOptions` | — | Child LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`) for every `agent()` call; omitted fields inherit the parent's route. |
+| `agentOptions` | — | Child LLM route defaults (`provider` and `model` together, `reasoningEffort`, `maxTokens`) for every `agent()` call whose subagent provider can apply a route; omitted fields inherit the parent's route. |
 | `maxConcurrentAgents` | `0` | Concurrent `agent()` ceiling; `0` resolves from available CPU parallelism. |
 | `maxTotalAgents` | `1000` | Total `agent()` calls one run may start. |
 | `maxItemsPerCall` | `4096` | Items accepted by one `parallel()` or `pipeline()` call. |

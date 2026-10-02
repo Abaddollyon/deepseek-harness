@@ -4380,7 +4380,8 @@ export interface Config {
   /** The `ctx.subagents` provider children run on (default `spawn`). */
   provider?: string
   /**
-   * Route defaults for every `agent()` child; omitted fields inherit the
+   * Route defaults for every `agent()` child whose subagent provider can
+   * apply a route (`agentOptions` capability); omitted fields inherit the
    * parent's route. A call's own provider, model or reasoning effort
    * overrides them, and a call that changes the route without naming an
    * effort drops the configured effort.

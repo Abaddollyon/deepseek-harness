@@ -39,7 +39,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `provider` | `spawn` | `agent()` 调用使用的宿主侧 subagent 提供方。 |
-| `agentOptions` | — | 每次 `agent()` 调用的子 agent LLM 路由默认值（`provider` 与 `model` 须一起配置，另有 `reasoningEffort`、`maxTokens`）；省略的字段继承父级路由。 |
+| `agentOptions` | — | 每次 `agent()` 调用的子 agent LLM 路由默认值（`provider` 与 `model` 须一起配置，另有 `reasoningEffort`、`maxTokens`），仅用于其 subagent 提供方能够应用路由的调用；省略的字段继承父级路由。 |
 | `maxConcurrentAgents` | `0` | 并发 `agent()` 上限；`0` 根据可用 CPU 并行度解析。 |
 | `maxTotalAgents` | `1000` | 一次运行最多启动的 `agent()` 调用数。 |
 | `maxItemsPerCall` | `4096` | 一次 `parallel()` 或 `pipeline()` 调用接受的条目数。 |

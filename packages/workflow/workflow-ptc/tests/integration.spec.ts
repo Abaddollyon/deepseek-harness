@@ -10,6 +10,7 @@ import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent-in-process-driver'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -182,6 +183,37 @@ return [first, second, third, fourth, fifth]`,
           { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
         ])
         expect(adapter.requests.map(request => request.reasoningEffort)).toEqual(['xhigh', 'low', 'high', 'high', 'xhigh'])
+      } finally {
+        await run.dispose()
+      }
+    })
+
+    it('starts a child on a provider that cannot apply a route without the configured defaults', async () => {
+      const { ctx, parent } = await setup([], XHIGH, undefined, { agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' } })
+      const seen: SubagentStartRequest[] = []
+      ctx.subagents.registerProvider({
+        name: 'fixed',
+        capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        inheritsParentContext: false,
+        start: (request) => {
+          seen.push(request)
+          return Promise.resolve({
+            id: SessionId('fixed-child'),
+            localAgent: undefined,
+            result: Promise.resolve({ output: [{ type: 'text' as const, text: 'fixed child' }], stopReason: 'completed' as const }),
+            dispose: () => Promise.resolve(),
+          })
+        },
+      })
+      const run = ctx.workflowEngine.start({
+        meta: { name: 'fixed-route', description: 'provider without agentOptions' },
+        script: "return await agent('go', { subagentProvider: 'fixed' })",
+        parent,
+      })
+      try {
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed', value: 'fixed child' })
+        expect(seen).toHaveLength(1)
+        expect(seen[0]).not.toHaveProperty('agentOptions')
       } finally {
         await run.dispose()
       }
