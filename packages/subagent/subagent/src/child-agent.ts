@@ -137,6 +137,7 @@ export function resolveChildAgentOptions(
  * @param isSeeded - whether this child inherits a parent-log prefix, including an explicitly empty one.
  * @param target - preset and cwd replacing the parent's, for a child that runs elsewhere.
  * @returns the `meta` for `ctx.agents.create()`.
+ * @throws {Error} when a seeded child names a target: the seed's `workspace/roots` would carry the parent's roots into the target's world.
  */
 export function childSessionMeta(
   parent: Agent,
@@ -144,6 +145,9 @@ export function childSessionMeta(
   isSeeded: boolean,
   target?: ChildExecutionTarget,
 ): NonNullable<CreateAgentOptions['meta']> {
+  if (isSeeded && target !== undefined) {
+    throw new Error(`a child seeded from its parent's log cannot run in agent preset "${target.agentPreset}" through an execution target`)
+  }
   const parentHeader = parent.session.header
   const agentPreset = target?.agentPreset ?? parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
   const cwd = target?.cwd ?? parentHeader.cwd

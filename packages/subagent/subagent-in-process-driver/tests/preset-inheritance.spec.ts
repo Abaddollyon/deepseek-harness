@@ -146,4 +146,19 @@ describe('a child agent composed in-process', () => {
     expect(run.localAgent?.session.header).toMatchObject({ agentPreset: 'reviewing', cwd: '/remote/work' })
     await run.dispose()
   })
+
+  it('refuses a forked seed with an execution target, whose seed would carry the parent\'s roots there', async () => {
+    const { ctx } = await setupPresetHost()
+    const parent = (await ctx.agents.create({
+      sessionId: SessionId('rooted-parent'),
+      meta: { cwd: '/local/work', additionalPaths: ['/local/extra'] },
+      agentOptions: { provider: 'mock', model: 'mock' },
+      setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, 'coding'),
+    })).agent
+    const seed = parent.session.snapshotEvents()
+
+    await expect(startInProcessRun(spawnRequest(parent), { seed, target: { agentPreset: 'reviewing', cwd: '/remote/work' } }))
+      .rejects.toThrow('cannot run in agent preset "reviewing"')
+    expect(ctx.agents.list().map(agent => agent.id)).toEqual(['parent', 'rooted-parent'])
+  })
 })

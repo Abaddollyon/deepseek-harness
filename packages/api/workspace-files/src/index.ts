@@ -354,7 +354,8 @@ export class WorkspaceFiles extends TypertRemoteService {
   /**
    * The Session's execution-world filesystem. The preset comes from the
    * Session's projection, because a blank Session may switch presets after its
-   * header was written; the preset's current revision serves cold Sessions.
+   * header was written; the preset's current revision serves cold Sessions. A
+   * preset that owns its world never falls back to the Host filesystem.
    */
   private async executionFs(scope: Context, sessionId: SessionId, header: SessionHeader): Promise<FileSystem> {
     const presets = scope.get('agentPresets')
@@ -365,7 +366,10 @@ export class WorkspaceFiles extends TypertRemoteService {
       using observation = await query.observeSession(sessionId)
       preset = observation.projections?.values.agentPreset ?? preset
     }
-    return (preset === undefined ? undefined : presets.serviceForPreset(preset, 'fs')) ?? this.ctx.fs
+    if (preset === undefined) return this.ctx.fs
+    const own = presets.serviceForPreset(preset, 'fs')
+    if (own === undefined && presets.ownsWorld(preset)) throw new Error(`the execution world of agent preset "${preset}" is not available`)
+    return own ?? this.ctx.fs
   }
 
   private async relativePath(scope: WorkspaceFileScope, baseFile: string, path: string, signal: AbortSignal): Promise<string> {

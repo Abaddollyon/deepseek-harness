@@ -252,7 +252,8 @@ export class WorkspaceRegistry extends Service {
   /**
    * Install the resolver for Workspaces whose paths live in an Agent preset's
    * execution world. Host Workspaces never consult it.
-   * @param resolve - The preset's world, or undefined while the preset is unknown or mounts no filesystem.
+   * @param resolve - The preset's world, whose operations reject while it is unavailable,
+   *   or undefined for a preset that is unknown or runs on the Host.
    * @returns a disposer that removes this resolver.
    */
   setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void {

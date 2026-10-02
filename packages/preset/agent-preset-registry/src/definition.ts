@@ -13,6 +13,18 @@ export interface PresetDefinition {
   readonly plugins: readonly (Omit<EntryOptions, 'id' | 'disabled'> & { id?: string; disabled?: EntryOptions['disabled'] | JsExpr })[]
 }
 
+/** Services whose isolation declares a preset's own execution world. */
+const WORLD_SERVICES = ['fs', 'subprocess'] as const
+
+/** Whether rows isolate the `fs` or `subprocess` service, which declares an execution world of their own (for example an SSH host).
+ * @param rows Composition rows, nested groups included.
+ * @returns true when any row isolates either service.
+ */
+export function declaresExecutionWorld(rows: PresetDefinition['plugins']): boolean {
+  return rows.some(row => WORLD_SERVICES.some(name => row.isolate?.[name] !== undefined)
+    || (row.group === true && Array.isArray(row.config) && declaresExecutionWorld(row.config as PresetDefinition['plugins'])))
+}
+
 /** Validate a parsed Cordis entry list, including nested groups.
  * @param rows Parsed YAML value.
  * @param at Diagnostic prefix.

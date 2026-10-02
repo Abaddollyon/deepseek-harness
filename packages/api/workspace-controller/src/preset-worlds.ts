@@ -30,15 +30,28 @@ export function filesystemPathWorld(fs: FileSystem): WorkspacePathWorld {
 }
 
 /**
+ * The world of a preset that owns one while its filesystem provider is
+ * missing: every path operation rejects, so nothing is read from the Host.
+ * @param agentPreset - The preset whose world is unavailable.
+ * @returns a world whose operations reject.
+ */
+function unavailablePathWorld(agentPreset: string): WorkspacePathWorld {
+  const unavailable = () => Promise.reject(new Error(`the execution world of agent preset '${agentPreset}' is not available`))
+  return { realpath: unavailable, isDirectory: unavailable }
+}
+
+/**
  * Bind the Workspace registry to the filesystems Agent presets isolate, for
- * as long as the preset registry is composed.
+ * as long as the preset registry is composed. A preset that owns its world
+ * keeps it while that world is unavailable instead of resolving to the Host.
  * @param ctx - Host context carrying the Workspace registry.
  */
 export function installPresetPathWorlds(ctx: Context): void {
   ctx.inject(['agentPresets'], (scope) => {
     scope.effect(() => ctx.workspaceRegistry.setPathWorlds((agentPreset) => {
       const fs = scope.agentPresets.serviceForPreset(agentPreset, 'fs')
-      return fs === undefined ? undefined : filesystemPathWorld(fs)
+      if (fs !== undefined) return filesystemPathWorld(fs)
+      return scope.agentPresets.ownsWorld(agentPreset) ? unavailablePathWorld(agentPreset) : undefined
     }), 'workspace-controller.presetPathWorlds')
   })
 }

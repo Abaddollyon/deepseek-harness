@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { entryListProblem, livePresetMounts } from '../src/index.ts'
@@ -125,11 +128,48 @@ describe('declarative preset revisions', () => {
     expect(await ctx.agentPresets.select(await sessionIn('remote-cwd', '/srv/app'), 'remote')).toBe('remote')
   })
 
+  it('checks every root in the world a switch enters, the Host included, and refuses an unavailable world', async () => {
+    const ctx = await setup()
+    await declare(ctx, contribution('standard'))
+    await declare(ctx, contribution('minimal'))
+    await declare(ctx, { id: 'remote', plugins: [{ name: 'cordis:group', group: true, isolate: { fs: true },
+      config: [{ name: plugin('world-fs'), config: { directories: ['/srv/app', '/srv/lib'], failing: ['/srv/flaky'] } }] }] })
+    // The world is declared by isolation alone, in a nested group too, and survives a failed provider row.
+    await declare(ctx, { id: 'offline', plugins: [{ name: 'cordis:group', group: true, config: [{ name: 'cordis:group', group: true,
+      isolate: { subprocess: true }, config: [{ name: plugin('contribute'), config: { tool: 'offline' } }, { name: plugin('throws') }] }] }] })
+    await declare(ctx, { id: 'malformed', plugins: [{ name: 'cordis:group', group: true, config: {} }] } as never)
+    expect(['standard', 'remote', 'offline', 'malformed', 'absent'].map(id => ctx.agentPresets.ownsWorld(id)))
+      .toEqual([false, true, true, false, false])
+    const host = mkdtempSync(join(tmpdir(), 'dsh-preset-world-'))
+    try {
+      const sessionIn = async (id: string, presetId: string, cwd: string, additionalPaths?: string[]) => (await ctx.agents.create({
+        sessionId: SessionId(id), meta: { cwd, ...additionalPaths === undefined ? {} : { additionalPaths } },
+        setup: async (agentCtx: Context) => { await ctx.agentPresets.mount(agentCtx, presetId) },
+      })).agent
+      await expect(ctx.agentPresets.select(await sessionIn('remote-extra', 'standard', '/srv/app', ['/srv/missing']), 'remote'))
+        .rejects.toThrow('"/srv/missing" is not a directory')
+      expect(await ctx.agentPresets.select(await sessionIn('remote-roots', 'standard', '/srv/app', ['/srv/lib']), 'remote')).toBe('remote')
+      await expect(ctx.agentPresets.select(await sessionIn('remote-flaky', 'standard', '/srv/flaky'), 'remote'))
+        .rejects.toThrow('cannot inspect "/srv/flaky" in agent preset "remote": Error: host unreachable')
+      expect(await ctx.agentPresets.select(await agentOn(ctx, 'no-cwd'), 'remote')).toBe('remote')
+      // Leaving a world checks the Host; a switch inside one world needs no check.
+      await expect(ctx.agentPresets.select(await sessionIn('to-host', 'remote', '/srv/app'), 'standard'))
+        .rejects.toThrow('"/srv/app" is not a directory')
+      expect(await ctx.agentPresets.select(await sessionIn('host-ok', 'remote', host), 'standard')).toBe('standard')
+      expect(await ctx.agentPresets.select(await sessionIn('host-host', 'standard', '/not/on/host'), 'minimal')).toBe('minimal')
+      await expect(ctx.agentPresets.select(await sessionIn('to-offline', 'standard', host), 'offline'))
+        .rejects.toThrow('execution world of agent preset "offline" is not available')
+    } finally {
+      rmSync(host, { recursive: true, force: true })
+    }
+  })
+
   it('inventories active and disabled child entries and declared display metadata', async () => {
     const ctx = await setup()
-    await declare(ctx, { ...contribution('standard'), name: 'Standard', description: 'General', order: 2 })
+    await declare(ctx, { ...contribution('standard'), name: 'Standard', description: 'General', order: 2, defaults: { permission: 'auto' } })
     await declare(ctx, { id: 'empty', order: 1, plugins: [{ name: 'missing', disabled: true }] })
     expect((await ctx.agentPresets.list()).map(row => row.id)).toEqual(['empty', 'standard'])
+    expect(await ctx.agentPresets.resolve('standard')).toEqual({ id: 'standard', defaults: { permission: 'auto' } })
     expect(await ctx.agentPresets.compositionInventory()).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'standard', name: 'Standard', isDefault: true, rows: expect.any(Array) as unknown[] }),
       expect.objectContaining({ id: 'empty', rows: [expect.objectContaining({ moduleName: 'missing', enabled: false })] }),
