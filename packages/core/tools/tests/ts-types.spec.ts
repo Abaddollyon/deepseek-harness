@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { jsonSchemaToTs, renderToolsSdk } from '@deepseek-ai/dsh-tools/src/ts-types.ts'
+import { jsonSchemaToTs, renderToolDeclarations, renderToolsSdk } from '@deepseek-ai/dsh-tools/src/ts-types.ts'
 import type { ToolSdkSchema } from '@deepseek-ai/dsh-tools/src/ts-types.ts'
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools/src/json-schema.ts'
 import { parameterSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
@@ -226,5 +226,48 @@ describe('renderToolsSdk', () => {
     const text = renderToolsSdk([])
     expect(text).toContain('interface ToolArgsMap {}')
     expect(text).toContain('interface ToolOutputMap {}')
+  })
+
+  describe('the shared MCP result type', () => {
+    const mcpResult: JsonSchemaNode = {
+      type: 'object',
+      properties: { content: { type: 'array', items: {} }, structuredContent: {} },
+      required: ['content'],
+      additionalProperties: false,
+    }
+    const mcpTool = (name: string): ToolSdkSchema => ({
+      name,
+      description: `The ${name} MCP tool.`,
+      parameters: parameterSchemaSpecToJsonSchema({}) as Record<string, unknown>,
+      output: mcpResult,
+    })
+    const structured: ToolSdkSchema = {
+      ...mcpTool('mcp__srv__structured'),
+      output: { ...mcpResult, properties: { content: { type: 'array', items: {} }, structuredContent: { type: 'string' } }, required: ['content', 'structuredContent'] },
+    }
+
+    it('declares the generic MCP result once and names it in every member that returns it', () => {
+      const text = renderToolsSdk([mcpTool('mcp__srv__a'), mcpTool('mcp__srv__b'), structured, bash])
+      expect(text).toContain([
+        'type McpToolResult = {',
+        '  content: JsonValue[];',
+        '  structuredContent?: JsonValue;',
+        '}',
+      ].join('\n'))
+      expect(text.match(/type McpToolResult =/gu)).toHaveLength(1)
+      expect(text).toContain('  mcp__srv__a: McpToolResult;\n  mcp__srv__b: McpToolResult;')
+      expect(text).toContain('  mcp__srv__structured: {\n    content: JsonValue[];\n    structuredContent: string;\n  };')
+      expect(text.match(/structuredContent\?: JsonValue;/gu)).toHaveLength(1)
+    })
+
+    it('declares no alias when no declared tool returns the generic result', () => {
+      expect(renderToolsSdk([bash, structured])).not.toContain('McpToolResult')
+    })
+
+    it('spells the result out in a declaration fragment, which cannot rely on the alias', () => {
+      const fragment = renderToolDeclarations([mcpTool('mcp__srv__a')])
+      expect(fragment).not.toContain('McpToolResult')
+      expect(fragment).toContain('  mcp__srv__a: {\n    content: JsonValue[];\n    structuredContent?: JsonValue;\n  };')
+    })
   })
 })

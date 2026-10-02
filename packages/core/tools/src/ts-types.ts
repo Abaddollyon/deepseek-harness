@@ -289,18 +289,50 @@ function byName<T extends { readonly name: string }>(schemas: readonly T[]): T[]
   return [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 }
 
-/** The `ToolArgsMap` and `ToolOutputMap` interface declarations for the given tools, in name order. */
-function renderToolMaps(schemas: readonly ToolSdkSchema[]): string {
+/** The SDK alias for the result every MCP tool without its own output schema returns. */
+const MCP_RESULT_TYPE = 'McpToolResult'
+
+/**
+ * The canonical result of an MCP tool that declares no output schema, as
+ * `@deepseek-ai/dsh-mcp-client` builds it. Every such tool renders the same
+ * output type, so the SDK declares it once under {@link MCP_RESULT_TYPE}.
+ */
+const MCP_RESULT_SCHEMA: JsonSchemaNode = {
+  type: 'object',
+  properties: { content: { type: 'array', items: {} }, structuredContent: {} },
+  required: ['content'],
+  additionalProperties: false,
+}
+
+/** Rendered `ToolArgsMap` and `ToolOutputMap` declarations. */
+interface ToolMaps {
+  readonly text: string
+  /** Whether an output member names the shared MCP result alias. */
+  readonly usesMcpResult: boolean
+}
+
+/**
+ * The `ToolArgsMap` and `ToolOutputMap` interface declarations for the given tools, in name order.
+ * @param schemas - the tools to declare.
+ * @param aliasMcpResult - name the shared MCP result alias instead of repeating its shape.
+ * @returns the declarations and whether they use the alias.
+ */
+function renderToolMaps(schemas: readonly ToolSdkSchema[], aliasMcpResult: boolean): ToolMaps {
+  const mcpResult = aliasMcpResult ? jsonSchemaToTs(MCP_RESULT_SCHEMA, 1) : undefined
   const argsMembers: string[] = []
   const outputMembers: string[] = []
+  let usesMcpResult = false
   for (const schema of byName(schemas)) {
     argsMembers.push(...docLines(schema.description, 1))
     argsMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.parameters, 1)};`)
-    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.output, 1)};`)
+    const output = jsonSchemaToTs(schema.output, 1)
+    const shared = output === mcpResult
+    usesMcpResult ||= shared
+    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${shared ? MCP_RESULT_TYPE : output};`)
   }
   const argsMap = `interface ToolArgsMap {${argsMembers.length > 0 ? `\n${argsMembers.join('\n')}\n` : ''}}`
   const outputMap = `interface ToolOutputMap {${outputMembers.length > 0 ? `\n${outputMembers.join('\n')}\n` : ''}}`
-  return `${argsMap}\n\n${outputMap}`
+  return { text: `${argsMap}\n\n${outputMap}`, usesMcpResult }
 }
 
 /**
@@ -311,7 +343,9 @@ function renderToolMaps(schemas: readonly ToolSdkSchema[]): string {
  * @returns the fenced declaration fragment.
  */
 export function renderToolDeclarations(schemas: readonly ToolSdkSchema[]): string {
-  return `\`\`\`ts\n${renderToolMaps(schemas)}\n\`\`\``
+  // A fragment spells every output out: the SDK declares the shared MCP
+  // result alias only when a declared tool uses it.
+  return `\`\`\`ts\n${renderToolMaps(schemas, false).text}\n\`\`\``
 }
 
 /**
@@ -330,13 +364,17 @@ export function renderToolDeclarations(schemas: readonly ToolSdkSchema[]): strin
  */
 export function renderToolsSdk(schemas: ToolSdkSchema[], deferred: readonly DeferredToolEntry[] = []): string {
   const sorted = byName(schemas)
+  const maps = renderToolMaps(sorted, true)
   const declaration = [
-    renderToolMaps(sorted),
+    maps.text,
     'type ToolName = keyof ToolOutputMap',
     ['declare class ToolCallError extends Error {', '  readonly name: "ToolCallError";', '  readonly toolName: ToolName;', '}'].join('\n'),
     ['declare const tools: {', '  [K in ToolName]: (args: ToolArgsMap[K]) => Promise<ToolOutputMap[K]>;', '}'].join('\n'),
   ].join('\n\n')
-  const jsonValue = 'type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }'
+  const jsonValue = [
+    'type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }',
+    ...maps.usesMcpResult ? [`type ${MCP_RESULT_TYPE} = ${jsonSchemaToTs(MCP_RESULT_SCHEMA)}`] : [],
+  ].join('\n\n')
   const index = renderDeferredIndex(deferred, name => `console.log((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`)
   return `${SDK_INSTRUCTIONS}${renderBashExample(sorted)}\n\n${SDK_PROGRAM_INSTRUCTIONS}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
 }
