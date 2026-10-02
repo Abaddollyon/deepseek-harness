@@ -213,6 +213,18 @@ describe('the per-call policy override (escalation)', () => {
       .rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
   })
 
+  it('a workspace-write stamp with additional roots admits writes there and still denies other paths', async () => {
+    await boot('read-only')
+    const extra = join(base, 'extra')
+    await mkdir(extra)
+    const policy = { mode: 'workspace-write', workspaceRoot: workspace, additionalRoots: [extra] } as const
+    await fs.writeText(await target(join(extra, 'shared.txt')), 'extra', undefined, undefined, policy)
+    expect(await readFile(join(extra, 'shared.txt'), 'utf8')).toBe('extra')
+    await expect(fs.writeText(await target(join(outside, 'denied.txt')), 'x', undefined, undefined, policy))
+      .rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
+    expect(existsSync(join(outside, 'denied.txt'))).toBe(false)
+  })
+
   it('a danger-full-access stamp bypasses the fence for that call', async () => {
     await boot('read-only')
     const path = join(outside, 'granted-full.txt')
