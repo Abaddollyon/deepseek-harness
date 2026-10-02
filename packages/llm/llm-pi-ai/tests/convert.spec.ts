@@ -1026,6 +1026,13 @@ describe('mapStopReason / mapUsage', () => {
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
   })
+
+  it('maps the provider-reported reasoning split without adding it to output', () => {
+    expect(mapUsage({ ...usage(10, 12), reasoning: 7 }))
+      .toEqual({ inputTokens: 10, outputTokens: 12, totalTokens: 22, reasoningTokens: 7 })
+    expect(mapUsage({ ...usage(10, 5), reasoning: 0 }))
+      .toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15, reasoningTokens: 0 })
+  })
 })
 
 describe('toStreamChunks edge branches', () => {
