@@ -33,7 +33,7 @@ kind: "package-library"
 
 ### 唯一输入
 
-`InProcessRunOptions` 的形态为 `{ seed?: SessionEvent[]; target?: ChildExecutionTarget }`。`seed` 是 fork 的已配平父级事件初始内容。spawn 省略该值；fork 提供已完成轮次前缀并记录其长度，使结果读取器不会把作为初始内容的父级消息误认为子 agent 输出。`target` 指定另一个 Agent 预设及其执行环境中的可选 cwd；子 agent 加入该预设而非父级预设，其 header 同时记录二者以供冷恢复。
+`InProcessRunOptions` 的形态为 `{ seed?: SessionEvent[]; target?: ChildExecutionTarget }`。`seed` 是 fork 的已配平父级事件初始内容。spawn 省略该值；fork 提供已完成轮次前缀并记录其长度，使结果读取器不会把作为初始内容的父级消息误认为子 agent 输出。`target` 指定另一个 Agent 预设及其执行环境中的可选 cwd；子 agent 加入该预设而非父级预设，其 header 同时记录二者以供冷恢复。target 使子 agent 全新启动：同时提供 `seed` 与 `target` 会被拒绝，因为 seed 会把父级的工作区根目录带入另一个执行环境。
 
 ### 子 agent 获得什么
 

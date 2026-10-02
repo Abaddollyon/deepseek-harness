@@ -1,4 +1,5 @@
 /** Declarative Agent capability sets, activation and session binding. */
+import { stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -11,7 +12,7 @@ import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
 import type { AgentPresetDocument, AgentPresetRoster } from './types.ts'
-import { entryListProblem, type PresetDefinition } from './definition.ts'
+import { declaresExecutionWorld, entryListProblem, type PresetDefinition } from './definition.ts'
 import type { AgentPreset, Config } from './preset.ts'
 import { agentPresetProjectionDefinition } from './session.ts'
 import { auditRows, mountPreset, standingMountFor, serviceForAgent, serviceInMount, type PresetMount } from './mount.ts'
@@ -302,6 +303,18 @@ export class AgentPresetRegistry extends TypertRemoteService {
     return serviceForAgent(this.owner, agent, name)
   }
 
+  /** Whether a declared preset runs in its own execution world (for example an SSH host): its
+   * composition isolates the `fs` or `subprocess` service. The answer comes from the declaration,
+   * so it holds while that world's providers are failed, pending or offline; callers that find
+   * such a provider missing refuse instead of using the Host's.
+   * @param id Preset identity.
+   * @returns false for an undeclared id or a preset that runs on the Host.
+   */
+  ownsWorld(id: string): boolean {
+    const record = this.definitions.get(id)
+    return record !== undefined && declaresExecutionWorld(record.config.plugins)
+  }
+
   /** Read a service supplied inside the current revision of a preset, before any Agent joins it.
    * Callers use the result for the operation at hand and do not retain it: a later
    * definition update retires that revision.
@@ -326,9 +339,10 @@ export class AgentPresetRegistry extends TypertRemoteService {
     return preset
   }
 
-  /** Select a preset before a session starts its first turn. A preset that
-   * mounts its own filesystem (for example over SSH) is accepted only when the
-   * Session's cwd is a directory in that execution world.
+  /** Select a preset before a session starts its first turn. A preset in
+   * another execution world than the Session's current one (an SSH host, or
+   * the Host when leaving one) is accepted only when the Session's cwd and
+   * every additional root are directories in that world.
    * @param agent Target Agent.
    * @param agentPreset Requested identity.
    * @returns Committed preset identity.
@@ -340,7 +354,7 @@ export class AgentPresetRegistry extends TypertRemoteService {
       if (boundary !== undefined && (boundary.openTurnStartSeq !== null || boundary.lastTurn > 0)) {
         throw new RemoteError('agent-preset/locked', 'This session has already started', { sessionId: agent.id, agentPreset })
       }
-      await this.assertCwdInWorld(agent, agentPreset)
+      await this.assertRootsInWorld(agent, agentPreset)
       const preset = await this.recompose(agent.ctx, agentPreset)
       agent.session.append('agent-preset/selected', { agentPreset: preset.id })
       return preset.id
@@ -352,21 +366,25 @@ export class AgentPresetRegistry extends TypertRemoteService {
     }
   }
 
-  private async assertCwdInWorld(agent: Agent, agentPreset: string): Promise<void> {
+  private async assertRootsInWorld(agent: Agent, agentPreset: string): Promise<void> {
     await this.resolve(agentPreset)
-    const fs = this.serviceForPreset(agentPreset, 'fs')
-    const cwd = agent.session.header.cwd
-    if (fs === undefined || cwd === undefined) return
-    let directory: boolean
-    try {
-      directory = (await fs.stat(await fs.resolve(cwd)))?.type === 'directory'
-    } catch (error) {
-      throw new RemoteError('agent-preset/invalid', `cannot inspect "${cwd}" in agent preset "${agentPreset}": ${String(error)}`,
-        { agentPreset, reason: String(error) }, { cause: error })
-    }
-    if (!directory) {
-      const reason = `"${cwd}" is not a directory in the execution world of agent preset "${agentPreset}"`
-      throw new RemoteError('agent-preset/invalid', reason, { agentPreset, reason })
+    const worldOf = (id: string | undefined) => id !== undefined && this.ownsWorld(id) ? id : undefined
+    const world = worldOf(agentPreset)
+    if (world === worldOf(this.composedPreset(agent.ctx))) return
+    const fs = world === undefined ? undefined : this.serviceForPreset(world, 'fs')
+    const invalid = (reason: string, options?: ErrorOptions) => new RemoteError('agent-preset/invalid', reason, { agentPreset, reason }, options)
+    if (world !== undefined && fs === undefined) throw invalid(`the execution world of agent preset "${agentPreset}" is not available`)
+    const { cwd } = agent.session.header
+    for (const root of [...cwd === undefined ? [] : [cwd], ...agent.session.additionalPaths]) {
+      let directory: boolean
+      try {
+        directory = fs === undefined
+          ? await stat(root).then(info => info.isDirectory(), () => false)
+          : (await fs.stat(await fs.resolve(root)))?.type === 'directory'
+      } catch (error) {
+        throw invalid(`cannot inspect "${root}" in agent preset "${agentPreset}": ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw invalid(`"${root}" is not a directory in the execution world of agent preset "${agentPreset}"`)
     }
   }
 

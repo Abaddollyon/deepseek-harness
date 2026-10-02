@@ -4,6 +4,8 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
+// Type-only: types `ctx.get('agentPresets')`, the registry of preset-owned execution worlds.
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { discoverShells, resolveShell } from './shells.ts'
 import { BrowserTerminal } from './terminal.ts'
@@ -330,8 +332,14 @@ export class TerminalController extends TypertRemoteService {
 
   private execution(agent: Agent): { subprocess: Context['subprocess']; sandboxPolicy: Context['sandboxPolicy'] } {
     // The Agent context selects execution providers but does not inject consumer services;
-    // a preset that isolates its own subprocess provider (for example over SSH) supplies it instead.
-    const subprocess = agent.ctx.get('agentPresets')?.serviceFor(agent, 'subprocess') ?? agent.ctx.get('subprocess')
+    // a preset that owns its world (for example over SSH) supplies its own and never falls back to the Host's.
+    const presets = agent.ctx.get('agentPresets')
+    const own = presets?.serviceFor(agent, 'subprocess')
+    const preset = own === undefined ? presets?.composedPreset(agent.ctx) : undefined
+    if (preset !== undefined && presets?.ownsWorld(preset) === true) {
+      throw new Error(`The execution world of agent preset "${preset}" is not available`)
+    }
+    const subprocess = own ?? agent.ctx.get('subprocess')
     const sandboxPolicy = agent.ctx.get('sandboxPolicy')
     if (subprocess === undefined || sandboxPolicy === undefined) throw new Error('The Session execution environment requires subprocess and sandbox policy providers')
     return { subprocess, sandboxPolicy }

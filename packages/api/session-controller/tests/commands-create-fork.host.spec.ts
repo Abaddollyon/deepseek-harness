@@ -75,7 +75,8 @@ describe('Session creation failures', () => {
       local: { id: 'local' as WorkspaceId, path: '/workspace', agentPreset: undefined, additionalPaths: [], attachSession: () => Promise.resolve() } as never,
     }
     ctx.provide('workspaceRegistry', { get: (id: string) => workspaces[id], list: () => Object.values(workspaces) } as never)
-    ctx.provide('agentPresets', { serviceForPreset: (id: string) => id === 'host-x' ? {} : undefined } as never)
+    const presets = { defaultId: 'standard', ownsWorld: (id: string) => id === 'host-x' }
+    ctx.provide('agentPresets', presets as never)
     const ensureSession = vi.fn((sessionId: SessionId, cwd: string) =>
       Promise.resolve({ id: sessionId, session: ctx.sessions.create(sessionId, { meta: { cwd } }) } as Agent))
     const controller = new SessionCommandController(ctx, controllerAgents({ ensureSession }), '/default')
@@ -84,6 +85,9 @@ describe('Session creation failures', () => {
     expect(ensureSession).toHaveBeenLastCalledWith(SessionId('in-remote'), '/srv/app', true, 'host-x', [])
     await expectFailure(controller.create({ workspaceId: 'remote' as WorkspaceId, agentPreset: 'standard' }), 'gateway/bad-request')
     await expectFailure(controller.create({ workspaceId: 'local' as WorkspaceId, agentPreset: 'host-x' }), 'gateway/bad-request')
+    // A remote default preset is refused in a Host Workspace just like a requested one.
+    presets.defaultId = 'host-x'
+    await expectFailure(controller.create({ workspaceId: 'local' as WorkspaceId }), 'gateway/bad-request')
     expect(ensureSession).toHaveBeenCalledTimes(1)
     await ctx.fiber.dispose()
   })

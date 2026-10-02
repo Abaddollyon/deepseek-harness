@@ -190,6 +190,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'The service, or undefined.',
       },
       {
+        signature: 'ownsWorld(id: string): boolean',
+        description: 'Whether a declared preset runs in its own execution world (for example an SSH host): its composition isolates the `fs` or `subprocess` service. The answer comes from the declaration, so it holds while that world\'s providers are failed, pending or offline; callers that find such a provider missing refuse instead of using the Host\'s.',
+        parameters: [{ name: 'id', description: 'Preset identity.' }],
+        returns: 'false for an undeclared id or a preset that runs on the Host.',
+      },
+      {
         signature: 'serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context[K] | undefined',
         description: 'Read a service supplied inside the current revision of a preset, before any Agent joins it. Callers use the result for the operation at hand and do not retain it: a later definition update retires that revision.',
         parameters: [{ name: 'id', description: 'Preset identity.' }, { name: 'name', description: 'Cordis service name.' }],
@@ -203,7 +209,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'select\') async select(agent: Agent, agentPreset: string): Promise<string>',
-        description: 'Select a preset before a session starts its first turn. A preset that mounts its own filesystem (for example over SSH) is accepted only when the Session\'s cwd is a directory in that execution world.',
+        description: 'Select a preset before a session starts its first turn. A preset in another execution world than the Session\'s current one (an SSH host, or the Host when leaving one) is accepted only when the Session\'s cwd and every additional root are directories in that world.',
         parameters: [{ name: 'agent', description: 'Target Agent.' }, { name: 'agentPreset', description: 'Requested identity.' }],
         returns: 'Committed preset identity.',
       },
@@ -3712,7 +3718,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       {
         signature: 'setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void',
         description: 'Install the resolver for Workspaces whose paths live in an Agent preset\'s execution world. Host Workspaces never consult it.',
-        parameters: [{ name: 'resolve', description: 'The preset\'s world, or undefined while the preset is unknown or mounts no filesystem.' }],
+        parameters: [{ name: 'resolve', description: 'The preset\'s world, whose operations reject while it is unavailable, or undefined for a preset that is unknown or runs on the Host.' }],
         returns: 'a disposer that removes this resolver.',
       },
       {

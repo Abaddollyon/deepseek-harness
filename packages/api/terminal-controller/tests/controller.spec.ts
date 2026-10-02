@@ -72,6 +72,15 @@ describe('TerminalController', () => {
     await controller.close(agent, id)
   })
 
+  it('refuses a terminal while the world an Agent preset owns has no subprocess provider', async () => {
+    const { ctx, controller, agent, subprocess } = fixture()
+    ctx.provide('agentPresets', {
+      serviceFor: () => undefined, composedPreset: () => 'remote', ownsWorld: (preset: string) => preset === 'remote',
+    } as never)
+    await expect(controller.create(agent, request, signal())).rejects.toThrow('agent preset "remote" is not available')
+    expect(subprocess.spawnTerminal).not.toHaveBeenCalled()
+  })
+
   it('creates the environment default shell and keeps an existing identity when that default changes', async () => {
     const { controller, agent, subprocess } = fixture({ shell: undefined })
     subprocess.terminalEnvironment.mockResolvedValue({ platform: 'posix', defaultShell: '/usr/local/bin/zsh' })

@@ -148,8 +148,8 @@ export class SessionCommandController {
   /**
    * Select the preset of a Session created in a Workspace. A Workspace in an
    * Agent preset's execution world creates its Sessions in that preset; a Host
-   * Workspace refuses a preset that mounts its own filesystem, whose world
-   * does not hold the Workspace directory.
+   * Workspace refuses a preset that owns another world, requested or the
+   * default, because that world does not hold the Workspace's directories.
    * @param workspace - the Workspace the Session joins.
    * @param requested - the caller's preset, if any.
    * @returns the preset the Session is created with.
@@ -162,9 +162,11 @@ export class SessionCommandController {
       }
       return workspace.agentPreset
     }
-    if (requested !== undefined && this.ctx.get('agentPresets')?.serviceForPreset(requested, 'fs') !== undefined) {
+    const presets = this.ctx.get('agentPresets')
+    const effective = requested ?? presets?.defaultId
+    if (effective !== undefined && presets?.ownsWorld(effective) === true) {
       throw new RemoteError('gateway/bad-request',
-        `agent preset "${requested}" runs on another execution host; create its Sessions in a Workspace on that host`, {})
+        `agent preset "${effective}" runs on another execution host; create its Sessions in a Workspace on that host`, {})
     }
     return requested
   }

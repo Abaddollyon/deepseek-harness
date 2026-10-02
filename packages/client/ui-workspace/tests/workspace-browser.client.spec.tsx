@@ -2284,6 +2284,26 @@ describe('WorkspaceBrowser', () => {
     await waitFor(() => { expect(screen.queryByText('/projects/alpha')).toBeNull() })
   })
 
+  it('labels Workspaces on another execution host with that host\'s display name', async () => {
+    const items = [
+      { ...workspace('local', [], 'app') },
+      { ...workspace('remote', [], 'app'), agentPreset: 'host-x' },
+      { ...workspace('offline', [], 'lib'), agentPreset: 'host-y' },
+    ]
+    const listWorlds = vi.fn(async () => [{ agentPreset: 'host-x', name: 'x (SSH)' }])
+    mount({ useWorkspaces: hook(workspaceState(items)), listWorlds })
+    expect(await screen.findByText('x (SSH)')).toBeTruthy()
+    // A host that is not listed (offline) shows its preset id; the Host Workspace carries no label.
+    expect(screen.getByText('host-y')).toBeTruthy()
+    expect(document.querySelectorAll('[data-row-key^="workspace:"] span[class*="hostBadge"]')).toHaveLength(2)
+    cleanup()
+    mount({ useWorkspaces: hook(workspaceState(items)), listWorlds: vi.fn(async () => { throw new Error('offline') }) })
+    await waitFor(() => { expect(screen.getByText('host-x')).toBeTruthy() })
+    cleanup()
+    mount({ useWorkspaces: hook(workspaceState(items)), listWorlds: undefined })
+    expect(screen.getByText('host-x')).toBeTruthy()
+  })
+
   it('renames a workspace through the row menu dialog', async () => {
     let resolveRename!: () => void
     const renameWorkspace = vi.fn(() => new Promise<void>((resolve) => { resolveRename = resolve }))

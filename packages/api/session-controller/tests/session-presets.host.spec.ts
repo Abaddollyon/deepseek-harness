@@ -49,6 +49,7 @@ function roster(ids: readonly string[], defaults: Record<string, AgentPresetDefa
     },
     mount: (_ctx: Context, id?: string) => Promise.resolve(presetOf(id ?? ids[0] ?? '')),
     serviceForPreset: () => undefined,
+    ownsWorld: () => false,
   }
 }
 

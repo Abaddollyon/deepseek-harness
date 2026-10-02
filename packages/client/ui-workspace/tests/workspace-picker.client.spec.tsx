@@ -172,7 +172,7 @@ describe('WorkspacePicker', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: '在 x (SSH) 上添加工作区…' }))
     fireEvent.change(screen.getByRole('textbox', { name: '主机上的文件夹路径' }), { target: { value: ' /srv/app ' } })
     fireEvent.click(screen.getByRole('button', { name: '添加' }))
-    expect(createWorkspace).toHaveBeenCalledWith({ path: '/srv/app', agentPreset: 'host-x' })
+    expect(createWorkspace).toHaveBeenCalledWith({ path: '/srv/app', agentPreset: 'host-x', host: 'x (SSH)' })
     await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
   })
 

@@ -15,9 +15,10 @@ Status: implemented
 - `agentPresets.serviceForPreset(id, name)` 在任何 Agent 加入之前读取预设当前修订在 `isolate` 域内发布的服务；`serviceFor(agent, name)` 仍是面向活动 Agent 的形式。
 - 若预设挂载了自己的 `fs`，Session 创建通过该 `fs` 检查 cwd。目录必须已存在于该环境中，且不会在 Host 上创建任何内容；其他预设保留 Host 上的 `mkdir`。
 - `workspace-files` 通过 Session 投影所指定预设的 `fs` 读取，因此空白 Session 切换预设后同样生效。`terminal-controller` 通过 Agent 预设隔离的 `subprocess` 启动进程。
+- `agentPresets.ownsWorld(id)` 依据声明（隔离的 `fs` 或 `subprocess`）判断是否拥有执行环境。此类预设的提供方因行失败或主机离线而缺失时，Session 创建、Files、Terminal 与工作区路径检查会拒绝，而不是改用 Host 的服务；空白 Session 切换预设时，会在其进入的执行环境（包括 Host）中检查 cwd 与附加根目录。
 - `tool-fs-search` 接受 `rgPath`，因为打包的 ripgrep 二进制是 Host 路径。
 - 工作区记录可指定 `agentPreset`；其路径通过该预设的 `fs` 规范化，并按（预设，路径）保持唯一。`workspace-controller` 在注册表上安装这些路径环境，在此类工作区中创建的 Session 以其预设启动。
-- 子 agent 可通过 `ChildExecutionTarget` 在另一个预设和 cwd 下运行，该目标由进程内提供方提供（`startInProcessRun` 选项或 `ContinuableCreateSpec.target`）。子 agent header 记录二者；当 header 预设与父级不同时，`applyChildComposition` 挂载 header 预设，因此冷恢复会重新加入同一环境。工作流 `agent()` 通过 `subagentProvider` 按子 agent 选择此类提供方。
+- 子 agent 可通过 `ChildExecutionTarget` 在另一个预设和 cwd 下运行，该目标由进程内提供方提供（`startInProcessRun` 选项或 `ContinuableCreateSpec.target`）。子 agent header 记录二者；当 header 预设与父级不同时，`applyChildComposition` 挂载 header 预设，因此冷恢复会重新加入同一环境。指定目标的子 agent 不带 fork seed 启动，因为 seed 的 `workspace/roots` 会把 Host 根目录带入另一个环境。工作流 `agent()` 通过 `subagentProvider` 按子 agent 选择此类提供方。
 
 若部署希望工作流脚本本身在远端运行，则在同一 isolate 组内挂载 `ptc-runtime-node`（含已安装的 bootstrap）、`workflow-ptc` 与 `tool-workflow`；Host PTC 运行时无法在仅存在于远端的 cwd 中启动进程。
 
@@ -31,4 +32,4 @@ Status: implemented
 
 ## Consequences
 
-代表 Session 行事的消费方必须向注册表请求预设拥有的服务；直接注入 `fs` 或 `subprocess` 的消费方仍只看到 Host。`workspace-files` 在每次作用域查找时观察 Session 投影。预设修订损坏时，位于该预设上的工作区会报告目录缺失，直到预设恢复。上游 `SshConnection` 不会重连：传输中断后，该预设修订的所有操作都会失败，直到部署重新建立连接。
+代表 Session 行事的消费方必须向注册表请求预设拥有的服务；直接注入 `fs` 或 `subprocess` 的消费方仍只看到 Host。`workspace-files` 在每次作用域查找时观察 Session 投影。预设的执行环境不可用时，位于该预设上的工作区或 Session 的操作会失败，直到预设恢复。上游 `SshConnection` 不会重连：传输中断后，该预设修订的所有操作都会失败，直到部署重新建立连接。

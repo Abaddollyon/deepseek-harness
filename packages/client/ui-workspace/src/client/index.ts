@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceSnapshot,
+  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceSnapshot, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { HostObservable, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
@@ -228,6 +228,24 @@ export function apply(ctx: Context): void {
     undoArchive: unarchiveSession,
     showArchived: () => { viewInstance.actions.setArchivedFilter('show') },
   })
+  const translate = ctx.locale.bind(NS)
+  /**
+   * Adopt a directory as a Workspace. A new Workspace on another execution
+   * host still titled after its folder takes a title naming that host, so a
+   * Host Workspace with the same folder name stays distinct in the sidebar.
+   */
+  const createWorkspace = async ({ host, ...input }: { path: string; agentPreset?: string; host?: string }): Promise<WorkspaceView> => {
+    const workspace = await workspaces.create(input)
+    if (host === undefined) return workspace
+    const folder = workspace.path.slice(workspace.path.lastIndexOf('/') + 1)
+    if (workspace.title !== folder) return workspace
+    return await workspaces.rename(workspace.workspaceId, translate('remoteWorkspace.defaultTitle', { name: folder, host }))
+      .catch((reason: unknown) => {
+        // A title conflict leaves the folder title: the Workspace itself was created.
+        console.warn('remote workspace keeps its folder title:', reason)
+        return workspace
+      })
+  }
   const createLooseSession = (): void => {
     void uiWorkspace.openLooseSession().catch((reason: unknown) => { console.warn('new chat failed:', reason) })
   }
@@ -248,7 +266,7 @@ export function apply(ctx: Context): void {
       await workspaces.insertBefore(workspaceId, beforeWorkspaceId)
     },
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
-    createWorkspace: input => workspaces.create(input),
+    createWorkspace,
     listWorlds: () => workspaces.worlds(),
     requestSearch: shortcutControls.search,
     requestAddWorkspace: shortcutControls.add,
@@ -259,7 +277,7 @@ export function apply(ctx: Context): void {
   })
   const pickerInjected = (): WorkspacePickerInjected => ({
     createLooseSession,
-    createWorkspace: input => workspaces.create(input),
+    createWorkspace,
     listWorlds: () => workspaces.worlds(),
     hooks: { directoryFlow: pickerFlowSource },
   })

@@ -537,4 +537,23 @@ describe('ApiSession create or adoption', () => {
     await expect(agents.ensureSession(SessionId('remote-file-root'), cwd, false, 'remote', [join(parent, 'file')]))
       .rejects.toThrow('is not a directory')
   })
+
+  it('refuses a preset-owned world whose filesystem is unavailable instead of creating the cwd on the Host', async () => {
+    const { ctx, agents } = await harness()
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-offline-'))
+    tempDirs.push(parent)
+    const cwd = join(parent, 'remote-only')
+    ctx.provide('agentPresets', {
+      resolve: (id?: string) => Promise.resolve({ id: id ?? 'remote' }),
+      mount: () => Promise.resolve(),
+      serviceForPreset: () => undefined,
+      ownsWorld: (id: string) => id === 'remote',
+    } as never)
+    const create = vi.spyOn(ctx.agents, 'create')
+
+    await expect(agents.ensureSession(SessionId('remote-offline'), cwd, false, 'remote'))
+      .rejects.toThrow('the execution world of agent preset "remote" is not available')
+    expect(existsSync(cwd)).toBe(false)
+    expect(create).not.toHaveBeenCalled()
+  })
 })

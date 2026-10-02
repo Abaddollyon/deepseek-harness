@@ -521,10 +521,11 @@ export class ApiSessionAgentController {
 
   /**
    * Ensure a new Session's directories in the execution world its preset
-   * selects. A preset that mounts its own `fs` (for example over SSH) owns that
-   * world: the cwd must already exist there and nothing is created on the Host.
-   * Otherwise the Host cwd is created when missing. Additional roots are
-   * recorded permanently, so each must already be a directory in that world.
+   * selects. A preset that owns its world (for example over SSH) checks the
+   * cwd through that world's `fs`, refuses while that provider is missing, and
+   * never creates anything on the Host. Otherwise the Host cwd is created when
+   * missing. Additional roots are recorded permanently, so each must already
+   * be a directory in that world.
    * @param cwd - requested project directory.
    * @param additionalPaths - additional workspace roots recorded beside `cwd`.
    * @param agentPreset - resolved preset identity, when presets are configured.
@@ -534,7 +535,11 @@ export class ApiSessionAgentController {
     additionalPaths: readonly string[],
     agentPreset: string | undefined,
   ): Promise<void> {
-    const fs = agentPreset === undefined ? undefined : this.ctx.get('agentPresets')?.serviceForPreset(agentPreset, 'fs')
+    const presets = this.ctx.get('agentPresets')
+    const fs = agentPreset === undefined ? undefined : presets?.serviceForPreset(agentPreset, 'fs')
+    if (fs === undefined && agentPreset !== undefined && presets?.ownsWorld(agentPreset) === true) {
+      throw new Error(`failed to ensure project directory "${cwd}": the execution world of agent preset "${agentPreset}" is not available`)
+    }
     const isDirectory = async (path: string): Promise<boolean> => fs === undefined
       ? (await stat(path)).isDirectory()
       : (await fs.stat(await fs.resolve(path)))?.type === 'directory'

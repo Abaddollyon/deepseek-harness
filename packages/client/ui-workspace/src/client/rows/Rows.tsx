@@ -279,6 +279,7 @@ export function ProjectRowItem({ group, containsCurrentDescendant = false, onTog
       <span className={css.projectText}>
         <span className={css.title}>{label}</span>
       </span>
+      {row.host !== undefined && <span className={css.hostBadge}>{row.host}</span>}
       <span className={css.rowActions}>
         {actions !== undefined && (
           <Menu

@@ -77,6 +77,8 @@ describe('Workspace Files Session scope lookup', () => {
   it('selects the filesystem of the Agent preset the Session projection names', async () => {
     const switched = SessionId('switched-blank')
     const local = SessionId('local')
+    const offline = SessionId('offline')
+    const plain = SessionId('plain')
     const hostFs = {}
     const remoteFs = {}
     const ctx = new Context()
@@ -84,10 +86,12 @@ describe('Workspace Files Session scope lookup', () => {
     ctx.provide('sandboxPolicy', { workspaceRoot: resolve('fallback') } as never)
     ctx.provide('agentPresets', {
       serviceForPreset: (id: string, name: string) => id === 'remote' && name === 'fs' ? remoteFs : undefined,
+      ownsWorld: (id: string) => id !== 'standard',
     } as never)
+    const presetOf: Record<string, string> = { [switched]: 'remote', [local]: 'standard', [offline]: 'host-offline' }
     ctx.provide('sessionQuery', {
       observeSession: (id: SessionId) => Promise.resolve({
-        projections: { values: { agentPreset: id === switched ? 'remote' : 'standard' } },
+        projections: { values: { agentPreset: presetOf[id] } },
         [Symbol.dispose]: () => {},
       }),
     } as never)
@@ -95,11 +99,15 @@ describe('Workspace Files Session scope lookup', () => {
     const typert = await ctx.plugin(TypertRegistry)
     const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
     try {
-      for (const id of [switched, local]) ctx.sessions.create(id, { meta: { cwd: resolve('cwd'), agentPreset: 'standard' } })
+      for (const id of [switched, local, offline]) ctx.sessions.create(id, { meta: { cwd: resolve('cwd'), agentPreset: 'standard' } })
+      ctx.sessions.create(plain, { meta: { cwd: resolve('cwd') } })
       const lookup = ctx.typert.lookups.get('workspaceFileScope')
       if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
       await expect(lookup.resolve(switched)).resolves.toMatchObject({ fs: remoteFs })
       await expect(lookup.resolve(local)).resolves.toMatchObject({ fs: hostFs })
+      await expect(lookup.resolve(plain)).resolves.toMatchObject({ fs: hostFs })
+      // An owned world without its filesystem never falls back to the Host files.
+      await expect(lookup.resolve(offline)).rejects.toThrow('agent preset "host-offline" is not available')
     } finally {
       await workspaceFiles.dispose()
       await sessions.dispose()

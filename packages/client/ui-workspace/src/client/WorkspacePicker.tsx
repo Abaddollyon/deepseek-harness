@@ -37,8 +37,8 @@ export interface WorkspacePickFlowProps {
   anchorRef?: RefObject<HTMLElement | null> | undefined
   /** Selector hook over the workspace list (framework standard hook). */
   useWorkspaces: <S>(selector: (state: WorkspaceSnapshot) => S) => S
-  /** Adopt a picked host directory, or a path on another execution host, as a real Workspace. */
-  createWorkspace: (input: { path: string; agentPreset?: string }) => Promise<WorkspaceView>
+  /** Adopt a picked host directory, or a path on another execution host named by `host`, as a real Workspace. */
+  createWorkspace: (input: { path: string; agentPreset?: string; host?: string }) => Promise<WorkspaceView>
   /** List the other execution hosts that can hold a Workspace; omitted offers only Host directories. */
   listWorlds?: (() => Promise<readonly WorkspaceWorld[]>) | undefined
   /** Bound occupancy selector hook for this surface's directory-flow hole (empty leaves the surface with no add action). */
@@ -225,7 +225,8 @@ export function WorkspacePickFlow({
     if (remoteWorld === undefined || remoteBusy) return
     setRemoteBusy(true)
     setRemoteError(null)
-    createWorkspace({ path: remotePath.trim(), agentPreset: remoteWorld.agentPreset }).then((workspace) => {
+    const { agentPreset, name } = remoteWorld
+    createWorkspace({ path: remotePath.trim(), agentPreset, host: name ?? agentPreset }).then((workspace) => {
       setRemoteWorld(undefined)
       onPick(workspace.workspaceId)
     }).catch((reason: unknown) => {

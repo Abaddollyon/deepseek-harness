@@ -137,6 +137,7 @@ describe('WorkspaceController commands', () => {
     }
     ctx.provide('agentPresets', {
       serviceForPreset: (id: string, name: string) => id === 'host-x' && name === 'fs' ? fs : undefined,
+      ownsWorld: (id: string) => id.startsWith('host-'),
       list: () => Promise.resolve([{ id: 'standard' }, { id: 'host-x', name: 'x (SSH)' }, { id: 'host-y', broken: 'offline' }]),
     } as never)
 
@@ -146,6 +147,18 @@ describe('WorkspaceController commands', () => {
     expect((await controller.create({ path: '/srv/app/', agentPreset: 'host-x' })).created).toBe(false)
     await expect(controller.create({ path: '/srv/missing', agentPreset: 'host-x' })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
     await expect(controller.create({ path: '/srv/app', agentPreset: 'standard' })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
+  })
+
+  it('keeps a Session of an unavailable preset world out of Host Workspaces', async () => {
+    const { controller, ctx, root } = await harness()
+    ctx.provide('agentPresets', { serviceForPreset: () => undefined, ownsWorld: (id: string) => id === 'host-y' } as never)
+    const app = stageDir(root, 'app')
+    const { workspace } = await controller.create({ path: app })
+    const offline = ctx.sessions.create(SessionId('offline-host'), { meta: { cwd: app, agentPreset: 'host-y' } })
+    await expect(ctx.workspaceRegistry.get(workspace.workspaceId)?.attachSession(offline.id))
+      .rejects.toThrow('it runs in agent preset \'host-y\', not the Host')
+    await expect(controller.create({ path: app, agentPreset: 'host-y' }))
+      .rejects.toThrow('the execution world of agent preset \'host-y\' is not available')
   })
 
   it('validates and replaces additional paths, keeping the primary path out of the list', async () => {

@@ -554,6 +554,15 @@ composedPreset(ctx: Context): string | undefined
  */
 serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): Context[K] | undefined
 
+/** Whether a declared preset runs in its own execution world (for example an SSH host): its
+ * composition isolates the `fs` or `subprocess` service. The answer comes from the declaration,
+ * so it holds while that world's providers are failed, pending or offline; callers that find
+ * such a provider missing refuse instead of using the Host's.
+ * @param id Preset identity.
+ * @returns false for an undeclared id or a preset that runs on the Host.
+ */
+ownsWorld(id: string): boolean
+
 /** Read a service supplied inside the current revision of a preset, before any Agent joins it.
  * Callers use the result for the operation at hand and do not retain it: a later
  * definition update retires that revision.
@@ -570,9 +579,10 @@ serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context
  */
 async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
-/** Select a preset before a session starts its first turn. A preset that
- * mounts its own filesystem (for example over SSH) is accepted only when the
- * Session's cwd is a directory in that execution world.
+/** Select a preset before a session starts its first turn. A preset in
+ * another execution world than the Session's current one (an SSH host, or
+ * the Host when leaving one) is accepted only when the Session's cwd and
+ * every additional root are directories in that world.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.
