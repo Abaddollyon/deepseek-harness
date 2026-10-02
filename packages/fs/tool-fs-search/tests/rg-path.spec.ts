@@ -21,7 +21,7 @@ vi.mock('@vscode/ripgrep', () => new Proxy({}, {
 }))
 
 function execution(id: string): ToolExecution {
-  return { signal: new AbortController().signal, name: 'glob', callId: ToolCallId(id) } as unknown as ToolExecution
+  return { signal: new AbortController().signal, name: 'glob', callId: ToolCallId(id) } as never
 }
 
 describe('lazy packaged-ripgrep resolution', () => {
