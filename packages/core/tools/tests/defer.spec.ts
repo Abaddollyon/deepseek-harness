@@ -275,6 +275,20 @@ describe('deferral in the registry', () => {
     }
   })
 
+  it('keeps the SDK unchanged when a direct tool_search under `both` activates a tool for the native list', async () => {
+    const { ctx } = await setup({ mode: 'both', defer: { include: ['gbrain_*', 'mcp__*'] } })
+    const agent = agentWith('both-agent')
+    await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
+    const before = await sdkOf(ctx, agent)
+    expect(before).toContain('- `mcp__home__light_on` — The mcp__home__light_on tool.')
+    expect(before).not.toContain('  mcp__home__light_on: {')
+    expect(await wireNames(ctx, agent)).not.toContain('mcp__home__light_on')
+    const result = await call(ctx, TOOL_SEARCH_NAME, { names: ['mcp__home__light_on'] }, agent)
+    expect(text(result)).toContain('Declarations for mcp__home__light_on:\n[')
+    expect(await wireNames(ctx, agent)).toContain('mcp__home__light_on')
+    expect(await sdkOf(ctx, agent)).toBe(before)
+  })
+
   it('restores a resumed agent\'s activations from the tools its logged request header declared', async () => {
     const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*'] } })
     const resumed = agentWith('resumed', { tools: [{ name: 'bash', description: '', parameters: {} }, { name: 'gbrain_put_page', description: '', parameters: {} }] })

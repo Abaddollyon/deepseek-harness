@@ -236,7 +236,7 @@ Each deferred tool costs one index line instead of its full declaration. A `tool
 
 #### KV Cache effect
 
-The index is prefix-stable while the visible and deferred sets are unchanged. In PTC mode, looked-up declarations stay in the history and the prompt does not change. In native mode an activated tool changes the declared list from the next request: routes with tool updates add it through a recorded addition after the cached history, and other routes re-declare the list once.
+The index is prefix-stable while the visible and deferred sets are unchanged. In PTC mode, looked-up declarations stay in the history and the prompt does not change. The SDK and both indexes ignore activations, so under `both` a direct `tool_search` changes only the native declared list. In native mode an activated tool changes the declared list from the next request: routes with tool updates add it through a recorded addition after the cached history, and other routes re-declare the list once.
 
 ### Tool-call history and results
 

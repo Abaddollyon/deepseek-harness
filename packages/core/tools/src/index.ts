@@ -741,7 +741,7 @@ interface ToolView {
   readonly visible: ReadonlyMap<string, ToolDefinition>
   /** Visible tools the scope's defer policy lists by name only, activated or not. */
   readonly deferrable: ReadonlySet<string>
-  /** Deferrable tools not yet activated for the scope: absent from declarations. */
+  /** Deferrable tools not yet activated for the scope: absent from the native declarations. The SDK ignores activations. */
   readonly deferred: ReadonlySet<string>
   /** Pre-restriction capability names used by prompt-order validation. */
   readonly knownNames: ReadonlySet<string>
@@ -925,19 +925,18 @@ export class ToolRuntime extends Service {
       order: this.ctx.systemPrompt.getSectionOrder('TOOLS_SDK'),
       interpolate: false,
       text: context => this.modeFor(context.scope) === 'native'
-        ? renderDeferredIndex(this.deferredEntries(this.view(context.scope), 'deferrable'), nativeIndexLead)
+        ? renderDeferredIndex(this.deferredEntries(this.view(context.scope)), nativeIndexLead)
         : '',
     }
   }
 
   /**
-   * The index entries for one of a view's deferral sets.
+   * The index entries for a view's deferrable tools, activated or not.
    * @param view - the calling scope's tool view.
-   * @param set - which set to list.
-   * @returns one entry per tool in the set.
+   * @returns one entry per deferrable tool.
    */
-  private deferredEntries(view: ToolView, set: 'deferrable' | 'deferred'): DeferredToolEntry[] {
-    return [...view[set]].map((name): DeferredToolEntry => ({
+  private deferredEntries(view: ToolView): DeferredToolEntry[] {
+    return [...view.deferrable].map((name): DeferredToolEntry => ({
       name,
       // The deferrable set is a subset of the visible names.
       description: (view.visible.get(name) as ToolDefinition).description,
@@ -994,7 +993,10 @@ export class ToolRuntime extends Service {
         const render = SDK_RENDERERS[runtime.language]
         /* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
         if (render === undefined) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`)
-        return render(this.sdkSchemas(context.scope), this.deferredEntries(this.view(context.scope), 'deferred'))
+        // The SDK reads the activation-independent deferrable set: a direct
+        // `tool_search` under `both` activates tools for the native list only,
+        // and must not rewrite this cached section.
+        return render(this.sdkSchemas(context.scope), this.deferredEntries(this.view(context.scope)))
       },
     }
   }
@@ -1435,7 +1437,7 @@ export class ToolRuntime extends Service {
   private sdkSchemas(scope?: ScopeKey): ToolSdkSchema[] {
     const view = this.view(scope)
     return this.sdkSchemasOf([...view.visible.values()]
-      .filter(definition => definition.name !== RUN_CODE_NAME && !view.deferred.has(definition.name)))
+      .filter(definition => definition.name !== RUN_CODE_NAME && !view.deferrable.has(definition.name)))
   }
 
   /**
