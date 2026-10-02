@@ -3285,6 +3285,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the exact disposer that restores the deployment default.',
       },
       {
+        signature: 'deferAs(policy: ToolDeferPolicy): () => void',
+        description: 'List the calling scope\'s tools named by `policy` by name only instead of applying the deployment default policy. Nearest scope on the chain wins, like presentAs, so a preset\'s standing declaration covers every agent joined under it. Scoped only, and one declaration per scope.',
+        parameters: [{ name: 'policy', description: 'include and exclude name patterns.' }],
+        returns: 'the exact disposer that restores the deployment default.',
+        throws: ['when called on an unscoped context, a pattern is empty, or the scope already declared a policy.'],
+      },
+      {
         signature: 'register(definition: ToolDefinition): () => void',
         description: 'Register globally or in the calling agent scope. Scoped tools shadow globals; duplicates within one layer and the reserved `run_code` name fail.',
         parameters: [{ name: 'definition', description: 'tool schema, execution, and optional finalization/presentation callbacks.' }],
@@ -7644,6 +7651,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ToolCallView = GenericCallView | TerminalCallView | DiffCallView;',
   },
   {
+    name: 'ToolDeferPolicy',
+    declaration: 'export interface ToolDeferPolicy {\n    readonly include?: readonly string[];\n    readonly exclude?: readonly string[];\n}',
+  },
+  {
     name: 'ToolDefinition',
     declaration: 'export interface ToolDefinition extends ToolSchema {\n    readonly output: ToolOutputDefinition;\n    execute(args: unknown, exec: ToolRunContext): Promise<unknown>;\n    projectContent?(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): ContentBlock[] | undefined;\n    finalizeContent?(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): ContentBlock[] | undefined;\n    timeoutMs?: number;\n    isConcurrencySafe?(args: unknown): boolean;\n    presentCall?(args: unknown): ToolCallView | undefined;\n    presentResult?(args: unknown, result: ToolResult): ToolResultView | undefined;\n}',
   },
@@ -7737,7 +7748,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ToolRuntime',
-    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    register(definition: ToolDefinition): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
+    declaration: 'export class ToolRuntime extends Service {\n    static inject;\n    static Config: z<Config>;\n    readonly [TOOL_RUNTIME_SCHEDULER]: ToolRuntimeScheduler;\n    constructor(ctx: Context, config: Config = {});\n    presentAs(mode: ToolPresentationMode): () => void;\n    deferAs(policy: ToolDeferPolicy): () => void;\n    register(definition: ToolDefinition): () => void;\n    restrict(filter: ToolRestriction): () => void;\n    guard(guard: ToolGuard): () => void;\n    get(name: string, scope?: ScopeKey): ToolDefinition | undefined;\n    schemas(scope?: ScopeKey): ToolSchema[];\n    executionMode(exec: ToolExecutionInput): ToolExecutionMode;\n    async execute(exec: ToolExecutionInput): Promise<ToolExecutionResult>;\n}',
   },
   {
     name: 'ToolRuntimeScheduler',

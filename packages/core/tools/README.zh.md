@@ -72,9 +72,26 @@ ctx.tools.register(defineTool({
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `mode` | `native` | 可见工具向模型呈现的方式：`native`、`ptc` 或 `both` |
+| `defer` | 无 | 只列名称的工具：用 `include` 与 `exclude` 名称模式指定，支持 `*` 通配（见[延迟工具声明](#defer-tool-declarations)） |
 | `maxParallelSubCalls` | `10` | `run_code` 程序重叠子调用的并发上限；`1` 恢复严格串行分发 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tools)是每个受支持字段的穷尽式真源。非原生模式要求已组合的 `ctx.ptcRuntime` 且其语言有已注册的 SDK 渲染器；agent preset 通过 [`dsh-agent-tool-presentation`](../agent-tool-presentation/README.zh.md) 自行选择呈现方式，单个 agent 可用 `presentAs(mode)` 遮蔽默认值。
+
+<a id="defer-tool-declarations"></a>
+### 延迟工具声明
+
+工具集较大时，可以只列出大部分工具的名称，使其完整声明不进入提示词。`defer.include` 指定延迟的工具，`defer.exclude` 使匹配的工具保持声明；模式匹配完整名称，`*` 匹配任意长度的字符。定义中设置了 `deferLoading` 的工具同样延迟，除非 `exclude` 指定了它。单个 agent 或 preset 可用 `ctx.tools.deferAs(policy)` 遮蔽部署级策略，[`dsh-agent-tool-presentation`](../agent-tool-presentation/README.zh.md) 以其 `defer` 字段暴露该能力。
+
+```yaml
+- name: '@deepseek-ai/dsh-tools'
+  config:
+    mode: ptc
+    defer:
+      include: ['mcp__*', 'gbrain_*']
+      exclude: ['gbrain_query']
+```
+
+当某个 scope 至少延迟一个可见工具时，注册表会加入保留的 `tool_search` 工具：它接受精确的 `names` 或关键词 `query`，最多返回十个声明。延迟的工具仍然注册且可调用。在 `ptc` 下，它们离开 SDK 的 `ToolArgsMap` 与 `ToolOutputMap`；SDK 代码块之后的 "More tools" 索引列出其名称，程序内的 `tool_search` 以 SDK 自身的语言返回其声明。在 `native` 下，它们离开已声明的工具列表；直接调用 `tool_search` 会返回其 JSON schema，并从该 agent 的下一次请求起将其加入已声明的工具。恢复的 agent 保留其最后一次记录的请求头所声明的延迟工具。延迟工具的参数错误会附带该工具的声明。[延迟声明决策](../../../.agents/notes/implemented/feature/2026-10-02-deferred-tool-declarations.zh.md)记录了激活为何从请求头恢复。
 
 ### 按 agent 限制工具
 
@@ -116,6 +133,8 @@ ctx.tools.register(defineTool({
 | [`src/ptc.ts`](src/ptc.ts) | PTC mode：SDK 生成、`run_code` 分发桥接层、结算 |
 | [`src/ts-types.ts`](src/ts-types.ts) | TypeScript SDK 类型渲染 |
 | [`src/py-types.ts`](src/py-types.ts) | Python SDK 类型渲染 |
+| [`src/defer.ts`](src/defer.ts) | 延迟策略、延迟工具索引与 `tool_search` 匹配 |
+| [`src/tool-search.ts`](src/tool-search.ts) | 保留的 `tool_search` 定义 |
 | [`src/invariant.ts`](src/invariant.ts) | 不变式配套 |
 
 ### 执行与取消
@@ -205,6 +224,20 @@ Program-only SDK bindings:
 
 只要 PTC mode 选择、生成的 SDK、传输 schema 与可见工具集合不变，前缀就保持稳定。模式或筛选器变更可能从第一个改变的提示词或 schema token 起使复用失效。
 
+### 仅列名称的工具索引与 `tool_search`
+
+#### 模型看到什么
+
+存在延迟策略时，PTC SDK 以 `## More tools` 段结尾：先给出一条说明，要求在调用所列工具前用 `tool_search` 查询其声明，然后每个延迟工具一行，附其首句（最多 100 个字符）。超过八个工具的命名空间族（`<prefix>__*` 或 `mcp__<server>__*`）合并为一行成员名称。在 native 模式下，延迟工具在 `tool_search` 返回它们之前不在已声明的列表中，`tool_search` 本身会被声明。
+
+#### Token 影响
+
+每个延迟工具只占一行索引，而不是完整声明。一次 `tool_search` 结果把返回的声明加入历史一次。
+
+#### KV Cache 影响
+
+可见集合与延迟集合不变时，索引保持前缀稳定。在 PTC 模式下，查询到的声明留在历史中，提示词不变。在 native 模式下，被激活的工具从下一次请求起改变已声明的列表：支持工具更新的路由在缓存历史之后通过已记录的新增项加入它，其他路由则重新声明一次列表。
+
 ### 工具调用历史与结果
 
 #### 模型看到什么
@@ -232,6 +265,7 @@ Program-only SDK bindings:
 - **定义中的 `timeoutMs` 仅作声明之用**：注册表绝不会强制执行截止时间；要强制执行，必须使用 `@deepseek-ai/dsh-tool-call-timeout-policy` 包装层。
 - **PTC mode 的 SDK 语言由当前加载的运行时决定，且呈现方式按 agent 而非按工具**：`mode: ptc`/`both` 会拒绝组装提示词，除非 `ctx.ptcRuntime.language` 有已注册的 SDK 渲染器；同一个 agent 内不能让一个工具仅使用 Native，而另一个仅使用 PTC。
 - **PTC mode 中间值只存在于执行局部，且没有字节上限**：它们无法从会话回放重建，并可能耗尽进程或 worker 内存；只有外层 `run_code` 输出受 worker 可配置的硬上限约束。
+- **native 模式下的 `tool_search` 激活从最后一次记录的请求头恢复**：在该请求头之后做出、且在下一次请求之前因崩溃丢失的激活不会保留；模型可以再次查询该工具。
 - **每次运行都会获得全新的 `run_code` 状态**：MVP 不采用持久 REPL 风格内核，因为跨调用状态不会出现在日志中。
 
 `defineTool()`、注册表模式投影和系统提示组装会保留 `deferLoading: true`。该标记请求延迟加载工具定义，并不意味着存在 `tool-addition` 记录；提供方执行语义的限制见 [LLM 包](../../../packages/llm/llm/README.zh.md#known-limitations-and-deferred-work)。

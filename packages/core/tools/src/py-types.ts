@@ -17,6 +17,8 @@
 import { assertSupportedJsonSchema } from './json-schema.ts'
 import type { JsonSchemaNode, JsonSchemaScalar } from './json-schema.ts'
 import type { ToolSdkSchema } from './ts-types.ts'
+import { renderDeferredIndex, TOOL_SEARCH_NAME } from './defer.ts'
+import type { DeferredToolEntry } from './defer.ts'
 
 /**
  * The reference grammar's `xid_start xid_continue*` — the set
@@ -758,9 +760,39 @@ The available tools:`
  * never carries a duplicate.
  * @param schemas - the tool schemas plus canonical output schemas to declare
  *   (the caller excludes `run_code` itself).
+ * @param deferred - tools listed by name only after the declarations.
  * @returns the complete section text.
  */
-export function renderToolsSdkPy(schemas: ToolSdkSchema[]): string {
+export function renderToolsSdkPy(schemas: ToolSdkSchema[], deferred: readonly DeferredToolEntry[] = []): string {
+  const errorDeclaration = 'class ToolCallError(Exception):\n    toolName: str'
+  const declaration = renderToolsStub(schemas, stub => `${stub.imports}\n\n${errorDeclaration}\n\n${stub.body}\n\ntools: Tools`)
+  const index = renderDeferredIndex(deferred, name => `print((await tools.${TOOL_SEARCH_NAME}({"names": ["${name}"]}))["declarations"])`)
+  return `${SDK_INSTRUCTIONS}\n\n\`\`\`python\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
+}
+
+/**
+ * Render deferred tools' declarations as a Python stub that extends the SDK's
+ * `Tools` protocol — the format `tool_search` returns inside a program.
+ * @param schemas - the tools to declare.
+ * @returns the fenced stub.
+ */
+export function renderToolDeclarationsPy(schemas: readonly ToolSdkSchema[]): string {
+  return `\`\`\`python\n${renderToolsStub(schemas, stub => `${stub.imports}\n\n${stub.body}`)}\n\`\`\``
+}
+
+/** The typing import line and the TypedDict classes plus `Tools` protocol for the given tools. */
+interface ToolsStub {
+  readonly imports: string
+  readonly body: string
+}
+
+/**
+ * Build the `Tools` protocol stub for the given tools, in name order.
+ * @param schemas - the tools to declare.
+ * @param assemble - joins the stub parts into the emitted text.
+ * @returns the assembled text.
+ */
+function renderToolsStub(schemas: readonly ToolSdkSchema[], assemble: (stub: ToolsStub) => string): string {
   const sorted = [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
   const state: RenderState = { classes: [], usedClassNames: new Set(), nextClassCounter: new Map(), typing: new Set(['Protocol']) }
   // ONE ordered member stream, matching the documented lexicographic contract
@@ -812,7 +844,5 @@ export function renderToolsSdkPy(schemas: ToolSdkSchema[]): string {
   const body = bodyLines.join('\n')
   const imports = TYPING_ORDER.filter(symbol => state.typing.has(symbol))
   const classBlock = state.classes.length > 0 ? `${state.classes.join('\n\n')}\n\n` : ''
-  const errorDeclaration = 'class ToolCallError(Exception):\n    toolName: str'
-  const declaration = `from typing import ${imports.join(', ')}\n\n${errorDeclaration}\n\n${classBlock}class Tools(Protocol):\n${body}\n\ntools: Tools`
-  return `${SDK_INSTRUCTIONS}\n\n\`\`\`python\n${declaration}\n\`\`\``
+  return assemble({ imports: `from typing import ${imports.join(', ')}`, body: `${classBlock}class Tools(Protocol):\n${body}` })
 }

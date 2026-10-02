@@ -21,12 +21,16 @@ import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { ToolCallView, ToolResultView } from './presentation.ts'
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from './json-schema.ts'
+import { ToolArgsError } from './schema.ts'
 import type { JsonSchemaNode } from './json-schema.ts'
 import { createRunCodeTool, RUN_CODE_NAME } from './ptc.ts'
 import type { PtcSdkLanguage } from './ptc.ts'
-import { renderToolsSdk } from './ts-types.ts'
+import { renderToolDeclarations, renderToolsSdk } from './ts-types.ts'
 import type { ToolSdkSchema } from './ts-types.ts'
-import { renderToolsSdkPy } from './py-types.ts'
+import { renderToolDeclarationsPy, renderToolsSdkPy } from './py-types.ts'
+import { compileToolDeferPolicy, TOOL_SEARCH_NAME } from './defer.ts'
+import type { CompiledToolDeferPolicy, DeferredToolEntry, ToolDeferConfig, ToolDeferPolicy } from './defer.ts'
+import { createToolSearchTool } from './tool-search.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -58,10 +62,21 @@ declare module '@deepseek-ai/dsh-llm' {
  */
 const PTC_ONLY_INSTRUCTION = `\`${RUN_CODE_NAME}\` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.`
 
-const SDK_RENDERERS: Record<string, (schemas: ToolSdkSchema[]) => string> = {
+type SdkRenderer = (schemas: ToolSdkSchema[], deferred: readonly DeferredToolEntry[]) => string
+
+const SDK_RENDERERS: Record<string, SdkRenderer> = {
   typescript: renderToolsSdk,
   python: renderToolsSdkPy,
-} satisfies Record<PtcSdkLanguage, (schemas: ToolSdkSchema[]) => string>
+} satisfies Record<PtcSdkLanguage, SdkRenderer>
+
+/** Per-language renderers of the declaration fragments `tool_search` returns inside a program. */
+const DECLARATION_RENDERERS: Record<string, (schemas: readonly ToolSdkSchema[]) => string> = {
+  typescript: renderToolDeclarations,
+  python: renderToolDeclarationsPy,
+} satisfies Record<PtcSdkLanguage, (schemas: readonly ToolSdkSchema[]) => string>
+
+/** The policy in force without any declaration: only tools that set `deferLoading` are deferred. */
+const DEFER_LOADING_ONLY = compileToolDeferPolicy({})
 
 export {
   defineTool,
@@ -102,6 +117,8 @@ export {
 export type { PtcDispatchEventData, PtcDispatchStartEventData } from './types.ts'
 
 export { CodeRunFailedError, RUN_CODE_NAME } from './ptc.ts'
+export { TOOL_SEARCH_NAME } from './defer.ts'
+export type { ToolDeferConfig, ToolDeferPolicy } from './defer.ts'
 export { jsonSchemaToTs, renderToolsSdk } from './ts-types.ts'
 export { jsonSchemaToPy, renderToolsSdkPy } from './py-types.ts'
 export { defineContentToolFixture, type ContentToolFixtureOptions } from './testing.ts'
@@ -684,6 +701,14 @@ export interface Config {
    */
   mode?: ToolPresentationMode
   /**
+   * Tools listed by name only for scopes that declare no policy of their own
+   * ({@link ToolRuntime.deferAs} shadows it per scope). A deferred tool stays
+   * callable; its full declaration is fetched with `tool_search`. Tools that
+   * set `deferLoading` are deferred unless `exclude` names them. Default: no
+   * patterns.
+   */
+  defer?: ToolDeferConfig | undefined
+  /**
    * Concurrency cap for a `run_code` program's overlapping sub-calls
    * (default 10, the loop scheduler's own default). Sub-calls follow the
    * native scheduling contract — only calls whose tools classify
@@ -714,6 +739,10 @@ interface CompiledToolRestriction {
 interface ToolView {
   /** Visible definitions after restrictions, scoped shadowing, and transport insertion. */
   readonly visible: ReadonlyMap<string, ToolDefinition>
+  /** Visible tools the scope's defer policy lists by name only, activated or not. */
+  readonly deferrable: ReadonlySet<string>
+  /** Deferrable tools not yet activated for the scope: absent from declarations. */
+  readonly deferred: ReadonlySet<string>
   /** Pre-restriction capability names used by prompt-order validation. */
   readonly knownNames: ReadonlySet<string>
   /** Current global names that a scoped restriction may name. */
@@ -741,6 +770,8 @@ class ToolLayer implements ScopeLayer {
    * "which form does the model see" is a contradiction, not a merge.
    */
   mode: ToolPresentationMode | undefined
+  /** Defer policy this scope declared for itself, shadowing the deployment default the same way. */
+  defer: CompiledToolDeferPolicy | undefined
 
   constructor(scope: ScopeKey | undefined) {
     this.tools = new NamedEntries(name => new Error(scope === undefined
@@ -751,7 +782,7 @@ class ToolLayer implements ScopeLayer {
   /** Whether every contribution table in this aggregate layer is empty. */
   isEmpty(): boolean {
     return this.tools.isEmpty() && this.restrictions.isEmpty() && this.guards.isEmpty()
-      && this.mode === undefined
+      && this.mode === undefined && this.defer === undefined
   }
 
   /** Whether every compiled restriction in this layer admits a global tool name. */
@@ -809,6 +840,11 @@ export class ToolRuntime extends Service {
 
   static Config: z<Config> = z.object({
     mode: z.union(['native', 'ptc', 'both'] as const).default('native'),
+    // Absent stays absent: an empty policy would shadow the deployment default.
+    defer: z.union([z.const(undefined), z.object({
+      include: z.array(z.string().min(1)),
+      exclude: z.array(z.string().min(1)),
+    })]),
     maxParallelSubCalls: z.natural().min(1).default(10),
   })
 
@@ -836,6 +872,15 @@ export class ToolRuntime extends Service {
   )
   /** Presentation for scopes that declare none; {@link presentAs} shadows it per scope. */
   private readonly defaultMode: ToolPresentationMode
+  /** Defer policy for scopes that declare none; {@link deferAs} shadows it per scope. */
+  private readonly defaultDefer: CompiledToolDeferPolicy
+  /**
+   * Deferred tools each agent activated through a direct `tool_search` call,
+   * seeded on resume from the tools its last logged request header declared.
+   */
+  private readonly activations = new WeakMap<ScopeKey, Set<string>>()
+  /** Reserved declaration lookup, built on first need like {@link ptcTransport}. */
+  private toolSearch: ToolDefinition | undefined
   private readonly maxParallelSubCalls: number
   /**
    * Reserved presentation transport, kept outside the filterable registration
@@ -850,8 +895,16 @@ export class ToolRuntime extends Service {
     // The schema already defaulted an omitted mode; the ?? narrows the
     // optional-input type for direct (non-Loader) construction in tests.
     this.defaultMode = config.mode ?? 'native'
+    this.defaultDefer = config.defer === undefined ? DEFER_LOADING_ONLY : compileToolDeferPolicy(config.defer)
     this.maxParallelSubCalls = resolveMaxParallelSubCalls(config.maxParallelSubCalls)
     ctx.systemPrompt.tools(context => this.wireSchemas(context.scope))
+    // A resumed agent keeps the deferred tools its model was last offered:
+    // the logged request header is the record of that declaration list.
+    ctx.on('agent/created', ({ agent }) => {
+      const names = agent.session.requestHeader()?.tools?.map(tool => tool.name) ?? []
+      if (names.length > 0) this.activations.set(agent, new Set(names))
+      return undefined
+    })
     if (this.defaultMode !== 'native') {
       ctx.systemPrompt.section(this.collapseSection())
       ctx.systemPrompt.section(this.sdkSection())
@@ -908,7 +961,13 @@ export class ToolRuntime extends Service {
         const render = SDK_RENDERERS[runtime.language]
         /* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
         if (render === undefined) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`)
-        return render(this.sdkSchemas(context.scope))
+        const view = this.view(context.scope)
+        const deferred = [...view.deferred].map((name): DeferredToolEntry => ({
+          name,
+          // The deferred set is a subset of the visible names.
+          description: (view.visible.get(name) as ToolDefinition).description,
+        }))
+        return render(this.sdkSchemas(context.scope), deferred)
       },
     }
   }
@@ -1002,15 +1061,44 @@ export class ToolRuntime extends Service {
   }
 
   /**
+   * List the calling scope's tools named by `policy` by name only instead of
+   * applying the deployment default policy. Nearest scope on the chain wins,
+   * like {@link presentAs}, so a preset's standing declaration covers every
+   * agent joined under it. Scoped only, and one declaration per scope.
+   * @param policy - include and exclude name patterns.
+   * @returns the exact disposer that restores the deployment default.
+   * @throws when called on an unscoped context, a pattern is empty, or the scope already declared a policy.
+   */
+  deferAs(policy: ToolDeferPolicy): () => void {
+    if (scopeOf(this.ctx) === undefined) {
+      throw new Error('tools.deferAs() requires a scoped context (agent.ctx): a context-global policy is the `defer` config field on the tools row')
+    }
+    const compiled = compileToolDeferPolicy(policy)
+    return this.layers.effect(
+      this.ctx,
+      (layer) => {
+        if (layer.defer !== undefined) {
+          throw new Error('tools.deferAs() is already declared for this scope; one composition selects one defer policy')
+        }
+        layer.defer = compiled
+        return () => { layer.defer = undefined }
+      },
+      { label: 'tools.deferAs()' },
+    )
+  }
+
+  /**
    * Build one scope's wire schemas and names for prompt-order validation.
    * Restrictions do not make known tools invalid, but a mode collapse does.
    */
   private wireSchemas(scope?: ScopeKey): ToolProviderResult {
     const view = this.view(scope)
     const mode = this.modeFor(scope)
+    const declared = [...view.visible.values()].filter(definition => !view.deferred.has(definition.name))
+    const search = view.visible.has(TOOL_SEARCH_NAME) ? [TOOL_SEARCH_NAME] : []
     if (mode === 'native') {
-      const schemas = [...view.visible.values()].map(definition => this.schemaOf(definition, false))
-      return { schemas, knownNames: [...view.knownNames] }
+      const schemas = declared.map(definition => this.schemaOf(definition, false))
+      return { schemas, knownNames: [...view.knownNames, ...search] }
     }
     // Validate the runtime language BEFORE projecting schemas: schemaOf reads
     // run_code's language-aware description/parameters getters, whose own
@@ -1018,14 +1106,14 @@ export class ToolRuntime extends Service {
     // renderer-table rejection the canonical assembly-time error for a
     // language with no SDK renderer.
     this.requirePtcRuntime(mode)
-    const schemas = [...view.visible.values()].map(definition => this.schemaOf(definition, false))
+    const schemas = declared.map(definition => this.schemaOf(definition, false))
     if (mode === 'ptc') {
       return {
         schemas: schemas.filter(schema => schema.name === RUN_CODE_NAME),
         knownNames: [RUN_CODE_NAME],
       }
     }
-    return { schemas, knownNames: [...view.knownNames, RUN_CODE_NAME] }
+    return { schemas, knownNames: [...view.knownNames, RUN_CODE_NAME, ...search] }
   }
 
   /**
@@ -1079,6 +1167,9 @@ export class ToolRuntime extends Service {
     // collision the moment a preset mounted.
     if (name === RUN_CODE_NAME) {
       throw new Error(`tool name "${RUN_CODE_NAME}" is reserved for the PTC mode presentation transport and cannot be registered or shadowed`)
+    }
+    if (name === TOOL_SEARCH_NAME) {
+      throw new Error(`tool name "${TOOL_SEARCH_NAME}" is reserved for deferred tool lookup and cannot be registered or shadowed`)
     }
     return this.layers.effect(
       this.ctx,
@@ -1215,7 +1306,59 @@ export class ToolRuntime extends Service {
     if (this.modeFor(scope) !== 'native') {
       visible.set(RUN_CODE_NAME, this.requirePtcTransport())
     }
-    return { visible, knownNames, restrictableNames }
+    // Deferral sorts the capabilities into declared and listed-by-name; the
+    // lookup tool exists exactly while something is listed by name.
+    const policy = this.deferFor(scope)
+    const activated = scope === undefined ? undefined : this.activations.get(scope)
+    const deferrable = new Set<string>()
+    const deferred = new Set<string>()
+    for (const [name, definition] of visible) {
+      if (name === RUN_CODE_NAME || !policy.defers(name, definition.deferLoading === true)) continue
+      deferrable.add(name)
+      if (activated?.has(name) !== true) deferred.add(name)
+    }
+    if (deferrable.size > 0) visible.set(TOOL_SEARCH_NAME, this.requireToolSearch())
+    return { visible, knownNames, restrictableNames, deferrable, deferred }
+  }
+
+  /**
+   * The defer policy one scope's agent sees: the nearest declaration on its
+   * scope chain, else the deployment default.
+   * @param scope - the calling agent, or undefined for the global view.
+   * @returns the compiled policy.
+   */
+  private deferFor(scope?: ScopeKey): CompiledToolDeferPolicy {
+    const layers = this.layers.chainLayers(scope)
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      const defer = layers[index]?.defer
+      if (defer !== undefined) return defer
+    }
+    return this.defaultDefer
+  }
+
+  /**
+   * The reserved `tool_search` lookup, built on first need. Like `run_code`
+   * it stays outside the filterable layers and is inserted per scope.
+   * @returns the shared lookup definition.
+   */
+  private requireToolSearch(): ToolDefinition {
+    this.toolSearch ??= createToolSearchTool({
+      deferredTools: (scope) => {
+        const view = this.view(scope)
+        return this.sdkSchemasOf([...view.deferrable].map(name => view.visible.get(name) as ToolDefinition))
+      },
+      renderSdkDeclarations: (schemas) => {
+        const runtime = this.requirePtcRuntime(this.defaultMode)
+        // requirePtcRuntime admits only languages with an SDK renderer, and both tables list the same languages.
+        return (DECLARATION_RENDERERS[runtime.language] as (schemas: readonly ToolSdkSchema[]) => string)(schemas)
+      },
+      activate: (scope, names) => {
+        const activated = this.activations.get(scope) ?? new Set<string>()
+        for (const name of names) activated.add(name)
+        this.activations.set(scope, activated)
+      },
+    })
+    return this.toolSearch
   }
 
   /**
@@ -1263,8 +1406,36 @@ export class ToolRuntime extends Service {
 
   /** Project visible callable tools onto the generated PTC mode SDK contract. */
   private sdkSchemas(scope?: ScopeKey): ToolSdkSchema[] {
-    return [...this.view(scope).visible.values()]
-      .filter(definition => definition.name !== RUN_CODE_NAME)
+    const view = this.view(scope)
+    return this.sdkSchemasOf([...view.visible.values()]
+      .filter(definition => definition.name !== RUN_CODE_NAME && !view.deferred.has(definition.name)))
+  }
+
+  /**
+   * Attach a deferred tool's declaration to its argument error, because the
+   * model calling it may never have read that declaration. A call inside
+   * `run_code` gets the SDK's own format, a direct call the JSON schema.
+   * @param error - the tool's argument validation failure.
+   * @param exec - the failed call.
+   * @returns the error, extended when the tool is deferred for the caller.
+   */
+  private withDeferredDeclaration(error: ToolArgsError, exec: ToolExecution): ToolArgsError {
+    const view = this.view(exec.agent)
+    const definition = view.visible.get(exec.name)
+    if (definition === undefined || !view.deferrable.has(exec.name)) return error
+    const [schema] = this.sdkSchemasOf([definition]) as [ToolSdkSchema]
+    const runtime = this.ctx.get('ptcRuntime')
+    const declaration = exec.parent !== undefined && runtime !== undefined && Object.hasOwn(DECLARATION_RENDERERS, runtime.language)
+      ? (DECLARATION_RENDERERS[runtime.language] as (schemas: readonly ToolSdkSchema[]) => string)([schema])
+      : JSON.stringify({ name: schema.name, description: schema.description, parameters: schema.parameters }, null, 2)
+    const extended = new ToolArgsError(error.violations)
+    extended.message = `${error.message}\nDeclaration of ${exec.name}:\n${declaration}`
+    return extended
+  }
+
+  /** Project definitions onto the SDK contract: the model-facing schema plus the canonical output schema. */
+  private sdkSchemasOf(definitions: readonly ToolDefinition[]): ToolSdkSchema[] {
+    return definitions
       .map((definition): ToolSdkSchema => {
         const output = snapshotJsonValue(definition.output.schema)
         /* v8 ignore next -- registration already validated and retained this schema as lossless JSON. */
@@ -1584,7 +1755,7 @@ export class ToolRuntime extends Service {
         ? toolAbortedResult(result)
         : result
     } catch (error: unknown) {
-      return toolErrorResult(error)
+      return toolErrorResult(isToolArgsError(error) ? this.withDeferredDeclaration(error, exec) : error)
     } finally {
       fused.dispose()
       exec.signal = wrapperSignal
@@ -1904,6 +2075,16 @@ export class ToolRuntime extends Service {
 /** Mint a same-process correlation token whose identity is its value. */
 function createExecutionToken(): ToolExecutionToken {
   return Symbol('dsh.tool.execution') as ToolExecutionToken
+}
+
+/** Whether a thrown value is an argument validation failure; a hostile value that cannot be inspected is not. */
+function isToolArgsError(error: unknown): error is ToolArgsError {
+  try {
+    return error instanceof ToolArgsError
+  } catch (_uninspectable) {
+    // A proxy whose prototype trap throws is reported through toolErrorResult's own normalization.
+    return false
+  }
 }
 
 function toolErrorResult(error: unknown): ToolExecutionResult {

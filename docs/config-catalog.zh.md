@@ -162,20 +162,24 @@ export interface Config {
 ## `@deepseek-ai/dsh-agent-tool-presentation`
 
 - `inject`: `tools`
-- `refs`: [`ToolPresentationMode`](subsystems/tools.zh.md)
+- `refs`: [`ToolDeferConfig`](../packages/core/tools/src/index.ts) · [`ToolPresentationMode`](subsystems/tools.zh.md)
 - `source`: [`packages/core/agent-tool-presentation/src/index.ts:38`](../packages/core/agent-tool-presentation/src/index.ts)
 
 ```ts config-catalog
-/** Plugin config. */
+/** Plugin config. At least one field is required: a row with neither changes nothing. */
 export interface Config {
   /**
    * The form this agent's model sees. `native` sends every visible schema,
    * `ptc` sends only `run_code` plus a generated SDK, `both` sends both.
-   * Required rather than defaulted: the deployment default is what a preset
-   * without this row already gets, so an omitted value would mean the row was
-   * composed for nothing.
+   * Omitted keeps the deployment default.
    */
-  mode: ToolPresentationMode
+  mode?: ToolPresentationMode
+  /**
+   * Tools this agent's model sees by name only, with `*` name patterns; the
+   * model fetches a declaration with `tool_search`. Omitted keeps the
+   * deployment default policy.
+   */
+  defer?: ToolDeferConfig | undefined
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-agent-tool-presentation -->
@@ -4058,7 +4062,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-tools`
 
 - `inject`: `systemPrompt`
-- `source`: [`packages/core/tools/src/index.ts:674`](../packages/core/tools/src/index.ts)
+- `source`: [`packages/core/tools/src/index.ts:691`](../packages/core/tools/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: how the registered tools are presented to the model. */
@@ -4075,6 +4079,14 @@ export interface Config {
    */
   mode?: ToolPresentationMode
   /**
+   * Tools listed by name only for scopes that declare no policy of their own
+   * ({@link ToolRuntime.deferAs} shadows it per scope). A deferred tool stays
+   * callable; its full declaration is fetched with `tool_search`. Tools that
+   * set `deferLoading` are deferred unless `exclude` names them. Default: no
+   * patterns.
+   */
+  defer?: ToolDeferConfig | undefined
+  /**
    * Concurrency cap for a `run_code` program's overlapping sub-calls
    * (default 10, the loop scheduler's own default). Sub-calls follow the
    * native scheduling contract — only calls whose tools classify
@@ -4086,6 +4098,14 @@ export interface Config {
 
 /** How the registry presents its tools to the model (see {@link Config.mode}). */
 export type ToolPresentationMode = 'native' | 'ptc' | 'both'
+
+/** The `defer` config field: a {@link ToolDeferPolicy} as configuration writes it. */
+export interface ToolDeferConfig {
+  /** Name patterns of tools listed by name only. */
+  include?: string[]
+  /** Name patterns kept fully declared. */
+  exclude?: string[]
+}
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tools -->
 

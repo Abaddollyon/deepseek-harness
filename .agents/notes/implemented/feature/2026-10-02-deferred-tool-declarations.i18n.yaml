@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-02-deferred-tool-declarations.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-10-02-deferred-tool-declarations.md
+/agent-note-deferred-tool-declarations:
+  en: ef91f99ad1bcbab2
+  zh: e0fc7fee8fd5747e
+/agent-note-deferred-tool-declarations/problem:
+  en: 035c51015c7ecf57
+  zh: c9477a5142572e88
+/agent-note-deferred-tool-declarations/decision:
+  en: 0ba693bad5c60feb
+  zh: 0fb154210101b20e
+/agent-note-deferred-tool-declarations/alternatives-considered:
+  en: ef925355471afbd9
+  zh: a0b36290c35d556d
+/agent-note-deferred-tool-declarations/consequences:
+  en: 38ea67650889329a
+  zh: d1f62e2011a53367

@@ -72,9 +72,26 @@ The `mode` config decides what the model sees: `native` (every visible schema), 
 | Field | Default | Meaning |
 |---|---|---|
 | `mode` | `native` | How visible tools are presented to the model: `native`, `ptc`, or `both` |
+| `defer` | none | Tools listed by name only: `include` and `exclude` name patterns with `*` wildcards (see [Defer tool declarations](#defer-tool-declarations)) |
 | `maxParallelSubCalls` | `10` | Concurrency cap for a `run_code` program's overlapping sub-calls; `1` restores strictly serial dispatch |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tools) is the exhaustive source for every accepted field. Non-native modes require a composed `ctx.ptcRuntime` whose language has a registered SDK renderer; an agent preset selects its own presentation with [`dsh-agent-tool-presentation`](../agent-tool-presentation/README.md), and one agent can shadow the default with `presentAs(mode)`.
+
+<a id="defer-tool-declarations"></a>
+### Defer tool declarations
+
+A large tool set can list most tools by name only and keep their full declarations out of the prompt. `defer.include` names the deferred tools and `defer.exclude` keeps matching tools declared; patterns match whole names and `*` matches any run of characters. A tool whose definition sets `deferLoading` is deferred too unless `exclude` names it. One agent or preset can shadow the deployment policy with `ctx.tools.deferAs(policy)`, which [`dsh-agent-tool-presentation`](../agent-tool-presentation/README.md) exposes as its `defer` field.
+
+```yaml
+- name: '@deepseek-ai/dsh-tools'
+  config:
+    mode: ptc
+    defer:
+      include: ['mcp__*', 'gbrain_*']
+      exclude: ['gbrain_query']
+```
+
+While a scope defers at least one visible tool, the registry adds the reserved `tool_search` tool, which takes exact `names` or a keyword `query` and returns at most ten declarations. Deferred tools stay registered and callable. Under `ptc` they leave the SDK's `ToolArgsMap` and `ToolOutputMap`; a "More tools" index after the SDK block lists them by name, and `tool_search` inside a program returns their declarations in the SDK's own language. Under `native` they leave the declared tool list; a direct `tool_search` call returns their JSON schemas and adds them to that agent's declared tools from its next request. A resumed agent keeps the deferred tools its last logged request header declared. An argument error from a deferred tool carries that tool's declaration. The [deferred declarations decision](../../../.agents/notes/implemented/feature/2026-10-02-deferred-tool-declarations.md) records why activations resume from the request header.
 
 ### Restrict tools per agent
 
@@ -116,6 +133,8 @@ The registry holds typed `ToolDefinition`s in scoped layers and projects them on
 | [`src/ptc.ts`](src/ptc.ts) | PTC mode: SDK generation, `run_code` dispatch bridge, settlement |
 | [`src/ts-types.ts`](src/ts-types.ts) | TypeScript SDK type rendering |
 | [`src/py-types.ts`](src/py-types.ts) | Python SDK type rendering |
+| [`src/defer.ts`](src/defer.ts) | Defer policy, the deferred-tool index, and `tool_search` matching |
+| [`src/tool-search.ts`](src/tool-search.ts) | The reserved `tool_search` definition |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion |
 
 ### Execution and cancellation
@@ -205,6 +224,20 @@ Fixed per-request cost proportional to the visible definitions. PTC mode trades 
 
 Prefix-stable while the PTC mode selection, generated SDK, transport schema, and visible tool set are unchanged. Mode or filter changes may invalidate reuse from the first changed prompt or schema token.
 
+### Name-only tool index and `tool_search`
+
+#### What the model sees
+
+With a defer policy, the PTC SDK ends with a `## More tools` section: one instruction to look up a declaration with `tool_search` before calling a listed tool, then one line per deferred tool with its first sentence (at most 100 characters). A namespaced family of more than eight tools (`<prefix>__*`, or `mcp__<server>__*`) becomes one line of member names. In native mode the deferred tools are absent from the declared list until `tool_search` returns them, and `tool_search` itself is declared.
+
+#### Token effect
+
+Each deferred tool costs one index line instead of its full declaration. A `tool_search` result adds the returned declarations to the history once.
+
+#### KV Cache effect
+
+The index is prefix-stable while the visible and deferred sets are unchanged. In PTC mode, looked-up declarations stay in the history and the prompt does not change. In native mode an activated tool changes the declared list from the next request: routes with tool updates add it through a recorded addition after the cached history, and other routes re-declare the list once.
+
 ### Tool-call history and results
 
 #### What the model sees
@@ -232,6 +265,7 @@ These limits define when the registry needs special care. They are current packa
 - **`timeoutMs` on a definition is declarative only** — the registry never enforces deadlines; enforcement requires the `@deepseek-ai/dsh-tool-call-timeout-policy` wrapper.
 - **PTC mode's SDK language follows the one loaded runtime, and a presentation is per agent rather than per tool** — `mode: ptc`/`both` rejects prompt assembly unless `ctx.ptcRuntime.language` has a registered SDK renderer; within one agent no tool can be native-only while another is ptc-only.
 - **PTC mode intermediate values are execution-local and unbounded by bytes** — they cannot be reconstructed from session replay and may exhaust process or worker memory; only the outer `run_code` output has the worker's configurable hard cap.
+- **Native `tool_search` activations are restored from the last logged request header** — an activation made after that header and lost to a crash before the next request is gone; the model can look the tool up again.
 - **`run_code` state is fresh per run** — a persistent REPL-style kernel is rejected for the MVP, because cross-call state would be invisible to the log.
 
 `defineTool()`, registry schema projection, and system-prompt assembly preserve `deferLoading: true`. The marker requests deferred definition loading and does not imply a `tool-addition` record; the [LLM package](../../../packages/llm/llm/README.md#known-limitations-and-deferred-work) documents provider enforcement limits.
