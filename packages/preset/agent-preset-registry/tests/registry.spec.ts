@@ -282,6 +282,20 @@ it('resolves an isolated service through a preset revision before any Agent join
   expect(ctx.agentPresets.serviceForPreset('missing', service)).toBeUndefined()
 })
 
+it('publishes an execution world\'s filesystem at mount and leaves connecting to the first operation', async () => {
+  const ctx = await setup()
+  await declare(ctx, { id: 'host-idle', name: 'idle (SSH)', plugins: [{ name: 'cordis:group', group: true, isolate: { link: true, fs: true },
+    config: [{ name: plugin('lazy-link') }, { name: plugin('link-fs') }] }] })
+  const link = ctx.agentPresets.serviceForPreset('host-idle', 'link' as string & keyof Context)
+  expect(await ctx.agentPresets.list()).toEqual([{ id: 'host-idle', name: 'idle (SSH)' }])
+  expect(ctx.agentPresets.ownsWorld('host-idle')).toBe(true)
+  const fs = ctx.agentPresets.serviceForPreset('host-idle', 'fs')
+  expect(fs).toBeDefined()
+  expect(link).toMatchObject({ connects: 0 })
+  expect(await fs!.stat(await fs!.resolve('/srv/app'))).toEqual({ type: 'directory' })
+  expect(link).toMatchObject({ connects: 1 })
+})
+
 it('resolves the saved default over the deployment default, and drops a removed override', async () => {
   const ctx = await harness({ live: true })
   contexts.push(ctx)
