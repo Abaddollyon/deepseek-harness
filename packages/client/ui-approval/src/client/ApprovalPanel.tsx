@@ -57,6 +57,10 @@ function ApprovalFlow({ pending, reason, detail, lead, t }: {
       || element.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]') !== null) return
     if (event.key !== 'Enter' && event.key !== 'Escape') return
     if (event.key === 'Enter' && element.closest('button, a[href], [role="button"]') !== null) return
+    // Plugin-owned seat content (a <summary>, an anchor without href, a
+    // tabIndex element) keeps its own keys: answering from inside it would
+    // approve on a key the user meant for that element.
+    if (element.closest('[data-approval-lead], [data-approval-detail]') !== null) return
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     event.preventDefault()
     event.stopPropagation()
@@ -71,7 +75,7 @@ function ApprovalFlow({ pending, reason, detail, lead, t }: {
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false; compositionEnded.current = true }}>
       <div className={css.card}>
-        <div className={css.strip}>{lead(answered)}</div>
+        <div className={css.strip} data-approval-lead="">{lead(answered)}</div>
         <div
           className={css.body}
           data-approval-scroll=""
@@ -80,7 +84,7 @@ function ApprovalFlow({ pending, reason, detail, lead, t }: {
           aria-label={t('detail.aria')}
         >
           <div className={css.headline}>{reason ?? t('escalation', { toolName: pending.toolName })}</div>
-          {detail !== null && <div className={css.command}>{detail}</div>}
+          {detail !== null && <div className={css.command} data-approval-detail="">{detail}</div>}
         </div>
         <div className={css.actionRow}>
           <Button variant="outline" className={css.reject} disabled={answered} onClick={() => { answer('rejected') }}>

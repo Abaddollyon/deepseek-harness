@@ -18,7 +18,7 @@ Browser approval presentation over the Agent-scoped Remote Event waterfall. The 
 
 -----
 
-Focus the approval detail region to approve with Enter or reject with Escape. The mounted plugin reserves both keys against editable shortcuts. Enter on the focused Reject button retains its native reject action. Input controls and IME candidates keep their own keys. Keyboard and pointer actions share one pending-request lock; a withdrawn or replaced request cannot accept another answer, and an earlier failed answer cannot unlock its replacement.
+Focus the approval detail region to approve with Enter or reject with Escape. The mounted plugin reserves both keys against editable shortcuts. Enter on the focused Reject button retains its native reject action. Input controls, IME candidates and any focused content inside the plugin-owned lead or detail seats keep their own keys. Keyboard and pointer actions share one pending-request lock; a withdrawn or replaced request cannot accept another answer, and an earlier failed answer cannot unlock its replacement.
 
 A `conversation.approval.lead` occupant replaces the card's status strip, which otherwise shows the state dot and waiting label. It receives the tool name, the correlated Tool call, the reason in the UI language, and whether the user has answered; it receives no way to answer, and the card keeps its headline, detail, decisions, and keys.
 

@@ -444,6 +444,27 @@ describe('ApprovalPanel', () => {
     await expect(pending.result).resolves.toBe('rejected')
   })
 
+  it.each(['conversation.approval.lead', 'conversation.approval.detail'])(
+    'leaves Enter and Escape on focusable content inside %s to that content', async (seat) => {
+      const pending = new PendingApproval(id('s1'), { toolName: 'bash', callId: 'call-1' as ToolCallId })
+      const renderSlot = (key: string) => key === seat
+        ? <details><summary>More</summary><span tabIndex={0}>focusable</span><a>plain anchor</a></details>
+        : null
+      render(<ApprovalPanel {...panelProps(pending, renderSlot as never)} />)
+      for (const target of [screen.getByText('More'), screen.getByText('focusable'), screen.getByText('plain anchor')]) {
+        target.focus()
+        for (const key of ['Enter', 'Escape']) {
+          expect(fireEvent.keyDown(target, { key, code: key })).toBe(true)
+        }
+      }
+      expect(pending.answerable).toBe(true)
+      const group = screen.getByRole('group', { name: 'Approval details' })
+      group.focus()
+      fireEvent.keyDown(group, { key: 'Enter', code: 'Enter' })
+      await expect(pending.result).resolves.toBe('allowed-once')
+    },
+  )
+
   it('ignores unowned input, modified keys, repeats and IME candidate keys', async () => {
     const pending = new PendingApproval(id('s1'), { toolName: 'bash', callId: 'call-1' as ToolCallId })
     const renderSlot = (key: string) => key === 'conversation.approval.detail' ? <input aria-label="Approval input" /> : null
