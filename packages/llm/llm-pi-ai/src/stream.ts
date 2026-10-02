@@ -44,6 +44,15 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): string {
+  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing, and `received from peer` alone
+  // appears in unrelated wording (TLS certificates). Node renders the reset
+  // code as NGHTTP2_* and intermediaries name the RST_STREAM frame. The peer
+  // reset one stream, not the connection, so resending the request can succeed.
+  // Checked before status codes: the stream id can read like one (`stream ID 401;`).
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
@@ -76,14 +85,6 @@ function classifyPiAiError(message: string): string {
       || /upstream websocket (?:closed before response\.completed|closed without a complete handshake|receive failed)/i.test(message)))) {
     return 'TRANSPORT'
   }
-  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
-  // stream ID N; <CODE>; received from peer`. Both fragments are required:
-  // bare `stream error` is generic phrasing, and `received from peer` alone
-  // appears in unrelated wording (TLS certificates). Node renders the reset
-  // code as NGHTTP2_* and intermediaries name the RST_STREAM frame. The peer
-  // reset one stream, not the connection, so resending the request can succeed.
-  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
-  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
