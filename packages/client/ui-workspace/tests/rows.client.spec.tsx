@@ -824,6 +824,24 @@ describe('workspace browser rows', () => {
     }
   })
 
+  it('session hover card lists the additional folders the Session recorded', () => {
+    vi.useFakeTimers()
+    try {
+      const node: SessionNode = {
+        id: sid('s1'), title: 'Rooted', blank: false, running: false, runningSubagentCount: 0,
+        completed: false, updatedAt: 0, pinned: false, archived: false, additionalPaths: ['/shared/lib', '/shared/docs'],
+      }
+      render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={tEn} />)
+      fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
+      act(() => { vi.advanceTimersByTime(800) })
+      expect(screen.getByText('Additional folders')).toBeTruthy()
+      expect(screen.getByText('/shared/lib')).toBeTruthy()
+      expect(screen.getByText('/shared/docs')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('completed hover card shows the Completed status line', () => {
     vi.useFakeTimers()
     try {

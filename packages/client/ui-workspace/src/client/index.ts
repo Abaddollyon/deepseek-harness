@@ -238,6 +238,7 @@ export function apply(ctx: Context): void {
     requestSessionRename,
     notifyArchivedNotOpenable: () => { notify({ kind: 'archivedNotOpenable' }) },
     renameWorkspace: async (workspaceId, title) => { await workspaces.rename(workspaceId, title) },
+    updateWorkspacePaths: async (workspaceId, additionalPaths) => { await workspaces.updatePaths(workspaceId, additionalPaths) },
     deleteWorkspace: async (workspaceId) => { await workspaces.delete(workspaceId) },
     insertWorkspaceBefore: async (workspaceId, beforeWorkspaceId) => {
       await workspaces.insertBefore(workspaceId, beforeWorkspaceId)

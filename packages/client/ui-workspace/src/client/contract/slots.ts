@@ -258,6 +258,8 @@ export type WorkspaceBrowserInjected = {
   notifyArchivedNotOpenable: () => void
   /** Rename a Host Workspace (rejects on name conflict; resolves on durability). */
   renameWorkspace: (workspaceId: WorkspaceId, title: string) => Promise<void>
+  /** Replace a Workspace's additional directories for new Sessions (rejects with the Host failure). */
+  updateWorkspacePaths: (workspaceId: WorkspaceId, additionalPaths: readonly string[]) => Promise<void>
   /** Delete only a Host Workspace registration; directory and Session logs remain. */
   deleteWorkspace: (workspaceId: WorkspaceId) => Promise<void>
   /**

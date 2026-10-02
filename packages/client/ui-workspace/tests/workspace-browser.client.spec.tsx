@@ -130,6 +130,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     searchResultLimit: 20,
     notifyArchivedNotOpenable: vi.fn(),
     renameWorkspace: vi.fn(async () => {}),
+    updateWorkspacePaths: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
     unarchiveSession: vi.fn(async () => {}),
     insertWorkspaceBefore: vi.fn(async () => {}),
@@ -2253,6 +2254,30 @@ describe('WorkspaceBrowser', () => {
     expect(confirm.disabled).toBe(false)
     fireEvent.click(confirm)
     expect(renameWorkspace).toHaveBeenCalledWith(wid('alpha'), '默认工作区')
+  })
+
+  it('edits a workspace’s additional folders through the directory flow and saves the complete list', async () => {
+    const updateWorkspacePaths = vi.fn(async () => {})
+    let flowOwner: DirectoryFlowOwnerProps | undefined
+    const renderSlot: WorkspaceBrowserProps['renderSlot'] = (name: string, owner: object) => {
+      if (name === 'sidebar.workspaces.directoryFlow') flowOwner = owner as DirectoryFlowOwnerProps
+      return null
+    }
+    mount({
+      useWorkspaces: hook(workspaceState([{ ...workspace('alpha', []), additionalPaths: ['/shared/lib'] }])),
+      updateWorkspacePaths,
+      renderSlot,
+    })
+    fireEvent.click(screen.getByRole('button', { name: '工作区“alpha”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '管理文件夹…' }))
+    expect(screen.getByText('/projects/alpha')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '移除文件夹 /shared/lib' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加文件夹…' }))
+    expect(flowOwner?.open).toBe(true)
+    act(() => { flowOwner?.onPicked('/shared/docs') })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => { expect(updateWorkspacePaths).toHaveBeenCalledWith(wid('alpha'), ['/shared/docs']) })
+    await waitFor(() => { expect(screen.queryByText('/projects/alpha')).toBeNull() })
   })
 
   it('renames a workspace through the row menu dialog', async () => {
