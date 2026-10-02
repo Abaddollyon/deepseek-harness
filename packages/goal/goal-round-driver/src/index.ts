@@ -444,7 +444,7 @@ export function apply(ctx: Context): void {
           /* v8 ignore next -- followup reserves the live agent before publishing a queued attempt */
           if (state.agent.status === 'running') {
             // Teardown interrupts the round but keeps pending inbox input for the next lifecycle.
-            state.agent.cancel({ kind: 'parent' }, { keepInbox: true })
+            state.agent.cancel({ kind: 'parent' }, { keepInbox: true, wake: false })
             waits.push(state.agent.whenIdle())
           }
         }
