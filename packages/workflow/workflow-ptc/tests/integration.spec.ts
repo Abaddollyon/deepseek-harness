@@ -243,6 +243,31 @@ return [first, second, third, fourth, fifth]`,
       }
     })
 
+    it('keeps a configured effort without a route when a call names the parent\'s own route', async () => {
+      const { ctx, parent, adapter } = await setup(
+        [textResponse('same route'), textResponse('other model')],
+        XHIGH,
+        { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+        { agentOptions: { reasoningEffort: 'xhigh' } },
+      )
+      const start = vi.spyOn(ctx.subagents, 'start')
+      const run = ctx.workflowEngine.start({
+        meta: { name: 'parent-route', description: 'parent route named' },
+        script: "return [await agent('same', { provider: 'mock', model: 'mock' }), await agent('other', { model: 'other' })]",
+        parent,
+      })
+      try {
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
+        expect(start.mock.calls.map(([, request]) => request.agentOptions)).toEqual([
+          { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
+          { model: 'other' },
+        ])
+        expect(adapter.requests.map(request => request.reasoningEffort)).toEqual(['xhigh', 'high'])
+      } finally {
+        await run.dispose()
+      }
+    })
+
     it('passes a configured effort and token limit without a route, a route without an effort, and rejects a route missing its model', async () => {
       const { ctx, parent } = await setup(
         [textResponse('child')],

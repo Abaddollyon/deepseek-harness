@@ -51,7 +51,7 @@ Node PTC 提供方的 `maxPendingCalls` 也限制工作流并发：子 agent 启
 
 ### 结果与失败
 
-脚本支持顶层 `await`；`meta` 和 `args` 作为 JSON 数据传入。每次 `agent()` 调用使用运行固定的父级及配置的 subagent 提供方；若其 `subagentProvider` 选项指定了另一个已注册的提供方（例如在其他执行主机上启动子 agent 的提供方），则改用该提供方。显式的 `label` 也会保存为子 Session 的显示标签。可选的 `provider`、`model` 和 `reasoningEffort` 覆盖该子 agent 的 LLM 路由以及配置的 `agentOptions`；若调用改变了配置的路由却未指定推理强度，则丢弃配置的推理强度。有效模型不提供的推理强度会在子 agent 启动前使工作流失败。最终的无损 JSON 返回值成为运行结果；普通子 agent 失败使 `agent()` 以 `null` 兑现。
+脚本支持顶层 `await`；`meta` 和 `args` 作为 JSON 数据传入。每次 `agent()` 调用使用运行固定的父级及配置的 subagent 提供方；若其 `subagentProvider` 选项指定了另一个已注册的提供方（例如在其他执行主机上启动子 agent 的提供方），则改用该提供方。显式的 `label` 也会保存为子 Session 的显示标签。可选的 `provider`、`model` 和 `reasoningEffort` 覆盖该子 agent 的 LLM 路由以及配置的 `agentOptions`；若调用改变了配置的路由（未配置的 provider 或 model 以父级的为准）却未指定推理强度，则丢弃配置的推理强度。有效模型不提供的推理强度会在子 agent 启动前使工作流失败。最终的无损 JSON 返回值成为运行结果；普通子 agent 失败使 `agent()` 以 `null` 兑现。
 
 无效元数据、无法解析的正文、不可用的提供方路由或高于上限的单次运行上限，在运行发布前被拒绝。执行期间，钩子误用与超出协作式上限会使工作流失败。进程失败、所需约束不可用，以及超出 PTC 输出或控制限制也会使运行失败。
 

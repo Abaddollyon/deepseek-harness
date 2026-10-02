@@ -71,20 +71,23 @@ function childRequest(value: unknown): ChildStartRequest {
 /**
  * The child's route: the call's own provider, model and effort over the
  * configured defaults. A call that changes the configured route without naming
- * an effort drops the configured effort, which belongs to that route.
+ * an effort drops the configured effort, which belongs to that route. The
+ * configured route is the defaults' provider and model, each falling back to
+ * the parent's, so naming that route keeps the effort.
  * @param defaults - configured child defaults, if any.
  * @param request - the `agent()` call.
+ * @param parent - the parent's current route.
  * @returns the child's Agent options, or `undefined` when it inherits the parent's route unchanged.
  */
-function childAgentOptions(defaults: AgentOptions | undefined, request: ChildStartRequest): AgentOptions | undefined {
+function childAgentOptions(defaults: AgentOptions | undefined, request: ChildStartRequest, parent: AgentOptions): AgentOptions | undefined {
   const perCall: AgentOptions = {
     ...request.provider === undefined ? {} : { provider: request.provider },
     ...request.model === undefined ? {} : { model: request.model },
     ...request.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) },
   }
   if (defaults === undefined) return Object.keys(perCall).length === 0 ? undefined : perCall
-  const routeChanged = (request.provider !== undefined && request.provider !== defaults.provider)
-    || (request.model !== undefined && request.model !== defaults.model)
+  const routeChanged = (request.provider !== undefined && request.provider !== (defaults.provider ?? parent.provider))
+    || (request.model !== undefined && request.model !== (defaults.model ?? parent.model))
   const { reasoningEffort: _configuredEffort, ...route } = defaults
   return { ...routeChanged && request.reasoningEffort === undefined ? route : defaults, ...perCall }
 }
@@ -255,7 +258,7 @@ export class PtcWorkflowRun implements WorkflowRun {
     // Configured defaults reach only a provider that can apply a route; an
     // explicit per-call route still reaches the provider, which rejects it.
     const defaults = this.subagents.getProvider(providerName)?.capabilities.agentOptions === true ? this.childDefaults : undefined
-    const agentOptions = childAgentOptions(defaults, request)
+    const agentOptions = childAgentOptions(defaults, request, parentAgentOptionsForDelegation(this.parent))
     if (agentOptions?.reasoningEffort !== undefined) {
       await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
       this.requireActive()
