@@ -56,8 +56,18 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: pnpm
 
-      - name: Install (immutable)
-        run: pnpm install --frozen-lockfile
+      - name: Install (immutable) and prepare bubblewrap
+        run: |
+          pnpm install --frozen-lockfile &
+          install_pid=$!
+          bash scripts/prepare-ci-bubblewrap.sh &
+          sandbox_pid=$!
+          install_status=0
+          wait "$install_pid" || install_status=$?
+          sandbox_status=0
+          wait "$sandbox_pid" || sandbox_status=$?
+          if (( install_status != 0 )); then exit "$install_status"; fi
+          exit "$sandbox_status"
 
       # Keep this gate aligned with scripts/run-gates.ts so build-backed
       # static checks remain one definition. The archived-note seal gate
