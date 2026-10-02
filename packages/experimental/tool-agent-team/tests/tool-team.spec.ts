@@ -745,7 +745,11 @@ describe('dsh-tool-team', () => {
     }
     const SOL_XHIGH = { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' }
 
-    async function routeSetup(config: toolTeam.Config, allowed?: Array<{ provider: string; model: string }>) {
+    async function routeSetup(
+      config: toolTeam.Config,
+      allowed?: Array<{ provider: string; model: string }>,
+      script: ConstructorParameters<typeof MockAdapter>[0] = ['hang', 'hang', 'hang'],
+    ) {
       const ctx = new Context()
       contexts.add(ctx)
       await mountAgentLoopTestDependencies(ctx)
@@ -760,7 +764,7 @@ describe('dsh-tool-team', () => {
       await ctx.plugin(TeamService)
       ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
       await ctx.plugin(toolTeam, config)
-      const adapter = new MockAdapter(['hang', 'hang', 'hang'], XHIGH)
+      const adapter = new MockAdapter(script, XHIGH)
       ctx.llm.registerAdapter(['mock'], adapter)
       const lead = await ctx.agentLoop.create(SessionId('tool-team-route-lead'), { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') })
       if (allowed !== undefined) recordSubagentModelSelection(ctx.sessionProjections, lead.session, allowed)
@@ -779,6 +783,17 @@ describe('dsh-tool-team', () => {
         expect.objectContaining({ target: 'lead', model: 'mock', reasoningEffort: 'low' }),
         expect.objectContaining({ target: 'deep-worker', model: 'mock', reasoningEffort: 'xhigh' }),
       ])
+    })
+
+    it('keeps reporting a teammate\'s own route once its Activation is no longer resident', async () => {
+      const { ctx, lead } = await routeSetup({}, [{ provider: 'mock', model: 'other' }], [textResponse('done')])
+      const spawned = await execute(ctx, lead, 'spawn_teammate', {
+        name: 'other-worker', description: 'other model', prompt: 'go', provider: 'mock', model: 'other', reasoning_effort: 'xhigh',
+      })
+      expect(spawned.isError, text(spawned)).toBe(false)
+      const childId = spawnedChildId(ctx, lead, spawned)
+      await waitNoAgent(ctx, childId)
+      expect(ctx.agentTeams.listMembers(lead)[1]).toMatchObject({ status: 'inactive', model: 'other', reasoningEffort: 'xhigh' })
     })
 
     it('lets the Lead choose an allowed route and effort, and drops the configured effort on a changed route', async () => {
