@@ -3961,14 +3961,14 @@ export interface Config {
 ## `@deepseek-ai/dsh-tool-workflow`
 
 - `inject`: `tools` · `workflowEngine` · `systemPrompt`
-- `source`: [`packages/workflow/tool-workflow/src/index.ts:44`](../packages/workflow/tool-workflow/src/index.ts)
+- `source`: [`packages/workflow/tool-workflow/src/index.ts:46`](../packages/workflow/tool-workflow/src/index.ts)
 
 ```ts config-catalog
 /** Config: the model-facing tool name plus result rendering caps. */
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
+  /** Serialized-result ceiling in characters; longer JSON spills through `ctx.spillStore` and returns recovery metadata (default 50000). */
   maxResultChars?: number
   /**
    * Expose `run_in_background` (default true); disabled calls are also

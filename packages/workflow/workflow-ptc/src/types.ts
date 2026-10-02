@@ -38,12 +38,19 @@ export interface WorkerInit {
 export interface ChildStartRequest {
   /** The child's prompt text. */
   prompt: string
+  /**
+   * The script's explicit `label` option, persisted with a session-backed child as its display
+   * label. The prompt-derived default label stays on observer events only.
+   */
+  label?: string
   /** The structured-output schema, if the call passed one (already subset-checked). */
   schema?: ObjectJsonSchema
   /** The per-child provider override, if the call passed one. */
   provider?: string
   /** The per-child model override, if the call passed one. */
   model?: string
+  /** The per-child reasoning-effort override, if the call passed one; the host validates it before start. */
+  reasoningEffort?: string
 }
 
 /**

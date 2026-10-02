@@ -40,6 +40,9 @@
     },
     {
       "path": "../../jobs/jobs"
+    },
+    {
+      "path": "../../spill/spill"
     }
   ]
 }
