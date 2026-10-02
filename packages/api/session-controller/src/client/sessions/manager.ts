@@ -731,7 +731,8 @@ export class SessionManager {
    * Repair one re-established Host-event generation with queryable baselines.
    * Discard old projection cuts before new queries, including cold Sessions
    * absent from the process-local control baseline.
-   * Opened Session follow streams resume independently through API Gateway.
+   * Opened Session follow streams resume independently through API Gateway;
+   * a journal whose stream already failed terminally reopens here.
    */
   handleConnected(): void {
     for (const store of this.projectionStores.values()) store.clear()
@@ -747,6 +748,7 @@ export class SessionManager {
     this.projectionInflight.clear()
     this.projectionLoads.clear()
     for (const parentSessionId of parents) void this.refreshProjections(parentSessionId)
+    for (const session of this.sessions.values()) session.handleConnected()
   }
 
   private buildListSnapshot(): SessionListSnapshot {

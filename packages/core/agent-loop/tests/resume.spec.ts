@@ -953,8 +953,7 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     a1.inject(createUserMessage({ content: [{ type: 'text', text: 'background job 42 finished' }], source: { kind: 'tool-bash' } }))
     await a1.whenIdle()
     await ctx1.sessions.flush(a1.session)
-    // Simulate a wedged first lifecycle: a graceful dispose would durably
-    // discard the pending inject, and the still-open kernel write lock would
+    // Simulate a wedged first lifecycle: the still-open kernel write lock would
     // otherwise exclude the second lifecycle. Removing the lock file orphans
     // the held inode so the resumer locks a fresh one (the documented
     // forfeit-by-unlink escape hatch).
@@ -974,6 +973,35 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
     expect(flat).toContain('background job 42 finished')
     await ctx2.fiber.dispose()
     await ctx1.fiber.dispose()
+  })
+
+  it.skipIf(process.platform === 'win32')('disposal keeps pending input and its unstarted claimed batch for a resumed lifecycle', async () => {
+    const { ctx: first, root } = await persistentHarness(new MockAdapter([]))
+    const sessionId = SessionId('dispose-keeps-inbox')
+    const handle = await first.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    const preStep = Promise.withResolvers<undefined>()
+    first.on('agent/pre-step', async ({ signal }, next) => {
+      preStep.resolve(undefined)
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => { signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+      }
+      return next()
+    })
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'claimed' }], source: { kind: 'user' } }))
+    await preStep.promise
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'queued' }], source: { kind: 'user' } }))
+    await handle.dispose()
+    await first.fiber.dispose()
+
+    const second = await mountPersistentHarness(root, new MockAdapter([]))
+    const resumed = await second.agents.resume({ resumeSessionId: sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
+    expect(resumed.agent.inbox.nextTurn.map(message => message.content)).toEqual([
+      [{ type: 'text', text: 'claimed' }],
+      [{ type: 'text', text: 'queued' }],
+    ])
+    expect(resumed.agent.session.snapshotEvents().some(event =>
+      event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')).toBe(false)
+    await second.fiber.dispose()
   })
 
   it.each(['resume', 'fork'] as const)('%s continues persisted history after a live scheduler failure', async (mode) => {

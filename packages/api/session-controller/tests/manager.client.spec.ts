@@ -1369,6 +1369,27 @@ describe('connected generation', () => {
     expect(remote.session.page).toHaveBeenCalledTimes(historyCallsBefore)
   })
 
+  it('reopens a Session journal that failed terminally before the Host reconnected', async ({ mock, remote, start }) => {
+    mock.stream(FOLLOW, followScript(ok({
+      records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[],
+      hasMore: false,
+      modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    })))
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    const session = manager.get(S1)
+    await session.open()
+    mock.streams.fail(FOLLOW, new RemoteError('gateway/internal', 'Environment stream disconnected', {}))
+    await vi.waitFor(() => { expect(session.getSnapshot().openState).toBe('error') })
+
+    manager.handleConnected()
+    await vi.waitFor(() => {
+      expect(session.getSnapshot()).toMatchObject({ openState: 'open', openError: null })
+    })
+    expect(remote.session.follow).toHaveBeenCalledTimes(2)
+  })
+
   it('retains the durable parent address and refreshes that parent across reconnect', async ({ mock, remote }) => {
     const address = {
       parentSessionId: S1,
