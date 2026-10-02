@@ -20,7 +20,19 @@ export const name = 'experimental-computer-use-cua-driver-native'
 export const inject = ['computerUse', 'tools', 'systemPrompt']
 
 /** The native provider uses the installed SDK's same-process defaults. */
-export const Config = Schema.object({})
+export interface Config {
+  /**
+   * Host platform the model guidance describes, as `process.platform` names
+   * it; defaults to the running platform. A snapshot composition pins it so
+   * the prompt does not depend on the machine.
+   */
+  platform?: string
+}
+
+/** Loader schema for the native provider. */
+export const Config: Schema<Config> = Schema.object({
+  platform: Schema.string(),
+})
 
 const ToolCatalog = z.object({
   tools: z.array(z.object({
@@ -46,9 +58,11 @@ const MACOS_GUIDANCE = 'On macOS, cursor-overlay operations may return facility_
  * Startup failures roll back every registration. Unload removes tools, aborts
  * calls and image admission, awaits settlement and SDK shutdown, then releases computer use.
  * @param ctx - context providing the exclusive registration and tool services.
+ * @param config - provider configuration.
  * @returns after native import, runtime creation, and tool discovery complete.
  */
-export async function apply(ctx: Context): Promise<void> {
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  const platform = config.platform ?? process.platform
   const lifetime = new AbortController()
   const pending = new Set<Promise<unknown>>()
   let driver: NativeDriver | undefined
@@ -133,7 +147,7 @@ export async function apply(ctx: Context): Promise<void> {
     inner.systemPrompt.section({
       name: 'computer-use:cua-driver-native',
       order: inner.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
-      text: process.platform === 'darwin' ? `${GUIDANCE}\n\n${MACOS_GUIDANCE}` : GUIDANCE,
+      text: platform === 'darwin' ? `${GUIDANCE}\n\n${MACOS_GUIDANCE}` : GUIDANCE,
     })
   }
 }

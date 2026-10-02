@@ -17,5 +17,7 @@ export async function apply(ctx) {
     return () => hooks.deregister()
   }, 'computer-use-native-fixture.module')
   const provider = await import('@deepseek-ai/dsh-experimental-computer-use-cua-driver-native')
-  await ctx.plugin(provider)
+  // Pin the described platform so the pinned system prompt is the same on
+  // every snapshot host.
+  await ctx.plugin(provider, { platform: 'linux' })
 }
