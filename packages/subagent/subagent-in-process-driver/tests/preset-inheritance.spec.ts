@@ -134,4 +134,16 @@ describe('a child agent composed in-process', () => {
     expect(run.localAgent?.session.header.agentPreset).toBe('reviewing')
     await run.dispose()
   })
+
+  it('joins the preset and cwd an execution target names instead of its parent\'s', async () => {
+    const { ctx, parent } = await setupPresetHost()
+
+    const run = await startInProcessRun(spawnRequest(parent), { target: { agentPreset: 'reviewing', cwd: '/remote/work' } })
+    await run.result
+
+    // The header is what a cold resume reads, so it must name the target, not the parent.
+    expect(ctx.tools.schemas(run.localAgent).map(schema => schema.name)).toEqual(['reviewing_only'])
+    expect(run.localAgent?.session.header).toMatchObject({ agentPreset: 'reviewing', cwd: '/remote/work' })
+    await run.dispose()
+  })
 })
