@@ -79,10 +79,10 @@ jobs:
           DSH_ARCHIVE_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
         run: pnpm run check:ci:static
 
-      # check:ci:unit is build:native-system then a plain `vitest run`. Upstream
-      # does not run that gate on a 4-core hosted runner, where git-heavy specs
-      # (workspace-changes) exceed vitest's 5s default under full-suite load.
+      # check:ci:unit is build:native-system then a plain `vitest run`, which is
+      # what the root `test` script runs. Upstream does not run that gate on a
+      # 4-core hosted runner, where git-heavy specs (workspace-changes) exceed
+      # vitest's 5s default under full-suite load. Stay inside `pnpm run`: the
+      # desktop specs build the native entry on demand through npm_execpath.
       - name: Run unit test suite
-        run: |
-          pnpm run build:native-system
-          pnpm exec vitest run --testTimeout=30000
+        run: pnpm run test --testTimeout=30000
