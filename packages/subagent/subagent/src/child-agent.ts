@@ -28,6 +28,7 @@ import type {} from '@deepseek-ai/dsh-permission-presets'
 // them through the tool registry's global layer.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { delegationDepthOf } from './depth.ts'
+import type { ChildExecutionTarget } from './types.ts'
 
 /** Thrown when starting a child would exceed the requested depth cap. */
 export class SubagentDepthError extends Error {
@@ -134,18 +135,22 @@ export function resolveChildAgentOptions(
  * @param parent - the delegating parent agent.
  * @param childDepth - the resolved delegation depth to persist.
  * @param isSeeded - whether this child inherits a parent-log prefix, including an explicitly empty one.
+ * @param target - preset and cwd replacing the parent's, for a child that runs elsewhere.
  * @returns the `meta` for `ctx.agents.create()`.
  */
 export function childSessionMeta(
   parent: Agent,
   childDepth: number,
   isSeeded: boolean,
+  target?: ChildExecutionTarget,
 ): NonNullable<CreateAgentOptions['meta']> {
   const parentHeader = parent.session.header
-  const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+  const agentPreset = target?.agentPreset ?? parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+  const cwd = target?.cwd ?? parentHeader.cwd
   return {
-    ...parentHeader.cwd !== undefined ? { cwd: parentHeader.cwd } : {},
-    ...parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: parent.session.additionalPaths },
+    ...cwd !== undefined ? { cwd } : {},
+    // Additional roots belong to the parent's execution world; a targeted child starts with its own cwd only.
+    ...target !== undefined || parent.session.additionalPaths.length === 0 ? {} : { additionalPaths: parent.session.additionalPaths },
     ...agentPreset === undefined ? {} : { agentPreset },
     parentSession: parentHeader.id,
     isSeeded,
@@ -177,7 +182,8 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + 'limitation in your reply so the delegating agent can handle it.'
 
 /**
- * Compose one child inside its creation window: join its parent's preset,
+ * Compose one child inside its creation window: join its parent's preset, or
+ * the different preset its header records (a {@link ChildExecutionTarget}),
  * register the fixed delegation-scope statement, then apply the child's own
  * shadowing persona section and tool restriction, all owned by the child's
  * scope and therefore invisible to its parent and siblings. Creation and cold
@@ -197,13 +203,18 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * @param childCtx - the child agent's scoped creation context.
  * @param parent - the delegating parent whose composition the child joins.
  * @param composition - the per-child persona and tool filter to install.
+ * @param child - the child being composed; its header preset selects a target other than the parent's.
  */
-export function applyChildComposition(
+export async function applyChildComposition(
   childCtx: Context,
   parent: Agent,
   composition: ChildComposition,
-): void {
-  childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+  child?: Agent,
+): Promise<void> {
+  const presets = childCtx.get('agentPresets')
+  const own = child?.session.header.agentPreset
+  if (presets !== undefined && own !== undefined && own !== presets.composedPreset(parent.ctx)) await presets.mount(childCtx, own)
+  else presets?.composeFrom(childCtx, parent.ctx)
   childCtx.systemPrompt.context({
     name: 'subagent:delegation',
     order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),

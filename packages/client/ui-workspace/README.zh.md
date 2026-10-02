@@ -45,7 +45,7 @@ kind: "package-reference"
 
 层级仅使用已注册的规范路径，不扫描项目，也不解析符号链接别名。嵌套不会改变 Session 的工作目录、日志或 Workspace 归属。删除父 Workspace 后，子 Workspace 仍保持注册，并归入下一个已注册祖先；没有祖先时显示在根层级。
 
-Workspace 行的**管理文件夹…**对话框列出主文件夹，并通过同一目录流程编辑该 Workspace 的其他文件夹，保存时以 `workspaces.updatePaths()` 提交完整列表。只有之后创建的 Session 使用修改后的列表。Workspace 悬停卡片列出其他文件夹，Session 悬停卡片列出该 Session 记录的文件夹（读取其 `additionalPaths` 投影）。
+Workspace 行的**管理文件夹…**对话框列出主文件夹，并通过同一目录流程编辑该 Workspace 的其他文件夹，保存时以 `workspaces.updatePaths()` 提交完整列表。只有之后创建的 Session 使用修改后的列表。Workspace 悬停卡片列出其他文件夹，Session 悬停卡片列出该 Session 记录的文件夹（读取其 `additionalPaths` 投影）。当其他执行主机可以容纳 Workspace（`workspaces.worlds()`）时，添加菜单还会提供**在 <主机> 上添加工作区…**，用于注册该主机上手动输入的文件夹路径；此类 Workspace 的文件夹对话框改为添加手动输入的路径，而不打开 Host 目录流程。
 
 不属于任何 Workspace 的 Session 显示在**聊天**下。该分组的新建会话操作，以及新会话选择器中的**不使用工作区**，都会在 Host 默认目录中创建不属于 Workspace 的 Session 并打开它。
 

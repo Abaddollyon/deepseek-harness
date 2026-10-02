@@ -8,12 +8,11 @@
  * @module @deepseek-ai/dsh-workspace/src/entity
  */
 
-import { stat } from 'node:fs/promises'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { WorkspaceRecord } from './spec.ts'
 import type { Workspace, WorkspaceId } from './types.ts'
-import { normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
+import { normalizeAdditionalWorkspacePaths, workspacePathKey, type WorkspacePathWorld } from './paths.ts'
 
 /** An insertSessionBefore request named a session or anchor not on the account (storage failures stay plain errors). */
 export class WorkspaceMoveInvalidError extends Error {
@@ -39,12 +38,26 @@ export interface WorkspaceEntityHost {
   table(): KvTable<WorkspaceId, WorkspaceRecord>
 
   /**
-   * Read a session's canonical directory from the registry's header index.
+   * Read a session's world-qualified canonical directory from the registry's header index.
    * @param id - Session whose indexed path is requested.
-   * @returns the canonical directory, or `undefined` when the header is
-   * missing or its cwd cannot identify an existing directory.
+   * @returns the {@link workspacePathKey} of its directory, or `undefined` when
+   * the header is missing or its cwd cannot identify an existing directory.
    */
   sessionPath(id: SessionId): string | undefined
+
+  /**
+   * Resolve the execution world holding a Workspace's paths.
+   * @param agentPreset - Preset named by the record, or undefined for the Host.
+   * @returns that world; rejects synchronously when the preset's world is unavailable.
+   */
+  world(agentPreset: string | undefined): WorkspacePathWorld
+
+  /**
+   * Name the execution world a Session header runs in.
+   * @param header - Stored or live header.
+   * @returns the header's preset when it owns a Workspace world, otherwise undefined for the Host.
+   */
+  sessionWorld(header: SessionHeader): string | undefined
 
   /**
    * Read one stored session header for attach validation.
@@ -57,7 +70,7 @@ export interface WorkspaceEntityHost {
   /**
    * Publish a successfully validated canonical cwd to the projection index.
    * @param id - Validated session id.
-   * @param path - Canonical existing directory from the immutable header cwd.
+   * @param path - World-qualified key of the canonical directory from the immutable header cwd.
    */
   rememberSessionPath(id: SessionId, path: string): void
 }
@@ -86,6 +99,10 @@ export class WorkspaceEntity implements Workspace {
     return this.record.path
   }
 
+  get agentPreset(): string | undefined {
+    return this.record.agentPreset
+  }
+
   get additionalPaths(): readonly string[] {
     return this.record.additionalPaths ?? []
   }
@@ -103,7 +120,8 @@ export class WorkspaceEntity implements Workspace {
   }
 
   get sessionIds(): readonly SessionId[] {
-    return this.record.sessionIds.filter(id => this.host.sessionPath(id) === this.record.path)
+    const key = workspacePathKey(this.record.agentPreset, this.record.path)
+    return this.record.sessionIds.filter(id => this.host.sessionPath(id) === key)
   }
 
   async setTitle(title: string): Promise<void> {
@@ -111,7 +129,8 @@ export class WorkspaceEntity implements Workspace {
   }
 
   async setAdditionalPaths(additionalPaths: readonly string[]): Promise<void> {
-    const normalized = await normalizeAdditionalWorkspacePaths(additionalPaths, this.record.path)
+    const world = this.host.world(this.record.agentPreset)
+    const normalized = await normalizeAdditionalWorkspacePaths(additionalPaths, this.record.path, world)
     await this.mutate((record) => {
       const current = record.additionalPaths ?? []
       return current.length === normalized.length && current.every((path, index) => path === normalized[index])
@@ -133,9 +152,18 @@ export class WorkspaceEntity implements Workspace {
           + 'its stored header carries no cwd to validate against',
         )
       }
+      const sessionWorld = this.host.sessionWorld(header)
+      if (sessionWorld !== this.record.agentPreset) {
+        throw new Error(
+          `cannot attach session '${sessionId}' to workspace '${this.record.path}': `
+          + `it runs in ${sessionWorld === undefined ? 'the Host' : `agent preset '${sessionWorld}'`}, `
+          + `not ${this.record.agentPreset === undefined ? 'the Host' : `agent preset '${this.record.agentPreset}'`}`,
+        )
+      }
+      const world = this.host.world(this.record.agentPreset)
       let cwd: string
       try {
-        cwd = await realpathNormalize(header.cwd)
+        cwd = await world.realpath(header.cwd)
       } catch (error) {
         throw new Error(
           `cannot attach session '${sessionId}' to workspace '${this.record.path}': `
@@ -143,7 +171,7 @@ export class WorkspaceEntity implements Workspace {
           { cause: error },
         )
       }
-      if (!(await stat(cwd)).isDirectory()) {
+      if (!(await world.isDirectory(cwd))) {
         throw new Error(
           `cannot attach session '${sessionId}' to workspace '${this.record.path}': `
           + `its cwd '${header.cwd}' is not a directory`,
@@ -155,7 +183,7 @@ export class WorkspaceEntity implements Workspace {
           + `its cwd resolves to '${cwd}'`,
         )
       }
-      this.host.rememberSessionPath(sessionId, cwd)
+      this.host.rememberSessionPath(sessionId, workspacePathKey(this.record.agentPreset, cwd))
     }
     await this.mutate(record => record.sessionIds.includes(sessionId)
       ? record
@@ -193,10 +221,11 @@ export class WorkspaceEntity implements Workspace {
 
   async status(): Promise<'ok' | 'missing-dir'> {
     try {
-      return (await stat(this.record.path)).isDirectory() ? 'ok' : 'missing-dir'
+      return await this.host.world(this.record.agentPreset).isDirectory(this.record.path) ? 'ok' : 'missing-dir'
     } catch {
-      // Any stat failure (ENOENT, dangling parent, permission loss) means the
-      // directory is not usable right now; the record itself never mutates.
+      // Any stat failure (ENOENT, dangling parent, permission loss, an
+      // unreachable remote world) means the directory is not usable right
+      // now; the record itself never mutates.
       return 'missing-dir'
     }
   }
@@ -218,9 +247,8 @@ export class WorkspaceEntity implements Workspace {
     try {
       next = await this.host.table().update(this.id, (current) => {
         const changed = fn(current)
-        const sessionIds = changed.sessionIds.filter(
-          id => this.host.sessionPath(id) === changed.path,
-        )
+        const key = workspacePathKey(changed.agentPreset, changed.path)
+        const sessionIds = changed.sessionIds.filter(id => this.host.sessionPath(id) === key)
         if (changed === current && sessionIds.length === current.sessionIds.length) {
           throw unchangedSentinel
         }

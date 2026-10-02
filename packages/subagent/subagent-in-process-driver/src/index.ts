@@ -30,6 +30,7 @@ import {
   resolveChildDepth,
 } from '@deepseek-ai/dsh-subagent'
 import type {
+  ChildExecutionTarget,
   ResolvedSubagentStartRequest,
   SubagentDescriptorData,
   SubagentResult,
@@ -70,6 +71,8 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
 export interface InProcessRunOptions {
   /** Completed-turn seed for fork, or undefined for a fresh spawn. */
   readonly seed?: readonly SessionEvent[]
+  /** Preset and cwd replacing the parent's, for a child that runs in another execution world. */
+  readonly target?: ChildExecutionTarget
 }
 
 /** Error used when cancellation wins before the child publication boundary. */
@@ -98,7 +101,7 @@ function attachDescriptorAppend(childCtx: Context, descriptor: SubagentDescripto
  * publishing a child. Every start appends its resolved descriptor inside the
  * child's initial turn.
  * @param request - the trusted typed start request, including its required signal.
- * @param options - the optional fork seed.
+ * @param options - the optional fork seed and execution target.
  * @returns a published holder-owned run.
  */
 export async function startInProcessRun(
@@ -119,12 +122,12 @@ export async function startInProcessRun(
   const inherited = captureDelegatedPolicyOverrides(parent)
 
   let structured: StructuredAttachment | undefined
-  const setup = (childCtx: Context, child: Agent): void => {
+  const setup = async (childCtx: Context, child: Agent): Promise<void> => {
     appendDelegatedPolicyOverrides(child.session, inherited)
-    applyChildComposition(childCtx, parent, {
+    await applyChildComposition(childCtx, parent, {
       persona: request.persona,
       toolFilter: request.toolFilter,
-    })
+    }, child)
     if (request.outputSchema !== undefined) {
       structured = attachStructuredRuntime(childCtx, request.outputSchema)
     }
@@ -134,7 +137,7 @@ export async function startInProcessRun(
   const handle = await parent.ctx.agents.create({
     sessionId: childId,
     parentAgent: parent,
-    meta: childSessionMeta(parent, childDepth, seed !== undefined),
+    meta: childSessionMeta(parent, childDepth, seed !== undefined, options.target),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
     agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),

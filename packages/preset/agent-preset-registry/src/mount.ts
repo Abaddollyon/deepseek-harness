@@ -153,7 +153,22 @@ export function serviceForAgent<K extends string & keyof Context>(
   name: K,
 ): Context[K] | undefined {
   const mount = standingMountFor(agent.ctx)
-  if (mount === undefined) return undefined
+  return mount === undefined ? undefined : serviceInMount(ctx, mount, name)
+}
+
+/**
+ * The instance of a service one preset revision mounted, located the same way
+ * as {@link serviceForAgent} but addressed by the revision rather than an agent.
+ * @param ctx - any context of the runtime whose service store is inspected.
+ * @param mount - the preset revision whose subtree is searched.
+ * @param name - the service name as the preset's rows resolve it.
+ * @returns the revision's instance, or undefined when its rows publish none.
+ */
+export function serviceInMount<K extends string & keyof Context>(
+  ctx: Context,
+  mount: Pick<PresetMount, 'fiber'>,
+  name: K,
+): Context[K] | undefined {
   const store = ctx.reflect.store
   for (const key of Object.getOwnPropertySymbols(store)) {
     const impl = store[key]

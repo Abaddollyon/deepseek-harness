@@ -6,6 +6,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { WorkspaceCommands } from './commands.ts'
 import { DirectoryPickerController } from './directory-picker.ts'
 import { WorkspaceFeed, workspaceView } from './feed.ts'
+import { installPresetPathWorlds, listPresetWorlds } from './preset-worlds.ts'
 import { defaultWorkspaceDirectory, validateDocumentsDirectory } from './default-directory.ts'
 import type {
   WorkspaceArchiveSessionRequest,
@@ -25,6 +26,7 @@ import type {
   WorkspaceUnpinSessionRequest,
   WorkspaceUpdatePathsRequest,
   WorkspaceValue,
+  WorkspaceWorldsValue,
 } from './types.ts'
 
 export type * from './types.ts'
@@ -71,6 +73,7 @@ export class WorkspaceController extends TypertRemoteService {
     if (this.config.documentsDirectory !== undefined) validateDocumentsDirectory(this.config.documentsDirectory)
     this.commands = new WorkspaceCommands(ctx)
     this.feed = new WorkspaceFeed(ctx)
+    installPresetPathWorlds(ctx)
     // This package is the Loader entry for both Remote owners it hosts: the
     // directory-picking seam is abstract and never an entry itself. The child
     // stays pending until a picking backend is composed, so a host without one
@@ -88,6 +91,16 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('create')
   create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue> {
     return this.commands.create(request)
+  }
+
+  /**
+   * List the Agent presets whose own filesystem can hold a new Workspace,
+   * such as SSH hosts; the Host itself is always available and not listed.
+   * @returns usable presets in roster order.
+   */
+  @Remote('worlds')
+  async worlds(): Promise<WorkspaceWorldsValue> {
+    return { worlds: await listPresetWorlds(this.ctx) }
   }
 
   /**

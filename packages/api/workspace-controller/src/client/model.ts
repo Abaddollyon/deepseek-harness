@@ -19,6 +19,7 @@ import type {
   WorkspaceUnpinSessionRequest,
   WorkspaceUpdatePathsRequest,
   WorkspaceValue,
+  WorkspaceWorldsValue,
   WorkspaceId,
   WorkspaceView,
 } from '../types.ts'
@@ -100,6 +101,14 @@ export class ClientWorkspaceModel implements WorkspaceFollowSink {
     const result = await this.remote.create(input)
     if (result.ok) this.upsert(result.value.workspace)
     return result
+  }
+
+  /**
+   * List the Agent presets whose own filesystem can hold a new Workspace.
+   * @returns generated Remote result.
+   */
+  worlds(): Promise<RemoteResult<WorkspaceWorldsValue>> {
+    return this.remote.worlds()
   }
 
   /**

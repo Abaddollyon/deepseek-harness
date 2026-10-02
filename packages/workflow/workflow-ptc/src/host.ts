@@ -50,6 +50,7 @@ function childRequest(value: unknown): ChildStartRequest {
   const provider = request.provider === undefined ? undefined : text(request.provider, 'provider')
   const model = request.model === undefined ? undefined : text(request.model, 'model')
   const reasoningEffort = request.reasoningEffort === undefined ? undefined : text(request.reasoningEffort, 'reasoning effort')
+  const subagentProvider = request.subagentProvider === undefined ? undefined : text(request.subagentProvider, 'subagentProvider')
   let schema: ObjectJsonSchema | undefined
   if (request.schema !== undefined) {
     const candidate = object(request.schema)
@@ -62,6 +63,7 @@ function childRequest(value: unknown): ChildStartRequest {
     ...provider === undefined ? {} : { provider },
     ...model === undefined ? {} : { model },
     ...reasoningEffort === undefined ? {} : { reasoningEffort },
+    ...subagentProvider === undefined ? {} : { subagentProvider },
     ...schema === undefined ? {} : { schema },
   }
 }
@@ -243,7 +245,7 @@ export class PtcWorkflowRun implements WorkflowRun {
       this.requireActive()
     }
     const callId = ++this.started
-    const run = await this.subagents.start(this.provider, {
+    const run = await this.subagents.start(request.subagentProvider ?? this.provider, {
       prompt: [{ type: 'text', text: request.prompt }],
       parent: this.parent,
       signal: this.controller.signal,

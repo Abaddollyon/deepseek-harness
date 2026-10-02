@@ -241,6 +241,21 @@ export interface ContinuableCreateSpec {
    * `CreateAgentOptions.seed`: contiguous from seq 0, lossless JSON, balanced.
    */
   readonly seed?: readonly SessionEvent[]
+  /** Execution coordinates replacing the parent's preset and cwd; absent joins the parent's composition. */
+  readonly target?: ChildExecutionTarget
+}
+
+/**
+ * Where a child runs when it does not join its parent's composition: another
+ * Agent preset (for example one bound to a different SSH host) and a cwd in
+ * that preset's execution world. The child's session header records both, so
+ * cold resume rejoins the same preset.
+ */
+export interface ChildExecutionTarget {
+  /** Agent preset the child joins instead of its parent's. */
+  readonly agentPreset: string
+  /** Child cwd in that preset's execution world; omitted keeps the parent's cwd. */
+  readonly cwd?: string
 }
 
 /**

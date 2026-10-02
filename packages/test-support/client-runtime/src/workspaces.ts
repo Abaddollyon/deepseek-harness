@@ -1,7 +1,7 @@
 /** Test-owned workspaces face: the renderer standard-kit observable plus recorded actions. */
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
-  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
+  IWorkspaces, WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceWorld,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -68,7 +68,7 @@ export class TestWorkspaces implements IWorkspaces {
    * @param input - the Host create payload.
    * @returns the created Workspace view.
    */
-  async create(input: { path: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
+  async create(input: { path: string; agentPreset?: string; additionalPaths?: readonly string[] }): Promise<WorkspaceView> {
     this.calls.push({ method: 'create', args: [input] })
     const stub = this.stubs.get('create')
     if (stub !== undefined) return await (stub(input) as Promise<WorkspaceView>)
@@ -78,6 +78,16 @@ export class TestWorkspaces implements IWorkspaces {
       path: input.path,
       sessionIds: [],
     } as unknown as WorkspaceView
+  }
+
+  /**
+   * List other execution hosts (recorded). The default offers none.
+   * @returns the stubbed hosts, or an empty list.
+   */
+  async worlds(): Promise<readonly WorkspaceWorld[]> {
+    this.calls.push({ method: 'worlds', args: [] })
+    const stub = this.stubs.get('worlds')
+    return stub === undefined ? [] : await (stub() as Promise<readonly WorkspaceWorld[]>)
   }
 
   /**

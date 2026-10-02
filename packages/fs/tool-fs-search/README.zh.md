@@ -65,6 +65,7 @@ kind: "package-reference"
 | `graceMs` | `3000` | subprocess seam 在 `timeoutMs` 之外授予的终止升级宽限期 |
 | `stderrMaxBytes` | `65536` | `rg` stderr 的诊断尾部预算 |
 | `searchMetaMaxBytes` | `65536` | 一次搜索序列化 `presentationMeta` 的字节上限；超出部分丢弃尾部的组/路径 |
+| `rgPath` | 打包的二进制 | 执行环境中的 ripgrep 可执行文件（绝对路径或其 PATH 中的名称）；当 `subprocess` 在别处运行（例如通过 SSH）时设置 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-fs-search)是每个受支持字段及其 JSDoc 的穷尽式真源。
 

@@ -41,6 +41,13 @@ interface Workspace {
   readonly path: string
 
   /**
+   * Agent preset whose execution world (for example an SSH host) holds
+   * {@link path} and every additional directory; undefined for the Host.
+   * Sessions created in this workspace use this preset.
+   */
+  readonly agentPreset: string | undefined
+
+  /**
    * Further canonical directories, excluding {@link path}, that a Session
    * created in this workspace records as its additional roots. Changing them
    * never changes an existing Session's roots.
@@ -137,6 +144,8 @@ Ownership truth is the record's ordered `sessionIds`, never derived from session
 `WorkspaceRegistry` ([signatures](#ctxworkspaceregistry--workspaceregistry)) owns registration and resolution. `create(path, title?)` requires a fully qualified path, canonicalizes it, rejects a nonexistent path (the original `ENOENT`) or a non-directory, returns the existing entity unchanged when the canonical path is already owned, and otherwise creates a record with `title ?? defaultWorkspaceTitle(path)` prepended to the durable registry order (different canonical paths may share a display title, and a path with no final segment uses its root spelling). `get(id)` and the ordered `list()` are synchronous cache reads; `resolveByPath(path)` applies the same fully qualified realpath canon without creating. `delete(id)` removes only the registration, order entry, and session account — the directory, user files, live sessions, and persisted logs are never touched, so those sessions become Ungrouped ([decision](../../.agents/notes/implemented/feature/2026-07-27-workspace-registration-deletion.md)); unknown ids return `false`. Create and delete persist a pending-mutation marker before their two writes (record + order) can diverge; startup resolves exactly the marked mutation — by deleting the marked table row, which completes an interrupted delete and rolls back an interrupted create (the registration is re-creatable, so rollback is the safe direction) — and an unmarked order/table mismatch fails loud as corruption.
 
 Sessions get their cwd at create time from whoever creates them, not from this registry — the API gateway resolves a new session's cwd from the chosen workspace's `path` (falling back to an explicit or default cwd), creates the session so the cwd lands in its immutable [`SessionHeader`](persistence.md#sessionheader--metadata-beside-the-log), then calls `attachSession`, which re-validates that stored header cwd against the workspace path. On the first successful start, the registry bootstraps history from persisted headers alone (`id`, `cwd`, `createdAt` — never event bodies), grouping sessions with a valid canonical cwd into per-directory workspaces, newest first; the initialized marker is written last so an interrupted bootstrap resumes safely. The bootstrap is one-time: cwd-less legacy sessions stay Ungrouped, and sessions created afterwards join a workspace only through `attachSession`.
+
+A Workspace may live in an Agent preset's execution world: `create(path, title, agentPreset)` canonicalizes and checks every path through the world the Host installs with `setPathWorlds` (the Workspace controller supplies each preset's own `fs`, such as an SSH host). Path uniqueness is per world, a Session attaches only when its header preset names the same world, and Sessions created in the Workspace use its preset. Membership indexing does not contact a remote world: Sessions in a preset that a Workspace record names keep their recorded cwd spelling, so a host that is offline at startup keeps its Sessions grouped. The one-time bootstrap groups Host directories only.
 
 ## Default Workspace initialization
 
@@ -358,6 +367,13 @@ Host service backing the generated `ctx.remote.workspace` namespace.
 @Remote('create') create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateValue>
 
 /**
+ * List the Agent presets whose own filesystem can hold a new Workspace,
+ * such as SSH hosts; the Host itself is always available and not listed.
+ * @returns usable presets in roster order.
+ */
+@Remote('worlds') async worlds(): Promise<WorkspaceWorldsValue>
+
+/**
  * Initialize or reuse the default Workspace during first-use startup. The
  * directory name is fixed, so the Host never renames or relocates an
  * existing default; its initial title is that same name, which browser
@@ -515,9 +531,18 @@ Durable workspace registry. Startup waits for `sessionPersistence`, builds one c
  * Different canonical paths may share a display title.
  * @param path - Existing directory to own, in a fully qualified path spelling.
  * @param title - Display title used only when a new record is created.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
  * @returns the existing or newly durable workspace.
  */
-async create(path: string, title?: string): Promise<Workspace>
+async create(path: string, title?: string, agentPreset?: string): Promise<Workspace>
+
+/**
+ * Install the resolver for Workspaces whose paths live in an Agent preset's
+ * execution world. Host Workspaces never consult it.
+ * @param resolve - The preset's world, or undefined while the preset is unknown or mounts no filesystem.
+ * @returns a disposer that removes this resolver.
+ */
+setPathWorlds(resolve: (agentPreset: string) => WorkspacePathWorld | undefined): () => void
 
 /**
  * Initialize the default Workspace only while both the registry and Session
@@ -622,9 +647,10 @@ unpinSession(sessionId: SessionId): Promise<void>
  * workspace. A missing path rejects during `realpath`; an existing unowned
  * directory returns `undefined`.
  * @param path - Existing directory path in a fully qualified spelling.
- * @returns the workspace owning the canonical path, when one exists.
+ * @param agentPreset - Preset whose execution world holds the directory; omitted selects the Host.
+ * @returns the workspace owning the canonical path in that world, when one exists.
  */
-async resolveByPath(path: string): Promise<Workspace | undefined>
+async resolveByPath(path: string, agentPreset?: string): Promise<Workspace | undefined>
 ```
 
 Types: [SessionId](core.md)

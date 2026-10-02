@@ -33,7 +33,7 @@ export interface ExecutionObserver {
  * The `agent()` options the script may pass; everything else rejects loud.
  * `reasoningEffort` uses the `AgentOptions` spelling beside `provider` and `model`.
  */
-const SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model', 'reasoningEffort'])
+const SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model', 'reasoningEffort', 'subagentProvider'])
 /** Deferred Claude Code options we name explicitly in the rejection message. */
 const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
 /** The supported-option list quoted by every option rejection. */
@@ -192,6 +192,7 @@ export class WorkflowExecution {
           ...opts.provider !== undefined ? { provider: opts.provider } : {},
           ...opts.model !== undefined ? { model: opts.model } : {},
           ...opts.reasoningEffort !== undefined ? { reasoningEffort: opts.reasoningEffort } : {},
+          ...opts.subagentProvider !== undefined ? { subagentProvider: opts.subagentProvider } : {},
         })
       } catch (error: unknown) {
         throw new WorkflowError(`agent() could not start a child: ${renderThrown(error)}`, 'AGENT_START', { cause: error })
@@ -242,6 +243,7 @@ export class WorkflowExecution {
     provider?: string
     model?: string
     reasoningEffort?: string
+    subagentProvider?: string
     schema?: ObjectJsonSchema
   } {
     if (rawOpts === undefined) return {}
@@ -264,7 +266,7 @@ export class WorkflowExecution {
       }
       throw new WorkflowError(`agent() option "${key}" is not recognized (supported: ${SUPPORTED_AGENT_OPTIONS_TEXT})`, 'UNSUPPORTED_OPTION')
     }
-    for (const key of ['label', 'phase', 'provider', 'model', 'reasoningEffort'] as const) {
+    for (const key of ['label', 'phase', 'provider', 'model', 'reasoningEffort', 'subagentProvider'] as const) {
       if (record[key] !== undefined && typeof record[key] !== 'string') {
         throw new WorkflowError(`agent() option "${key}" must be a string`, 'INVALID_ARGUMENT')
       }
@@ -286,6 +288,7 @@ export class WorkflowExecution {
       ...record.provider !== undefined ? { provider: record.provider as string } : {},
       ...record.model !== undefined ? { model: record.model as string } : {},
       ...record.reasoningEffort !== undefined ? { reasoningEffort: record.reasoningEffort as string } : {},
+      ...record.subagentProvider !== undefined ? { subagentProvider: record.subagentProvider as string } : {},
       ...schema !== undefined ? { schema } : {},
     }
   }

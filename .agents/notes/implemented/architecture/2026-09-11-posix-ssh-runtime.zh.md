@@ -54,4 +54,4 @@ SSH 提供经过认证的字节通道及逐通道流量控制，但普通 exec �
 
 ## 延后工作
 
-持久远端重连需要独立的操作身份与恢复设计，不能在断连后复用活跃回调句柄。更广泛的 Web 支持需要由提供方负责的工作区资源。更强的资源计量或修订后的 PTC yield/wait 与超时策略属于 [Node 运行时参考](../../../../packages/ptc-runtime/ptc-runtime-node/README.zh.md)，不属于 SSH 管理请求截止时限。
+持久远端重连需要独立的操作身份与恢复设计，不能在断连后复用活跃回调句柄。Web Session 通过[预设拥有的执行环境](2026-10-02-preset-owned-execution-worlds.zh.md)访问 SSH 环境；包含远端路径的工作区记录仍待实现。更强的资源计量或修订后的 PTC yield/wait 与超时策略属于 [Node 运行时参考](../../../../packages/ptc-runtime/ptc-runtime-node/README.zh.md)，不属于 SSH 管理请求截止时限。

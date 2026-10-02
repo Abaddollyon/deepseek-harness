@@ -24,7 +24,13 @@
       "path": "../../fs/fs"
     },
     {
+      "path": "../../preset/agent-preset-registry"
+    },
+    {
       "path": "../../sandbox/sandbox-policy"
+    },
+    {
+      "path": "../../session-query/session-query"
     },
     {
       "path": "../../session/session-persistence"

@@ -1588,6 +1588,11 @@
     },
     {
       "doc": "docs/subsystems/subagent.md",
+      "symbol": "ChildExecutionTarget",
+      "source": "packages/subagent/subagent/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/subagent.md",
       "symbol": "SubagentResult",
       "source": "packages/subagent/subagent/src/types.ts"
     },

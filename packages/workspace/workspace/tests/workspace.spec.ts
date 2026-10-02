@@ -908,6 +908,50 @@ describe('workspace mutation and status', () => {
   })
 })
 
+describe('Workspaces in an Agent preset\'s execution world', () => {
+  const remoteDirs = new Set(['/srv/app', '/srv/lib'])
+  const remoteWorld = {
+    realpath: (path: string) => remoteDirs.has(path.replace(/\/$/u, '')) ? Promise.resolve(path.replace(/\/$/u, '')) : Promise.reject(new Error(`ENOENT: ${path}`)),
+    isDirectory: (path: string) => Promise.resolve(remoteDirs.has(path)),
+  }
+  const remoteHeader = (id: string, agentPreset: string): SessionHeader => ({ ...header(id, '/srv/app'), agentPreset })
+
+  it('canonicalizes, de-duplicates, attaches and reports health through the preset world', async () => {
+    const result = await harness()
+    const { registry } = result
+    const dispose = registry.setPathWorlds(preset => preset === 'host-x' ? remoteWorld : undefined)
+    await expect(registry.create('/srv/app')).rejects.toThrow(/ENOENT/)
+    const workspace = await registry.create('/srv/app/', undefined, 'host-x')
+    expect(workspace).toMatchObject({ path: '/srv/app', agentPreset: 'host-x' })
+    expect(await registry.create('/srv/app', undefined, 'host-x')).toBe(workspace)
+    expect(await registry.resolveByPath('/srv/app', 'host-x')).toBe(workspace)
+    await expect(registry.create('/srv/app', undefined, 'host-y')).rejects.toThrow(/agent preset 'host-y' is not available/)
+    await workspace.setAdditionalPaths(['/srv/lib'])
+    expect(workspace.additionalPaths).toEqual(['/srv/lib'])
+
+    result.setSessions([remoteHeader('remote', 'host-x'), remoteHeader('local', 'standard')])
+    await workspace.attachSession(SessionId('remote'))
+    await expect(workspace.attachSession(SessionId('local'))).rejects.toThrow(/runs in the Host, not agent preset 'host-x'/)
+    expect(workspace.sessionIds).toEqual(['remote'])
+    expect(await workspace.status()).toBe('ok')
+    dispose()
+    expect(await workspace.status()).toBe('missing-dir')
+  })
+
+  it('keeps remote membership while the world is unavailable at startup', async () => {
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool })
+    first.registry.setPathWorlds(() => remoteWorld)
+    const workspace = await first.registry.create('/srv/app', undefined, 'host-x')
+    first.setSessions([remoteHeader('remote', 'host-x')])
+    await workspace.attachSession(SessionId('remote'))
+    await first.fiber.dispose()
+
+    const restarted = await harness({ pool, sessions: [remoteHeader('remote', 'host-x')] })
+    expect(restarted.registry.list()[0]).toMatchObject({ agentPreset: 'host-x', sessionIds: ['remote'] })
+  })
+})
+
 describe('registry-global session archive', () => {
   it('archives durably in order, idempotently skips repeats, and leaves accounting untouched', async () => {
     const dir = await makeDir('archive-home')

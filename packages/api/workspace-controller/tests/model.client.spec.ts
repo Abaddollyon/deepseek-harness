@@ -17,6 +17,7 @@ import type {
   WorkspacePinValue,
   WorkspaceRenameRequest,
   WorkspaceUpdatePathsRequest,
+  WorkspaceWorldsValue,
   WorkspaceUnarchiveSessionRequest,
   WorkspaceUnpinSessionRequest,
   WorkspaceValue,
@@ -112,6 +113,11 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   rename(request: WorkspaceRenameRequest): Promise<RemoteResult<WorkspaceValue>> {
     this.record('rename', request)
     return this.onRename(request)
+  }
+
+  worlds(): Promise<RemoteResult<WorkspaceWorldsValue>> {
+    this.record('worlds', {})
+    return Promise.resolve(remoteOk({ worlds: [] }))
   }
 
   updatePaths(request: WorkspaceUpdatePathsRequest): Promise<RemoteResult<WorkspaceValue>> {

@@ -30,6 +30,9 @@
       "path": "../../fs/fs"
     },
     {
+      "path": "../../preset/agent-preset-registry"
+    },
+    {
       "path": "../../sandbox/sandbox"
     },
     {

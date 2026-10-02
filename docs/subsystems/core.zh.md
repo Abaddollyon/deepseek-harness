@@ -556,6 +556,15 @@ composedPreset(ctx: Context): string | undefined
  */
 serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): Context[K] | undefined
 
+/** Read a service supplied inside the current revision of a preset, before any Agent joins it.
+ * Callers use the result for the operation at hand and do not retain it: a later
+ * definition update retires that revision.
+ * @param id Preset identity.
+ * @param name Cordis service name.
+ * @returns The service, or undefined when the preset is unknown, not mounted, or publishes none.
+ */
+serviceForPreset<K extends string & keyof Context>(id: string, name: K): Context[K] | undefined
+
 /** Rebind a blank Agent; the caller owns the blank-session check.
  * @param ctx Agent context.
  * @param id Requested preset.
@@ -563,7 +572,9 @@ serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): 
  */
 async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
-/** Select a preset before a session starts its first turn.
+/** Select a preset before a session starts its first turn. A preset that
+ * mounts its own filesystem (for example over SSH) is accepted only when the
+ * Session's cwd is a directory in that execution world.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.

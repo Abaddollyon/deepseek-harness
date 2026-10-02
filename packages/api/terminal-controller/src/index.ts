@@ -329,8 +329,9 @@ export class TerminalController extends TypertRemoteService {
   }
 
   private execution(agent: Agent): { subprocess: Context['subprocess']; sandboxPolicy: Context['sandboxPolicy'] } {
-    // The Agent context selects execution providers but does not inject consumer services.
-    const subprocess = agent.ctx.get('subprocess')
+    // The Agent context selects execution providers but does not inject consumer services;
+    // a preset that isolates its own subprocess provider (for example over SSH) supplies it instead.
+    const subprocess = agent.ctx.get('agentPresets')?.serviceFor(agent, 'subprocess') ?? agent.ctx.get('subprocess')
     const sandboxPolicy = agent.ctx.get('sandboxPolicy')
     if (subprocess === undefined || sandboxPolicy === undefined) throw new Error('The Session execution environment requires subprocess and sandbox policy providers')
     return { subprocess, sandboxPolicy }

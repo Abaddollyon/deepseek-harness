@@ -38,7 +38,8 @@ describe('Workspace Files Session scope lookup', () => {
       return undefined
     })
     const ctx = new Context()
-    ctx.provide('fs', {} as never)
+    const fs = {}
+    ctx.provide('fs', fs as never)
     ctx.provide('sandboxPolicy', { workspaceRoot: fallbackRoot } as never)
     ctx.provide('sessionPersistence', { stat } as never)
     const sessions = await ctx.plugin(SessionStore)
@@ -57,15 +58,48 @@ describe('Workspace Files Session scope lookup', () => {
       })
       if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
 
-      await expect(lookup.resolve(liveId)).resolves.toEqual({ sessionId: liveId, workspaceRoot: liveRoot })
+      await expect(lookup.resolve(liveId)).resolves.toEqual({ sessionId: liveId, workspaceRoot: liveRoot, fs })
       expect(stat).not.toHaveBeenCalled()
-      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot })
-      await expect(lookup.resolve(fallbackId)).resolves.toEqual({ sessionId: fallbackId, workspaceRoot: fallbackRoot })
+      await expect(lookup.resolve(coldId)).resolves.toEqual({ sessionId: coldId, workspaceRoot: coldRoot, fs })
+      await expect(lookup.resolve(fallbackId)).resolves.toEqual({ sessionId: fallbackId, workspaceRoot: fallbackRoot, fs })
       await expect(lookup.resolve(missingId)).resolves.toBeUndefined()
       expect(stat.mock.calls.map(([id]) => id)).toEqual([coldId, fallbackId, missingId])
 
       await workspaceFiles.dispose()
       expect(ctx.typert.lookups.get('workspaceFileScope')).toBeUndefined()
+    } finally {
+      await workspaceFiles.dispose()
+      await sessions.dispose()
+      await typert.dispose()
+    }
+  })
+
+  it('selects the filesystem of the Agent preset the Session projection names', async () => {
+    const switched = SessionId('switched-blank')
+    const local = SessionId('local')
+    const hostFs = {}
+    const remoteFs = {}
+    const ctx = new Context()
+    ctx.provide('fs', hostFs as never)
+    ctx.provide('sandboxPolicy', { workspaceRoot: resolve('fallback') } as never)
+    ctx.provide('agentPresets', {
+      serviceForPreset: (id: string, name: string) => id === 'remote' && name === 'fs' ? remoteFs : undefined,
+    } as never)
+    ctx.provide('sessionQuery', {
+      observeSession: (id: SessionId) => Promise.resolve({
+        projections: { values: { agentPreset: id === switched ? 'remote' : 'standard' } },
+        [Symbol.dispose]: () => {},
+      }),
+    } as never)
+    const sessions = await ctx.plugin(SessionStore)
+    const typert = await ctx.plugin(TypertRegistry)
+    const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
+    try {
+      for (const id of [switched, local]) ctx.sessions.create(id, { meta: { cwd: resolve('cwd'), agentPreset: 'standard' } })
+      const lookup = ctx.typert.lookups.get('workspaceFileScope')
+      if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
+      await expect(lookup.resolve(switched)).resolves.toMatchObject({ fs: remoteFs })
+      await expect(lookup.resolve(local)).resolves.toMatchObject({ fs: hostFs })
     } finally {
       await workspaceFiles.dispose()
       await sessions.dispose()

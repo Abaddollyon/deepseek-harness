@@ -481,22 +481,8 @@ export class ApiSessionAgentController {
       }
     }
 
-    try {
-      await mkdir(cwd, { recursive: true })
-    } catch (error: unknown) {
-      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
-    }
-    // The Session records these roots permanently, so a vanished directory fails creation here.
-    for (const path of additionalPaths) {
-      let directory: boolean
-      try {
-        directory = (await stat(path)).isDirectory()
-      } catch (error: unknown) {
-        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
-      }
-      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
-    }
     const composition = await this.composeAgent(presetId)
+    await this.ensureProjectDirectories(cwd, additionalPaths, composition.agentPreset)
     return (await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
@@ -507,6 +493,42 @@ export class ApiSessionAgentController {
       },
       setup: composition.setup,
     })).agent
+  }
+
+  /**
+   * Ensure a new Session's directories in the execution world its preset
+   * selects. A preset that mounts its own `fs` (for example over SSH) owns that
+   * world: the cwd must already exist there and nothing is created on the Host.
+   * Otherwise the Host cwd is created when missing. Additional roots are
+   * recorded permanently, so each must already be a directory in that world.
+   * @param cwd - requested project directory.
+   * @param additionalPaths - additional workspace roots recorded beside `cwd`.
+   * @param agentPreset - resolved preset identity, when presets are configured.
+   */
+  private async ensureProjectDirectories(
+    cwd: string,
+    additionalPaths: readonly string[],
+    agentPreset: string | undefined,
+  ): Promise<void> {
+    const fs = agentPreset === undefined ? undefined : this.ctx.get('agentPresets')?.serviceForPreset(agentPreset, 'fs')
+    const isDirectory = async (path: string): Promise<boolean> => fs === undefined
+      ? (await stat(path)).isDirectory()
+      : (await fs.stat(await fs.resolve(path)))?.type === 'directory'
+    try {
+      if (fs === undefined) await mkdir(cwd, { recursive: true })
+      else if (!await isDirectory(cwd)) throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
+    } catch (error: unknown) {
+      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
+    }
+    for (const path of additionalPaths) {
+      let directory: boolean
+      try {
+        directory = await isDirectory(path)
+      } catch (error: unknown) {
+        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
+    }
   }
 
   private agentOptions(): AgentOptions {

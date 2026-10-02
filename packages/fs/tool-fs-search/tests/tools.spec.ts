@@ -741,10 +741,12 @@ describe('glob results', () => {
     expect(text(result)).toBe(`${join('src', 'a.ts')}\n/elsewhere/b.ts\nrel/c.ts`)
   })
 
-  it('validates arguments (blank pattern, blank path)', async () => {
-    const { ctx } = await setup()
+  it('rejects a blank pattern and reads a blank path as omitted', async () => {
+    const { ctx, subprocess } = await setup()
     expect(text(await call(ctx, 'glob', { pattern: '  ' }))).toContain('pattern must be a non-empty string')
-    expect(text(await call(ctx, 'glob', { pattern: '*', path: ' ' }))).toContain('path must be a non-empty string')
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'glob', { pattern: '*', path: ' ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv).not.toContain('--')
   })
 
   it('threads a valid path through to the spawn as the plain search root element', async () => {
@@ -1059,11 +1061,12 @@ describe('grep results', () => {
     expect(text(result)).toBe('Found 1 of 2 matches\n\na.ts\nLine 1: one\n\n(The complete result could not be saved; narrow pattern, path, or include to see more.)')
   })
 
-  it('validates arguments (empty pattern, blank path, bad include)', async () => {
-    const { ctx } = await setup()
+  it('validates arguments (empty pattern, bad include) and reads blank optional fields as omitted', async () => {
+    const { ctx, subprocess } = await setup()
     expect(text(await call(ctx, 'grep', { pattern: '' }))).toContain('pattern must be a non-empty string')
-    expect(text(await call(ctx, 'grep', { pattern: 'x', path: '  ' }))).toContain('path must be a non-empty string')
-    expect(text(await call(ctx, 'grep', { pattern: 'x', include: '  ' }))).toContain('include must be a non-empty glob')
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'grep', { pattern: 'x', path: '', include: '  ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv.some(arg => arg === '--' || arg.startsWith('--glob='))).toBe(false)
     expect(text(await call(ctx, 'grep', { pattern: 'x', include: '!*.ts' }))).toContain('negated patterns')
     expect(text(await call(ctx, 'grep', { pattern: 'x', include: '*.ts,*.js' }))).toContain('comma-separated list')
   })

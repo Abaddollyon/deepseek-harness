@@ -194,6 +194,14 @@ it.each([{ absolutePath: '/workspace/replaced.docx' }, { version: 'v2' }])('refu
     .rejects.toMatchObject({ code: 'document-render/failed', details: { reason: 'source-changed' } })
 })
 
+it('reads source bytes through the filesystem the Session scope names', async () => {
+  const remoteRead = vi.fn<FileSystem['readBytes']>().mockResolvedValue(rawSource.data)
+  const remote = { resolve: vi.fn().mockResolvedValue(target), stat: fileInfo, processPath, readBytes: remoteRead }
+  await ctx.officeToPdf.render({ ...scope, fs: remote as never }, 'report.docx', 'foreground', new AbortController().signal)
+  expect(remoteRead).toHaveBeenCalledOnce()
+  expect(read).not.toHaveBeenCalled()
+})
+
 it.each(['workspaceFiles', 'fs'] as const)('reports unavailable file access when %s is absent', async (missing) => {
   const independent = new Context()
   try {

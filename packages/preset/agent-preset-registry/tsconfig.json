@@ -60,6 +60,9 @@
       "path": "../../boot/hmr"
     },
     {
+      "path": "../../fs/fs"
+    },
+    {
       "path": "../../sandbox/sandbox"
     },
     {

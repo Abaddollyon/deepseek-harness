@@ -14,6 +14,7 @@ import {
 } from '@deepseek-ai/dsh-workspace'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { workspaceView } from './feed.ts'
+import { filesystemPathWorld } from './preset-worlds.ts'
 import type {
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
@@ -52,15 +53,15 @@ export class WorkspaceCommands {
       try {
         const additionalPaths = request.additionalPaths === undefined
           ? undefined
-          : await normalizeAdditionalWorkspacePaths(request.additionalPaths, await realpathNormalize(request.path))
-        const existing = await this.ctx.workspaceRegistry.resolveByPath(request.path)
+          : await this.normalizeAdditionalPaths(request.path, request.additionalPaths, request.agentPreset)
+        const existing = await this.ctx.workspaceRegistry.resolveByPath(request.path, request.agentPreset)
         if (existing !== undefined) {
           if (additionalPaths !== undefined && !samePathSet(existing.additionalPaths, additionalPaths)) {
             throw new Error('the Workspace already exists with different additional paths; update them with updatePaths')
           }
           return { workspace: workspaceView(existing), created: false }
         }
-        const workspace = await this.ctx.workspaceRegistry.create(request.path)
+        const workspace = await this.ctx.workspaceRegistry.create(request.path, undefined, request.agentPreset)
         if (additionalPaths !== undefined) await workspace.setAdditionalPaths(additionalPaths)
         return { workspace: workspaceView(workspace), created: true }
       } catch (error) {
@@ -73,6 +74,21 @@ export class WorkspaceCommands {
         )
       }
     })
+  }
+
+  /** Canonicalize requested additional directories in the requested Workspace's execution world. */
+  private async normalizeAdditionalPaths(
+    path: string,
+    additionalPaths: readonly string[],
+    agentPreset: string | undefined,
+  ): Promise<string[]> {
+    if (agentPreset === undefined) {
+      return await normalizeAdditionalWorkspacePaths(additionalPaths, await realpathNormalize(path))
+    }
+    const fs = this.ctx.get('agentPresets')?.serviceForPreset(agentPreset, 'fs')
+    if (fs === undefined) throw new Error(`agent preset '${agentPreset}' mounts no filesystem for Workspaces`)
+    const world = filesystemPathWorld(fs)
+    return await normalizeAdditionalWorkspacePaths(additionalPaths, await world.realpath(path), world)
   }
 
   /**

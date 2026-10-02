@@ -127,6 +127,27 @@ describe('WorkspaceController commands', () => {
       .rejects.toMatchObject({ code: 'workspace/not-found' })
   })
 
+  it('creates Workspaces in a preset\'s own filesystem and lists the presets that offer one', async () => {
+    const { controller, ctx } = await harness()
+    const directories = new Set(['/srv/app', '/srv/lib'])
+    const fs = {
+      resolve: (path: string) => Promise.resolve(path.replace(/\/$/u, '')),
+      stat: (path: string) => Promise.resolve(directories.has(path) ? { type: 'directory' } : undefined),
+      processPath: (target: string) => target,
+    }
+    ctx.provide('agentPresets', {
+      serviceForPreset: (id: string, name: string) => id === 'host-x' && name === 'fs' ? fs : undefined,
+      list: () => Promise.resolve([{ id: 'standard' }, { id: 'host-x', name: 'x (SSH)' }, { id: 'host-y', broken: 'offline' }]),
+    } as never)
+
+    expect(await controller.worlds()).toEqual({ worlds: [{ agentPreset: 'host-x', name: 'x (SSH)' }] })
+    const created = await controller.create({ path: '/srv/app', agentPreset: 'host-x', additionalPaths: ['/srv/lib'] })
+    expect(created.workspace).toMatchObject({ path: '/srv/app', agentPreset: 'host-x', additionalPaths: ['/srv/lib'] })
+    expect((await controller.create({ path: '/srv/app/', agentPreset: 'host-x' })).created).toBe(false)
+    await expect(controller.create({ path: '/srv/missing', agentPreset: 'host-x' })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
+    await expect(controller.create({ path: '/srv/app', agentPreset: 'standard' })).rejects.toMatchObject({ code: 'workspace/invalid-path' })
+  })
+
   it('validates and replaces additional paths, keeping the primary path out of the list', async () => {
     const { controller, root } = await harness()
     const app = stageDir(root, 'app')

@@ -17,8 +17,10 @@ export type { DirectoryEntry, DirectoryListing } from '@deepseek-ai/dsh-host-dir
 /** One durable Workspace projected for browser consumers. */
 export interface WorkspaceView {
   readonly workspaceId: WorkspaceId
-  /** Canonical host directory path. */
+  /** Canonical directory path in the Workspace's execution world. */
   readonly path: string
+  /** Agent preset whose execution world (for example an SSH host) holds every path; omitted for the Host. */
+  readonly agentPreset?: string
   /** Further canonical directories new Sessions in this Workspace record beside `path`; omitted when there are none. */
   readonly additionalPaths?: readonly string[]
   /** User-visible title. */
@@ -67,10 +69,28 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 export interface WorkspaceCreateRequest {
   readonly path: string
   /**
+   * Agent preset whose own filesystem holds `path` and the additional
+   * directories, for a Workspace on another execution host; omitted selects
+   * the Host. Sessions created in the Workspace use this preset.
+   */
+  readonly agentPreset?: string
+  /**
    * Existing directories new Sessions also record. A new Workspace stores
    * them; an existing one must already hold the same canonical set.
    */
   readonly additionalPaths?: readonly string[]
+}
+
+/** An Agent preset whose own filesystem can hold Workspaces. */
+export interface WorkspaceWorld {
+  readonly agentPreset: string
+  /** The preset's display name, when it declares one. */
+  readonly name?: string
+}
+
+/** Execution worlds available for new Workspaces besides the Host. */
+export interface WorkspaceWorldsValue {
+  readonly worlds: readonly WorkspaceWorld[]
 }
 
 /** Created or previously registered Workspace. */

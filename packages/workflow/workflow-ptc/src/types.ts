@@ -51,6 +51,8 @@ export interface ChildStartRequest {
   model?: string
   /** The per-child reasoning-effort override, if the call passed one; the host validates it before start. */
   reasoningEffort?: string
+  /** The subagent provider starting this child in place of the configured one, for example another execution host. */
+  subagentProvider?: string
 }
 
 /**
