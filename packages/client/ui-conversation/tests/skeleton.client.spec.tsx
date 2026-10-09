@@ -667,7 +667,7 @@ describe('ConversationRoot resident composer', () => {
     // seeds the composer and typing reaches the Conversation store.
     expect(b.wiring.snapshot.draft).toBe('ordinary draft')
     act(() => { b.wiring.setDraft('plan my week') })
-    expect(b.store.store.getSnapshot().draft).toBe('plan my week')
+    expect(b.store.store.getSnapshot().draft).toEqual({ text: 'plan my week', references: [] })
 
     // The first turn replaces the landing with the transcript; the composer stays mounted.
     b.session.set(sessionSnapshotOf({ blank: false }))
