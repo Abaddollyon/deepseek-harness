@@ -140,7 +140,7 @@ describe('declarative preset revisions', () => {
     // The world is declared by isolation alone, in a nested group too, and survives a failed provider row.
     await declare(ctx, { id: 'offline', plugins: [{ name: 'cordis:group', group: true, config: [{ name: 'cordis:group', group: true,
       isolate: { subprocess: true }, config: [{ name: plugin('contribute'), config: { tool: 'offline' } }, { name: plugin('throws') }] }] }] })
-    await declare(ctx, { id: 'malformed', plugins: [{ name: 'cordis:group', group: true, config: {} }] } as never)
+    await declare(ctx, { id: 'malformed', plugins: [{ name: 'cordis:group', group: true, config: {} }] })
     expect(['standard', 'remote', 'offline', 'malformed', 'absent'].map(id => ctx.agentPresets.ownsWorld(id)))
       .toEqual([false, true, true, false, false])
     const host = mkdtempSync(join(tmpdir(), 'dsh-preset-world-'))
