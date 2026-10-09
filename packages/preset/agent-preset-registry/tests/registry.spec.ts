@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
 import { entryListProblem } from '../src/index.ts'
 import { currentKey, harness, declare, contribution, agentOn, liveRegistries, plugin } from './harness.ts'
 import { omitsGeneratedPage } from '../../../settings/settings/tests/live-config.ts'
@@ -297,6 +297,27 @@ it('publishes an execution world\'s filesystem at mount and leaves connecting to
   expect(link).toMatchObject({ connects: 0 })
   expect(await fs!.stat(await fs!.resolve('/srv/app'))).toEqual({ type: 'directory' })
   expect(link).toMatchObject({ connects: 1 })
+})
+
+it('selects the working-directory filesystem of the execution world an Agent\'s preset owns', async () => {
+  const ctx = await setup()
+  await declare(ctx, contribution('standard'))
+  await declare(ctx, { id: 'remote', plugins: [{ name: 'cordis:group', group: true, isolate: { fs: true },
+    config: [{ name: plugin('world-fs'), config: { directories: ['/srv/app'] } }] }] })
+  await declare(ctx, { id: 'offline', plugins: [{ name: 'cordis:group', group: true, isolate: { subprocess: true },
+    config: [{ name: plugin('contribute'), config: { tool: 'offline' } }] }] })
+  const agentIn = async (id: string, presetId: string) => (await ctx.agents.create({
+    sessionId: SessionId(id),
+    setup: async (agentCtx: Context) => { await ctx.agentPresets.mount(agentCtx, presetId) },
+  })).agent
+  const hostFs = {} as Context['fs']
+  const select = (agent: Agent) => ctx.waterfall('working-directory/fs', agent, () => hostFs)
+  const remote = await agentIn('wd-remote', 'remote')
+  expect(select(remote)).toBe(ctx.agentPresets.serviceFor(remote, 'fs'))
+  expect(select(remote)).not.toBe(hostFs)
+  expect(select(await agentIn('wd-host', 'standard'))).toBe(hostFs)
+  const offline = await agentIn('wd-offline', 'offline')
+  expect(() => select(offline)).toThrow('execution world of agent preset "offline" is not available')
 })
 
 it('resolves the saved default over the deployment default, and drops a removed override', async () => {

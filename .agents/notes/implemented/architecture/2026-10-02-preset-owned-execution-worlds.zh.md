@@ -19,7 +19,7 @@ Status: implemented
 - `tool-fs-search` 接受 `rgPath`，因为打包的 ripgrep 二进制是 Host 路径。
 - 每个 Session 的 MCP 浏览器服务器（`browser-use-runtime/mcp`）仍是 Host 进程：当 Session 的 preset 拥有另一个世界，或其 cwd 不是可进入的 Host 目录时，它在 Host 的临时目录中启动；在这样的世界中，启动失败只会让该 Session 没有浏览器工具，而不会导致其创建失败。
 - 工作区记录可指定 `agentPreset`；其路径通过该预设的 `fs` 规范化，并按（预设，路径）保持唯一。`workspace-controller` 在注册表上安装这些路径环境，在此类工作区中创建的 Session 以其预设启动。
-- 子 agent 可通过 `ChildExecutionTarget` 在另一个预设和 cwd 下运行，该目标由进程内提供方提供（`startInProcessRun` 选项或 `ContinuableCreateSpec.target`）。子 agent header 记录二者；当 header 预设与父级不同时，`applyChildComposition` 挂载 header 预设，因此冷恢复会重新加入同一环境。指定目标的子 agent 不带 fork seed 启动，因为 seed 的 `workspace/roots` 会把 Host 根目录带入另一个环境。工作流 `agent()` 通过 `subagentProvider` 按子 agent 选择此类提供方。
+- 子 agent 可通过 `ChildExecutionTarget` 在另一个预设和 cwd 下运行，该目标由提供方通过 `ContinuableCreateSpec.target` 提供。子 agent header 记录二者；当 header 预设与父级不同时，`applyChildComposition` 挂载 header 预设，因此冷恢复会重新加入同一环境。指定目标的子 agent 不带 fork seed 启动，因为 seed 的 `workspace/roots` 会把 Host 根目录带入另一个环境。工作流 `agent()` 通过 `subagentProvider` 按子 agent 选择此类提供方。
 
 若部署希望工作流脚本本身在远端运行，则在同一 isolate 组内挂载 `ptc-runtime-node`（含已安装的 bootstrap）、`workflow-ptc` 与 `tool-workflow`；Host PTC 运行时无法在仅存在于远端的 cwd 中启动进程。
 

@@ -135,11 +135,16 @@ it.each(['loop', 'root'] as const)('unloads %s while a background child is stopp
   expect(child.status).toBe('idle')
   const events = child.session.snapshotEvents()
   expect(events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
-  expect(events.filter(event => event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled'))
-    .toMatchObject([
+  const canceled = events.filter(event => event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled')
+  // Loop teardown keeps queued input for a later lifecycle; root teardown first
+  // stops the child through its parent, and a parent cancel discards it.
+  if (owner === 'loop') expect(canceled).toEqual([])
+  else {
+    expect(canceled).toMatchObject([
       { data: { target: 'next-step', removedCount: 1 } },
       { data: { target: 'next-turn', removedCount: 1 } },
     ])
+  }
   if (owner === 'loop') {
     const verify = new Context()
     onTestFinished(async () => { await verify.fiber.dispose() })

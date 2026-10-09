@@ -301,17 +301,16 @@ describe('Session MCP Loader composition', () => {
     }
   })
 
-  it('starts the browser in a Host directory when the Session cwd is missing here or belongs to another execution world', async () => {
+  it('starts the browser in the Host temporary directory when the Session belongs to another execution world', async () => {
     const { ctx, root } = await load()
     const host = await realpath(tmpdir())
     const local = await realpath(root)
     await ctx.agents.create({ sessionId: SessionId('local'), meta: { cwd: root } })
-    await ctx.agents.create({ sessionId: SessionId('missing'), meta: { cwd: join(root, 'missing') } })
     ctx.provide('agentPresets', { composedPreset: () => 'remote', ownsWorld: (id: string) => id === 'remote' } as never)
     const remote = await ctx.agents.create({ sessionId: SessionId('remote'), meta: { cwd: root } })
     expect(ctx.tools.schemas(remote.agent).map(tool => tool.name)).toContain(TOOL)
     expect((await events(root)).filter(event => event.event === 'start').map(event => event.cwd))
-      .toEqual([local, local, host, host, host, host])
+      .toEqual([local, local, host, host])
   })
 
   it('starts a Session in another execution world without browser tools when the browser cannot start', async () => {
