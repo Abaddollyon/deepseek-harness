@@ -61,4 +61,30 @@ set(agent: Agent, path: string, signal?: AbortSignal): Promise<string>
 Types: [Agent](core.zh.md) · [Session](session.zh.md)
 
 Source: [`packages/session/working-directory/src/index.ts`](../../packages/session/working-directory/src/index.ts)
+
+<a id="working-directory-events"></a>
+
+### `working-directory/*` events
+
+<a id="working-directoryfs--waterfall"></a>
+
+#### `working-directory/fs` — waterfall
+
+Select the filesystem that holds one Agent's working directory. A listener that owns the Agent's execution world, such as an agent preset over SSH, returns that world's filesystem or throws while it is unavailable; other listeners call `next()`, which ends at the Host filesystem.
+
+```ts cordis-catalog
+/**
+ * Select the filesystem that holds one Agent's working directory. A listener that owns the
+ * Agent's execution world, such as an agent preset over SSH, returns that world's filesystem or
+ * throws while it is unavailable; other listeners call `next()`, which ends at the Host filesystem.
+ * @param agent - Agent whose directory is validated or changed.
+ * @param next - delegate to the next listener or the Host filesystem.
+ * @mode waterfall
+ */
+'working-directory/fs'(agent: Agent, next: () => Context['fs']): Context['fs']
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/session/working-directory/src/index.ts`](../../packages/session/working-directory/src/index.ts)
 <!-- END GENERATED cordis-surface -->

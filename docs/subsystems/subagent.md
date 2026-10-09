@@ -192,7 +192,7 @@ interface ContinuableCreateSpec {
 interface ChildExecutionTarget {
   /** Agent preset the child joins instead of its parent's. */
   readonly agentPreset: string
-  /** Child cwd in that preset's execution world; omitted keeps the parent's cwd. */
+  /** Absolute child directory in that preset's execution world; omitted keeps the directory captured from the parent or request. */
   readonly cwd?: string
 }
 ```
