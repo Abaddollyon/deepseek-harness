@@ -1,0 +1,173 @@
+diff --git a/dist/api/anthropic-messages.d.ts b/dist/api/anthropic-messages.d.ts
+index c79e885abfc5046ead5cf49e213ae9738ebba358..87c48aa2a0374150a106f043cc57c3b5595568d0 100644
+--- a/dist/api/anthropic-messages.d.ts
++++ b/dist/api/anthropic-messages.d.ts
+@@ -65,6 +65,14 @@ export interface AnthropicOptions extends StreamOptions {
+      * `AnthropicVertex` that shares the same messaging API.
+      */
+     client?: Anthropic;
++    /**
++     * Request format. "claude-code" applies the Claude Code identity headers, beta
++     * features, system preamble, and tool-name mapping that an OAuth token selects,
++     * whatever credential the request carries, and accepts a request with no
++     * credential for a proxy that authenticates upstream itself.
++     * Default: "provider" (the credential selects the format).
++     */
++    requestMode?: "provider" | "claude-code";
+ }
+ export declare const stream: StreamFunction<"anthropic-messages", AnthropicOptions>;
+ export declare const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOptions>;
+diff --git a/dist/api/anthropic-messages.js b/dist/api/anthropic-messages.js
+index 38571b31e143e913c2bf59dad73382982e93664a..474f173825885521a7f3a7ea4c0a9543cce16550 100644
+--- a/dist/api/anthropic-messages.js
++++ b/dist/api/anthropic-messages.js
+@@ -176,7 +176,10 @@ function hasRequestAuth(apiKey, headers) {
+         hasHeader(headers, "x-api-key") ||
+         hasHeader(headers, "cf-aig-authorization"));
+ }
+-function assertRequestAuth(provider, apiKey, headers) {
++function assertRequestAuth(provider, apiKey, headers, requestMode) {
++    // Claude Code request mode may be keyless: a proxy authenticates upstream itself.
++    if (requestMode === "claude-code")
++        return;
+     if (!hasRequestAuth(apiKey, headers))
+         throw new Error(`No API key for provider: ${provider}`);
+ }
+@@ -410,7 +413,7 @@ export const stream = (model, context, options) => {
+                 const apiKey = options?.apiKey;
+                 const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
+                 if (!federation)
+-                    assertRequestAuth(model.provider, apiKey, options?.headers);
++                    assertRequestAuth(model.provider, apiKey, options?.headers, options?.requestMode);
+                 let copilotDynamicHeaders;
+                 if (model.provider === "github-copilot") {
+                     const hasImages = hasCopilotVisionInput(normalizedContext.messages);
+@@ -421,7 +424,7 @@ export const stream = (model, context, options) => {
+                 }
+                 const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+                 const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+-                const created = createClient(model, apiKey, options?.headers, options?.fetch, copilotDynamicHeaders, cacheSessionId, federation);
++                const created = createClient(model, apiKey, options?.headers, options?.fetch, copilotDynamicHeaders, cacheSessionId, federation, options?.requestMode);
+                 client = created.client;
+                 isOAuth = created.isOAuthToken;
+             }
+@@ -553,7 +556,6 @@ export const stream = (model, context, options) => {
+                         const block = blocks[index];
+                         if (block && block.type === "toolCall") {
+                             block.partialJson += event.delta.partial_json;
+-                            block.arguments = parseStreamingJson(block.partialJson);
+                             stream.push({
+                                 type: "toolcall_delta",
+                                 contentIndex: index,
+@@ -712,11 +714,12 @@ function mapThinkingLevelToEffort(model, level) {
+ }
+ export const streamSimple = (model, context, options) => {
+     if (!getAnthropicFederation(model, options?.apiKey, options?.headers, options?.env)) {
+-        assertRequestAuth(model.provider, options?.apiKey, options?.headers);
++        assertRequestAuth(model.provider, options?.apiKey, options?.headers, options?.requestMode);
+     }
+     const base = {
+         ...buildBaseOptions(model, context, options, options?.apiKey),
+         toolChoice: options?.toolChoice,
++        requestMode: options?.requestMode,
+     };
+     if (!options?.reasoning) {
+         return stream(model, context, {
+@@ -748,7 +751,7 @@ export const streamSimple = (model, context, options) => {
+ function isOAuthToken(apiKey) {
+     return apiKey.includes("sk-ant-oat");
+ }
+-function createClient(model, apiKey, optionsHeaders, fetch, dynamicHeaders, sessionId, federation) {
++function createClient(model, apiKey, optionsHeaders, fetch, dynamicHeaders, sessionId, federation, requestMode) {
+     // Copilot: Bearer auth.
+     if (model.provider === "github-copilot") {
+         const client = new PiAnthropic({
+@@ -764,11 +767,15 @@ function createClient(model, apiKey, optionsHeaders, fetch, dynamicHeaders, sess
+         });
+         return { client, isOAuthToken: false };
+     }
+-    // OAuth: Bearer auth, Claude Code identity headers
+-    if (apiKey && isOAuthToken(apiKey)) {
++    // OAuth: Bearer auth, Claude Code identity headers. Claude Code request mode
++    // selects the same format for any other key (sent as X-Api-Key) or for none.
++    const oauthToken = Boolean(apiKey) && isOAuthToken(apiKey);
++    if (oauthToken || requestMode === "claude-code") {
+         const client = new PiAnthropic({
+-            apiKey: null,
+-            authToken: apiKey,
++            apiKey: oauthToken ? null : apiKey ?? null,
++            // A keyless request passes an empty token so the SDK resolves no ambient
++            // credential; the null headers below omit both auth headers.
++            authToken: oauthToken ? apiKey : apiKey ? null : "",
+             baseURL: model.baseUrl,
+             dangerouslyAllowBrowser: true,
+             fetch,
+@@ -777,6 +784,7 @@ function createClient(model, apiKey, optionsHeaders, fetch, dynamicHeaders, sess
+                 "anthropic-dangerous-direct-browser-access": "true",
+                 "user-agent": `claude-cli/${claudeCodeVersion}`,
+                 "x-app": "cli",
++                ...(apiKey ? {} : { "x-api-key": null, authorization: null }),
+             }, model.headers, optionsHeaders),
+         });
+         return { client, isOAuthToken: true };
+diff --git a/dist/api/bedrock-converse-stream.js b/dist/api/bedrock-converse-stream.js
+index 428af807620993a4c90ceb1a1a120d553844be32..d81d290d8b8b97f8e2cdd97cff1ebaf019c5733e 100644
+--- a/dist/api/bedrock-converse-stream.js
++++ b/dist/api/bedrock-converse-stream.js
+@@ -461,7 +461,6 @@ function handleContentBlockDelta(event, blocks, output, stream) {
+     }
+     else if (delta?.toolUse && block?.type === "toolCall") {
+         block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
+-        block.arguments = parseStreamingJson(block.partialJson);
+         stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
+     }
+     else if (delta?.reasoningContent) {
+diff --git a/dist/api/mistral-conversations.js b/dist/api/mistral-conversations.js
+index fbcc5e25ee6752a9c5461b41fa8544a090a17b3f..f540825c4f934f342200db72190599fe95f01d0c 100644
+--- a/dist/api/mistral-conversations.js
++++ b/dist/api/mistral-conversations.js
+@@ -554,7 +554,6 @@ async function consumeChatStream(model, output, stream, mistralStream, onProvide
+                 ? toolCall.function.arguments
+                 : JSON.stringify(toolCall.function.arguments || {});
+             block.partialArgs = (block.partialArgs || "") + argsDelta;
+-            block.arguments = parseStreamingJson(block.partialArgs);
+             stream.push({
+                 type: "toolcall_delta",
+                 contentIndex: toolBlocksByKey.get(key),
+diff --git a/dist/api/openai-completions.js b/dist/api/openai-completions.js
+index a60f39352b776d71497e55b33b3334bacfbeb2f5..6c9b98e35606c52e4f0fb29d8fd0b5ba02d92e09 100644
+--- a/dist/api/openai-completions.js
++++ b/dist/api/openai-completions.js
+@@ -438,7 +438,6 @@ export const stream = (model, context, options) => {
+                             if (toolCall.function?.arguments) {
+                                 delta = toolCall.function.arguments;
+                                 block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
+-                                block.arguments = parseStreamingJson(block.partialArgs);
+                             }
+                             else if (toolCall.custom?.input) {
+                                 const nextInput = getCustomToolCallInput(block) + toolCall.custom.input;
+diff --git a/dist/api/openai-responses-shared.js b/dist/api/openai-responses-shared.js
+index f413fe5f2a1abcac39c38bbd4a77b38c349a5918..108f599ae1d985d2f465e8cdf99ce0624acea6aa 100644
+--- a/dist/api/openai-responses-shared.js
++++ b/dist/api/openai-responses-shared.js
+@@ -548,7 +548,6 @@ export async function processResponsesStream(openaiStream, output, stream, model
+             if (!slot || slot.block.partialJson === undefined)
+                 continue;
+             slot.block.partialJson += event.delta;
+-            slot.block.arguments = parseStreamingJson(slot.block.partialJson);
+             pushToolCallDelta(slot, event.delta);
+         }
+         else if (event.type === "response.function_call_arguments.done") {
+diff --git a/dist/api/pi-messages.js b/dist/api/pi-messages.js
+index 7da1c45de8a106a68411cf79bec75f553534a1c7..296d131b59b1cf75f2516c39e85bba72972b2c17 100644
+--- a/dist/api/pi-messages.js
++++ b/dist/api/pi-messages.js
+@@ -155,8 +155,6 @@ function createEventConverter(model) {
+             case "toolcall_delta": {
+                 const json = `${toolJson.get(event.contentIndex) ?? ""}${event.delta}`;
+                 toolJson.set(event.contentIndex, json);
+-                partial.content[event.contentIndex].arguments =
+-                    parseStreamingJson(json);
+                 break;
+             }
+             case "toolcall_end":

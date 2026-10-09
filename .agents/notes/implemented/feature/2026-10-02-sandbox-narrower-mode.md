@@ -10,7 +10,7 @@ A delegated agent can ask for `sandbox_permissions: workspace-write` while its S
 
 ## Decision
 
-`approveEscalation` returns a strictly narrower requested mode without approval, and the tool runs that one call confined at the narrower mode. Repeated modes still return the effective mode, wider modes still require approval, and unsupported targets still fail before execution. Argument pairing remains mandatory at the tool. This partially supersedes the narrower-target rejection in the [same-mode decision](2026-09-16-sandbox-same-mode.md) and the [sandbox decision](2026-07-06-sandbox.md); their confinement and per-call approval decisions remain active.
+`approveEscalation` returns a strictly narrower requested mode without approval, and the tool runs that one call confined at the narrower mode. Repeated modes still return the effective mode, wider modes still require approval, and unsupported targets still fail before execution. Argument pairing remains mandatory at the tool. This partially supersedes the narrower-target rejection in the [same-mode decision](../../archived/feature/2026-09-16-sandbox-same-mode.md) and the [sandbox decision](../../archived/feature/2026-07-06-sandbox.md); their confinement and per-call approval decisions remain active.
 
 ## Alternatives considered
 

@@ -34,6 +34,9 @@
     },
     {
       "path": "../../preset/agent-preset-registry"
+    },
+    {
+      "path": "../../session/working-directory"
     }
   ]
 }

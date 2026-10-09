@@ -4,6 +4,7 @@
  * @module @deepseek-ai/dsh-tools
  */
 
+import type {} from '@deepseek-ai/dsh-working-directory'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AnonymousEntries, NamedEntries, ScopedLayers, scopeOf, scopeTarget } from '@deepseek-ai/dsh-scope'
@@ -244,7 +245,7 @@ export interface ToolOutputDefinition {
   readonly schema: JsonSchemaNode
   /** Pure projection from validated arguments and value to Native/model content. */
   render(args: unknown, value: JsonValue): ContentBlock[]
-  /** Pure replayable presentation projection, computed only for top-level calls. */
+  /** Pure replayable presentation projection for native and nested calls. */
   presentationMeta?(args: unknown, value: JsonValue): JsonValue
 }
 
@@ -335,9 +336,9 @@ export interface ToolResult {
   isError: boolean
   /**
    * The tool-private presentation payload projected by its output declaration.
-   * It is persisted verbatim on `tool/result` for Host presenters and Client
-   * renderers to narrow independently. Absent when the tool declared no
-   * projector or the call was nested under a composite transport.
+   * It is persisted on `tool/result` or `tool/ptc-dispatch` for Host presenters
+   * and Client renderers to narrow independently. Absent when the tool
+   * declared no projector.
    */
   meta?: JsonValue
 }
@@ -697,7 +698,7 @@ function errorInfo(error: unknown): ToolErrorInfo | undefined {
 }
 
 /** How the registry presents its tools to the model (see {@link Config.mode}). */
-export type ToolPresentationMode = 'native' | 'ptc' | 'both'
+export type ToolPresentationMode = 'native' | 'ptc'
 
 /** Plugin config: how the registered tools are presented to the model. */
 export interface Config {
@@ -705,9 +706,9 @@ export interface Config {
    * Model presentation. `native` (default) sends every visible schema; `ptc`
    * sends only `run_code` plus a generated SDK prompt and collapses the
    * executor to the same surface (a model-direct call may only name
-   * `run_code`; `run_code` SDK sub-dispatches keep every visible tool); `both`
-   * sends both forms. PTC mode requires a `ctx.ptcRuntime` whose `language`
-   * has a registered SDK renderer (TypeScript or Python) and fail prompt
+   * `run_code`; `run_code` SDK sub-dispatches keep every visible tool).
+   * PTC mode requires a `ctx.ptcRuntime` whose `language`
+   * has a registered SDK renderer (TypeScript or Python) and fails prompt
    * assembly when it is absent or has no renderer. Under `ptc`, native names
    * in `toolOrder` are invalid.
    */
@@ -851,7 +852,7 @@ export class ToolRuntime extends Service {
   static inject = ['systemPrompt']
 
   static Config: z<Config> = z.object({
-    mode: z.union(['native', 'ptc', 'both'] as const).default('native'),
+    mode: z.union(['native', 'ptc'] as const).default('native'),
     // Absent stays absent: an empty policy would shadow the deployment default.
     defer: z.union([z.const(undefined), z.object({
       include: z.array(z.string().min(1)),
@@ -944,8 +945,8 @@ export class ToolRuntime extends Service {
 
   /**
    * The name-only index of deferred tools for an agent presenting natively.
-   * Under `ptc` and `both` the SDK section carries the index instead, so this
-   * renders empty there. It lists every deferrable tool, activated or not, so
+   * Under `ptc` the SDK section carries the index instead, so this renders
+   * empty there. It lists every deferrable tool, activated or not, so
    * a `tool_search` activation leaves the prompt unchanged.
    * @returns the section registration.
    */
@@ -985,7 +986,7 @@ export class ToolRuntime extends Service {
    * the deployment is inconsistent. Its order places the rule before that
    * guidance rather than after it.
    *
-   * `both` renders empty: native calls do execute there, so the rule is false.
+   * Native scopes render no instruction.
    * @returns the section registration.
    */
   private collapseSection(): PromptSection {
@@ -1023,9 +1024,9 @@ export class ToolRuntime extends Service {
         const render = SDK_RENDERERS[runtime.language]
         /* v8 ignore next -- requirePtcRuntime rejects an unknown language before this runs. */
         if (render === undefined) throw new Error(`dsh-tools: no SDK renderer for ${runtime.language}`)
-        // The SDK reads the activation-independent deferrable set: a direct
-        // `tool_search` under `both` activates tools for the native list only,
-        // and must not rewrite this cached section.
+        // The SDK reads the activation-independent deferrable set: tools a
+        // direct `tool_search` activated while the scope presented natively
+        // must not rewrite this cached section.
         return render(this.sdkSchemas(context.scope), this.deferredEntries(this.view(context.scope)))
       },
     }
@@ -1061,6 +1062,14 @@ export class ToolRuntime extends Service {
    */
   private requirePtcTransport(): ToolDefinition {
     this.ptcTransport ??= createRunCodeTool(this, {
+      resolveWorkingDirectory: async (exec) => {
+        // Only Agent-owned PTC requires directory state; native registries
+        // and unowned programs can run without this service.
+        if (exec.agent === undefined) return undefined
+        const directories = this.ctx.get('workingDirectory')
+        if (directories === undefined) throw new Error('dsh-tools: run_code with an Agent requires workingDirectory')
+        return directories.ensure(exec.agent, exec.signal)
+      },
       requireRuntime: () => this.requirePtcRuntime(this.defaultMode),
       peekApprover: () => this.ctx.get('approval'),
       resolveSandboxPolicy: (exec) => {
@@ -1160,10 +1169,11 @@ export class ToolRuntime extends Service {
   private wireSchemas(scope?: ScopeKey): ToolProviderResult {
     const view = this.view(scope)
     const mode = this.modeFor(scope)
-    const declared = [...view.visible.values()].filter(definition => !view.deferred.has(definition.name))
-    const search = view.visible.has(TOOL_SEARCH_NAME) ? [TOOL_SEARCH_NAME] : []
     if (mode === 'native') {
-      const schemas = declared.map(definition => this.schemaOf(definition, false))
+      const schemas = [...view.visible.values()]
+        .filter(definition => !view.deferred.has(definition.name))
+        .map(definition => this.schemaOf(definition, false))
+      const search = view.visible.has(TOOL_SEARCH_NAME) ? [TOOL_SEARCH_NAME] : []
       return { schemas, knownNames: [...view.knownNames, ...search] }
     }
     // Validate the runtime language BEFORE projecting schemas: schemaOf reads
@@ -1172,14 +1182,11 @@ export class ToolRuntime extends Service {
     // renderer-table rejection the canonical assembly-time error for a
     // language with no SDK renderer.
     this.requirePtcRuntime(mode)
-    const schemas = declared.map(definition => this.schemaOf(definition, false))
-    if (mode === 'ptc') {
-      return {
-        schemas: schemas.filter(schema => schema.name === RUN_CODE_NAME),
-        knownNames: [RUN_CODE_NAME],
-      }
+    const schemas = [...view.visible.values()].map(definition => this.schemaOf(definition, false))
+    return {
+      schemas: schemas.filter(schema => schema.name === RUN_CODE_NAME),
+      knownNames: [RUN_CODE_NAME],
     }
-    return { schemas, knownNames: [...view.knownNames, RUN_CODE_NAME, ...search] }
   }
 
   /**
@@ -2080,7 +2087,7 @@ export class ToolRuntime extends Service {
     }
     const content = snapshotProjection(tool.name, 'render', rendered)
     let meta: JsonValue | undefined
-    if (exec.parent === undefined && tool.output.presentationMeta !== undefined) {
+    if (tool.output.presentationMeta !== undefined) {
       let projected: JsonValue
       try {
         projected = tool.output.presentationMeta(exec.arguments, value)

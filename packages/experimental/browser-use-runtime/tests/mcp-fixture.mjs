@@ -47,7 +47,7 @@ lines.on('line', line => {
       ] })
       break
     case 'tools/call':
-      record('call', { name: request.params.name })
+      record('call', { name: request.params.name, cwd: process.cwd() })
       if (request.params.name === 'disconnect') process.exit(0)
       counter += 1
       reply(request.id, { content: [{ type: 'text', text: `Visit ${counter}: ${request.params.arguments.label}` }], structuredContent: { counter, pid: process.pid } })

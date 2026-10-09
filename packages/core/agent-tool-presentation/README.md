@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use `dsh-agent-tool-presentation` in an [agent preset](../../preset/agent-preset-registry/README.md) to fix whether models see every native tool schema, only `run_code` with a generated SDK, or both forms. Each preset can choose independently, so native and PTC agents can share one process without sharing tool catalogs. Selecting `ptc` or `both` requires a compatible PTC runtime; a deployment without one rejects the preset at mount time before its first prompt. A preset can also list tools by name only with `defer`, which the model expands with `tool_search`. A row must set `mode`, `defer`, or both; omitting the package keeps the deployment defaults.
+Use `dsh-agent-tool-presentation` in an [agent preset](../../preset/agent-preset-registry/README.md) to fix whether models see every native tool schema or only `run_code` with a generated SDK. Each preset can choose independently, so native and PTC agents can share one process without sharing tool catalogs. Selecting `ptc` requires a compatible PTC runtime; a deployment without one rejects the preset at mount time before its first prompt. A preset can also list tools by name only with `defer`, which the model expands with `tool_search`. A row must set `mode`, `defer`, or both; omitting the package keeps the deployment defaults.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ Use `dsh-agent-tool-presentation` in an [agent preset](../../preset/agent-preset
 <a id="use-this-package"></a>
 ## Use this package
 
-Add this row to an agent preset to fix how every agent joined to that preset sees its tools. `native` presents each visible tool schema as a function definition; `ptc` presents only the `run_code` transport plus a generated SDK and the rule that only `run_code` may be called directly; `both` presents both forms. Agents that declare nothing get the deployment-wide `mode` on the [`dsh-tools`](../tools/README.md) row.
+Add this row to an agent preset to fix how every agent joined to that preset sees its tools. `native` presents each visible tool schema as a function definition; `ptc` presents only the `run_code` transport plus a generated SDK and the rule that only `run_code` may be called directly. Agents that declare nothing get the deployment-wide `mode` on the [`dsh-tools`](../tools/README.md) row.
 
 ### Add the row to a preset
 
@@ -40,14 +40,14 @@ Add this row to an agent preset to fix how every agent joined to that preset see
 
 | Field | Default | Meaning |
 |---|---|---|
-| `mode` | deployment default | `native` — every schema; `ptc` — `run_code` plus generated SDK; `both` — both forms |
+| `mode` | deployment default | `native` — every schema; `ptc` — `run_code` plus generated SDK |
 | `defer` | deployment default | Tools listed by name only: `include` and `exclude` name patterns with `*` wildcards, as on the [`dsh-tools`](../tools/README.md#defer-tool-declarations) row |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-tool-presentation) is the exhaustive source for every accepted field. A row with neither field fails at mount, because a preset without this row already inherits the deployment defaults.
 
 ### What PTC mode requires
 
-Selecting `ptc` or `both` needs a composed PTC runtime (`ctx.ptcRuntime`) whose language has a registered SDK renderer — the TypeScript runtime ships via [`dsh-ptc-runtime-node`](../../ptc-runtime/ptc-runtime-node/README.md), and both the TypeScript and Python SDK renderers are built into `dsh-tools`. A preset that selects a PTC mode against a deployment composing no such runtime refuses to mount, naming this row, so the failure lands where the operator can act instead of at the session's first request.
+Selecting `ptc` needs a composed PTC runtime (`ctx.ptcRuntime`) whose language has a registered SDK renderer — the TypeScript runtime ships via [`dsh-ptc-runtime-node`](../../ptc-runtime/ptc-runtime-node/README.md), and both the TypeScript and Python SDK renderers are built into `dsh-tools`. A preset that selects a PTC mode against a deployment composing no such runtime refuses to mount, naming this row, so the failure lands where the operator can act instead of at the session's first request.
 
 ### One presentation per agent
 
@@ -72,7 +72,6 @@ The tool registry cannot move into a preset: its consumers are all host-plane �
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `mode` and `defer` config, `apply` wiring `ctx.tools.presentAs` and `ctx.tools.deferAs` for the mounting scope |
-| — | No runtime invariant companion is published; this package makes at most two scoped calls into `ctx.tools` and owns no event or snapshot of its own; the relation it establishes — which presentation and defer policy one agent's assembly uses — is the tool registry's to hold, and `dsh-tools` observes it there. |
 
 ### Behavior notes
 
@@ -90,7 +89,7 @@ The package-level contract is enough for most consumers; read these when you nee
 - [tools package](../tools/README.md) — the tool presentation modes and `presentAs` API.
 - [agent-presets package](../../preset/agent-preset-registry/README.md) — how presets compose agents and their standing mounts.
 - [Node ptc-runtime package](../../ptc-runtime/ptc-runtime-node/README.md) — the TypeScript runtime a PTC mode needs.
-- [PTC mode executor-collapse note](../../../.agents/notes/implemented/bug-fix/2026-08-07-ptc-executor-collapse.md) — why the announced and callable surfaces stay the same.
+- [historical PTC mode executor-collapse note](../../../.agents/notes/archived/bug-fix/2026-08-07-ptc-executor-collapse.md) — why the announced and callable surfaces stay the same.
 - [Core group map](../README.md) — how the core packages compose.
 
 -----
