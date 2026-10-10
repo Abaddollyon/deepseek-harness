@@ -2,12 +2,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-working-directory'
 import type { PtcBindingFunction, PtcJsonValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { assertAllowedModelSelection } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import type { AllowedModelRoute } from '@deepseek-ai/dsh-tool-subagent/route-selection'
@@ -22,7 +23,7 @@ import type { ChildStartRequest, WorkerInit } from './types.ts'
 
 interface ChildRecord {
   readonly callId: number
-  readonly run: SubagentRun
+  readonly run: SubagentActivation
   disposal?: Promise<void>
 }
 
@@ -154,6 +155,7 @@ export class PtcWorkflowRun implements WorkflowRun {
   private cancelReason: string | undefined
   private disposed: Promise<void> | undefined
   private readonly externalAbort: () => void
+  private readonly cwd: Promise<string>
 
   constructor(
     private readonly ctx: Context,
@@ -173,6 +175,7 @@ export class PtcWorkflowRun implements WorkflowRun {
     this.externalAbort = () => { this.cancel('workflow signal aborted') }
     if (signal?.aborted) this.externalAbort()
     else signal?.addEventListener('abort', this.externalAbort, { once: true })
+    this.cwd = ctx.workingDirectory.ensure(parent, this.controller.signal)
     // Consumers attach durable run recording after start() returns.
     this.result = Promise.resolve().then(() => this.drive())
   }
@@ -287,13 +290,18 @@ export class PtcWorkflowRun implements WorkflowRun {
       this.requireActive()
     }
     const callId = ++this.started
-    const run = await this.subagents.start(providerName, {
-      prompt: [{ type: 'text', text: request.prompt }],
-      parent: this.parent,
+    const run = await this.subagents.startActivation({
+      provider: providerName,
+      label: request.label ?? `${this.meta.name} child ${callId}`,
+      delivery: 'caller',
       signal: this.controller.signal,
-      ...request.label === undefined ? {} : { label: request.label },
-      ...request.schema === undefined ? {} : { outputSchema: request.schema },
-      ...agentOptions === undefined ? {} : { agentOptions },
+      request: {
+        cwd: await this.cwd,
+        prompt: [{ type: 'text', text: request.prompt }],
+        parent: this.parent,
+        ...request.schema === undefined ? {} : { outputSchema: request.schema },
+        ...agentOptions === undefined ? {} : { agentOptions },
+      },
     })
     const record: ChildRecord = { callId, run }
     this.children.set(callId, record)
@@ -302,7 +310,7 @@ export class PtcWorkflowRun implements WorkflowRun {
       await this.disposeChild(record)
       throw new Error('workflow child started after cancellation')
     }
-    return { callId, childId: run.id }
+    return { callId, childId: run.childId }
   }
 
   private async childResult(record: ChildRecord): Promise<PtcJsonValue> {
@@ -359,10 +367,12 @@ export class PtcWorkflowRun implements WorkflowRun {
   private async drive(): Promise<WorkflowResult> {
     let result: WorkflowResult
     try {
+      const cwd = await this.cwd
+      this.requireActive()
       const outcome = await this.runtime.run(this.runtime.resolve({
         program: PROGRAM,
         bindings: [{ global: 'workflowHost', functions: this.bindings() }],
-        cwd: this.policy.workspaceRoot,
+        cwd,
         sandboxPolicy: this.policy,
         timeoutMs: null,
         signal: this.controller.signal,

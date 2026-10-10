@@ -54,9 +54,6 @@
       "path": "../../util/atomic-write"
     },
     {
-      "path": "../../runtime-diagnostics/invariants"
-    },
-    {
       "path": "../../boot/hmr"
     },
     {
@@ -70,6 +67,9 @@
     },
     {
       "path": "../../interaction/user-approval"
+    },
+    {
+      "path": "../../session/working-directory"
     }
   ]
 }

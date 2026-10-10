@@ -4,12 +4,14 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '../src/index.ts'
+import { mountWorkingDirectoryFixture } from './working-directory-fixture.ts'
 
 const SOL = { provider: 'openai-codex', model: 'gpt-6.1-sol', reasoningEffort: ReasoningEffortId('xhigh') }
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
+  await mountWorkingDirectoryFixture(ctx)
   await ctx.plugin(SubagentRuntime)
   return ctx
 }

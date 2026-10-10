@@ -38,8 +38,8 @@ export const inject = ['tools']
 export interface Config {
   /**
    * The form this agent's model sees. `native` sends every visible schema,
-   * `ptc` sends only `run_code` plus a generated SDK, `both` sends both.
-   * Omitted keeps the deployment default.
+   * `ptc` sends only `run_code` plus a generated SDK. Omitted keeps the
+   * deployment default.
    */
   mode?: ToolPresentationMode
   /**
@@ -52,7 +52,7 @@ export interface Config {
 
 /** Runtime schema. */
 export const Config: z<Config> = z.object({
-  mode: z.union(['native', 'ptc', 'both'] as const),
+  mode: z.union(['native', 'ptc'] as const),
   // Absent stays absent: an empty policy would shadow the deployment default.
   defer: z.union([z.const(undefined), z.object({
     include: z.array(z.string().min(1)),

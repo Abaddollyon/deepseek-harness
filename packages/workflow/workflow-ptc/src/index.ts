@@ -12,6 +12,7 @@ import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-ptc-runtime'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
@@ -145,7 +146,7 @@ function resolveMaxTotalAgents(requested: number | undefined, ceiling: number): 
  * the seam contract.
  */
 class PtcWorkflowEngine extends WorkflowEngine {
-  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy', 'sessionProjections']
+  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy', 'workingDirectory', 'sessionProjections']
 
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
