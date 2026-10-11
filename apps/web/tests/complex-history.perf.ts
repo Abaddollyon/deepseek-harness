@@ -37,6 +37,8 @@ import {
 import { connectFreshWorkspace, newEnglishPage } from './support.ts'
 
 const SIDEBAR_SESSION_COUNT = 1_000
+// An open sidebar group renders this many rows until its Show-more control.
+const SIDEBAR_GROUP_ROWS = 5
 const LONG_SESSION_ID = 'perf-long-history'
 const LONG_SESSION_TITLE = 'LONG_PERF_SENTINEL 500-turn session'
 const LONG_HISTORY_TURNS = 500
@@ -919,24 +921,28 @@ async function closePerformanceWorld(world: PerformanceWorld): Promise<void> {
   if (failures.length > 1) throw new AggregateError(failures, 'web performance teardown failed')
 }
 
-async function openPerformancePage(
-  world: PerformanceWorld,
-  expectedSessions: number,
-): Promise<Locator> {
+async function openPerformancePage(world: PerformanceWorld): Promise<Locator> {
   await world.page.goto(world.scaffold.authenticatedUrl, { waitUntil: 'load' })
   await world.page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+  // Seeded sessions have no Workspace, so the collapsed Chats bucket is the
+  // only row of the session tree.
   const group = world.page.getByRole('treeitem').first()
-  await expect.poll(() => group.textContent(), { timeout: 30_000 })
-    .toContain(`${String(expectedSessions)} ${expectedSessions === 1 ? 'session' : 'sessions'}`)
+  await expect.poll(() => group.textContent(), { timeout: 30_000 }).toBe('Chats')
   return group
 }
 
-async function openLongHistory(page: Page): Promise<number> {
-  await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
+async function searchLongHistory(page: Page): Promise<Locator> {
+  const searchButton = page.getByRole('button', { name: 'Search sessions', exact: true })
+  if (await searchButton.getAttribute('aria-expanded') !== 'true') await searchButton.click()
+  await page.getByRole('textbox', { name: 'Search session names', exact: true })
     .fill('LONG_PERF_SENTINEL')
   const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
   await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
-  await results.first().click()
+  return results.first()
+}
+
+async function openLongHistory(page: Page): Promise<number> {
+  await (await searchLongHistory(page)).click()
   await page.getByRole('tab', { name: 'Chat', exact: true }).waitFor({ timeout: 30_000 })
   return conversationTurns(page)
 }
@@ -1215,7 +1221,7 @@ describe('manual web performance: complex workspace and history', () => {
     })
     try {
       const bootStarted = performance.now()
-      const group = await openPerformancePage(world, SIDEBAR_SESSION_COUNT + 1)
+      const group = await openPerformancePage(world)
       const bootReadyMs = performance.now() - bootStarted
       const page = world.page
       const cdp = await page.context().newCDPSession(page)
@@ -1228,21 +1234,17 @@ describe('manual web performance: complex workspace and history', () => {
         await group.click()
         return stableCount(
           page.getByRole('treeitem'),
-          count => count === SIDEBAR_SESSION_COUNT + 2,
+          count => count === SIDEBAR_GROUP_ROWS + 1,
         )
       })
-      expect(sidebar.value).toBe(SIDEBAR_SESSION_COUNT + 2)
+      expect(sidebar.value).toBe(SIDEBAR_GROUP_ROWS + 1)
+      const hiddenSessions = SIDEBAR_SESSION_COUNT + 1 - SIDEBAR_GROUP_ROWS
+      await page.getByRole('button', { name: `Show ${String(hiddenSessions)} more sessions`, exact: true })
+        .waitFor({ timeout: 30_000 })
       await group.click()
       await expect.poll(() => page.getByRole('treeitem').count()).toBe(1)
 
-      const contentSearch = await measure(cdp, async () => {
-        await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
-          .fill('LONG_PERF_SENTINEL')
-        const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
-        await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
-        await results.first().waitFor({ timeout: 60_000 })
-        return results.first()
-      })
+      const contentSearch = await measure(cdp, () => searchLongHistory(page))
       const opened = await measure(cdp, async () => {
         await contentSearch.value.click()
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).waitFor({ timeout: 30_000 })
@@ -1310,7 +1312,7 @@ describe('manual web performance: complex workspace and history', () => {
             ? null
             : rounded(firstContentfulPaintMs),
         },
-        sidebarExpand: sidebar.measurement,
+        sidebarExpand: { rows: sidebar.value, hiddenSessions, ...sidebar.measurement },
         contentSearch: contentSearch.measurement,
         openLongHistory: { initialTurns: opened.value, ...opened.measurement },
         coldTrajectory: { rows: coldTrajectory.value, ...coldTrajectory.measurement },
@@ -1334,7 +1336,7 @@ describe('manual web performance: complex workspace and history', () => {
       seedLongHistory: true,
     })
     try {
-      await openPerformancePage(world, 1)
+      await openPerformancePage(world)
       const cdp = await world.page.context().newCDPSession(world.page)
       await cdp.send('Performance.enable')
       const opened = await measure(cdp, () => openLongHistory(world.page))
@@ -1367,7 +1369,7 @@ describe('manual web performance: complex workspace and history', () => {
       seedLongHistory: true,
     })
     try {
-      await openPerformancePage(world, 1)
+      await openPerformancePage(world)
       const cdp = await world.page.context().newCDPSession(world.page)
       await cdp.send('Performance.enable')
       expect(await openLongHistory(world.page)).toBe(DEFAULT_HISTORY_TURNS)
