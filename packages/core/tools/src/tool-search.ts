@@ -1,6 +1,6 @@
 /**
  * The reserved `tool_search` tool: looks up the declarations of tools a scope
- * defers, and in native presentation adds the found tools to that agent's
+ * defers, and for a direct call adds the found tools to that agent's
  * declared tools from its next step.
  * @module @deepseek-ai/dsh-tools/src/tool-search
  */
@@ -8,23 +8,24 @@
 import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import { defineTool } from './schema.ts'
 import { searchTools, TOOL_SEARCH_LIMIT, TOOL_SEARCH_NAME } from './defer.ts'
-import type { ToolDefinition, ToolRunContext } from './index.ts'
-import type { ToolSdkSchema } from './ts-types.ts'
+import type { ToolDefinition, ToolRunContext } from './contracts.ts'
 
 /** What `tool_search` needs from the registry that owns it. */
 export interface ToolSearchOptions {
   /**
-   * The tools the calling scope defers, with their SDK projections.
-   * @param scope - the calling agent.
+   * The tools the calling scope defers for this call's step.
+   * @param exec - the `tool_search` call: its agent and step admission.
    * @returns every deferred visible tool, activated or not.
    */
-  deferredTools(scope: ScopeKey | undefined): readonly ToolSdkSchema[]
+  deferredTools(exec: ToolRunContext): readonly ToolDefinition[]
   /**
-   * Render declarations in the PTC runtime's SDK language.
-   * @param schemas - the found tools.
-   * @returns the fenced declaration text.
+   * Render the found tools' declarations for the caller: a program reads its
+   * executor's SDK format, a direct call JSON schemas.
+   * @param tools - the found tools.
+   * @param exec - the `tool_search` call.
+   * @returns the declaration text.
    */
-  renderSdkDeclarations(schemas: readonly ToolSdkSchema[]): string
+  renderDeclarations(tools: readonly ToolDefinition[], exec: ToolRunContext): string
   /**
    * Add tools to the calling agent's declared tools from its next step.
    * @param scope - the calling agent.
@@ -46,11 +47,6 @@ interface ToolSearchOutput {
 const DESCRIPTION = 'Look up the declarations of tools listed by name only under "More tools". '
   + 'Pass exact `names`, or a keyword `query` matched against tool names and descriptions; '
   + `at most ${String(TOOL_SEARCH_LIMIT)} tools are returned.`
-
-/** Render the native result: the declarations as JSON tool schemas. */
-function nativeDeclarations(schemas: readonly ToolSdkSchema[]): string {
-  return JSON.stringify(schemas.map(({ name, description, parameters }) => ({ name, description, parameters })), null, 2)
-}
 
 /**
  * Build the reserved `tool_search` definition.
@@ -88,15 +84,14 @@ export function createToolSearchTool(options: ToolSearchOptions): ToolDefinition
       if ((args.names === undefined || args.names.length === 0) && (args.query === undefined || args.query.trim().length === 0)) {
         return Promise.reject(new Error('tool_search needs `names` or a non-empty `query`'))
       }
-      const { found, unknown } = searchTools(options.deferredTools(exec.agent), args.names, args.query)
-      // A program inside run_code reads the SDK's own format; a direct call
-      // reads JSON schemas, and those tools join the agent's declared tools.
-      const nested = exec.parent !== undefined
-      if (!nested && exec.agent !== undefined && found.length > 0) {
-        options.activate(exec.agent, found.map(schema => schema.name))
+      const { found, unknown } = searchTools(options.deferredTools(exec), args.names, args.query)
+      // A program reads its SDK's own format; only a direct call adds the
+      // found tools to the agent's declared tools.
+      if (exec.parent === undefined && exec.agent !== undefined && found.length > 0) {
+        options.activate(exec.agent, found.map(tool => tool.name))
       }
-      const declarations = found.length === 0 ? '' : nested ? options.renderSdkDeclarations(found) : nativeDeclarations(found)
-      return Promise.resolve({ tools: found.map(schema => schema.name), unknown, declarations })
+      const declarations = found.length === 0 ? '' : options.renderDeclarations(found, exec)
+      return Promise.resolve({ tools: found.map(tool => tool.name), unknown, declarations })
     },
   })
 }

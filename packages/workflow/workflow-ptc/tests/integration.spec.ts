@@ -7,7 +7,6 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
-import { recordSubagentModelSelection, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/src/model-selection-state.ts'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -190,7 +189,7 @@ return [first, second, third, fourth, fifth]`,
       const seen: SubagentStartRequest[] = []
       ctx.subagents.registerProvider({
         name: 'fixed',
-        capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+        capabilities: { agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false },
         inheritsParentContext: false,
         start: (request) => {
           seen.push(request)
@@ -217,8 +216,7 @@ return [first, second, third, fourth, fifth]`,
 
     it('limits an explicit route to the Session\'s allowed routes when a selection policy is recorded', async () => {
       const { ctx, parent } = await setup([textResponse('allowed child')], XHIGH)
-      ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
-      recordSubagentModelSelection(ctx.sessionProjections, parent.session, [{ provider: 'mock', model: 'mock' }])
+      parent.session.append('subagent/model-selection-policy', { allowedModels: [{ provider: 'mock', model: 'mock' }] })
       const start = vi.spyOn(ctx.subagents, 'startActivation')
       const refused = ctx.workflowEngine.start({
         meta: { name: 'refused-route', description: 'route outside the pool' },

@@ -27,6 +27,8 @@ kind: "package-reference"
 
 在自定义 `dsh` 配置组合中，将本服务与 [`fs-ssh`](../fs-ssh/README.zh.md)、[`subprocess-ssh`](../subprocess-ssh/README.zh.md) 和 [`sandbox-ssh`](../sandbox-ssh/README.zh.md) 组合。主机运行 Harness、模型传输和 Session 存储；远端机器提供文件与进程。headless 配置组合支持这种安排。
 
+辅助进程验证线协议中的额外可写根目录；其执行限制的提供方要求使用远端文件系统中的物理目录路径。只读模式不授予这些目录的写权限。
+
 ### 部署前提
 
 两端均需运行 Linux 或 macOS。本地 `ssh` 命令必须支持连接复用与 Unix 套接字转发，服务器也必须允许该转发。启动前配置主机别名、凭据与已知主机记录：本服务启用 `BatchMode`、要求严格检查主机密钥、禁用认证代理转发，且不提供交互认证流程。
@@ -56,8 +58,6 @@ kind: "package-reference"
 <summary>实现细节 — 点击展开</summary>
 
 OpenSSH 主连接承载私有管理 RPC。每条程序流使用独立转发的 Unix 套接字和独立 SSH 通道。程序 stdout 无法伪造管理回复，也不会占用控制流的通道窗口；SSH 传输拥塞仍会影响共享连接。
-
-helper 的策略 schema 接受 `additionalRoots`；helper 先经远端文件系统规范化每个根目录，再由其沙箱与文件系统围栏执行，因此远端 Session 的全部根目录都位于该主机上。
 
 每个流预留项都有一个随机 256 位 TLS 预共享密钥，仅由管理 RPC 传递。TLS 认证两端并保护流中的每个字节；密钥绝不作为流前缀发送。套接字目录为私有目录（`0700`），套接字使用 `0600` 权限。替换可写套接字路径无法冒充端点或获知流密钥；攻击者仍可中断服务或转发不透明的 TLS 记录。
 

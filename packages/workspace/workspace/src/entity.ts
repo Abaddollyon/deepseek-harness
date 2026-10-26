@@ -38,12 +38,13 @@ export interface WorkspaceEntityHost {
   table(): KvTable<WorkspaceId, WorkspaceRecord>
 
   /**
-   * Read a session's world-qualified canonical directory from the registry's header index.
-   * @param id - Session whose indexed path is requested.
-   * @returns the {@link workspacePathKey} of its directory, or `undefined` when
-   * the header is missing or its cwd cannot identify an existing directory.
+   * Validate an already-accounted session, preserving ownership when its fully
+   * qualified cwd cannot resolve because a path component is missing.
+   * @param id - Session already present in this workspace's candidate account.
+   * @param path - {@link workspacePathKey} of the Workspace's stored canonical directory in its world.
+   * @returns whether the candidate remains a member.
    */
-  sessionPath(id: SessionId): string | undefined
+  candidateMatches(id: SessionId, path: string): boolean
 
   /**
    * Resolve the execution world holding a Workspace's paths.
@@ -121,7 +122,7 @@ export class WorkspaceEntity implements Workspace {
 
   get sessionIds(): readonly SessionId[] {
     const key = workspacePathKey(this.record.agentPreset, this.record.path)
-    return this.record.sessionIds.filter(id => this.host.sessionPath(id) === key)
+    return this.record.sessionIds.filter(id => this.host.candidateMatches(id, key))
   }
 
   async setTitle(title: string): Promise<void> {
@@ -233,7 +234,7 @@ export class WorkspaceEntity implements Workspace {
   /**
    * The single write path: run `fn` on the domain write chain via
    * `table.update`, stamping `updatedAt` and pruning candidates that no
-   * longer pass the id-plus-canonical-cwd membership check, then swap the
+   * longer pass the candidate membership check, then swap the
    * snapshot.
    *
    * `fn` sees the value current at its chain slot, so membership decisions
@@ -248,7 +249,7 @@ export class WorkspaceEntity implements Workspace {
       next = await this.host.table().update(this.id, (current) => {
         const changed = fn(current)
         const key = workspacePathKey(changed.agentPreset, changed.path)
-        const sessionIds = changed.sessionIds.filter(id => this.host.sessionPath(id) === key)
+        const sessionIds = changed.sessionIds.filter(id => this.host.candidateMatches(id, key))
         if (changed === current && sessionIds.length === current.sessionIds.length) {
           throw unchangedSentinel
         }

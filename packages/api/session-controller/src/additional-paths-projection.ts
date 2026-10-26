@@ -16,9 +16,10 @@ const additionalPathsProjection = {
 } satisfies ProjectionDefinition<'additionalPaths', readonly string[] | null>
 
 /**
- * Register the Session additional-root projection.
+ * Register the Session additional-root projection on the calling fiber.
  * @param ctx - Session Controller context.
+ * @returns when the registration is ready, before consumers are published.
  */
-export function installAdditionalPathsProjection(ctx: Context): void {
-  ctx.sessionProjections.register(additionalPathsProjection)
+export async function installAdditionalPathsProjection(ctx: Context): Promise<void> {
+  await ctx.sessionProjections.register(additionalPathsProjection)
 }

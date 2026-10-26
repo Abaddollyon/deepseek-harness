@@ -8,6 +8,8 @@ describe('Session additional roots', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const session = ctx.sessions.prepare(SessionId('roots'), { meta: { cwd: '/work/app', additionalPaths: ['/work/lib', '/work/docs'] } })
+    ctx.effect(() => ctx.sessions.enter(session))
+    ctx.sessions.announce(session)
     session.append('turn/start', { turn: 1 })
 
     const events = session.snapshotEvents()
@@ -26,6 +28,8 @@ describe('Session additional roots', () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const parent = ctx.sessions.prepare(SessionId('parent'), { meta: { cwd: '/work/app', additionalPaths: ['/work/lib'] } })
+    ctx.effect(() => ctx.sessions.enter(parent))
+    ctx.sessions.announce(parent)
     parent.append('turn/start', { turn: 1 })
     parent.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     const seed = buildForkSeed(parent.snapshotEvents(), SessionSeq(2))

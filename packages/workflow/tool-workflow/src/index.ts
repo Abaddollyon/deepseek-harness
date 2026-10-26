@@ -18,7 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolExecution, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { JobId, JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type { JobId, JobOutcome, JobToolCall } from '@deepseek-ai/dsh-jobs'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 // Type-only: `ctx.get('spillStore')` resolves when an optional spill backend is composed.
 import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
@@ -330,6 +330,7 @@ function renderResult(name: string, agentsStarted: number, value: JsonValue): st
  * @param ctx - plugin context (engine, optional jobs registry, logger).
  * @param args - the validated tool call.
  * @param parent - the calling agent; owns the job.
+ * @param toolCall - creating invocation, including its root call.
  * @param deps - the tool's recorder/mirror taps, the result cap, and the result spill request.
  * @returns the background result for the tool's output schema.
  */
@@ -337,6 +338,7 @@ function startBackgroundRun(
   ctx: Context,
   args: WorkflowCallArgs,
   parent: Agent,
+  toolCall: JobToolCall,
   deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number; spill: Omit<SaveTextSpill, 'content'> },
 ): { kind: 'background'; jobId: JobId; runId: WorkflowRunId } {
   const jobs = ctx.get('jobs')
@@ -348,6 +350,7 @@ function startBackgroundRun(
     kind: 'workflow',
     label: args.meta.name,
     owner: parent.id,
+    toolCall,
     run: (job) => {
       // A synchronous engine rejection (META_INVALID/SCRIPT_PARSE) propagates
       // out of the starter, so the registry registers nothing and the model
@@ -491,7 +494,7 @@ export function apply(ctx: Context, config: Config): void {
         // jobs.start synchronously from there. The shell tools await a
         // sandbox escalation approval before registering, which is the window
         // their check covers.
-        return startBackgroundRun(ctx, args, parent, {
+        return startBackgroundRun(ctx, args, parent, { callId: exec.callId, rootCallId: exec.rootCallId }, {
           recorder,
           mirror,
           maxResultChars,

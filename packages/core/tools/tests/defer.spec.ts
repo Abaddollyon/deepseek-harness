@@ -1,47 +1,25 @@
 /**
- * Deferred tool declarations: the policy, the SDK index and declaration
- * fragments, `tool_search` inside a program and as a native call (with
- * activation and its resume from the logged request header), and the argument
- * error that carries a deferred tool's declaration.
+ * Deferred tool declarations in the registry: the policy, `tool_search` as a
+ * native call (with activation and its resume from the logged request
+ * header), the native index section, and the argument error that carries a
+ * deferred tool's declaration. The PTC SDK side lives in the PTC executor's
+ * defer spec.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
-import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
-import ToolRuntime, { RUN_CODE_NAME, TOOL_SEARCH_NAME, defineTool, renderToolsSdk, renderToolsSdkPy } from '@deepseek-ai/dsh-tools'
-import type { Config, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import SystemPrompt, { TOOL_ORDER_REST } from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime, { TOOL_SEARCH_NAME, ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolDeferConfig, ToolExecution, ToolExecutionResult, ToolExecutor } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { byToolName, compileToolDeferPolicy, firstSentence, searchTools } from '../src/defer.ts'
-import { renderToolDeclarations } from '../src/ts-types.ts'
-import { renderToolDeclarationsPy } from '../src/py-types.ts'
-import type { ToolSdkSchema } from '../src/ts-types.ts'
 
 const signal = new AbortController().signal
-
-/** A runtime whose program calls one binding and returns its value. */
-class FakeRuntime extends PtcRuntime {
-  readonly language: string
-  readonly isolation = 'fake'
-  behavior: (request: PtcRunRequest) => Promise<PtcRunResult> = () => Promise.resolve({ logs: [] })
-
-  constructor(ctx: Context, config: { language?: string } = {}) {
-    super(ctx)
-    this.language = config.language ?? 'typescript'
-  }
-
-  resolve(request: PtcRunRequest): PtcRunSpec {
-    return { ...request, cwd: request.cwd ?? process.cwd(), timeoutMs: request.timeoutMs ?? 120_000 }
-  }
-
-  run(request: PtcRunRequest): Promise<PtcRunResult> {
-    return this.behavior(request)
-  }
-}
 
 /** A logged request header the resume seeding reads, or none for a new Session. */
 type LoggedHeader = { tools?: ToolSchema[] } | undefined
@@ -62,18 +40,20 @@ function register(ctx: Context, name: string, description = `The ${name} tool. M
   }))
 }
 
-async function setup(config: Config, language = 'typescript') {
+async function setup(defer?: ToolDeferConfig) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {})
-  await ctx.plugin(ToolRuntime, config)
-  await ctx.plugin(FakeRuntime, { language })
+  await ctx.plugin(ToolRuntime, defer === undefined ? {} : { defer })
+  await ctx.plugin(NativeToolExecutor)
   for (const name of ['bash', 'gbrain_query', 'gbrain_put_page', 'mcp__home__light_on']) register(ctx, name)
-  return { ctx, runtime: ctx.ptcRuntime as FakeRuntime }
+  return { ctx }
 }
 
-async function sdkOf(ctx: Context, scope?: Agent): Promise<string> {
-  const assembly = await ctx.systemPrompt.assemble(scope === undefined ? {} : { scope })
-  return assembly.sections.find(section => section.name === 'tools:sdk')?.text ?? ''
+/** Mount an agent scope under `ctx` and return its context. */
+async function scopeOf(ctx: Context, agent: Agent): Promise<Context> {
+  let scoped!: Context
+  await ctx.plugin(Object.assign((inner: Context) => { scoped = createScope(inner, agent).ctx }, { inject: ['tools', 'systemPrompt'] }))
+  return scoped
 }
 
 async function wireNames(ctx: Context, scope?: Agent): Promise<string[]> {
@@ -81,20 +61,17 @@ async function wireNames(ctx: Context, scope?: Agent): Promise<string[]> {
   return assembly.tools.map(tool => tool.name)
 }
 
+async function indexOf(ctx: Context, scope?: Agent): Promise<string | undefined> {
+  return (await ctx.systemPrompt.assemble(scope === undefined ? {} : { scope })).sections.find(section => section.name === 'tools:deferred')?.text
+}
+
 function call(ctx: Context, name: string, args: Record<string, unknown>, agent?: Agent): Promise<ToolExecutionResult> {
-  return ctx.tools.execute({ signal, callId: ToolCallId('call-1'), name, arguments: args, ...agent ? { agent } : {} })
+  return executeModelToolFixture(ctx, { signal, callId: ToolCallId('call-1'), name, arguments: args, ...agent ? { agent } : {} })
 }
 
 function text(result: ToolExecutionResult): string {
   return result.content.map(block => block.type === 'text' ? block.text : '').join('\n')
 }
-
-const schema = (name: string, description = `The ${name} tool.`): ToolSdkSchema => ({
-  name,
-  description,
-  parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
-  output: { type: 'string' },
-})
 
 describe('the defer policy', () => {
   it('defers included names and deferLoading tools unless excluded, with whole-name `*` patterns', () => {
@@ -133,111 +110,44 @@ describe('the defer policy', () => {
   })
 })
 
-describe('the SDK index and declaration fragments', () => {
-  it('lists deferred tools after the declarations, one line per small family and one line per large family', () => {
-    const large = Array.from({ length: 9 }, (_, index) => ({ name: `cua__tool_${String(index)}`, description: 'Do a thing.' }))
-    const sdk = renderToolsSdk([schema('bash')], [
-      ...large,
-      { name: 'gbrain_put_page', description: 'Write a page. Then index it.' },
-      { name: 'mcp__home__light_on', description: '' },
-    ])
-    const [declarations, index] = sdk.split('## More tools') as [string, string]
-    expect(declarations).toContain('  bash: {')
-    expect(declarations).not.toContain('gbrain_put_page')
-    expect(index).toContain('`console.log((await tools.tool_search({ names: ["cua__tool_0"] })).declarations)`')
-    expect(index).toContain('- `cua__*` (9 tools): tool_0, tool_1, tool_2, tool_3, tool_4, tool_5, tool_6, tool_7, tool_8')
-    expect(index).toContain('- `gbrain_put_page` — Write a page.')
-    expect(index).toMatch(/\n- `mcp__home__light_on`$/u)
-    expect(renderToolsSdk([schema('bash')])).not.toContain('## More tools')
-  })
-
-  it('renders the Python index with a Python call', () => {
-    const sdk = renderToolsSdkPy([schema('bash')], [{ name: 'gbrain_put_page', description: 'Write a page.' }])
-    expect(sdk).toContain('print((await tools.tool_search({"names": ["gbrain_put_page"]}))["declarations"])')
-    expect(sdk).toContain('- `gbrain_put_page` — Write a page.')
-  })
-
-  it('renders fragments that merge into the SDK declarations', () => {
-    const ts = renderToolDeclarations([schema('gbrain_put_page')])
-    expect(ts).toMatch(/^```ts\ninterface ToolArgsMap \{\n {2}\/\*\* The gbrain_put_page tool\. \*\/\n {2}gbrain_put_page: \{/u)
-    expect(ts).toContain('interface ToolOutputMap {\n  gbrain_put_page: string;\n}')
-    const py = renderToolDeclarationsPy([schema('gbrain_put_page')])
-    expect(py).toMatch(/^```python\nfrom typing import /u)
-    expect(py).toContain('class Tools(Protocol):\n    async def gbrain_put_page(self, args: GbrainPutPageArgs) -> str:')
-    expect(py).not.toContain('tools: Tools')
-  })
-})
-
 describe('deferral in the registry', () => {
   it('keeps an omitted deployment policy absent', () => {
     expect(ToolRuntime.Config({})).not.toHaveProperty('defer')
   })
 
   it('changes nothing without a policy', async () => {
-    const { ctx } = await setup({ mode: 'ptc' })
-    const sdk = await sdkOf(ctx)
-    expect(sdk).toContain('  gbrain_put_page: {')
-    expect(sdk).not.toContain('tool_search')
+    const { ctx } = await setup()
+    expect(await wireNames(ctx)).toEqual(['bash', 'gbrain_put_page', 'gbrain_query', 'mcp__home__light_on'])
+    expect(ctx.tools.get(TOOL_SEARCH_NAME)).toBeUndefined()
     await expect(call(ctx, TOOL_SEARCH_NAME, { query: 'x' })).resolves.toMatchObject({ isError: true })
   })
 
-  it('declares only loaded tools plus tool_search in the SDK and keeps deferred tools callable', async () => {
-    const { ctx, runtime } = await setup({ mode: 'ptc', defer: { include: ['gbrain_*', 'mcp__*'], exclude: ['gbrain_query'] } })
-    const sdk = await sdkOf(ctx)
-    expect(sdk).toContain('  gbrain_query: {')
-    expect(sdk).toContain('  tool_search: {')
-    expect(sdk).not.toContain('  gbrain_put_page: {')
-    expect(sdk).toContain('- `gbrain_put_page` — The gbrain_put_page tool.')
-    expect(await wireNames(ctx)).toEqual([RUN_CODE_NAME])
-
-    runtime.behavior = async (request) => {
-      const functions = request.bindings[0]!.functions
-      const search = await functions[TOOL_SEARCH_NAME]!({ names: ['gbrain_put_page', 'bash'] }) as { tools: string[]; unknown: string[]; declarations: string }
-      const written = await functions['gbrain_put_page']!({ value: 'v' })
-      return { logs: [search.declarations], value: { tools: search.tools, unknown: search.unknown, written } }
-    }
-    const result = await call(ctx, RUN_CODE_NAME, { code: 'x', description: 'Look up and call' })
-    expect(result.isError).toBe(false)
-    expect(text(result)).toContain('```ts\ninterface ToolArgsMap {')
-    expect(text(result)).toContain('"tools": [\n    "gbrain_put_page"\n  ]')
-    expect(text(result)).toContain('"unknown": [\n    "bash"\n  ]')
-    expect(text(result)).toContain('"written": "gbrain_put_page:v"')
-  })
-
-  it('attaches the declaration to a deferred tool\'s argument error, in the SDK format inside a program', async () => {
-    const { ctx, runtime } = await setup({ mode: 'ptc', defer: { include: ['gbrain_put_page'] } })
-    runtime.behavior = async (request) => {
-      try {
-        await request.bindings[0]!.functions['gbrain_put_page']!({})
-        return { logs: [] }
-      } catch (error) {
-        return { logs: [(error as Error).message] }
-      }
-    }
-    const nested = text(await call(ctx, RUN_CODE_NAME, { code: 'x', description: 'Call without args' }))
-    expect(nested).toContain('invalid arguments')
-    expect(nested).toContain('Declaration of gbrain_put_page:\n```ts\ninterface ToolArgsMap {')
-
-    const native = await setup({ mode: 'native', defer: { include: ['gbrain_put_page'] } })
-    const direct = text(await call(native.ctx, 'gbrain_put_page', {}))
+  it('attaches the JSON declaration to a deferred tool\'s argument error on a direct call', async () => {
+    const { ctx } = await setup({ include: ['gbrain_put_page'] })
+    const direct = text(await call(ctx, 'gbrain_put_page', {}))
+    expect(direct).toContain('invalid arguments')
     expect(direct).toContain('Declaration of gbrain_put_page:\n{\n  "name": "gbrain_put_page"')
-    expect(text(await call(native.ctx, 'bash', {}))).not.toContain('Declaration of')
+    expect(text(await call(ctx, 'bash', {}))).not.toContain('Declaration of')
+    // A declared tool's argument error passes through unchanged.
+    const declared = new ToolArgsError(['value: required'])
+    expect(ctx.tools.explainArgsError(declared, { name: 'bash' } as ToolExecution)).toBe(declared)
   })
 
-  it('activates found tools for the calling agent in native presentation, from its next request', async () => {
-    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*', 'mcp__*'] } })
+  it('activates found tools for the calling agent from its next request', async () => {
+    const { ctx } = await setup({ include: ['gbrain_*', 'mcp__*'] })
     const agent = agentWith('native-agent')
     const other = agentWith('other-agent')
-    for (const scoped of [agent, other]) {
-      await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, scoped) }, { inject: ['tools', 'systemPrompt'] }))
-    }
+    for (const scoped of [agent, other]) await scopeOf(ctx, scoped)
     expect(await wireNames(ctx, agent)).toEqual(['bash', TOOL_SEARCH_NAME])
+    expect(ctx.tools.get(TOOL_SEARCH_NAME, agent)?.name).toBe(TOOL_SEARCH_NAME)
 
     const result = await call(ctx, TOOL_SEARCH_NAME, { query: 'light' }, agent)
     expect(result.isError).toBe(false)
     expect(text(result)).toContain('Declarations for mcp__home__light_on:\n[\n  {\n    "name": "mcp__home__light_on"')
     expect(await wireNames(ctx, agent)).toEqual(['bash', 'mcp__home__light_on', TOOL_SEARCH_NAME])
     expect(await wireNames(ctx, other)).toEqual(['bash', TOOL_SEARCH_NAME])
+    await call(ctx, TOOL_SEARCH_NAME, { names: ['gbrain_put_page'] }, agent)
+    expect(await wireNames(ctx, agent)).toEqual(['bash', 'gbrain_put_page', 'mcp__home__light_on', TOOL_SEARCH_NAME])
     await expect(call(ctx, TOOL_SEARCH_NAME, {}, agent)).resolves.toMatchObject({ isError: true })
     await expect(call(ctx, TOOL_SEARCH_NAME, { names: [], query: '  ' }, agent)).resolves.toMatchObject({ isError: true })
     expect(text(await call(ctx, TOOL_SEARCH_NAME, { names: ['bash', 'nothing'] }, agent)))
@@ -248,12 +158,10 @@ describe('deferral in the registry', () => {
   })
 
   it('lists deferred tools by name for a native agent, unchanged by its activations', async () => {
-    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*', 'mcp__*'] } })
+    const { ctx } = await setup({ include: ['gbrain_*', 'mcp__*'] })
     const agent = agentWith('native-index')
-    await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
-    const index = async (): Promise<string> => (await ctx.systemPrompt.assemble({ scope: agent })).sections
-      .find(section => section.name === 'tools:deferred')?.text ?? ''
-    const before = await index()
+    await scopeOf(ctx, agent)
+    const before = await indexOf(ctx, agent)
     expect(before).toBe([
       '## More tools',
       '',
@@ -263,33 +171,39 @@ describe('deferral in the registry', () => {
       '- `gbrain_query` — The gbrain_query tool.',
       '- `mcp__home__light_on` — The mcp__home__light_on tool.',
     ].join('\n'))
-    expect(await sdkOf(ctx, agent)).toBe('')
     await call(ctx, TOOL_SEARCH_NAME, { names: ['mcp__home__light_on'] }, agent)
     expect(await wireNames(ctx, agent)).toContain('mcp__home__light_on')
-    expect(await index()).toBe(before)
+    expect(await indexOf(ctx, agent)).toBe(before)
 
-    // PTC carries the index in its SDK, and a registry that cannot defer
-    // anything registers no index section at all.
-    const ptc = await setup({ mode: 'ptc', defer: { include: ['gbrain_*'] } })
-    expect((await ptc.ctx.systemPrompt.assemble()).sections.find(section => section.name === 'tools:deferred')?.text).toBe('')
-    const plain = await setup({ mode: 'native' })
+    // A registry that cannot defer anything registers no index section at all.
+    const plain = await setup()
     expect((await plain.ctx.systemPrompt.assemble()).sections.map(section => section.name)).not.toContain('tools:deferred')
   })
 
+  it('renders the index only through an executor that lists deferred tools there', async () => {
+    const { ctx } = await setup({ include: ['gbrain_*'] })
+    const agent = agentWith('declares-all')
+    const scoped = await scopeOf(ctx, agent)
+    const declaresAll: ToolExecutor = {
+      describe: tools => ({ schemas: tools.map(({ name, description, parameters }) => ({ name, description, parameters })) }),
+      execute: () => Promise.reject(new Error('not called')),
+    }
+    scoped.tools.setExecutor(declaresAll)
+    expect(await indexOf(ctx, agent)).toBe('')
+    expect(await wireNames(ctx, agent)).toEqual(['bash', 'gbrain_put_page', 'gbrain_query', 'mcp__home__light_on', TOOL_SEARCH_NAME])
+  })
+
   it('registers the native index for a scoped policy and on the first deferLoading tool', async () => {
-    const indexOf = async (ctx: Context, scope?: Agent): Promise<string | undefined> =>
-      (await ctx.systemPrompt.assemble(scope === undefined ? {} : { scope })).sections.find(section => section.name === 'tools:deferred')?.text
-    const scoped = await setup({ mode: 'native' })
+    const scoped = await setup()
     const agent = agentWith('scoped-index')
-    let agentCtx!: Context
-    await scoped.ctx.plugin(Object.assign((inner: Context) => { agentCtx = createScope(inner, agent).ctx }, { inject: ['tools', 'systemPrompt'] }))
+    const agentCtx = await scopeOf(scoped.ctx, agent)
     const dispose = agentCtx.tools.deferAs({ include: ['gbrain_put_page'] })
     expect(await indexOf(scoped.ctx, agent)).toContain('- `gbrain_put_page` — The gbrain_put_page tool.')
     expect(await indexOf(scoped.ctx)).toBeUndefined()
     dispose()
     expect(await indexOf(scoped.ctx, agent)).toBeUndefined()
 
-    const flagged = await setup({ mode: 'native' })
+    const flagged = await setup()
     for (const name of ['flagged', 'flagged_too']) {
       flagged.ctx.tools.register(defineTool({
         name,
@@ -301,29 +215,19 @@ describe('deferral in the registry', () => {
       }))
     }
     expect(await indexOf(flagged.ctx)).toContain('- `flagged` — The flagged tool.\n- `flagged_too` — The flagged_too tool.')
-  })
 
-  it('keeps a tool activated under native presentation listed by name in the SDK after the scope switches to ptc', async () => {
-    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*', 'mcp__*'] } })
-    const agent = agentWith('switching-agent')
-    let scoped!: Context
-    await ctx.plugin(Object.assign((inner: Context) => { scoped = createScope(inner, agent).ctx }, { inject: ['tools', 'systemPrompt'] }))
-    expect(await wireNames(ctx, agent)).not.toContain('mcp__home__light_on')
-    const result = await call(ctx, TOOL_SEARCH_NAME, { names: ['mcp__home__light_on'] }, agent)
-    expect(text(result)).toContain('Declarations for mcp__home__light_on:\n[')
-    expect(await wireNames(ctx, agent)).toContain('mcp__home__light_on')
-    scoped.tools.presentAs('ptc')
-    const sdk = await sdkOf(ctx, agent)
-    expect(sdk).toContain('- `mcp__home__light_on` — The mcp__home__light_on tool.')
-    expect(sdk).not.toContain('  mcp__home__light_on: {')
+    // A policy that matches no visible tool renders an empty index and no lookup.
+    const unmatched = await setup({ include: ['nothing_*'] })
+    expect(await indexOf(unmatched.ctx)).toBe('')
+    expect(await wireNames(unmatched.ctx)).not.toContain(TOOL_SEARCH_NAME)
   })
 
   it('restores a resumed agent\'s activations from the tools its logged request header declared', async () => {
-    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*'] } })
+    const { ctx } = await setup({ include: ['gbrain_*'] })
     const resumed = agentWith('resumed', { tools: [{ name: 'bash', description: '', parameters: {} }, { name: 'gbrain_put_page', description: '', parameters: {} }] })
     const fresh = agentWith('fresh')
     for (const scoped of [resumed, fresh]) {
-      await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, scoped) }, { inject: ['tools', 'systemPrompt'] }))
+      await scopeOf(ctx, scoped)
       await ctx.serial('agent/created', { agent: scoped, source: 'resume' } as never)
     }
     expect(await wireNames(ctx, resumed)).toEqual(['bash', 'gbrain_put_page', 'mcp__home__light_on', TOOL_SEARCH_NAME])
@@ -331,29 +235,38 @@ describe('deferral in the registry', () => {
   })
 
   it('seeds nothing from an agent whose Session has no request-header history', async () => {
-    const { ctx } = await setup({ mode: 'native', defer: { include: ['gbrain_*'] } })
+    const { ctx } = await setup({ include: ['gbrain_*'] })
     const standIn = { id: SessionId('stand-in'), session: {} as Agent['session'] } as Agent
     const sessionless = { id: SessionId('sessionless') } as Agent
     for (const agent of [standIn, sessionless]) {
-      await ctx.plugin(Object.assign((inner: Context) => { createScope(inner, agent) }, { inject: ['tools', 'systemPrompt'] }))
+      await scopeOf(ctx, agent)
       await ctx.serial('agent/created', { agent, source: 'create' } as never)
       expect(await wireNames(ctx, agent)).toEqual(['bash', 'mcp__home__light_on', TOOL_SEARCH_NAME])
     }
   })
 
-  it('shadows the deployment policy per scope and rejects a second declaration or an unscoped one', async () => {
-    const { ctx } = await setup({ mode: 'ptc', defer: { include: ['gbrain_*'] } })
+  it('shadows the deployment policy per scope and rejects a second declaration, an unscoped one, or the reserved name', async () => {
+    const { ctx } = await setup({ include: ['gbrain_*'] })
     const agent = agentWith('scoped')
-    let scoped!: Context
-    await ctx.plugin(Object.assign((inner: Context) => { scoped = createScope(inner, agent).ctx }, { inject: ['tools', 'systemPrompt'] }))
+    const scoped = await scopeOf(ctx, agent)
     const dispose = scoped.tools.deferAs({ include: ['bash'] })
     expect(() => scoped.tools.deferAs({ include: ['x'] })).toThrow(/already declared/)
     expect(() => ctx.tools.deferAs({ include: ['x'] })).toThrow(/requires a scoped context/)
-    const sdk = await sdkOf(ctx, agent)
-    expect(sdk).toContain('  gbrain_put_page: {')
-    expect(sdk).toContain('- `bash` — The bash tool.')
+    expect(await wireNames(ctx, agent)).toEqual(['gbrain_put_page', 'gbrain_query', 'mcp__home__light_on', TOOL_SEARCH_NAME])
+    expect(await indexOf(ctx, agent)).toContain('- `bash` — The bash tool.')
     dispose()
-    expect(await sdkOf(ctx, agent)).toContain('- `gbrain_put_page` — The gbrain_put_page tool.')
+    expect(await wireNames(ctx, agent)).toEqual(['bash', 'mcp__home__light_on', TOOL_SEARCH_NAME])
     expect(() => { register(ctx, TOOL_SEARCH_NAME) }).toThrow(/reserved for deferred tool lookup/)
+  })
+
+  it('lists tool_search where toolOrder may name it', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(SystemPrompt, { toolOrder: [TOOL_SEARCH_NAME, TOOL_ORDER_REST] })
+      await ctx.plugin(ToolRuntime, { defer: { include: ['gbrain_*'] } })
+      await ctx.plugin(NativeToolExecutor)
+      for (const name of ['bash', 'gbrain_query']) register(ctx, name)
+      expect(await wireNames(ctx)).toEqual([TOOL_SEARCH_NAME, 'bash'])
+    } finally { await ctx.fiber.dispose() }
   })
 })

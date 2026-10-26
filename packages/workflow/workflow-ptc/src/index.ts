@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { availableParallelism } from 'node:os'
 import * as vm from 'node:vm'
+import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -16,7 +17,7 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
-import { subagentModelSelectionPolicy } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import { subagentModelSelectionPolicy, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { PtcWorkflowRun } from './host.ts'
 import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
@@ -165,6 +166,8 @@ class PtcWorkflowEngine extends WorkflowEngine {
 
   private readonly config: ResolvedConfig
   private readonly childDefaults: AgentOptions | undefined
+  /** Reader of each Session's allowed child routes; it stays readable for holder-owned runs after unload. */
+  private policyReader!: Parameters<typeof subagentModelSelectionPolicy>[0]
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -173,6 +176,11 @@ class PtcWorkflowEngine extends WorkflowEngine {
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
     this.childDefaults = childAgentDefaults(config.agentOptions)
+  }
+
+  protected async [Service.init](): Promise<void> {
+    // Shared with the subagent tool: the registry keeps one registration per key.
+    this.policyReader = await this.ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
   }
 
   /**
@@ -220,7 +228,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
       subagentProvider,
       this.childDefaults,
       // The policy is recorded once per Session, so the run start reads it.
-      subagentModelSelectionPolicy(runCtx.sessionProjections, request.parent.session),
+      subagentModelSelectionPolicy(this.policyReader, request.parent.session),
       runCtx.sandboxPolicy.resolve({ session: request.parent.session }),
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },

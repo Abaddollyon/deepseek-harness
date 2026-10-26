@@ -1,18 +1,18 @@
 /** Session commands whose activation policy is explicit at each Remote method. */
 
-import { resolveModelSelection } from './catalog.ts'
+import { modelAvailable } from './catalog.ts'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection as AgentModelSelection } from '@deepseek-ai/dsh-agent'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type {
-  AttachmentAdmissionPart, FileAttachmentRef, ImageAttachmentRef,
+  AttachmentAdmissionPart, ImageAttachmentRef,
 } from '@deepseek-ai/dsh-attachment'
-import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload/types'
+import type { FileUploadReceiptId, StagedAttachment } from '@deepseek-ai/dsh-client-file-upload/types'
 import type {} from '@deepseek-ai/dsh-client-file-upload'
 import {
-  assistantStreamChunks, createUserMessage, freezeMessage,
+  ReasoningEffortId, assistantStreamChunks, createUserMessage, freezeMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
@@ -20,7 +20,6 @@ import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
-import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
@@ -32,7 +31,7 @@ import {
   ApiSessionSubagentOwnership,
   apiSessionSubagentOwnershipError,
   hasApiSessionSubagentOwner,
-  inspectApiSession,
+  type ApiSessionCreated,
 } from './agent.ts'
 import type {
   SessionAttachmentRequest,
@@ -54,17 +53,16 @@ import type {
   SessionRequestId,
 } from './types.ts'
 
-interface SessionReadState {
-  readonly id: SessionId
-  readonly header: SessionHeader
-  readonly events: readonly SessionEvent[]
-}
-
 type PromptContentCandidate =
   | SessionPromptRequest['content'][number]
   | Extract<SessionUpdateQueueRequest['action'], { readonly kind: 'edit' }>['content'][number]
 
-function hasPromptContent(content: readonly PromptContentCandidate[]): boolean {
+/**
+ * Whether prompt content carries non-whitespace text or an attachment.
+ * @param content - submitted or edited prompt parts.
+ * @returns false for content the Agent must not receive.
+ */
+export function hasPromptContent(content: readonly PromptContentCandidate[]): boolean {
   return content.some(part => part.type !== 'text' || part.text.trim().length > 0)
 }
 
@@ -88,7 +86,7 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): Session
 export class SessionCommandController {
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
-   * @param agents - sole owner of create, resume, and Session-local model selection.
+   * @param agents - sole owner of create, resume, and Agent composition.
    * @param defaultCwd - project directory used when create names neither a Workspace nor a cwd.
    */
   constructor(
@@ -98,15 +96,15 @@ export class SessionCommandController {
   ) {}
 
   /**
-   * Create or idempotently adopt one ordinary Session.
-   * @param request - requested identity, location, and Agent preset.
-   * @returns the Session identity and resolved preset when configured.
+   * Create one ordinary Session for a new conversation, reusing the named
+   * blank Session while it is an unarchived member of the requested Workspace.
+   * @param request - optional blank Session to reuse, location, and Agent preset.
+   * @returns the created or reused Session identity and its preset when configured.
    */
   async create(request: SessionCreateRequest): Promise<SessionCreateValue> {
     if (request.workspaceId !== undefined && request.cwd !== undefined) {
       throw new RemoteError('gateway/bad-request', 'session.create accepts workspaceId or cwd, not both', {})
     }
-    const sessionId = request.sessionId ?? brandString<SessionId>(`session-${randomUUID()}`)
     let workspace: Workspace | undefined
     if (request.workspaceId !== undefined) {
       workspace = this.ctx.workspaceRegistry.get(request.workspaceId)
@@ -118,18 +116,20 @@ export class SessionCommandController {
     }
     const cwd = workspace?.path ?? request.cwd ?? this.defaultCwd
     const agentPreset = workspace === undefined ? request.agentPreset : this.workspacePreset(workspace, request.agentPreset)
-    let adopted: Agent
+    let created: ApiSessionCreated
     try {
-      adopted = await this.agents.ensureSession(
-        sessionId,
+      created = await this.agents.createSession({
+        ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
         cwd,
-        request.sessionId !== undefined,
-        agentPreset,
-        workspace?.additionalPaths,
-      )
+        ...(workspace === undefined || workspace.additionalPaths.length === 0 ? {} : { additionalPaths: workspace.additionalPaths }),
+        ...(agentPreset === undefined ? {} : { agentPreset }),
+        reusable: sessionId => !this.ctx.workspaceRegistry.archivedSessionIds.includes(sessionId)
+          && (workspace === undefined || workspace.sessionIds.includes(sessionId)),
+      })
     } catch (error) {
-      this.rejectCreation(sessionId, error)
+      this.rejectCreation(error)
     }
+    const sessionId = created.agent.id
     if (workspace !== undefined) {
       try {
         await workspace.attachSession(sessionId)
@@ -141,8 +141,7 @@ export class SessionCommandController {
         )
       }
     }
-    const selected = this.agents.presetForSession(adopted.session)
-    return { sessionId, ...(selected === undefined ? {} : { agentPreset: selected }) }
+    return { sessionId, ...(created.agentPreset === undefined ? {} : { agentPreset: created.agentPreset }) }
   }
 
   /**
@@ -172,16 +171,24 @@ export class SessionCommandController {
   }
 
   /**
-   * Validate and install one Session-local model selection; save the default in the background.
+   * Validate and record one Session model selection; save the default in the background.
    * @param request - Session identity and requested model selection.
-   * @returns the normalized selection installed for the Session, without waiting for default persistence.
+   * @returns the normalized selection recorded for the Session, without waiting for default persistence.
    */
   async selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue> {
     const agent = await this.resolveAgent(request.sessionId)
     return this.agents.serializeImageAdmission(agent, async () => {
       try {
-        const selected = await resolveModelSelection(this.ctx, request)
-        this.agents.selectForNextRequest(agent, selected)
+        await this.requireModel(request)
+        const selected: AgentModelSelection = {
+          provider: request.provider,
+          model: request.model,
+          ...(request.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }),
+        }
+        await this.ctx.llm.resolveCallConfig(selected)
+        agent.model.select(selected)
         void this.ctx.agentDefaultModel.saveSelection(selected).catch((error: unknown) => {
           this.ctx.logger.warn(
             `session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`,
@@ -287,7 +294,6 @@ export class SessionCommandController {
         inheritedEventCount: SessionLogOffset(boundary + 1),
         meta: {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
-          parentSession: source.header.id,
           isSeeded: true,
           ...(composition.agentPreset === undefined
             ? {}
@@ -318,54 +324,40 @@ export class SessionCommandController {
   }
 
   /**
-   * Reject empty content, then admit one prompt after Agent and attachment validation,
-   * ordered after the Agent's earlier admissions, model selections, and preset-default switches.
-   * @param request - Session identity, prompt content, source metadata, and delivery mode.
+   * Admit one prompt after Agent and attachment validation; the Remote method
+   * has already validated the content and built the durable message source.
+   * Admission waits for the Agent's earlier admissions, model selections, and
+   * preset-default switches.
+   * @param request - Session identity, prompt content, and delivery mode.
+   * @param source - the `user-rpc` source recorded on the accepted message.
    * @returns acknowledgement that the Agent accepted the prompt.
    */
-  async prompt(request: SessionPromptRequest): Promise<SessionPromptValue> {
-    if (!hasPromptContent(request.content)) {
-      throw new RemoteError(
-        'gateway/bad-request',
-        'prompt content must include non-whitespace text or an attachment',
-        {},
-      )
-    }
-    const clientTimeZone = request.clientTimeZone === undefined
-      ? undefined
-      : canonicalClientTimeZone(request.clientTimeZone)
-    if (request.clientTimeZone !== undefined && clientTimeZone === undefined) {
-      throw new RemoteError(
-        'session/invalid-time-zone',
-        'clientTimeZone must be UTC or a valid IANA Area/Location name',
-        { value: request.clientTimeZone },
-      )
-    }
+  async prompt(request: SessionPromptRequest, source: MessageSource): Promise<SessionPromptValue> {
     const agent = await this.resolveAgent(request.sessionId)
-    const source: MessageSource = {
-      kind: 'user',
-      rpcId: request.requestId,
-      ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
-    }
-    const hasImage = request.content.some(part => part.type === 'image')
+    if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+    const admission = resolvePromptFileReceipts(
+      request.content,
+      receiptId => this.ctx.fileUploads.resolve(agent, receiptId),
+    )
+    // Encoded images and image upload receipts both make an image prompt.
+    const hasImage = admission.content.some(part => part.type === 'image')
     const admit = async (): Promise<SessionPromptValue> => {
+      // A retry queued behind its original is accepted once.
       if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
       try {
         if (hasImage) {
-          const current = this.agents.selectionFor(agent).current
-          const model = await this.ctx.llm.resolveModelInfo(current.provider, current.model)
-          if (model.inputModalities !== undefined && !model.inputModalities.includes('image')) {
-            throw new RemoteError(
-              'session/attachment-invalid',
-              `Model "${current.model}" does not support image input.`,
-              { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
-            )
+          const current = agent.model.current()
+          if (current !== undefined) {
+            const model = await this.ctx.llm.resolveModelInfo(current.provider, current.model)
+            if (model.inputModalities !== undefined && !model.inputModalities.includes('image')) {
+              throw new RemoteError(
+                'session/attachment-invalid',
+                `Model "${current.model}" does not support image input.`,
+                { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+              )
+            }
           }
         }
-        const admission = resolvePromptFileReceipts(
-          request.content,
-          receiptId => this.ctx.fileUploads.resolve(agent, receiptId),
-        )
         const content = await this.ctx.attachments.admitPromptContent(admission.content)
         const message: UserMessage = createUserMessage({ content, source })
         if (this.ctx.agents.get(agent.id) !== agent) {
@@ -391,17 +383,29 @@ export class SessionCommandController {
     return this.agents.serializeImageAdmission(agent, admit)
   }
 
+  private async requireModel(selection: Pick<AgentModelSelection, 'provider' | 'model'>): Promise<void> {
+    if (!await modelAvailable(this.ctx, selection)) {
+      throw new RemoteError('session/model-unavailable', 'Select an available model before sending a message.',
+        { provider: selection.provider, model: selection.model })
+    }
+  }
+
   /**
    * Read one durable image after proving the Session log references it.
    * @param request - Session and attachment identities used for authorization.
    * @returns the durable attachment reference and base64-encoded bytes.
    */
   async attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue> {
-    let source: SessionReadState
+    let ref: ImageAttachmentRef | undefined
     try {
-      source = await this.readSessionState(request.sessionId)
+      using observation = await this.ctx.sessionQuery.observeSession(request.sessionId, { projectionMode: 'none' })
+      if (observation.source === 'prepared' && observation.header.cwd === undefined) {
+        throw new ApiSessionNotFound(`session "${request.sessionId}" not found`)
+      }
+      ref = referencedImage(observation.events, String(request.attachmentId))
     } catch (error) {
-      if (error instanceof ApiSessionNotFound) {
+      if (error instanceof ApiSessionNotFound
+        || (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND')) {
         throw new RemoteError('session/not-found', error.message, { sessionId: request.sessionId })
       }
       throw new RemoteError(
@@ -410,7 +414,6 @@ export class SessionCommandController {
         {},
       )
     }
-    const ref = referencedImage(source.events, String(request.attachmentId))
     if (ref === undefined) {
       throw new RemoteError(
         'session/attachment-invalid',
@@ -538,16 +541,12 @@ export class SessionCommandController {
     return found.agent
   }
 
-  private rejectCreation(sessionId: SessionId, error: unknown): never {
+  private rejectCreation(error: unknown): never {
     if (remoteErrorOf(error) !== undefined) throw error
-    if (error instanceof Error && error.name === 'SessionAlreadyOwnedError') {
-      throw new RemoteError('session/writer-held', error.message, { sessionId })
-    }
     if (error instanceof ApiSessionPresetConflict) {
       throw new RemoteError('agent-preset/conflict', error.message, {
         sessionId: error.sessionId,
         requestedPreset: error.requestedPreset,
-        ...(error.existingPreset === undefined ? {} : { existingPreset: error.existingPreset }),
       })
     }
     if (error instanceof ApiSessionCwdConflict) {
@@ -560,17 +559,7 @@ export class SessionCommandController {
     if (error instanceof ApiSessionSubagentOwnership) {
       throw apiSessionSubagentOwnershipError(error.sessionId)
     }
-    throw new RemoteError('gateway/internal', `failed to create session "${sessionId}": ${String(error)}`, {})
-  }
-
-  private async readSessionState(sessionId: SessionId): Promise<SessionReadState> {
-    const attached = this.ctx.sessions.get(sessionId)
-    if (attached !== undefined) {
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-      return { id: attached.id, header: attached.header, events: attached.snapshotEvents() }
-    }
-    const inspected = await inspectApiSession(this.ctx, sessionId)
-    return { id: inspected.meta.id, header: inspected.meta, events: inspected.events }
+    throw new RemoteError('gateway/internal', `failed to create session: ${String(error)}`, {})
   }
 
   private async forkWorkspace(source: SessionHeader): Promise<Workspace | undefined> {
@@ -586,14 +575,15 @@ export class SessionCommandController {
   }
 }
 
+/** Replace each file part with the file or image its staged receipt names. */
 function resolvePromptFileReceipts(
   content: SessionPromptRequest['content'],
-  stagedFile: (receiptId: FileUploadReceiptId) => FileAttachmentRef | undefined,
+  staged: (receiptId: FileUploadReceiptId) => StagedAttachment | undefined,
 ): { readonly content: AttachmentAdmissionPart[]; readonly receiptIds: readonly FileUploadReceiptId[] } {
   const receiptIds = new Set<FileUploadReceiptId>()
   const resolved = content.map((part): AttachmentAdmissionPart => {
     if (part.type !== 'file') return part
-    const attachment = stagedFile(part.receiptId)
+    const attachment = staged(part.receiptId)
     if (attachment === undefined) {
       throw new RemoteError(
         'session/attachment-invalid',
@@ -602,7 +592,7 @@ function resolvePromptFileReceipts(
       )
     }
     receiptIds.add(part.receiptId)
-    return { type: 'file', attachment }
+    return attachment
   })
   return { content: resolved, receiptIds: [...receiptIds] }
 }

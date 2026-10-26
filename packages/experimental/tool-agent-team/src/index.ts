@@ -14,6 +14,7 @@ import {
   preflightChildLlmRoute,
   requestedAgentOptions,
   subagentModelSelectionPolicy,
+  subagentModelSelectionProjectionDefinition,
 } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import type { DelegationModelRequest } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -41,6 +42,8 @@ export interface TeammateDefaults {
 
 /** Tool routing configuration. */
 export interface Config {
+  /** Register `interrupt_agent` and its policy guidance. Defaults to true; false leaves the domain API available. */
+  readonly interrupt?: boolean
   /** Continuable-subagent provider used for fresh teammates. */
   readonly freshProvider?: string
   /** Continuable-subagent provider used for completed-prefix fork teammates. */
@@ -58,6 +61,7 @@ export interface Config {
 
 /** Loader schema for the opt-in Team tool plugin. */
 export const Config: z<Config> = z.object({
+  interrupt: z.boolean().default(true),
   freshProvider: z.string().default('spawn'),
   forkProvider: z.string().default('fork'),
   // A union keeps an omitted field absent instead of an empty object.
@@ -71,6 +75,7 @@ export const Config: z<Config> = z.object({
 
 /** Resolved plugin configuration. */
 interface ResolvedConfig {
+  readonly interrupt: boolean
   readonly freshProvider: string
   readonly forkProvider: string
   readonly agentOptions: AgentOptions | undefined
@@ -98,12 +103,32 @@ function teammateDefaults(defaults: TeammateDefaults | undefined): AgentOptions 
 /** Pointer appended to a rejected route choice. */
 const ROUTE_HINT = ' Call list_subagent_models to see the routes and reasoning efforts you may choose.'
 
+/** Reader of a Session's durable allowed-route list. */
+type ModelSelectionPolicyReader = Parameters<typeof subagentModelSelectionPolicy>[0]
+
+/**
+ * Carry the route fields of Agent options into a teammate route.
+ * @param options - the resolved Agent options, if any.
+ * @returns the teammate route without absent fields, or undefined without options.
+ */
+function teammateRouteOf(options: AgentOptions | undefined): TeammateRoute | undefined {
+  if (options === undefined) return undefined
+  return {
+    ...options.provider === undefined ? {} : { provider: options.provider },
+    ...options.model === undefined ? {} : { model: options.model },
+    ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
+    ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
+  }
+}
+
 /**
  * Resolve and check one teammate's LLM route the way the subagent tool checks
  * a child's: provider and model together, an explicit choice limited to the
- * Session's allowed routes, and the effective route and effort resolved by
- * the live adapter before the teammate exists.
+ * Session's allowed routes (to the Lead's own route when the Session records
+ * none), and the effective route and effort resolved by the live adapter
+ * before the teammate exists.
  * @param ctx - the plugin Context.
+ * @param policyReader - reader of the Lead Session's allowed routes.
  * @param lead - the calling Team Lead.
  * @param providerName - the subagent provider that will start the teammate.
  * @param configured - the configured teammate defaults.
@@ -113,6 +138,7 @@ const ROUTE_HINT = ' Call list_subagent_models to see the routes and reasoning e
  */
 async function teammateRoute(
   ctx: Context,
+  policyReader: ModelSelectionPolicyReader,
   lead: Agent,
   providerName: string,
   configured: AgentOptions | undefined,
@@ -124,11 +150,8 @@ async function teammateRoute(
   if ((explicit || configured !== undefined) && subagentProvider?.capabilities.agentOptions === false) {
     throw new Error(`subagent provider "${providerName}" cannot start a teammate on a chosen LLM route (no agentOptions capability)`)
   }
-  if (!explicit && !hasConfiguredLlmSelection(configured)) return configured
-  const allowed = subagentModelSelectionPolicy(ctx.sessionProjections, lead.session)
-  if (explicit && allowed === undefined) {
-    throw new Error('teammate model selection is not enabled for this Session; omit provider, model and reasoning_effort to use the configured teammate route')
-  }
+  if (!explicit && !hasConfiguredLlmSelection(configured)) return teammateRouteOf(configured)
+  const allowed = subagentModelSelectionPolicy(policyReader, lead.session)
   const policy = allowed === undefined ? undefined : { routes: allowed }
   const parentOptions = parentAgentOptionsForDelegation(lead)
   const routeDefaults = subagentProvider?.agentRouteDefaults
@@ -143,17 +166,19 @@ async function teammateRoute(
     const message = (error instanceof Error ? error.message : String(error)).replace(/\.$/u, '')
     throw new Error(`${message}.${ROUTE_HINT}`, { cause: error })
   }
-  return requested
+  return teammateRouteOf(requested)
 }
 
 /** Model-facing collaboration guidance shared by Lead and teammates. */
-const POLICY = `Agent Teams is available in this session, but create teammates only when the user explicitly asks to use Agent Teams or teammates.
+function teamPolicy(interrupt: boolean): string {
+  return `Agent Teams is available in this session
 
 The Team Lead and all teammates share the same working directory and filesystem. Edits are immediately visible to every member. Split write work into disjoint scopes, record expected write scopes on shared tasks, and use task dependencies when work must be ordered. Write-scope overlap is advisory, not a lock.
 
 Prefer read/edit/write for file changes. If a file operation returns FS_STALE_VERSION, read the current file, rebase your intended change onto the new content, and retry. Bash, formatters, code generators, and scripts are not fully protected by the filesystem version guard; coordinate them explicitly and have the Lead review the final diff and run tests.
 
-Use the target returned by spawn_teammate or list_agents for send_message and interrupt_agent, or as owner when assigning or filtering shared tasks. send_message steers a running target at its nearest step boundary and starts or resumes an inactive target. inactive means no turn is executing; it does not describe task completion, success, failure, or waiting for other agents. provisioning means member creation is in progress; failed means member creation failed. A peer message starts with its sender name. A successful send does not mean the recipient has processed it. Shared-task workflow is list, get, claim with the current revision, perform the work, then complete. Task readiness never starts an owner. Before wait_agent, use list_agents and make sure another required member is running or provisioning; use send_message first when the required member is inactive. wait_agent observes only changes after that call starts, never wakes a member, and returns noProgress immediately when no other member can produce a change. Re-list after wakeup or timeout. The Lead must wait for required teammates before giving the final answer.`
+Use the target returned by spawn_teammate or list_agents for send_message${interrupt ? ' and interrupt_agent' : ''}, or as owner when assigning or filtering shared tasks. send_message steers a running target at its nearest step boundary and starts or resumes an inactive target. inactive means no turn is executing; it does not describe task completion, success, failure, or waiting for other agents. provisioning means member creation is in progress; failed means member creation failed. A peer message starts with its sender name. A successful send does not mean the recipient has processed it. Shared-task workflow is list, get, claim with the current revision, perform the work, then complete. Task readiness never starts an owner. Before wait_agent, use list_agents and make sure another required member is running or provisioning; use send_message first when the required member is inactive. wait_agent observes only changes after that call starts, never wakes a member, and returns noProgress immediately when no other member can produce a change. Re-list after wakeup or timeout. The Lead must wait for required teammates before giving the final answer.`
+}
 
 const ACTIVE_WAIT_STATUSES: ReadonlySet<TeamMemberView['status']> = new Set(['running', 'provisioning'])
 const NO_ACTIVE_PEER_MESSAGE = 'No other Team member is running or provisioning. wait_agent cannot make progress or wake inactive teammates. Re-list with list_agents and team_task_list, then use send_message to wake each required inactive teammate before waiting again.'
@@ -280,7 +305,7 @@ function callingAgent(agent: Agent | undefined, toolName: string): Agent {
 }
 
 /** Register the complete Team tool set in one exact Agent scope. */
-function install(agent: Agent, ctx: Context, config: ResolvedConfig): () => void {
+function install(agent: Agent, ctx: Context, config: ResolvedConfig, policyReader: ModelSelectionPolicyReader): () => void {
   const scoped = agent.ctx
   const disposers: Array<() => unknown> = []
   const register = (disposer: () => unknown): void => { disposers.push(disposer) }
@@ -288,7 +313,20 @@ function install(agent: Agent, ctx: Context, config: ResolvedConfig): () => void
     register(scoped.systemPrompt.section({
       name: 'team:policy',
       order: scoped.systemPrompt.getSectionOrder('TEAM_POLICY'),
-      text: POLICY,
+      text: teamPolicy(config.interrupt),
+    }))
+    register(scoped.systemPrompt.context({
+      name: 'team:identity',
+      order: scoped.systemPrompt.getContextOrder('TEAM_IDENTITY'),
+      required: true,
+      text: () => {
+        const { role, name } = ctx.agentTeams.membership(agent)
+        return `${role === 'lead'
+          ? 'You are the Team Lead named "lead".'
+          : `You are teammate "${name}".\nYour Team Lead is named "lead".\nTo message your Team Lead, use send_message({ target: "lead", message: "..." }).`}
+Use list_agents({}) to find your teammates and their names.
+To message another teammate, use send_message({ target: "<teammate name>", message: "..." }).`
+      },
     }))
 
     register(scoped.tools.register(defineTool({
@@ -327,7 +365,7 @@ function install(agent: Agent, ctx: Context, config: ResolvedConfig): () => void
         const followsDefault = config.agentOptions === undefined
           && ctx.subagents.getProvider(provider)?.capabilities.agentOptions === true
         const configured = followsDefault ? ctx.subagents.defaultChildRoute(agent) : config.agentOptions
-        const route = await teammateRoute(ctx, agent, provider, configured, {
+        const route = await teammateRoute(ctx, policyReader, agent, provider, configured, {
           ...args.provider === undefined ? {} : { provider: args.provider },
           ...args.model === undefined ? {} : { model: args.model },
           ...args.reasoning_effort === undefined ? {} : { reasoning_effort: args.reasoning_effort },
@@ -335,18 +373,7 @@ function install(agent: Agent, ctx: Context, config: ResolvedConfig): () => void
         const result = await ctx.agentTeams.spawnTeammate(agent, {
           name: args.name,
           description: args.description,
-          prompt: [
-            { type: 'text', text: `<system-reminder>
-You are teammate "${args.name.trim()}".
-Your Team Lead is named "lead".
-Use list_agents({}) to find your teammates and their names.
-To message your Team Lead, use send_message({ target: "lead", message: "..." }).
-To message another teammate, use send_message({ target: "<teammate name>", message: "..." }).
-</system-reminder>
-
-` },
-            { type: 'text', text: args.prompt },
-          ],
+          prompt: [{ type: 'text', text: args.prompt }],
           context,
           provider,
           ...route === undefined ? {} : { agentOptions: route },
@@ -419,17 +446,19 @@ To message another teammate, use send_message({ target: "<teammate name>", messa
       },
     })))
 
-    register(scoped.tools.register(defineTool({
-      name: 'interrupt_agent',
-      description: 'Interrupt one teammate\'s current turn while preserving its pending inbox. Team Lead only.',
-      parameters: {
-        target: { type: 'string', required: true, description: 'Teammate target returned by spawn_teammate or list_agents.' },
-      },
-      output: jsonOutput(INTERRUPT_VALUE_SCHEMA),
-      execute(args, exec) {
-        return Promise.resolve(ctx.agentTeams.interrupt(callingAgent(exec.agent, 'interrupt_agent'), args.target))
-      },
-    })))
+    if (config.interrupt) {
+      register(scoped.tools.register(defineTool({
+        name: 'interrupt_agent',
+        description: 'Interrupt one teammate\'s current turn while preserving its pending inbox. Team Lead only.',
+        parameters: {
+          target: { type: 'string', required: true, description: 'Teammate target returned by spawn_teammate or list_agents.' },
+        },
+        output: jsonOutput(INTERRUPT_VALUE_SCHEMA),
+        execute(args, exec) {
+          return Promise.resolve(ctx.agentTeams.interrupt(callingAgent(exec.agent, 'interrupt_agent'), args.target))
+        },
+      })))
+    }
 
     register(scoped.tools.register(defineTool({
       name: 'team_task_create',
@@ -543,17 +572,25 @@ To message another teammate, use send_message({ target: "<teammate name>", messa
   }
 }
 
-/** Install Team tools in every live or subsequently published Team member scope. */
-export function apply(ctx: Context, config: Config = {}): void {
+/**
+ * Install Team tools in every live or subsequently published Team member scope.
+ * @param ctx - the plugin Context.
+ * @param config - provider routing and teammate route defaults.
+ * @returns when the allowed-route reader is registered and live members are installed.
+ */
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const resolved: ResolvedConfig = {
+    interrupt: config.interrupt ?? true,
     freshProvider: config.freshProvider ?? 'spawn',
     forkProvider: config.forkProvider ?? 'fork',
     agentOptions: teammateDefaults(config.agentOptions),
   }
+  // Shared with the subagent tool: the registry keeps one registration per key.
+  const policyReader = await ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
   const installed = new Map<Agent, () => void>()
   const maybeInstall = (agent: Agent): void => {
     if (installed.has(agent) || ctx.agentTeams.tryMembership(agent) === undefined) return
-    installed.set(agent, install(agent, ctx, resolved))
+    installed.set(agent, install(agent, ctx, resolved, policyReader))
   }
   for (const agent of ctx.agents.list()) maybeInstall(agent)
   ctx.on('agent/created', ({ agent }) => { maybeInstall(agent) })

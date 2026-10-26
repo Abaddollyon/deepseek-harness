@@ -259,17 +259,21 @@ export class PtcWorkflowRun implements WorkflowRun {
   }
 
   /**
-   * Limit a call's explicit route to the parent Session's allowed routes, as
-   * the subagent tool does. Without a recorded selection policy any route is
-   * accepted, and configured defaults are not a choice the script made. The
-   * list is read at run start, so the run needs no engine service later.
+   * Limit a call's explicit route to the parent Session's allowed routes with
+   * the subagent tool's own assertion. Without a recorded selection policy any
+   * route is accepted (the subagent tool would allow only the parent's route),
+   * so a deployment without model-selection settings keeps `agent()`'s
+   * independent route overrides; configured defaults are not a choice the
+   * script made. The list is read at run start, so the run needs no engine
+   * service later.
    * @param request - the `agent()` call.
    * @param parentOptions - the parent's current route.
    * @param agentOptions - the child's merged route.
    */
   private assertAllowedRoute(request: ChildStartRequest, parentOptions: AgentOptions, agentOptions: AgentOptions | undefined): void {
     const routes = this.allowedRoutes
-    assertAllowedModelSelection(routes === undefined ? undefined : { routes }, parentOptions, agentOptions, {
+    if (routes === undefined) return
+    assertAllowedModelSelection({ routes }, parentOptions, agentOptions, {
       ...request.provider === undefined ? {} : { provider: request.provider },
       ...request.model === undefined ? {} : { model: request.model },
       ...request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort },
@@ -369,11 +373,14 @@ export class PtcWorkflowRun implements WorkflowRun {
     try {
       const cwd = await this.cwd
       this.requireActive()
+      if (this.runtime.sandboxMode === undefined && this.policy.mode !== 'danger-full-access') {
+        throw new Error(`workflow runtime cannot enforce the ${this.policy.mode} file policy`)
+      }
       const outcome = await this.runtime.run(this.runtime.resolve({
-        program: PROGRAM,
+        program: this.runtime.programFormat === 'repl' ? `await (async () => {\n${PROGRAM}\n})()` : PROGRAM,
         bindings: [{ global: 'workflowHost', functions: this.bindings() }],
         cwd,
-        sandboxPolicy: this.policy,
+        ...this.runtime.sandboxMode === undefined ? {} : { sandboxPolicy: this.policy },
         timeoutMs: null,
         signal: this.controller.signal,
       }))
