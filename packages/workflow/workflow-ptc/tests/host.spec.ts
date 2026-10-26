@@ -7,7 +7,7 @@ import type { PtcBindingFunction, PtcRunRequest, PtcRunResult, PtcRunSpec } from
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjections from '@deepseek-ai/dsh-session-projection'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
-import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { SubagentActivation, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import PtcWorkflowEngine from '../src/index.ts'
@@ -30,7 +30,7 @@ class ControlledRuntime extends PtcRuntime {
   run(spec: PtcRunSpec): Promise<PtcRunResult> { return this.execute(spec) }
 }
 
-async function setup(execute?: (bindings: HostBindings, spec: PtcRunSpec) => Promise<PtcRunResult>, language = 'typescript') {
+async function setup(execute?: (bindings: HostBindings, spec: PtcRunSpec) => Promise<PtcRunResult>, language = 'typescript', maxActiveSubagents?: number) {
   const ctx = new Context()
   onTestFinished(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(SessionStore)
@@ -38,7 +38,7 @@ async function setup(execute?: (bindings: HostBindings, spec: PtcRunSpec) => Pro
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SandboxPolicy, { mode: 'read-only' })
   provideWorkingDirectoryFixture(ctx)
-  await ctx.plugin(SubagentRuntime)
+  await ctx.plugin(SubagentRuntime, maxActiveSubagents === undefined ? {} : { maxActiveSubagents })
   ctx.subagents.registerProvider({
     name: 'stub',
     capabilities: { agentOptions: true, agentPreset: false, outputSchema: true, depthLimit: false },
@@ -320,5 +320,147 @@ describe('workflow runtime outcomes', () => {
       childResult.resolve({ output: [], stopReason: 'aborted' })
       await handle.dispose()
     }
+  })
+})
+
+describe('workflow child capacity', () => {
+  /** External children that stay running until the test finishes them. */
+  function heldChildren(ctx: Context) {
+    const finishers: (() => void)[] = []
+    vi.spyOn(ctx.subagents.getProvider('stub')!, 'start').mockImplementation(() => {
+      const result = Promise.withResolvers<SubagentResult>()
+      finishers.push(() => { result.resolve({ output: [], stopReason: 'completed' }) })
+      return Promise.resolve({
+        id: SessionId(`held-${finishers.length}`),
+        result: result.promise,
+        dispose: () => {
+          result.resolve({ output: [], stopReason: 'aborted' })
+          return Promise.resolve()
+        },
+      })
+    })
+    return finishers
+  }
+
+  it('waits for one of its own children to finish when the subagent capacity is full, then starts', async () => {
+    const order: string[] = []
+    let finishers: (() => void)[] = []
+    const { ctx, start } = await setup(async (bindings) => {
+      const first = await bindings.startChild!({ prompt: 'first' }) as { callId: number }
+      const second = bindings.startChild!({ prompt: 'second' }).then((child) => { order.push('second started'); return child })
+      await new Promise(resolve => setImmediate(resolve))
+      order.push('first finishing')
+      finishers[0]!()
+      expect(await bindings.childResult!(first)).toMatchObject({ stopReason: 'completed' })
+      await bindings.disposeChild!(first)
+      const started = await second as { callId: number }
+      finishers[1]!()
+      await bindings.childResult!(started)
+      await bindings.disposeChild!(started)
+      return completed
+    }, 'typescript', 1)
+    finishers = heldChildren(ctx)
+    const run = start()
+    try {
+      expect((await run.result).stopReason).toBe('completed')
+      expect(order).toEqual(['first finishing', 'second started'])
+    } finally { await run.dispose() }
+  })
+
+  it('fails at once when the run has no child of its own that could free a slot', async () => {
+    const { ctx, start, parent } = await setup(async (bindings) => {
+      await expect(bindings.startChild!({ prompt: 'blocked' })).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      return completed
+    }, 'typescript', 1)
+    const finishers = heldChildren(ctx)
+    const sibling = await ctx.subagents.startActivation({
+      provider: 'stub', label: 'sibling', delivery: 'caller', signal: new AbortController().signal,
+      request: { cwd: ctx.workingDirectory.get(parent.session), prompt: [{ type: 'text', text: 'occupy' }], parent },
+    })
+    const run = start()
+    try {
+      expect((await run.result).stopReason).toBe('completed')
+    } finally {
+      finishers[0]!()
+      await sibling.dispose()
+      await run.dispose()
+    }
+  })
+
+  it('fails a waiting start once the run has no running child left to free a slot', async () => {
+    const finished = Promise.withResolvers<SubagentResult>()
+    const { ctx, start } = await setup(async (bindings) => {
+      const first = await bindings.startChild!({ prompt: 'first' }) as { callId: number }
+      const waiting = bindings.startChild!({ prompt: 'waiting' })
+      void waiting.catch(() => {})
+      await new Promise(resolve => setImmediate(resolve))
+      finished.resolve({ output: [], stopReason: 'completed' })
+      await expect(waiting).rejects.toMatchObject({ code: 'ACTIVATION_LIMIT_REACHED' })
+      await bindings.disposeChild!(first)
+      return completed
+    })
+    // Another tree member takes every freed slot, so each retry is refused.
+    const activation = vi.spyOn(ctx.subagents, 'startActivation')
+      .mockResolvedValueOnce({ childId: SessionId('only-child'), result: finished.promise, dispose: () => Promise.resolve() })
+      .mockRejectedValue(new SubagentError('subagent limit reached', 'ACTIVATION_LIMIT_REACHED'))
+    const run = start()
+    try {
+      expect((await run.result).stopReason).toBe('completed')
+      expect(activation).toHaveBeenCalledTimes(3)
+    } finally { await run.dispose() }
+  })
+
+  it.each([
+    { running: 1, others: 'no other running child' },
+    { running: 2, others: 'another running child' },
+  ])('retries a refused start at once when one of its children settled during that start, with $others', async ({ running }) => {
+    const held = Array.from({ length: running }, () => Promise.withResolvers<SubagentResult>())
+    const refused = Promise.withResolvers<SubagentActivation>()
+    const { ctx, start } = await setup(async (bindings) => {
+      const children = []
+      for (const [index] of held.entries()) children.push(await bindings.startChild!({ prompt: `held ${index}` }))
+      const racing = bindings.startChild!({ prompt: 'racing' })
+      await vi.waitFor(() => { expect(activation).toHaveBeenCalledTimes(running + 1) })
+      // The first child settles while the pool is still refusing the start that it would have admitted.
+      held[0]!.resolve({ output: [], stopReason: 'completed' })
+      await new Promise(resolve => setImmediate(resolve))
+      refused.reject(new SubagentError('subagent limit reached', 'ACTIVATION_LIMIT_REACHED'))
+      const admitted = await racing
+      expect(admitted).toMatchObject({ childId: 'admitted' })
+      for (const waiting of held.slice(1)) waiting.resolve({ output: [], stopReason: 'completed' })
+      for (const child of [...children, admitted]) await bindings.disposeChild!(child)
+      return completed
+    })
+    const activation = vi.spyOn(ctx.subagents, 'startActivation')
+    for (const [index, result] of held.entries()) {
+      activation.mockResolvedValueOnce({ childId: SessionId(`held-${index}`), result: result.promise, dispose: () => Promise.resolve() })
+    }
+    activation.mockReturnValueOnce(refused.promise)
+      .mockResolvedValueOnce({ childId: SessionId('admitted'), result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: () => Promise.resolve() })
+    const run = start()
+    try {
+      expect((await run.result).stopReason).toBe('completed')
+      expect(activation).toHaveBeenCalledTimes(running + 2)
+    } finally { await run.dispose() }
+  })
+
+  it('stops a capacity wait when the run is cancelled', async () => {
+    const waitingStarted = Promise.withResolvers<undefined>()
+    const { ctx, start } = await setup(async (bindings) => {
+      await bindings.startChild!({ prompt: 'first' })
+      const waiting = bindings.startChild!({ prompt: 'waiting' })
+      void waiting.catch(() => {})
+      waitingStarted.resolve(undefined)
+      await expect(waiting).rejects.toBe('stop while waiting')
+      return completed
+    }, 'typescript', 1)
+    heldChildren(ctx)
+    const run = start()
+    try {
+      await waitingStarted.promise
+      await new Promise(resolve => setImmediate(resolve))
+      run.cancel('stop while waiting')
+      expect((await run.result).stopReason).toBe('cancelled')
+    } finally { await run.dispose() }
   })
 })

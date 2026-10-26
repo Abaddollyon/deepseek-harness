@@ -56,13 +56,34 @@ async function settleDownstream(
   }
 }
 
-function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
+function exponentialDelay(config: ResolvedRetryPolicy, retry: number): number {
   const exponent = Math.min(retry - 1, 1024)
-  const exponential = Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
-  const jitter = 1 - config.jitterRatio + 2 * config.jitterRatio * random()
-  return Math.min(exponential * jitter, config.maxDelayMs)
+  return Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
 }
 
+/** Local backoff for `retry` under the policy's `RetryJitter` strategy. */
+function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
+  const exponential = exponentialDelay(config, retry)
+  return config.jitter === 'full'
+    ? exponential * (1 - config.jitterRatio * random())
+    : Math.min(exponential * (1 - config.jitterRatio + 2 * config.jitterRatio * random()), config.maxDelayMs)
+}
+
+/**
+ * Wait for a provider-requested delay, accepted up to `maxDelayMs`. Full jitter
+ * never waits less than the accepted delay and spreads concurrent Agents
+ * answered by one rate-limit burst above it; symmetric jitter waits exactly the
+ * accepted delay. A longer request waits exactly `maxDelayMs`, so neither mode
+ * ends the turn on it or retries at once.
+ */
+function providerDelay(config: ResolvedRetryPolicy, retry: number, requestedMs: number, random: () => number): number {
+  const acceptedMs = Math.min(requestedMs, config.maxDelayMs)
+  if (config.jitter === 'symmetric') return acceptedMs
+  const spread = config.jitterRatio * random() * Math.max(exponentialDelay(config, retry), acceptedMs)
+  return Math.min(acceptedMs + spread, config.maxDelayMs)
+}
+
+// The key omits `jitter`: changing only the spread strategy keeps an in-progress retry chain's budget.
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
   return policy.mode === 'always'
     ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
@@ -220,19 +241,11 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = previous?.retryId ?? RetryId(randomUUID())
-    let delayMs: number
-    if (failure.providerRetryAfterMs !== undefined
+    const delayMs = failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
-      && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > policy.maxDelayMs) {
-        if (policy.mode === 'normal') return next()
-        delayMs = localDelay(policy, retry, random)
-      } else {
-        delayMs = failure.providerRetryAfterMs
-      }
-    } else {
-      delayMs = localDelay(policy, retry, random)
-    }
+      && failure.providerRetryAfterMs > 0
+      ? providerDelay(policy, retry, failure.providerRetryAfterMs, random)
+      : localDelay(policy, retry, random)
 
     return backoff(agent, turn, step, failure, provider, policy, policyKey, retry, retryId, delayMs, signal)
   }

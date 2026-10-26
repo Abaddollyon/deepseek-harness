@@ -8,7 +8,7 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
-import { mapStopReason, mapUsage, toStreamChunks } from '../src/stream.ts'
+import { mapStopReason, mapUsage, parseRetryAfterMs, toStreamChunks } from '../src/stream.ts'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
   return {
@@ -985,6 +985,62 @@ describe('mapStopReason / mapUsage', () => {
   ] as const)('classifies %j as %s', (errorMessage, code) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code } })
+  })
+
+  it('adds a failed response status and Retry-After, letting the status classify unrecognized text', () => {
+    const reworded = assistant({ stopReason: 'error', errorMessage: 'admission full' })
+    expect(mapStopReason(reworded, undefined, { status: 429, retryAfterMs: 5_000 })).toEqual({
+      kind: 'error',
+      failure: { message: 'admission full', code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 5_000 },
+    })
+    expect(mapStopReason(reworded, undefined, { status: 503 }))
+      .toEqual({ kind: 'error', failure: { message: 'admission full', code: 'SERVER', status: 503 } })
+    expect(mapStopReason(reworded, undefined, { status: 408 })).toMatchObject({ failure: { code: 'TIMEOUT', status: 408 } })
+    expect(mapStopReason(reworded, undefined, { status: 404 })).toMatchObject({ failure: { code: 'PI_AI_ERROR', status: 404 } })
+    // Recognized text keeps its code; a successful response belongs to a later stream failure.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' }), undefined, { status: 429, retryAfterMs: 1 }))
+      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 1 } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'terminated' }), undefined, { status: 200, retryAfterMs: 1 }))
+      .toEqual({ kind: 'error', failure: { message: 'terminated', code: 'TRANSPORT' } })
+  })
+
+  it('fails pi-ai\'s Codex usage-limit sentence as QUOTA whatever the status, with its stated reset', () => {
+    const exhausted = (errorMessage: string) => assistant({ stopReason: 'error', errorMessage })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit.', code: 'QUOTA', status: 429 } })
+    // The stated minutes cannot read as an authentication status.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.')))
+      .toEqual({
+        kind: 'error',
+        failure: { message: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.', code: 'QUOTA', providerRetryAfterMs: 401 * 60_000 },
+      })
+    // A response header's exact delay wins over the rounded sentence.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~5 min.'), undefined, { status: 429, retryAfterMs: 90_000 }))
+      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 90_000 } })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~0 min.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit. Try again in ~0 min.', code: 'QUOTA', status: 429 } })
+    // A reset sentence without the usage-limit sentence is no delay.
+    expect(mapStopReason(exhausted('server busy. Try again in ~5 min.'))).toEqual({
+      kind: 'error',
+      failure: { message: 'server busy. Try again in ~5 min.', code: 'PI_AI_ERROR' },
+    })
+  })
+
+  it.each([
+    ['delta-seconds', { 'retry-after': '3' }, 3_000],
+    ['fractional seconds', { 'retry-after': ' 1.5 ' }, 1_500],
+    ['an HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:05 GMT' }, 5_000],
+    ['milliseconds over seconds', { 'retry-after-ms': '250', 'retry-after': '9' }, 250],
+    ['seconds after malformed milliseconds', { 'retry-after-ms': 'soon', 'retry-after': '2' }, 2_000],
+    ['seconds after zero milliseconds', { 'retry-after-ms': '0', 'retry-after': '2' }, 2_000],
+    ['seconds after empty milliseconds', { 'retry-after-ms': '', 'retry-after': '2' }, 2_000],
+    ['nothing for a past HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }, undefined],
+    ['nothing for zero seconds', { 'retry-after': '0' }, undefined],
+    ['nothing for malformed text', { 'retry-after': 'later' }, undefined],
+    ['nothing for an empty header', { 'retry-after': ' ' }, undefined],
+    ['nothing without either header', {}, undefined],
+  ] as const)('parses %s from Retry-After headers', (_label, headers, expected) => {
+    expect(parseRetryAfterMs(new Headers(headers), Date.parse('Wed, 21 Oct 2026 07:28:00 GMT'))).toBe(expected)
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {

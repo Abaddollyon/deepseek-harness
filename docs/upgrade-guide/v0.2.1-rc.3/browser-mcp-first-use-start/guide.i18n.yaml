@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.3/browser-mcp-first-use-start/guide.md
+/:
+  en: e327773cd11d3b15
+  zh: 6b7c6af48c2c2523
+/mcp-browser-servers-start-on-first-use:
+  en: 94fd7c5d07361ab3
+  zh: 02cccf7fcc081aef
+/mcp-browser-servers-start-on-first-use/change:
+  en: d05970e2bfc2c74f
+  zh: a97165c7f00d9696
+/mcp-browser-servers-start-on-first-use/migration:
+  en: ca430e03ff142f15
+  zh: d6908af42f418528

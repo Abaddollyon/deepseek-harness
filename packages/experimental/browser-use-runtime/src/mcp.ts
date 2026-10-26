@@ -9,12 +9,23 @@ import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { SessionResources } from './index.ts'
+import { SharedServerStart } from './startup.ts'
+import type { DeferredServerTransport } from './startup.ts'
 import type {} from '@deepseek-ai/dsh-browser-use'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 // Type-only: types `ctx.get('agentPresets')`, which tells a preset-owned execution world from the Host.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-working-directory'
+
+/**
+ * When each live Session's MCP server process starts. `activation` starts it
+ * while the Session's Agent is created or resumed. `first-use` records the
+ * first started server's startup exchange, answers later activations from that
+ * record, and starts their server at the Session's first browser tool or
+ * resource call.
+ */
+export type BrowserServerStart = 'activation' | 'first-use'
 
 /** Browser launch settings shared by the MCP integrations. */
 export interface BrowserMcpLaunchConfig {
@@ -26,6 +37,8 @@ export interface BrowserMcpLaunchConfig {
   executablePath?: string
   /** Per-call timeout override in milliseconds; omission uses the MCP client default. */
   toolCallTimeoutMs?: number
+  /** When each Session's server process starts; defaults to `first-use`. */
+  serverStart: BrowserServerStart
 }
 
 /** Attachment to an externally owned Chromium browser. */
@@ -36,23 +49,34 @@ export interface BrowserMcpAttachConfig {
   endpoint: string
   /** Per-call timeout override in milliseconds; omission uses the MCP client default. */
   toolCallTimeoutMs?: number
+  /** When each Session's server process starts; defaults to `first-use`. */
+  serverStart: BrowserServerStart
 }
 
 /** Fixed launch or attachment choice for one MCP browser provider. */
 export type BrowserMcpConfig = BrowserMcpLaunchConfig | BrowserMcpAttachConfig
 
+/** Accepted browser settings before defaults apply. */
+export type BrowserMcpConfigInput =
+  | (Omit<BrowserMcpAttachConfig, 'serverStart'> & { serverStart?: BrowserServerStart })
+  | (Omit<BrowserMcpLaunchConfig, 'headless' | 'serverStart'> & { headless?: boolean; serverStart?: BrowserServerStart })
+
+const ServerStart: Schema<BrowserServerStart> = Schema.union([Schema.const('activation'), Schema.const('first-use')]).default('first-use')
+
 /** Validate the browser mode before the provider reserves browser use. */
-export const BrowserMcpConfig: Schema<BrowserMcpAttachConfig | (Omit<BrowserMcpLaunchConfig, 'headless'> & { headless?: boolean }), BrowserMcpConfig> = Schema.union([
+export const BrowserMcpConfig: Schema<BrowserMcpConfigInput, BrowserMcpConfig> = Schema.union([
   Schema.object({
     mode: Schema.const('launch').required(),
     headless: Schema.boolean().default(true),
     executablePath: Schema.string().pattern(/\S/u),
     toolCallTimeoutMs: Schema.number().min(1),
+    serverStart: ServerStart,
   }),
   Schema.object({
     mode: Schema.const('attach').required(),
     endpoint: Schema.string().pattern(/^https?:\/\/[^\s/]+|^wss?:\/\/[^\s/]+/u).required(),
     toolCallTimeoutMs: Schema.number().min(1),
+    serverStart: ServerStart,
   }),
 ])
 
@@ -60,7 +84,7 @@ export const BrowserMcpConfig: Schema<BrowserMcpAttachConfig | (Omit<BrowserMcpL
  * Reject an invalid debugging endpoint before acquiring provider or browser resources.
  * @param config - schema-validated browser selection.
  */
-export function validateBrowserMcpConfig(config: BrowserMcpConfig): void {
+export function validateBrowserMcpConfig(config: BrowserMcpConfigInput): void {
   if (config.mode !== 'attach') return
   let endpoint: URL
   try {
@@ -87,6 +111,8 @@ export interface SessionMcpOptions {
   env?: Record<string, string>
   /** Per-call timeout override; omission retains the MCP client default. */
   toolCallTimeoutMs?: number
+  /** When each Session's server process starts. */
+  serverStart: BrowserServerStart
 }
 
 interface ClientState {
@@ -113,6 +139,9 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
   const workingDirectory = ctx.get('workingDirectory')
   if (workingDirectory === undefined) throw new Error(`${options.name}: browser MCP requires a working-directory provider`)
   let resources!: SessionResources<Scope>
+  const shared = options.serverStart === 'first-use'
+    ? new SharedServerStart(options.name, (message) => { ctx.logger.warn(message) })
+    : undefined
   const clients = new Map<Agent, ClientState>()
   const toolPrefix = `mcp__${options.name}__`
   const resourceTools = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
@@ -157,7 +186,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
             }
             return next()
           })
-          await scope.ctx.plugin(McpClient, McpClient.Config({
+          const config = McpClient.Config({
             transport: 'stdio',
             serverName: options.name,
             command: options.command,
@@ -167,7 +196,18 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
             ...options.toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs: options.toolCallTimeoutMs },
             failOnStartupError: true,
             reconnect: { enabled: false },
-          }))
+          })
+          // Reconnect is disabled, so the client opens at most one transport generation.
+          const generation: { transport?: DeferredServerTransport } = {}
+          const client = shared === undefined
+            ? McpClient
+            : McpClient.withTransportWrapper((open) => {
+              // The replayed startup precedes the call that started the server, so it shares that call's timeout.
+              generation.transport = shared.wrap(open, config.toolCallTimeoutMs)
+              return generation.transport
+            })
+          await scope.ctx.plugin(client, config)
+          generation.transport?.commit()
           signal.throwIfAborted()
           return {
             value: scope,

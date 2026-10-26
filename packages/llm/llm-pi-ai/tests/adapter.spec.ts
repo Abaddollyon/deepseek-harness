@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { AttachmentId, AttachmentStore, ImageVariantId } from '@deepseek-ai/dsh-attachment'
@@ -390,6 +393,186 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
+  it.each([
+    ['seconds', { 'retry-after': '3' }, 3_000],
+    ['milliseconds', { 'retry-after-ms': '1500', 'retry-after': '9' }, 1_500],
+  ] as const)('carries a chat-completions 429 status and its Retry-After %s', async (_unit, headers, delay) => {
+    const server = await mockServer([{ status: 429, headers, body: JSON.stringify({ error: { message: 'slow down' } }) }])
+    const ctx = await harness(server.url)
+    const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: delay } })
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('carries an Anthropic Messages 503 Retry-After the SDK error message drops', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{
+      status: 503,
+      headers: { 'retry-after': '4' },
+      body: JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'pool busy' } }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { 'claude-pool': { apiKeyEnv: 'PI_TEST_KEY', api: 'anthropic-messages', baseURL: server.url, models: [{ id: 'pooled' }] } },
+    })
+    const result = await assemble(ctx, { provider: 'claude-pool', model: 'pooled', maxTokens: 64, messages: [] })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'SERVER', status: 503, providerRetryAfterMs: 4_000 } })
+  })
+
+  it('leaves the Google adapter on its own fetch', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ status: 429, headers: { 'retry-after': '2' }, body: JSON.stringify({ error: { message: 'busy' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, { providers: { google: { apiKeyEnv: 'PI_TEST_KEY', baseURL: server.url } } })
+    const result = await assemble(ctx, {
+      provider: 'google',
+      model: 'gemini-2.5-flash',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })],
+    })
+    // The request reaches the provider, and its failure carries no observed status.
+    expect(server.paths).toEqual(['/models/gemini-2.5-flash:streamGenerateContent?alt=sse'])
+    expect(result.finish).toEqual({ kind: 'error', failure: { message: '{"error":{"message":"busy"}}', code: 'PI_AI_ERROR' } })
+  })
+
+  /** A Codex SSE route on a mock server; Codex extracts an account id from the token before any request. */
+  async function codexHarness(baseURL: string): Promise<Context> {
+    const payload = Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account' } })).toString('base64url')
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['openai-codex'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ 'openai-codex': { baseURL, apiKeyEnv: 'PI_TEST_KEY', transport: 'sse' } }),
+      resolveApiKey: () => Promise.resolve(`e30.${payload}.fixture`),
+      auth: memoryAuth(),
+    }))
+    return ctx
+  }
+
+  it('fails a Codex 429 that pi-ai rewords as a usage limit as QUOTA with its Retry-After', async () => {
+    const server = await mockServer([{
+      status: 429,
+      headers: { 'retry-after': '5' },
+      body: JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'admission full', type: 'rate_limit_error' } }),
+    }])
+    const ctx = await codexHarness(server.url)
+    const result = await assemble(ctx, { provider: 'openai-codex', model: 'gpt-5.5', messages: [] })
+    expect(result.finish).toEqual({
+      kind: 'error',
+      failure: { message: 'You have hit your ChatGPT usage limit.', code: 'QUOTA', status: 429, providerRetryAfterMs: 5_000 },
+    })
+  })
+
+  it('fails an exhausted Codex plan as QUOTA carrying the reset pi-ai states', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          code: 'usage_limit_reached',
+          message: 'The usage limit has been reached',
+          plan_type: 'PLUS',
+          // Ten seconds past the minute keeps pi-ai's rounding at 42.
+          resets_at: Math.floor(Date.now() / 1000) + 42 * 60 + 10,
+        },
+      }),
+    }])
+    const ctx = await codexHarness(server.url)
+    const result = await assemble(ctx, { provider: 'openai-codex', model: 'gpt-5.5', messages: [] })
+    expect(result.finish).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~42 min.',
+        code: 'QUOTA',
+        status: 429,
+        providerRetryAfterMs: 42 * 60_000,
+      },
+    })
+  })
+
+  it('never lets an earlier request\'s response describe a later request\'s failure', async () => {
+    const server = await mockServer([
+      { status: 429, headers: { 'retry-after': '3' }, body: JSON.stringify({ error: { message: 'slow down' } }) },
+      { destroy: true },
+    ])
+    const ctx = await harness(server.url)
+    const limited = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+    const dropped = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+    expect(limited.finish).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 3_000 } })
+    // The dropped connection received no response, so its failure carries no status or delay.
+    expect(dropped.finish).toEqual({ kind: 'error', failure: { message: 'Connection error.', code: 'TRANSPORT' } })
+  })
+
+  it('keeps one fetch across requests, so pi-ai exchanges an Anthropic federation token once', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pi-ai-federation-'))
+    onTestFinished(async () => { await rm(directory, { recursive: true, force: true }) })
+    const identityTokenFile = join(directory, 'identity-token')
+    await writeFile(identityTokenFile, 'header.payload.signature')
+    const federationEnv: Record<string, string> = {
+      ANTHROPIC_FEDERATION_RULE_ID: 'fdrl_fixture',
+      ANTHROPIC_ORGANIZATION_ID: 'org_fixture',
+      ANTHROPIC_IDENTITY_TOKEN_FILE: identityTokenFile,
+    }
+    const server = await mockServer([
+      { body: JSON.stringify({ access_token: 'federated-token', token_type: 'Bearer', expires_in: 3600 }) },
+      { events: anthropicTextEvents },
+      { status: 429, headers: { 'retry-after': '2' }, body: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }) },
+    ])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // No resolved key: the catalog provider's ambient auth finds the federation variables.
+    ctx.llm.registerAdapter(['anthropic'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ anthropic: { baseURL: server.url } }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth: {
+        ...memoryAuth(),
+        authContext: { env: name => Promise.resolve(federationEnv[name]), fileExists: () => Promise.resolve(false) },
+      },
+    }))
+    const request = { provider: 'anthropic', model: 'claude-sonnet-4-5', maxTokens: 64, messages: [] }
+
+    expect((await assemble(ctx, request)).finish).toEqual({ kind: 'stop' })
+    expect((await assemble(ctx, request)).finish)
+      .toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 2_000 } })
+    expect(server.paths.map(path => new URL(path, server.url).pathname)).toEqual(['/v1/oauth/token', '/v1/messages', '/v1/messages'])
+    expect(server.headers.slice(1).map(headers => headers.authorization)).toEqual(['Bearer federated-token', 'Bearer federated-token'])
+  })
+
+  it('streams at most maxConcurrentRequests requests per route and admits the queue in order', async () => {
+    const server = await mockServer([
+      { events: textEvents.slice(0, 2), holdOpen: true },
+      { events: textEvents },
+    ])
+    const ctx = await harness(server.url, { maxConcurrentRequests: 1 })
+    const first = new AbortController()
+    const holding = (async () => {
+      for await (const _chunk of ctx.llm.stream({ provider: 'deepseek', model: 'deepseek-flash', messages: [], signal: first.signal })) {
+        // Drains the held-open response until the abort below.
+      }
+    })().catch((error: unknown) => error)
+    await server.requestReceived
+    const queued = assemble(ctx, { model: 'deepseek-flash', messages: [] })
+    const cancelled = new AbortController()
+    const leaving = assemble(ctx, { model: 'deepseek-flash', messages: [], signal: cancelled.signal })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    cancelled.abort(new Error('turn cancelled'))
+    // A request that leaves the queue ends there, before pi-ai builds a wire request.
+    expect((await leaving).finish).toEqual({
+      kind: 'aborted',
+      failure: { message: 'pi-ai request to provider "deepseek" aborted while waiting for a request slot', code: 'ABORTED' },
+    })
+    expect(server.requests).toHaveLength(1)
+
+    first.abort(new Error('first request stopped'))
+    await holding
+    expect((await queued).finish).toEqual({ kind: 'stop' })
+    expect(server.requests).toHaveLength(2)
+  })
+
+  it.each([0, 1.5])('rejects maxConcurrentRequests %s at configuration', async (maxConcurrentRequests) => {
+    expect(() => resolveProfiles({ deepseek: { apiKeyEnv: 'PI_TEST_KEY', maxConcurrentRequests } }))
+      .toThrow(/maxConcurrentRequests must be a positive safe integer/)
+  })
+
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
     const model = getBuiltinModels('deepseek').find(candidate => candidate.id === 'deepseek-flash')
     if (model === undefined) throw new Error('deepseek-flash missing from pi-ai test catalog')
@@ -476,6 +659,7 @@ describe('provider profile lifecycle', () => {
       mode: 'always',
       initialDelayMs: 25,
       maxDelayMs: 100,
+      jitter: 'full',
       jitterRatio: 0.2,
     })
     expect(ctx.llm.providerRetryPolicy('anthropic')).toMatchObject({

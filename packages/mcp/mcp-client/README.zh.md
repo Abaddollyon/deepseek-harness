@@ -122,6 +122,8 @@ kind: "package-reference"
 
 导出的 `createMcpToolDefinition(ctx, options)` 将上游工具 schema 和原始结果回调适配到相同的规范值、错误和持久化图像投影。每次回调都收到原样的 `ToolExecution`，包括其 Agent 和取消信号；SDK 的规范类型校验会在投影前检查返回结果。调用方负责注册、取消截止时间和提供方卸载。原生 Cua Driver 提供方使用此适配函数，无需打开 MCP 传输。
 
+导出的 `withTransportWrapper(wrap)` 返回与本插件名称、注入和 `Config` 相同的插件对象，其每代连接通过 `wrap(open)` 建立；`open()` 创建配置的传输。包装器拥有它返回的传输，插件仍负责命名空间保留、启动、工具同步、重连与销毁。[实验性浏览器运行时](../../experimental/browser-use-runtime/README.zh.md)用它在首次使用时启动 Session 的服务器。
+
 ### 生命周期与同步
 
 `apply` 解析重连策略、在当前注册作用域内预留 `serverName`、启动监督器，并等待初始连接加发现完成。独立 agent（智能体）作用域可以复用相同 namespace，因为其工具与传输彼此隔离；同一作用域内重复会在加载时失败。监督器把所有同步——初始、通知与重连——串行到同一条队列，因此两次同步绝不会交错执行各自的先 dispose 后注册交换。dispose 会取消待执行的重连、关闭协商中的传输或已绑定的客户端、等待进行中的尝试与排队同步完全停稳，然后注销当前世代。

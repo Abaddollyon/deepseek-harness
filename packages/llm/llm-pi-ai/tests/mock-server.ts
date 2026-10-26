@@ -68,6 +68,8 @@ export async function mockServer(script: {
   /** Keep the SSE response open after its scripted events until the client disconnects. */
   holdOpen?: boolean
   headers?: Record<string, string>
+  /** Drop the connection without a response. */
+  destroy?: boolean
 }[]): Promise<MockServer> {
   const paths: string[] = []
   const requests: unknown[] = []
@@ -93,6 +95,10 @@ export async function mockServer(script: {
       headers.push(request.headers)
       requestReceived.resolve(undefined)
       const behavior = script.shift() ?? { status: 500, body: 'script exhausted' }
+      if (behavior.destroy === true) {
+        request.socket.destroy()
+        return
+      }
       if (behavior.status !== undefined && behavior.status !== 200) {
         response.writeHead(behavior.status, { 'content-type': 'application/json', ...behavior.headers })
         response.end(behavior.body ?? '{}')

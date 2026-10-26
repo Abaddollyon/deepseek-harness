@@ -27,6 +27,7 @@ import Projections from '@deepseek-ai/dsh-session-projection'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
 import { BrowserMcpConfig, mountSessionMcp, validateBrowserMcpConfig } from '../src/mcp.ts'
+import type { BrowserServerStart } from '../src/mcp.ts'
 
 const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url))
 const roots: string[] = []
@@ -80,7 +81,7 @@ class PresentationRuntime extends PtcRuntime {
   run(): Promise<never> { return Promise.reject(new Error('Unexpected PTC execution in a presentation test')) }
 }
 
-async function load(exclusive = false, mode?: string, toolCallTimeoutMs?: number, toolOrder?: string[]) {
+async function load(exclusive = false, mode?: string, toolCallTimeoutMs?: number, toolOrder?: string[], serverStart: BrowserServerStart = 'activation') {
   const root = await mkdtemp(join(tmpdir(), 'dsh-browser-mcp-'))
   roots.push(root)
   const model = new FixtureModel()
@@ -90,7 +91,7 @@ async function load(exclusive = false, mode?: string, toolCallTimeoutMs?: number
     ['fs', LocalFileSystem], ['workingDirectory', WorkingDirectory],
     ['model', { inject: ['llm'], apply(ctx: Context) { ctx.effect(() => ctx.llm.registerAdapter(['fixture'], model)) } }],
     ['browser', { inject: ['browserUse', 'agents', 'tools', 'systemPrompt', 'workingDirectory'], apply(ctx: Context) {
-      mountSessionMcp(ctx, { name: 'browser-fixture', exclusive, command: process.execPath, args: [fixture, root, ...mode === undefined ? [] : [mode]], ...toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs, env: {} } })
+      mountSessionMcp(ctx, { name: 'browser-fixture', exclusive, serverStart, command: process.execPath, args: [fixture, root, ...mode === undefined ? [] : [mode]], ...toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs, env: {} } })
     } }],
   ])
   const configPath = join(root, 'cordis.yml')
@@ -149,10 +150,11 @@ async function events(root: string) {
 }
 
 it('requires a browser mode and validates launch and attachment settings', () => {
-  expect(BrowserMcpConfig({ mode: 'launch' })).toEqual({ mode: 'launch', headless: true })
+  expect(BrowserMcpConfig({ mode: 'launch' })).toEqual({ mode: 'launch', headless: true, serverStart: 'first-use' })
+  expect(BrowserMcpConfig({ mode: 'attach', endpoint: 'http://127.0.0.1:9222', serverStart: 'activation' })).toMatchObject({ serverStart: 'activation' })
   expect(BrowserMcpConfig({ mode: 'launch', headless: false, executablePath: '/chromium', toolCallTimeoutMs: 12 })).toMatchObject({ headless: false, toolCallTimeoutMs: 12 })
   expect(BrowserMcpConfig({ mode: 'attach', endpoint: 'wss://browser.example/devtools/browser/id' })).toMatchObject({ mode: 'attach' })
-  for (const invalid of [{}, { mode: 'attach' }, { mode: 'attach', endpoint: 'file:///tmp/browser' }, { mode: 'launch', toolCallTimeoutMs: 0 }, { mode: 'launch', executablePath: '' }]) {
+  for (const invalid of [{}, { mode: 'attach' }, { mode: 'attach', endpoint: 'file:///tmp/browser' }, { mode: 'launch', toolCallTimeoutMs: 0 }, { mode: 'launch', executablePath: '' }, { mode: 'launch', serverStart: 'lazy' }]) {
     expect(() => BrowserMcpConfig(invalid as never)).toThrow()
   }
   for (const endpoint of ['http://localhost:bad/path', 'http://localhost trailing-junk', 'file:///tmp/browser', 'http://localhost/ ']) {
@@ -171,7 +173,7 @@ it('waits for SystemPrompt and ToolRuntime before reserving the provider', async
   const browser = ctx.plugin({
     inject: ['browserUse', 'agents', 'tools', 'systemPrompt', 'workingDirectory'],
     apply(provider: Context) {
-      mountSessionMcp(provider, { name: 'browser-fixture', exclusive: true, command: process.execPath, args: [fixture] })
+      mountSessionMcp(provider, { name: 'browser-fixture', exclusive: true, serverStart: 'activation', command: process.execPath, args: [fixture] })
     },
   })
   await Promise.all([tools, browser])
@@ -647,7 +649,7 @@ describe('Session MCP Loader composition', () => {
     await ctx.plugin({
       inject: ['browserUse', 'agents', 'tools', 'systemPrompt', 'workingDirectory'],
       apply(inner: Context) {
-        mountSessionMcp(inner, { name: 'browser-fixture', exclusive: false, command: process.execPath, args: [fixture, root] })
+        mountSessionMcp(inner, { name: 'browser-fixture', exclusive: false, serverStart: 'activation', command: process.execPath, args: [fixture, root] })
       },
     })
     expect((await warm(ctx, existing.agent)).tools).toEqual([])
@@ -655,5 +657,136 @@ describe('Session MCP Loader composition', () => {
     expect((await warm(ctx, future.agent)).tools.some(tool => tool.name === TOOL)).toBe(true)
     expect((await execute(ctx, existing.agent)).isError).toBe(true)
     expect((await execute(ctx, future.agent)).isError).toBe(false)
+  })
+})
+
+describe('First-use server start', () => {
+  const firstUse = (mode?: string) => load(false, mode, undefined, undefined, 'first-use')
+  const mcpSections = (assembly: Awaited<ReturnType<typeof warm>>) => assembly.sections.filter(section => section.name.startsWith('mcp'))
+
+  it('declares the recorded tools, instructions and resources without a process until a Session first uses its browser', async () => {
+    const { ctx, root, browser } = await firstUse()
+    await ctx.plugin(McpResources)
+    const first = await ctx.agents.create({ sessionId: SessionId('recorder'), meta: { cwd: root } })
+    const recorded = await warm(ctx, first.agent)
+    const afterRecording = await events(root)
+    // The recording Session probes in place: one process answers discovery and initialization.
+    expect(afterRecording.filter(event => event.event === 'start')).toHaveLength(1)
+    expect(afterRecording.filter(event => event.event === 'probe')).toHaveLength(1)
+
+    const replayed = await Promise.all(['second', 'third', 'fourth'].map(id => ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root } })))
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(1)
+    for (const { agent } of replayed) {
+      const assembly = await warm(ctx, agent)
+      expect(assembly.tools).toEqual(recorded.tools)
+      expect(mcpSections(assembly)).toEqual(mcpSections(recorded))
+      expect(renderPrompt(assembly)).toContain('BROWSER_FIXTURE_INSTRUCTION')
+      expect(ctx.tools.schemas(agent)).toEqual(ctx.tools.schemas(first.agent))
+    }
+
+    const [second] = replayed
+    expect((await execute(ctx, second!.agent)).content).toEqual([{ type: 'text', text: 'Visit 1: direct' }])
+    expect(browserState(await resource(ctx, second!.agent)).counter).toBe(1)
+    expect((await execute(ctx, first.agent)).content).toEqual([{ type: 'text', text: 'Visit 1: direct' }])
+    const used = await events(root)
+    const starts = used.filter(event => event.event === 'start')
+    expect(starts).toHaveLength(2)
+    expect(new Set(used.filter(event => event.event === 'call').map(event => event.pid)).size).toBe(2)
+    // The started server receives the replayed startup exchange once, before the call.
+    expect(used.filter(event => event.pid === starts[1]!.pid).map(event => event.event)).toEqual(['start', 'probe', 'initialize', 'call', 'resource'])
+
+    await browser.dispose()
+    for (const { pid } of starts) {
+      expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+    }
+  })
+
+  it('holds Sessions created during the first recording until it completes, then answers them from it', async () => {
+    const { ctx, root } = await firstUse('gate')
+    const recording = observeActivation(ctx.agents.create({ sessionId: SessionId('recorder'), meta: { cwd: root } }))
+    await expect.poll(async () => (await events(root)).some(event => event.event === 'probe')).toBe(true)
+    let waited = false
+    const waiting = observeActivation(ctx.agents.create({ sessionId: SessionId('waiting'), meta: { cwd: root } }).then((handle) => {
+      waited = true
+      return handle
+    }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(waited).toBe(false)
+    await writeFile(join(root, 'release'), '')
+    const [owner, follower] = await Promise.all([recording, waiting])
+    expect(ctx.tools.schemas(follower.agent)).toEqual(ctx.tools.schemas(owner.agent))
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(1)
+    expect((await execute(ctx, follower.agent)).isError).toBe(false)
+  })
+
+  it('records again after a failed start and rejects that activation as before', async () => {
+    const { ctx, root } = await firstUse('fail')
+    await expect(ctx.agents.create({ sessionId: SessionId('first') })).rejects.toThrow('initial connection')
+    await expect(ctx.agents.create({ sessionId: SessionId('second') })).rejects.toThrow('initial connection')
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(2)
+  })
+
+  it('updates a Session whose started server lists different tools without declaring list changes, and records anew for the next Session', async () => {
+    const { ctx, root } = await firstUse('vary')
+    const warnings: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
+    const visitDescription = (agent: Agent) => ctx.tools.schemas(agent).find(tool => tool.name === TOOL)?.description
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    expect(visitDescription(first.agent)).toBe('Visit the fixture page from server 1.')
+    expect(visitDescription(second.agent)).toBe('Visit the fixture page from server 1.')
+    expect((await execute(ctx, second.agent)).isError).toBe(false)
+    await expect.poll(() => visitDescription(second.agent)).toBe('Visit the fixture page from server 2.')
+    expect(warnings.flat().join('\n')).toContain('answered its startup requests differently from the recorded exchange')
+    const third = await ctx.agents.create({ sessionId: SessionId('third'), meta: { cwd: root } })
+    expect(visitDescription(third.agent)).toBe('Visit the fixture page from server 3.')
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
+  })
+
+  it('fails a call to a tool the started server no longer lists with its error, then removes that tool', async () => {
+    const { ctx, root } = await firstUse('drop')
+    const browserTools = (agent: Agent) => ctx.tools.schemas(agent).map(tool => tool.name).filter(name => name.startsWith('mcp__browser-fixture__'))
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    expect(browserTools(second.agent)).toEqual(browserTools(first.agent))
+    const refused = await execute(ctx, second.agent)
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('Unknown tool: visit')
+    await expect.poll(() => browserTools(second.agent)).toEqual(['mcp__browser-fixture__disconnect'])
+    expect(browserTools(first.agent)).toContain(TOOL)
+    expect((await execute(ctx, first.agent)).isError).toBe(false)
+  })
+
+  it('closes a later Session server that does not answer its replayed startup within the tool-call timeout', async () => {
+    const { ctx, root } = await load(false, 'hang', 1000, undefined, 'first-use')
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    expect((await execute(ctx, second.agent)).isError).toBe(true)
+    const hung = (await events(root)).filter(event => event.event === 'start')[1]!.pid
+    await expect.poll(() => {
+      try { process.kill(hung, 0) } catch (error) {
+        return (error as NodeJS.ErrnoException).code
+      }
+      return 'running'
+    }).toBe('ESRCH')
+    const disconnected = await execute(ctx, second.agent)
+    expect(disconnected.isError).toBe(true)
+    expect(JSON.stringify(disconnected.content)).toContain('Not connected')
+    expect((await execute(ctx, first.agent)).isError).toBe(false)
+  })
+
+  it('starts each later Session server during activation without waiting once the startup exchange cannot be replayed', async () => {
+    const { ctx, root } = await firstUse('chatty')
+    const warnings: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const later = await Promise.all(['second', 'third'].map(id => ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root } })))
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
+    expect(warnings.flat().filter(warning => String(warning).includes('startup exchange cannot be replayed'))).toHaveLength(1)
+    for (const { agent } of later) {
+      expect(ctx.tools.schemas(agent)).toEqual(ctx.tools.schemas(first.agent))
+      expect((await execute(ctx, agent)).isError).toBe(false)
+    }
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
   })
 })

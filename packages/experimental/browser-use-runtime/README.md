@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Browser providers use this library to reuse a browser across one Session's turns and close its resources when that Session's runtime is disposed. Operations for one Session run in order, while isolated Sessions can proceed independently. Attachment mode reserves one external browser for a single Session. The library also connects provider-owned MCP servers and discovers their tools before the Session's first model request.
+Browser providers use this library to reuse a browser across one Session's turns and close its resources when that Session's runtime is disposed. Operations for one Session run in order, while isolated Sessions can proceed independently. Attachment mode reserves one external browser for a single Session. The library also connects provider-owned MCP servers and discovers their tools before the Session's first model request; a server process can wait for the Session's first browser call.
 
 ## Table of Contents
 
@@ -31,7 +31,9 @@ Native providers construct `SessionResources` from the package root, supplying r
 
 MCP providers use `mountSessionMcp` from `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp`, supplying their fixed server name, executable, arguments, and ownership policy. The mounting context must provide `workingDirectory`. Acquisition uses the [working-directory service](../../session/working-directory/README.md) to validate or recover the current directory and set the MCP server process's initial directory. Retained servers keep that directory when the Session later selects another. The helper awaits one scoped client startup and discovery attempt within each future Agent's `agent/created` event. Agent creation or resume completes after discovery, before queued input runs; a successful client remains owned by that Session across turns.
 
-A busy attachment skips startup permanently for that live activation while its other work continues. Releasing the attachment does not retry skipped activations; a newly created or resumed Agent can acquire it. Startup failure or cancellation rejects Agent creation or resume and triggers creation rollback, including client cleanup. The server always runs on the Host; for a Session whose Agent preset owns another execution world, such as an SSH host, it starts in the Host's temporary directory instead of the working directory. For such a Session, a startup failure instead leaves that activation without browser tools or instructions and logs a warning naming the Session. Reconnection is disabled. Loading or reloading a provider applies only to future Agent activations.
+`serverStart` selects when each Session's server process starts. `activation` starts it during that awaited startup. With `first-use`, the first Session whose server starts records the server's startup exchange (negotiation, initialization, and tool discovery), and every later Session receives the recorded replies to the same requests, so its activation declares identical tools, instructions, and resource servers without a process. A Session's own server starts at its first other request, normally its first browser tool or resource call, in the directory validated at activation. It first receives the requests already answered and must answer them within the Session's tool-call timeout; otherwise that Session's connection closes and the request fails. A reply that differs from the record discards the record, so the next Session records again. The replayed initialization declares tool-list change notifications, so a changed tool list makes that Session's client list its tools again; the request that started the server reaches it first, and a call to a tool the server no longer lists fails with the server's error. Sessions activated while a record is being made wait for it. A completed exchange that cannot be replayed is not kept: the server sent a message of its own, a request stayed unanswered, or no `initialize` result declared tools. Every later Session then starts its own server during activation without waiting, and the provider logs one warning. The record belongs to the provider activation.
+
+A busy attachment skips startup permanently for that live activation while its other work continues. Releasing the attachment does not retry skipped activations; a newly created or resumed Agent can acquire it. Startup failure or cancellation rejects Agent creation or resume and triggers creation rollback, including client cleanup. A Session answered from the record has no server start to fail during activation; a failed later start fails the request that triggered it and closes that Session's connection. The server always runs on the Host; for a Session whose Agent preset owns another execution world, such as an SSH host, it starts in the Host's temporary directory instead of the working directory. For such a Session, a startup failure instead leaves that activation without browser tools or instructions and logs a warning naming the Session. Reconnection is disabled. Loading or reloading a provider applies only to future Agent activations.
 
 Callers can inspect prompt assembly and scoped tool definitions after awaited Agent creation or resume completes.
 
@@ -49,7 +51,7 @@ The [resource manager](src/index.ts) keys ownership by live Agent identity and j
 
 Disposed-cause cancellation starts resource cleanup before AgentHandle waits for idle. Cleanup closes resources before waiting for running operations, allowing connection teardown to interrupt upstream APIs without abort support. A failed close rejects disposal and retains ownership. Agent-scoped cleanup prevents a resumed Session with the same durable id from inheriting a previous browser.
 
-The [MCP helper](src/mcp.ts) connects within serial `agent/created`; [AgentLoop](../../core/agent-loop/README.md#understand-the-implementation) holds queued input and owns creation rollback. Prompt assembly reads the initialized catalog. The helper retains the provider registration through resource cleanup and uses the [MCP client](../../mcp/mcp-client/README.md) for transport, schema discovery, result conversion, and durable image admission.
+The [MCP helper](src/mcp.ts) connects within serial `agent/created`; under `first-use` the client connects through a [startup transport](src/startup.ts) that shares one record per provider activation and probes on the serving process instead of a separate SDK probe process; [AgentLoop](../../core/agent-loop/README.md#understand-the-implementation) holds queued input and owns creation rollback. Prompt assembly reads the initialized catalog. The helper retains the provider registration through resource cleanup and uses the [MCP client](../../mcp/mcp-client/README.md) for transport, schema discovery, result conversion, and durable image admission.
 
 </details>
 
@@ -71,7 +73,7 @@ Indirectly, through provider-owned browser tools discovered before model request
 
 #### KV Cache effect
 
-Discovered tool schemas and provider guidance determine request-prefix changes; ordinary browser resource reuse does not alter those schemas. Directory recovery appends user context without replacing the system-prompt prefix.
+Discovered tool schemas and provider guidance determine request-prefix changes; ordinary browser resource reuse does not alter those schemas, and recorded startup replies reproduce the schemas and guidance a started server returns. Directory recovery appends user context without replacing the system-prompt prefix.
 
 ## Known Limitations and Deferred Work
 
@@ -82,6 +84,7 @@ Providers remain responsible for the browser operations they supply.
 - **MCP activation** — providers do not adopt existing live Agents; a busy attachment is not retried within that activation.
 - **Attachment scope** — exclusive ownership applies to one resource manager, not separate providers, processes, or external browser clients.
 - **Cancellation** — abort signals and connection closure cannot undo browser actions already delivered. An upstream operation that ignores both can delay cleanup.
+- **Recorded startup** — `first-use` gives later Sessions the first Session's startup replies, so a server whose negotiation, initialization, or tool list depends on the Session directory needs `activation`, as does a server that exits on the protocol probe sent before initialization. Each later Session's first browser call waits for its server to start.
 - **Recovery** — a failed close retains ownership; this manager does not retry disposal or restore browser state from the Session log.
 - **Shared host runtimes** — a profile installs this package beside the dsh installation, so `@deepseek-ai/dsh-scope` and `@deepseek-ai/dsh-mcp-client` stay peer dependencies. A dependency edge ships a second `dsh-scope` copy whose scope tags host registries cannot read: each Agent's MCP tools would register in the global tool layer and the second Agent's creation would fail.
 

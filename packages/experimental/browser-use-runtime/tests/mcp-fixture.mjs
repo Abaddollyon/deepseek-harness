@@ -1,5 +1,5 @@
 /** Private stdio browser fixture; each process owns independent state. */
-import { appendFileSync, existsSync, watch } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
@@ -7,13 +7,18 @@ const [root, mode] = process.argv.slice(2)
 const record = (event, values = {}) => appendFileSync(join(root, 'events.ndjson'), JSON.stringify({ event, pid: process.pid, ...values }) + '\n')
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
 let counter = 0
+// `vary` mode lists a tool description that names how many fixture processes have started.
+const starts = () => readFileSync(join(root, 'events.ndjson'), 'utf8').split('\n').filter(line => line.includes('"event":"start"')).length
 record('start', { cwd: process.cwd() })
+// `drop` and `hang` modes change every fixture process after the first.
+const later = (mode === 'drop' || mode === 'hang') && starts() > 1
 process.once('exit', () => record('exit'))
 const lines = createInterface({ input: process.stdin })
 lines.once('close', () => process.exit(0))
 lines.on('line', line => {
   const request = JSON.parse(line)
   if (request.id === undefined) return
+  if (mode === 'hang' && later) return
   switch (request.method) {
     case 'server/discover':
       record('probe')
@@ -39,16 +44,21 @@ lines.on('line', line => {
         protocolVersion: request.params.protocolVersion, capabilities: { tools: {}, resources: {} },
         serverInfo: { name: 'browser-fixture', version: '1' }, instructions: 'BROWSER_FIXTURE_INSTRUCTION: use this Session browser.',
       })
+      if (mode === 'chatty') process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', data: 'browser fixture started' } }) + '\n')
       break
     case 'tools/list':
       reply(request.id, { tools: [
-        { name: 'visit', description: 'Visit the fixture page.', inputSchema: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } },
+        ...mode === 'drop' && later ? [] : [{ name: 'visit', description: mode === 'vary' ? `Visit the fixture page from server ${starts()}.` : 'Visit the fixture page.', inputSchema: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } }],
         { name: 'disconnect', description: 'Disconnect the fixture.', inputSchema: { type: 'object', properties: {} } },
       ] })
       break
     case 'tools/call':
       record('call', { name: request.params.name, cwd: process.cwd() })
       if (request.params.name === 'disconnect') process.exit(0)
+      if (mode === 'drop' && later) {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32602, message: `Unknown tool: ${request.params.name}` } }) + '\n')
+        break
+      }
       counter += 1
       reply(request.id, { content: [{ type: 'text', text: `Visit ${counter}: ${request.params.arguments.label}` }], structuredContent: { counter, pid: process.pid } })
       break

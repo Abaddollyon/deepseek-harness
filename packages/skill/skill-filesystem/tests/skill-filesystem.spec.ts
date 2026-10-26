@@ -855,6 +855,14 @@ describe('FileSystemSkillProvider', () => {
     await expect(ctx.plugin(SkillFileSystem, { watchStabilityThresholdMs: 0 })).rejects.toThrow('watchStabilityThresholdMs')
   })
 
+  it('validates the frontmatter cache bound at plugin load', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SkillRegistry)
+
+    await expect(ctx.plugin(SkillFileSystem, { frontmatterCacheMaxEntries: 0 })).rejects.toThrow('frontmatterCacheMaxEntries')
+    await expect(ctx.plugin(SkillFileSystem, { frontmatterCacheMaxEntries: 2.5 })).rejects.toThrow('frontmatterCacheMaxEntries')
+  })
+
   it('uses default home root resolution without exposing builtin skills', async () => {
     const previousDshHome = process.env.DSH_HOME
     const previousAgentsHome = process.env.DSH_AGENTS_HOME
@@ -917,6 +925,199 @@ describe('FileSystemSkillProvider', () => {
       } else {
         process.env.DSH_BUNDLED_SKILL_DIR = previousBundledSkillDir
       }
+    }
+  })
+})
+
+describe('discovery frontmatter reuse', () => {
+  async function setupProject(name: string): Promise<{ home: string; project: string; root: string }> {
+    const home = await tempDir(`${name}-home`)
+    const project = await tempDir(`${name}-project`)
+    await mkdir(join(project, '.git'))
+    return { home, project, root: join(home, '.agents/skills') }
+  }
+
+  /** A distinct cwd per lookup gives every lookup its own registry catalog, as a new Agent's first step does. */
+  async function agentCwd(project: string, index: number): Promise<string> {
+    const cwd = join(project, `agent-${index}`)
+    await mkdir(cwd, { recursive: true })
+    return cwd
+  }
+
+  async function setupWithFileSystem(
+    home: string,
+    config: Partial<SkillFileSystem.Config> = {},
+  ): Promise<{ ctx: Context; fs: TestFileSystem }> {
+    const ctx = new Context()
+    await ctx.plugin(TestFileSystem)
+    const fs = ctx.fs as TestFileSystem
+    await ctx.plugin(SkillRegistry)
+    await ctx.plugin(SkillFileSystem, { dshHome: join(home, '.dsh'), agentsHome: join(home, '.agents'), watch: false, ...config })
+    return { ctx, fs }
+  }
+
+  it('reads each unchanged skill file once however many concurrent and later lookups discover it', async () => {
+    const { home, project, root } = await setupProject('skill-reuse')
+    for (const name of ['alpha-skill', 'beta-skill', 'gamma-skill']) await writeSkill(root, name, `${name} description`)
+    await writeFlatSkill(join(project, '.agents/skills'), 'project-skill', 'Project skill')
+    await writeFile(join(root, 'broken.md'), '---\nname: broken\n---\n\nNo description.\n')
+    const { ctx, fs } = await setupWithFileSystem(home)
+    const expected = [
+      ['alpha-skill', 'user-agents', 'alpha-skill description'],
+      ['beta-skill', 'user-agents', 'beta-skill description'],
+      ['gamma-skill', 'user-agents', 'gamma-skill description'],
+      ['project-skill', 'project-agents', 'Project skill'],
+    ]
+    const catalog = async (index: number): Promise<string[][]> => (await ctx.skills.list({ cwd: await agentCwd(project, index) }))
+      .map(skill => [skill.name, skill.source, skill.description])
+
+    const concurrent = await Promise.all(Array.from({ length: 24 }, async (_, index) => await catalog(index)))
+    for (const skills of concurrent) expect(skills).toEqual(expected)
+    // Five candidate files (four valid and one invalid), each read once for 24 concurrent catalogs.
+    expect(fs.readTextSignals).toHaveLength(5)
+
+    for (let index = 24; index < 48; index += 1) expect(await catalog(index)).toEqual(expected)
+    expect(fs.readTextSignals).toHaveLength(5)
+  })
+
+  it('re-reads only a skill file whose resolved version changed', async () => {
+    const { home, project, root } = await setupProject('skill-version')
+    await writeSkill(root, 'stable-skill', 'Stable skill')
+    await writeSkill(root, 'edited-skill', 'First description')
+    const path = join(root, 'edited-skill/SKILL.md')
+    const { ctx, fs } = await setupWithFileSystem(home)
+    fs.statOverrides.set(path, { version: FsVersion('edited-v1'), type: 'file', size: 1 })
+    const description = async (index: number): Promise<string | undefined> =>
+      (await ctx.skills.list({ cwd: await agentCwd(project, index) })).find(skill => skill.name === 'edited-skill')?.description
+
+    expect(await description(0)).toBe('First description')
+    expect(fs.readTextSignals).toHaveLength(2)
+
+    await writeSkill(root, 'edited-skill', 'Second description')
+    fs.statOverrides.set(path, { version: FsVersion('edited-v2'), type: 'file', size: 1 })
+    expect(await description(1)).toBe('Second description')
+    expect(fs.readTextSignals).toHaveLength(3)
+
+    // The freshness token is the validator: an unchanged token reuses the parsed frontmatter.
+    await writeSkill(root, 'edited-skill', 'Third description')
+    expect(await description(2)).toBe('Second description')
+    expect(fs.readTextSignals).toHaveLength(3)
+
+    ctx.emit('fs/observed', { targetKey: path as never, displayPath: path }, { kind: 'present', version: FsVersion('edited-v2') }, { name: 'edit' })
+    expect(await description(3)).toBe('Third description')
+    expect(fs.readTextSignals).toHaveLength(4)
+  })
+
+  it('retries a failed read of an unchanged version on the next lookup', async () => {
+    const { home, project, root } = await setupProject('skill-read-retry')
+    await writeSkill(root, 'flaky-skill', 'Flaky skill')
+    const path = join(root, 'flaky-skill/SKILL.md')
+    const { ctx, fs } = await setupWithFileSystem(home)
+    fs.statOverrides.set(path, { version: FsVersion('flaky-v1'), type: 'file', size: 1 })
+    fs.errorReadPaths.add(path)
+
+    expect(await ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })).toEqual({ skills: [], complete: false })
+    fs.errorReadPaths.clear()
+    expect(await ctx.skills.snapshot({ cwd: await agentCwd(project, 1) })).toMatchObject({
+      skills: [{ name: 'flaky-skill' }],
+      complete: true,
+    })
+    expect(fs.readTextSignals).toHaveLength(2)
+  })
+
+  it('keeps a newer version when a superseded read fails', async () => {
+    const { home, project, root } = await setupProject('skill-superseded-read')
+    await writeSkill(root, 'racing-skill', 'Second version')
+    const path = join(root, 'racing-skill/SKILL.md')
+    const { ctx, fs } = await setupWithFileSystem(home)
+    fs.statOverrides.set(path, { version: FsVersion('racing-v1'), type: 'file', size: 1 })
+    const firstRead = Promise.withResolvers<string>()
+    let reads = 0
+    fs.readTextOverride = async (target) => {
+      reads += 1
+      return reads === 1 ? await firstRead.promise : await readFile(target.displayPath, 'utf8')
+    }
+
+    const superseded = ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })
+    await waitFor(async () => reads, count => count === 1)
+    fs.statOverrides.set(path, { version: FsVersion('racing-v2'), type: 'file', size: 1 })
+    expect(await ctx.skills.list({ cwd: await agentCwd(project, 1) })).toMatchObject([{ description: 'Second version' }])
+    firstRead.reject(new Error('read temporarily failed'))
+
+    expect(await superseded).toEqual({ skills: [], complete: false })
+    expect(await ctx.skills.list({ cwd: await agentCwd(project, 2) })).toMatchObject([{ description: 'Second version' }])
+    expect(reads).toBe(2)
+  })
+
+  it('reports a body load that finds the file newly invalid as missing', async () => {
+    const { home, root } = await setupProject('skill-load-invalid')
+    await writeSkill(root, 'soon-invalid', 'Soon invalid')
+    const { ctx } = await setupWithFileSystem(home)
+
+    expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(['soon-invalid'])
+    await writeFile(join(root, 'soon-invalid/SKILL.md'), '---\nname: soon-invalid\n---\n\nNo description.\n')
+    expect(await ctx.skills.get('soon-invalid')).toBeUndefined()
+  })
+
+  it.skipIf(process.platform === 'win32')('marks a looping host skill-file link incomplete', async () => {
+    const { home, root } = await setupProject('skill-loop-link')
+    await mkdir(join(root, 'looping-skill'), { recursive: true })
+    await symlink('SKILL.md', join(root, 'looping-skill/SKILL.md'))
+    const ctx = await setupLocal(home)
+
+    expect(await ctx.skills.snapshot()).toEqual({ skills: [], complete: false })
+  })
+
+  it('bounds retained frontmatter by frontmatterCacheMaxEntries', async () => {
+    const { home, project, root } = await setupProject('skill-cache-bound')
+    await writeSkill(root, 'first-skill', 'First skill')
+    await writeSkill(root, 'second-skill', 'Second skill')
+    const fitting = await setupWithFileSystem(home, { frontmatterCacheMaxEntries: 2 })
+    const bounded = await setupWithFileSystem(home, { frontmatterCacheMaxEntries: 1 })
+
+    for (let index = 0; index < 3; index += 1) {
+      const cwd = await agentCwd(project, index)
+      expect((await fitting.ctx.skills.list({ cwd })).map(skill => skill.name)).toEqual(['first-skill', 'second-skill'])
+      expect((await bounded.ctx.skills.list({ cwd })).map(skill => skill.name)).toEqual(['first-skill', 'second-skill'])
+    }
+    expect(fitting.fs.readTextSignals).toHaveLength(2)
+    expect(bounded.fs.readTextSignals).toHaveLength(6)
+  })
+
+  it('reflects host skill edits across lookups without a filesystem service', async () => {
+    const { home, project, root } = await setupProject('skill-host-version')
+    await writeSkill(root, 'host-skill', 'Short')
+    await writeFlatSkill(root, 'host-flat', 'Flat skill')
+    const ctx = await setupLocal(home)
+    const catalog = async (index: number): Promise<string[][]> => (await ctx.skills.list({ cwd: await agentCwd(project, index) }))
+      .map(skill => [skill.name, skill.description])
+
+    const first = await Promise.all([0, 1, 2, 3].map(async index => await catalog(index)))
+    for (const skills of first) expect(skills).toEqual([['host-flat', 'Flat skill'], ['host-skill', 'Short']])
+
+    await writeSkill(root, 'host-skill', 'A longer description')
+    expect(await catalog(4)).toEqual([['host-flat', 'Flat skill'], ['host-skill', 'A longer description']])
+    await rm(join(root, 'host-flat.md'))
+    expect(await catalog(5)).toEqual([['host-skill', 'A longer description']])
+  })
+
+  it('discards reused frontmatter when the host watcher reports a change', { timeout: 10000 }, async () => {
+    const { home, project, root } = await setupProject('skill-watch-evict')
+    await writeSkill(root, 'watched-skill', 'Before watcher')
+    const path = join(root, 'watched-skill/SKILL.md')
+    const { ctx, fs } = await setupWithFileSystem(home, { watch: true, watchStabilityThresholdMs: 20, watchPollIntervalMs: 10 })
+    fs.statOverrides.set(path, { version: FsVersion('pinned'), type: 'file', size: 1 })
+    let index = 0
+    const description = async (): Promise<string | undefined> => {
+      index += 1
+      return (await ctx.skills.list({ cwd: await agentCwd(project, index) })).find(skill => skill.name === 'watched-skill')?.description
+    }
+    try {
+      expect(await description()).toBe('Before watcher')
+      await writeSkill(root, 'watched-skill', 'After watcher')
+      expect(await waitFor(description, value => value === 'After watcher')).toBe('After watcher')
+    } finally {
+      await ctx.fiber.dispose()
     }
   })
 })

@@ -49,6 +49,8 @@ kind: "package-reference"
 
 Node PTC 提供方的 `maxPendingCalls` 也限制工作流并发：子 agent 启动、结果等待与资源释放会占用这些名额。进度批次至多再占用一个名额。设置 `maxConcurrentAgents` 时应预留余量。
 
+子 agent 还共享父级树的 [subagent 容量](../../subagent/subagent/README.zh.md)。容量已满且本次运行仍有运行中的子 agent 时，`agent()` 会等待本次运行的某个子 agent 结算后重试，因为运行中的子 agent 占用一个名额且从不等待其所属运行。若某次启动尝试期间本次运行的某个子 agent 已结算，而该尝试仍被拒绝，则立即重试。若本次运行没有自己的运行中子 agent，也没有这样的结算，运行仍像以前一样失败（`ACTIVATION_LIMIT_REACHED`），因为它拥有的任何东西都不会释放名额。取消运行会结束等待。
+
 ### 结果与失败
 
 脚本支持顶层 `await`；`meta` 和 `args` 作为 JSON 数据传入。每次 `agent()` 调用都会在本次运行的固定父 agent 下启动受管理的 subagent Activation，并等待其文本或结构化结果。该 Activation 使用配置的 subagent 提供方；若调用的 `subagentProvider` 选项指定了另一个已注册的提供方（例如在其他执行主机上启动子 agent 的提供方），则改用该提供方。显式的 `label` 会替换随子 agent 目录成员资格保存的按运行编号的 Activation 标签（`<meta.name> child <n>`）。调用可选的 `provider`、`model` 和 `reasoningEffort` 覆盖该子 agent 的 LLM 路由以及配置的 `agentOptions`；若调用改变了配置的路由（未配置的 provider 或 model 以父级的为准）却未指定推理强度，则丢弃配置的推理强度。若父 Session 记录了 subagent 模型选择策略，调用显式指定的路由必须属于其允许的路由，与 `subagent` 工具相同。有效模型不提供的推理强度会在子 agent 启动前使工作流失败。工作流记录自己的成员并收集其结果，不向父模型发送子 agent 结算通知。最终的无损 JSON 返回值成为运行结果；普通子 agent 失败使 `agent()` 以 `null` 兑现。

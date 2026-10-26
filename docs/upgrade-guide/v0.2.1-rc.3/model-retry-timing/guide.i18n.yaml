@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.3/model-retry-timing/guide.md
+/:
+  en: 5dd79da1bf52c232
+  zh: 2b059eacd175a4c8
+/model-request-retries-spread-their-waits-and-honour-provider-delays:
+  en: cd4ffb5075361e2e
+  zh: a130f971396eb0bb
+/model-request-retries-spread-their-waits-and-honour-provider-delays/change:
+  en: 0d8a6ce002e73e5c
+  zh: 2b1df5721c8fb98c
+/model-request-retries-spread-their-waits-and-honour-provider-delays/migration:
+  en: 8f33545f8de3e9ea
+  zh: 4f6da18885661a2e

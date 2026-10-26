@@ -5,10 +5,12 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { TeamTaskId } from '@deepseek-ai/dsh-experimental-agent-team'
 import type { TeammateRoute, TeamMemberView } from '@deepseek-ai/dsh-experimental-agent-team'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm'
 import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import {
   assertAllowedModelSelection,
+  childRouteAgentOptions,
+  childRouteDefaultsSchema,
   hasConfiguredLlmSelection,
   hasDelegationModelRequest,
   preflightChildLlmRoute,
@@ -16,7 +18,7 @@ import {
   subagentModelSelectionPolicy,
   subagentModelSelectionProjectionDefinition,
 } from '@deepseek-ai/dsh-tool-subagent/route-selection'
-import type { DelegationModelRequest } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import type { ChildRouteDefaults, DelegationModelRequest } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 
@@ -29,16 +31,7 @@ export const inject = ['agents', 'agentTeams', 'tools', 'systemPrompt', 'subagen
  * LLM route defaults for every teammate. Provider and model form one route
  * and are configured together.
  */
-export interface TeammateDefaults {
-  /** LLM provider id of the teammate route. */
-  readonly provider?: string
-  /** Model id interpreted by `provider`. */
-  readonly model?: string
-  /** Adapter-owned reasoning effort; checked against the effective route before each teammate starts. */
-  readonly reasoningEffort?: string
-  /** Positive output-token limit per teammate request. */
-  readonly maxTokens?: number
-}
+export type TeammateDefaults = ChildRouteDefaults
 
 /** Tool routing configuration. */
 export interface Config {
@@ -64,13 +57,7 @@ export const Config: z<Config> = z.object({
   interrupt: z.boolean().default(true),
   freshProvider: z.string().default('spawn'),
   forkProvider: z.string().default('fork'),
-  // A union keeps an omitted field absent instead of an empty object.
-  agentOptions: z.union([z.const(undefined), z.object({
-    provider: z.string().min(1),
-    model: z.string().min(1),
-    reasoningEffort: z.string().min(1),
-    maxTokens: z.natural().min(1),
-  })]),
+  agentOptions: childRouteDefaultsSchema,
 })
 
 /** Resolved plugin configuration. */
@@ -79,25 +66,6 @@ interface ResolvedConfig {
   readonly freshProvider: string
   readonly forkProvider: string
   readonly agentOptions: AgentOptions | undefined
-}
-
-/**
- * Convert configured teammate defaults into Agent options.
- * @param defaults - the configured defaults, if any.
- * @returns the Agent options, or undefined when nothing is configured.
- * @throws when only one of provider and model is configured.
- */
-function teammateDefaults(defaults: TeammateDefaults | undefined): AgentOptions | undefined {
-  if (defaults === undefined) return undefined
-  if ((defaults.provider === undefined) !== (defaults.model === undefined)) {
-    throw new Error('tool-agent-team: configure `agentOptions.provider` and `agentOptions.model` together')
-  }
-  return {
-    ...defaults.provider === undefined ? {} : { provider: defaults.provider },
-    ...defaults.model === undefined ? {} : { model: defaults.model },
-    ...defaults.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(defaults.reasoningEffort) },
-    ...defaults.maxTokens === undefined ? {} : { maxTokens: defaults.maxTokens },
-  }
 }
 
 /** Pointer appended to a rejected route choice. */
@@ -583,7 +551,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     interrupt: config.interrupt ?? true,
     freshProvider: config.freshProvider ?? 'spawn',
     forkProvider: config.forkProvider ?? 'fork',
-    agentOptions: teammateDefaults(config.agentOptions),
+    agentOptions: childRouteAgentOptions('tool-agent-team', config.agentOptions),
   }
   // Shared with the subagent tool: the registry keeps one registration per key.
   const policyReader = await ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
