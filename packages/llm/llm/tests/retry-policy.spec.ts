@@ -16,7 +16,8 @@ describe('provider retry policy', () => {
       retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
       initialDelayMs: 500,
       maxDelayMs: 10_000,
-      jitterRatio: 0.1,
+      jitter: 'full',
+      jitterRatio: 1,
     })
     expect(Object.isFrozen(policy)).toBe(true)
     if (policy.mode !== 'normal') throw new Error('expected normal policy')
@@ -32,6 +33,7 @@ describe('provider retry policy', () => {
       backoff: {
         initialDelayMs: 25,
         maxDelayMs: 100,
+        jitter: 'symmetric',
         jitterRatio: 0,
       },
     }
@@ -45,6 +47,7 @@ describe('provider retry policy', () => {
       retryableCodes: ['BUSY'],
       initialDelayMs: 25,
       maxDelayMs: 100,
+      jitter: 'symmetric',
       jitterRatio: 0,
     })
   })
@@ -54,7 +57,8 @@ describe('provider retry policy', () => {
       mode: 'always',
       initialDelayMs: 500,
       maxDelayMs: 10_000,
-      jitterRatio: 0.1,
+      jitter: 'full',
+      jitterRatio: 1,
     })
     expect(RetryPolicySchema).toBeDefined()
   })
@@ -70,7 +74,8 @@ describe('provider retry policy', () => {
       mode: 'always',
       initialDelayMs: 500,
       maxDelayMs: 10_000,
-      jitterRatio: 0.1,
+      jitter: 'full',
+      jitterRatio: 1,
     })
   })
 
@@ -84,6 +89,7 @@ describe('provider retry policy', () => {
     [{ mode: 'always', backoff: { maxDelayMs: MAX_TIMER_DELAY_MS + 1 } }, /maxDelayMs/],
     [{ mode: 'normal', backoff: { initialDelayMs: 20, maxDelayMs: 10 } }, /less than or equal/],
     [{ mode: 'always', backoff: { jitterRatio: 1.1 } }, /jitterRatio/],
+    [{ mode: 'normal', backoff: { jitter: 'decorrelated' } }, /jitter must be "full" or "symmetric"/],
     [{ mode: 'normal', retryableCodes: [] }, /must not be empty/],
     [{ mode: 'normal', retryableCodes: ['SERVER', 'SERVER'] }, /duplicates/],
     [{ mode: 'normal', retryableCodes: [''] }, /non-empty strings/],

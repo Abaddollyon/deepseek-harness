@@ -10,7 +10,7 @@
 
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { FinishReason, LlmFailure, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
@@ -96,18 +96,79 @@ function classifyPiAiError(message: string): string {
   return 'PI_AI_ERROR'
 }
 
+/** HTTP facts of the last response one pi-ai request received, observed through its `fetch`. */
+export interface ObservedProviderResponse {
+  /** HTTP status code. */
+  readonly status: number
+  /** Positive provider-requested retry delay in milliseconds, resolved when the response arrived. */
+  readonly retryAfterMs?: number
+}
+
+function positiveDelay(value: number): number | undefined {
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Parse a provider-requested retry delay. A valid positive `retry-after-ms`
+ * (milliseconds, which the OpenAI and Anthropic SDKs also honour) wins over
+ * `retry-after`, which carries delta-seconds or an HTTP-date.
+ * @param headers - response headers.
+ * @param nowMs - receipt time in epoch milliseconds, used to resolve an HTTP-date.
+ * @returns the positive delay in milliseconds, or `undefined` when both headers
+ *   are absent, malformed, zero, or name a past date.
+ */
+export function parseRetryAfterMs(headers: Headers, nowMs: number): number | undefined {
+  const milliseconds = headers.get('retry-after-ms')?.trim()
+  const millisecondDelay = milliseconds === undefined || milliseconds === '' ? undefined : positiveDelay(Number(milliseconds))
+  if (millisecondDelay !== undefined) return millisecondDelay
+  const retryAfter = headers.get('retry-after')?.trim()
+  if (retryAfter === undefined || retryAfter === '') return undefined
+  const seconds = Number(retryAfter)
+  return Number.isNaN(seconds) ? positiveDelay(Date.parse(retryAfter) - nowMs) : positiveDelay(seconds * 1000)
+}
+
+/** Failure codes an HTTP status determines when pi-ai's flattened error text is unrecognized. */
+function statusFailureCode(status: number): string | undefined {
+  if (status === 408) return 'TIMEOUT'
+  if (status === 429) return 'RATE_LIMIT'
+  return status >= 500 ? 'SERVER' : undefined
+}
+
+/**
+ * Classify pi-ai error text, then add the failed HTTP response's status and
+ * requested delay. Text classification wins; the status decides only text the
+ * classifier leaves as `PI_AI_ERROR`, such as a provider's reworded 429 body.
+ */
+function errorFailure(text: string, response: ObservedProviderResponse | undefined): LlmFailure {
+  const classified = classifyPiAiError(text)
+  if (response === undefined || response.status < 400) return { message: text, code: classified }
+  return {
+    message: text,
+    code: classified === 'PI_AI_ERROR' ? statusFailureCode(response.status) ?? classified : classified,
+    status: response.status,
+    ...response.retryAfterMs === undefined ? {} : { providerRetryAfterMs: response.retryAfterMs },
+  }
+}
+
 /**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param response - the last HTTP response the request received, when its transport exposed one.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
  *   to non-retryable `PI_AI_ERROR` failures. Known status-less overloads map to
- *   `SERVER`; unclassified errors remain `PI_AI_ERROR`.
+ *   `SERVER`. An error after a failed HTTP `response` carries its `status` and
+ *   `providerRetryAfterMs`, and unrecognized text after a 408, 429, or 5xx maps
+ *   to `TIMEOUT`, `RATE_LIMIT`, or `SERVER`; other unclassified errors remain `PI_AI_ERROR`.
  */
-export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
+export function mapStopReason(
+  message: AssistantMessage,
+  contextWindow?: number,
+  response?: ObservedProviderResponse,
+): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
@@ -153,10 +214,8 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       kind: 'aborted',
       failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' },
     }
-    case 'error': {
-      const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
-    }
+    case 'error':
+      return { kind: 'error', failure: errorFailure(message.errorMessage ?? 'pi-ai stream error', response) }
   }
 }
 
@@ -169,6 +228,7 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  * @param callerSignal - caller cancellation state; an aborted caller makes any
  *   in-band terminal error an aborted finish.
  * @param requestedModel - request model identity recorded for durable replay.
+ * @param lastResponse - reads the last HTTP response of this request when the terminal event arrives.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event, or
  *   `MALFORMED_RESPONSE` when completed tool arguments are invalid. Length-limited
@@ -179,6 +239,7 @@ export async function* toStreamChunks(
   contextWindow?: number,
   callerSignal?: AbortSignal,
   requestedModel?: string,
+  lastResponse?: () => ObservedProviderResponse | undefined,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -252,7 +313,7 @@ export async function* toStreamChunks(
         }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.message, contextWindow),
+          reason: mapStopReason(event.message, contextWindow, lastResponse?.()),
           replayState: toPiReplayState(event.message, requestedModel),
         }
         return
@@ -265,6 +326,7 @@ export async function* toStreamChunks(
           reason: mapStopReason(
             callerSignal?.aborted ? { ...event.error, stopReason: 'aborted' } : event.error,
             contextWindow,
+            lastResponse?.(),
           ),
         }
         return

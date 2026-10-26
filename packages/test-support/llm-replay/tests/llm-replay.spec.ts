@@ -1468,7 +1468,8 @@ describe('installLlmReplay (through the real LlmRuntime)', () => {
       maxRetries: 5,
       initialDelayMs: 500,
       maxDelayMs: 10_000,
-      jitterRatio: 0.1,
+      jitter: 'full',
+      jitterRatio: 1,
     })
     const prepared = await ctx.llm.prepareCall({
       provider: 'deepseek', model: 'flash',

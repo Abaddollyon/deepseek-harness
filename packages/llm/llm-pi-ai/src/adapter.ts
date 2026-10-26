@@ -31,6 +31,7 @@ import type {
   Api,
   AuthContext,
   CredentialStore,
+  FetchFunction,
   Model,
   Models,
   ModelThinkingLevel,
@@ -62,7 +63,9 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
-import { toStreamChunks } from './stream.ts'
+import { RouteRequestLimiter } from './request-limit.ts'
+import { parseRetryAfterMs, toStreamChunks } from './stream.ts'
+import type { ObservedProviderResponse } from './stream.ts'
 
 /**
  * Initially active declaration added to an Anthropic request whose projected
@@ -150,6 +153,35 @@ function snapshotAuth(
         : credentials.modify(providerId, mutate, options),
       delete: (providerId, options) => credentials.delete(providerId, options),
     },
+  }
+}
+
+/**
+ * pi-ai APIs whose HTTP requests go through a caller-supplied `fetch`. The
+ * Google adapters reject a custom `fetch`, Bedrock signs through the AWS SDK,
+ * and WebSocket transports bypass `fetch`, so their failures carry no status.
+ */
+const FETCH_OBSERVING_APIS: ReadonlySet<Api> = new Set<Api>([
+  'anthropic-messages',
+  'azure-openai-responses',
+  'mistral-conversations',
+  'openai-codex-responses',
+  'openai-completions',
+  'openai-responses',
+  'pi-messages',
+])
+
+/**
+ * Wrap the global `fetch`, read when each request starts so a process-wide
+ * proxy dispatcher still applies, and report every response's status and
+ * requested retry delay before pi-ai consumes it.
+ */
+function observingFetch(observe: (response: ObservedProviderResponse) => void): FetchFunction {
+  return async (input, init) => {
+    const response = await globalThis.fetch(input, init)
+    const retryAfterMs = parseRetryAfterMs(response.headers, Date.now())
+    observe({ status: response.status, ...retryAfterMs === undefined ? {} : { retryAfterMs } })
+    return response
   }
 }
 
@@ -278,6 +310,7 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
+  private readonly requestLimiter = new RouteRequestLimiter()
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
@@ -433,6 +466,8 @@ export class PiAiAdapter extends LlmAdapter {
     const keyless = isKeylessProxyRequest(profile, model, resolvedKey)
     const apiKey = keyless ? KEYLESS_PROXY_KEY : resolvedKey
 
+    // Held until this stream ends; queueing precedes the watchdog because waiting is not provider idleness.
+    using _slot = await this.requestLimiter.acquire(options.provider, profile.maxConcurrentRequests, options.signal)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -463,8 +498,11 @@ export class PiAiAdapter extends LlmAdapter {
             maxBytes: profile.requestImageMaxBytes,
           },
         }, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
+      let lastResponse: ObservedProviderResponse | undefined
+      const observe = (response: ObservedProviderResponse): void => { lastResponse = response }
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
+        ...FETCH_OBSERVING_APIS.has(model.api) ? { fetch: observingFetch(observe) } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
@@ -473,7 +511,7 @@ export class PiAiAdapter extends LlmAdapter {
         // Harness-owned and therefore win collisions.
         headers: keyless ? { ...requestHeaders(profile.headers), Authorization: null } : requestHeaders(profile.headers),
       })
-      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id, () => lastResponse)[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

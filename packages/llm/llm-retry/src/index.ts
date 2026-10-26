@@ -56,13 +56,31 @@ async function settleDownstream(
   }
 }
 
-function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
+function exponentialDelay(config: ResolvedRetryPolicy, retry: number): number {
   const exponent = Math.min(retry - 1, 1024)
-  const exponential = Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
-  const jitter = 1 - config.jitterRatio + 2 * config.jitterRatio * random()
-  return Math.min(exponential * jitter, config.maxDelayMs)
+  return Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
 }
 
+/** Local backoff for `retry` under the policy's `RetryJitter` strategy. */
+function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
+  const exponential = exponentialDelay(config, retry)
+  return config.jitter === 'full'
+    ? exponential * (1 - config.jitterRatio * random())
+    : Math.min(exponential * (1 - config.jitterRatio + 2 * config.jitterRatio * random()), config.maxDelayMs)
+}
+
+/**
+ * Wait for an accepted provider delay. Full jitter never waits less than the
+ * requested delay and spreads concurrent Agents answered by one rate-limit
+ * burst above it; symmetric jitter waits exactly the requested delay.
+ */
+function providerDelay(config: ResolvedRetryPolicy, retry: number, requestedMs: number, random: () => number): number {
+  if (config.jitter === 'symmetric') return requestedMs
+  const spread = config.jitterRatio * random() * Math.max(exponentialDelay(config, retry), requestedMs)
+  return Math.min(requestedMs + spread, config.maxDelayMs)
+}
+
+// The key omits `jitter`: changing only the spread strategy keeps an in-progress retry chain's budget.
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
   return policy.mode === 'always'
     ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
@@ -228,7 +246,7 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
         if (policy.mode === 'normal') return next()
         delayMs = localDelay(policy, retry, random)
       } else {
-        delayMs = failure.providerRetryAfterMs
+        delayMs = providerDelay(policy, retry, failure.providerRetryAfterMs, random)
       }
     } else {
       delayMs = localDelay(policy, retry, random)

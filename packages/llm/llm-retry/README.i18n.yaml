@@ -21,11 +21,14 @@
   en: 17f7e708d9daed6c
   zh: 6ebf99501110948a
 /deepseek-ai-dsh-llm-retry/use-this-package/minimal-configuration:
-  en: 95b1cf09ee2c77a9
-  zh: 4d45e437db4988c7
+  en: f5bf2589b0d60d0e
+  zh: 0a4da0c9fc37022a
 /deepseek-ai-dsh-llm-retry/use-this-package/what-you-can-observe:
-  en: 21267b22ad48e012
-  zh: 521bfad2c2d8e418
+  en: eb068bdd611940a1
+  zh: 6cb6e87564d380fb
+/deepseek-ai-dsh-llm-retry/use-this-package/spread-retries-across-agents:
+  en: 9b4e3880362b35f1
+  zh: ea17640b1d3a49ec
 /deepseek-ai-dsh-llm-retry/use-this-package/failures-and-recovery:
   en: 730567739a21a4d2
   zh: 3ea222c68d960948
@@ -39,8 +42,8 @@
   en: 9b79cdd6597930e0
   zh: 0838f3efbc1e83ac
 /deepseek-ai-dsh-llm-retry/understand-the-implementation/recovery-flow:
-  en: 4ba0a3ef069bd416
-  zh: e1cf971729a8717c
+  en: 2ee3881de6c5d504
+  zh: e6d89a1e85779be2
 /deepseek-ai-dsh-llm-retry/understand-the-implementation/waterfall-composition:
   en: 388e8db333e03cb1
   zh: 54b6446ac3584724
@@ -63,8 +66,8 @@
   en: 82d6bdfc0ec747ea
   zh: 14269c9dcd086611
 /deepseek-ai-dsh-llm-retry/known-limitations-and-deferred-work:
-  en: bef1baa545592b9c
-  zh: 61984a1e10de8294
+  en: 5686bf9ff9396586
+  zh: 462b35ca3df5f8f6
 /deepseek-ai-dsh-llm-retry/known-limitations-and-deferred-work/dev-note:
   en: add61ee91e4ae8e4
   zh: 3877c147b541b2c9

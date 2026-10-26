@@ -47,11 +47,22 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-省略 `retryPolicy` 时使用 normal mode：对 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT` 最多重试五次，退避从 500 毫秒到 10 秒、带 10% 抖动。normal mode 可以更改其有界预算、合格 code 与退避；always mode 先询问下游恢复，然后无尝试上限地重试每个模型请求失败，只在成功、取消或插件释放时停止。
+省略 `retryPolicy` 时使用 normal mode：对 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT` 最多重试五次，退避从 500 毫秒到 10 秒、采用 full 抖动。normal mode 可以更改其有界预算、合格 code 与退避；always mode 先询问下游恢复，然后无尝试上限地重试每个模型请求失败，只在成功、取消或插件释放时停止。
 
 ### 你可以观察到什么
 
-每次计划的重试在等待前就是持久的：插件会先追加携带重试 id、提供方、模式、策略键、失败与计划延迟的非表层 `llm/retry` 事件，然后在重试开始前立即追加 `llm/retry-started` 事件。提供方给出且符合策略边界的有效 `Retry-After` 会替换本地退避。等待完成后，loop 会在同一个打开的轮次内重跑失败步骤，仍基于同一份持久历史，因此重试请求与原始请求一样可以从会话日志重建。取消或插件释放会中止进行中的退避、等待活跃的委派恢复结算，并使释放前捕获的回调只能以失败结束。
+每次计划的重试在等待前就是持久的：插件会先追加携带重试 id、提供方、模式、策略键、失败与计划延迟的非表层 `llm/retry` 事件，然后在重试开始前立即追加 `llm/retry-started` 事件。提供方给出且符合策略边界的有效 `Retry-After` 会替换本地退避：重试绝不会早于提供方要求的时间开始。等待完成后，loop 会在同一个打开的轮次内重跑失败步骤，仍基于同一份持久历史，因此重试请求与原始请求一样可以从会话日志重建。取消或插件释放会中止进行中的退避、等待活跃的委派恢复结算，并使释放前捕获的回调只能以失败结束。
+
+### 在 agent 之间错开重试
+
+被同一次限流突发拒绝的 agent，如果每次等待都相同，就会一起重试。`backoff.jitter` 选择一个随机样本如何错开每次等待，并按 `backoff.jitterRatio`（0 到 1）缩放：
+
+| `jitter` | 指数延迟 `d` 的本地退避 | 已接受的提供方延迟 `p` |
+|---|---|---|
+| `full`（默认） | 介于 `d * (1 - jitterRatio)` 与 `d` 之间 | 介于 `p` 与 `p + jitterRatio * max(d, p)` 之间，上限为 `maxDelayMs` |
+| `symmetric` | `d` 乘以介于 `1 - jitterRatio` 与 `1 + jitterRatio` 之间的系数，上限为 `maxDelayMs` | 恰好为 `p` |
+
+默认 `jitterRatio` 为 1，因此本地等待分布在 `[0, d]`，提供方延迟的等待分布在 `[p, min(p + max(d, p), maxDelayMs)]`。`jitterRatio: 0` 会使任一策略变为确定性。
 
 ### 失败与恢复
 
@@ -83,7 +94,7 @@ kind: "package-reference"
 
 恢复监听器在等待投影注册前安装。激活期间到达的失败会先等待读取句柄，再应用提供方策略。注册失败会传播给 agent；等待期间取消或释放插件，不会写入重试记录或发起后续尝试。
 
-失败步骤连同其提供方与解析后的策略一起到达 waterfall。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——有效且在边界内的提供方 `Retry-After`，否则带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
+失败步骤连同其提供方与解析后的策略一起到达 waterfall。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——有效且在边界内的提供方 `Retry-After`，否则本地有界指数退避，二者都按配置的抖动错开——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
 
 ### Waterfall 组合
 
@@ -135,6 +146,7 @@ kind: "package-reference"
 - **有界插件预算相加**——normal mode 只统计其配置的 code 与精确提供方策略，而上下文溢出压缩（compaction）拥有独立预算。任何重叠策略都必须定义注册顺序行为。
 - **恢复策略按 waterfall 顺序组合**——always mode 先接受下游重试，再应用其回退。之后忽略取消且永不结算的策略也会阻止回退、轮次完全停稳与插件释放完成。
 - **`llm/retry` 记录调度，而非完成**——后续步骤与轮次事件才确立成功、耗尽或取消。
+- **重试等待保留 agent 的容量**——等待在 agent 打开的步骤内进行，因此子 agent 或 workflow 子 agent 在等待期间保留其激活槽位。
 
 <a id="dev-note"></a>
 ### 开发备注

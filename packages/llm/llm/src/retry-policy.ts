@@ -14,7 +14,8 @@ import { EMPTY_RESPONSE_CODE } from './error.ts'
 const DEFAULT_MAX_RETRIES = 5
 const DEFAULT_INITIAL_DELAY_MS = 500
 const DEFAULT_MAX_DELAY_MS = 10_000
-const DEFAULT_JITTER_RATIO = 0.1
+const DEFAULT_JITTER: RetryJitter = 'full'
+const DEFAULT_JITTER_RATIO = 1
 const DEFAULT_RETRYABLE_CODES = Object.freeze([
   EMPTY_RESPONSE_CODE,
   'RATE_LIMIT',
@@ -23,13 +24,29 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
   'TRANSPORT',
 ])
 
-/** Bounded exponential backoff with symmetric jitter around each local delay. */
+/**
+ * How one random sample `u` in `[0, 1]` spreads a retry delay, given the
+ * retry's exponential delay `d` and the `jitterRatio` `r`.
+ *
+ * - `full` waits `d * (1 - r * u)` locally, so `r = 1` is full jitter over
+ *   `[0, d]`; an accepted provider delay `p` waits
+ *   `min(p + r * u * max(d, p), maxDelayMs)`, never less than `p`.
+ * - `symmetric` waits `min(d * (1 - r + 2 * r * u), maxDelayMs)` locally and
+ *   exactly `p` for an accepted provider delay.
+ *
+ * `r = 0` makes both strategies deterministic.
+ */
+export type RetryJitter = 'full' | 'symmetric'
+
+/** Bounded exponential backoff with a random spread around each delay. */
 export interface BackoffConfig {
   /** Initial local exponential-backoff delay in milliseconds (default 500). */
   initialDelayMs?: number
   /** Maximum locally scheduled or accepted provider delay in milliseconds (default 10000). */
   maxDelayMs?: number
-  /** Symmetric random multiplier range around one (default 0.1). */
+  /** Random spread strategy (default `full`). */
+  jitter?: RetryJitter
+  /** Fraction of the delay the random spread spans, from 0 to 1 (default 1). */
   jitterRatio?: number
 }
 
@@ -60,6 +77,7 @@ export type RetryPolicyConfig = NormalRetryPolicyConfig | AlwaysRetryPolicyConfi
 export interface ResolvedRetryBackoff {
   readonly initialDelayMs: number
   readonly maxDelayMs: number
+  readonly jitter: RetryJitter
   readonly jitterRatio: number
 }
 
@@ -81,6 +99,7 @@ export type ResolvedRetryPolicy = ResolvedNormalRetryPolicy | ResolvedAlwaysRetr
 const backoffSchema: z<BackoffConfig> = z.object({
   initialDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_INITIAL_DELAY_MS),
   maxDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_MAX_DELAY_MS),
+  jitter: z.union([z.const('full'), z.const('symmetric')]).default(DEFAULT_JITTER),
   jitterRatio: z.number().min(0).max(1).default(DEFAULT_JITTER_RATIO),
 })
 
@@ -110,7 +129,7 @@ const NORMAL_POLICY_KEYS: ReadonlySet<string> = new Set([
 const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set([
   'mode', 'maxRetries', 'retryableCodes', 'backoff',
 ])
-const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio'])
+const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitter', 'jitterRatio'])
 
 function validateKeys(value: object, allowed: ReadonlySet<string>, path: string): void {
   for (const key of Object.keys(value)) {
@@ -122,6 +141,8 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (config !== undefined) validateKeys(config, BACKOFF_KEYS, path)
   const initialDelayMs = config?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS
   const maxDelayMs = config?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS
+  // Layered cordis.yml values reach this resolver unchecked by the TypeScript type.
+  const jitter: unknown = config?.jitter ?? DEFAULT_JITTER
   const jitterRatio = config?.jitterRatio ?? DEFAULT_JITTER_RATIO
 
   if (!Number.isFinite(initialDelayMs) || initialDelayMs <= 0 || initialDelayMs > MAX_TIMER_DELAY_MS) {
@@ -133,11 +154,14 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (initialDelayMs > maxDelayMs) {
     throw new Error(`${path}.initialDelayMs must be less than or equal to maxDelayMs`)
   }
+  if (jitter !== 'full' && jitter !== 'symmetric') {
+    throw new Error(`${path}.jitter must be "full" or "symmetric"`)
+  }
   if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
     throw new Error(`${path}.jitterRatio must be between 0 and 1`)
   }
 
-  return Object.freeze({ initialDelayMs, maxDelayMs, jitterRatio })
+  return Object.freeze({ initialDelayMs, maxDelayMs, jitter, jitterRatio })
 }
 
 /**

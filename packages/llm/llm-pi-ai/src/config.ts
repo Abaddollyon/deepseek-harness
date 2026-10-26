@@ -222,6 +222,12 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Maximum model requests this route streams at once in this Host; further
+   * requests wait in arrival order until one finishes, and a caller's abort
+   * leaves the queue. Omission leaves the route unlimited.
+   */
+  maxConcurrentRequests?: number
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
@@ -398,6 +404,7 @@ const profile = z.object({
   requestImagePixelBudget: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET),
   requestImageMaxBytes: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_MAX_BYTES),
   retryPolicy: RetryPolicySchema,
+  maxConcurrentRequests: z.number().step(1).min(1),
 })
 
 /** Runtime schema for {@link Config}. */
@@ -525,6 +532,10 @@ export function resolveProfiles(
     const requestImageMaxBytes = source.requestImageMaxBytes ?? DEFAULT_REQUEST_IMAGE_MAX_BYTES
     if (!Number.isSafeInteger(requestImageMaxBytes) || requestImageMaxBytes <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" requestImageMaxBytes must be a positive safe integer`)
+    }
+    if (source.maxConcurrentRequests !== undefined
+      && (!Number.isSafeInteger(source.maxConcurrentRequests) || source.maxConcurrentRequests <= 0)) {
+      throw new Error(`llm-pi-ai: provider "${provider}" maxConcurrentRequests must be a positive safe integer`)
     }
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty

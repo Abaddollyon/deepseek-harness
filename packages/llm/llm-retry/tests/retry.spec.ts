@@ -337,7 +337,7 @@ describe('provider-routed retry policy', () => {
     })
   })
 
-  it('applies bounded exponential jitter and stops after the configured budget', async () => {
+  it('applies bounded exponential symmetric jitter and stops after the configured budget', async () => {
     vi.useFakeTimers()
     const samples = [0, 1]
     const adapter = new ScriptedAdapter([
@@ -346,7 +346,7 @@ describe('provider-routed retry policy', () => {
       new LlmError('busy three', 'SERVER'),
     ])
     ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
-      backoff: { jitterRatio: 0.1 },
+      backoff: { jitter: 'symmetric', jitterRatio: 0.1 },
     }) }, undefined, {
       random: () => samples.shift() ?? 0.5,
     }))
@@ -372,15 +372,18 @@ describe('provider-routed retry policy', () => {
     })
   })
 
-  it('accepts the zero-delay lower jitter bound', async () => {
+  it.each([
+    ['symmetric', 0],
+    ['full', 1],
+  ] as const)('accepts the zero-delay lower %s jitter bound', async (jitter, sample) => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
       new LlmError('busy', 'SERVER'),
       textResponse('done'),
     ])
     ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
-      backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 1 },
-    }) }, undefined, { random: () => 0 }))
+      backoff: { initialDelayMs: 1, maxDelayMs: 1, jitter, jitterRatio: 1 },
+    }) }, undefined, { random: () => sample }))
     const agent = await context.agentLoop.create(SessionId('retry-zero-delay'), { provider: 'mock', model: 'mock' })
     const scheduled = waitForRetry(context, agent, 1)
 
@@ -393,14 +396,14 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('uses a bounded provider Retry-After verbatim and delegates an over-cap instruction', async () => {
+  it('uses a bounded provider Retry-After verbatim under symmetric jitter and delegates an over-cap instruction', async () => {
     vi.useFakeTimers()
     const accepted = new ScriptedAdapter([
       new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
       textResponse('done'),
     ])
     ;({ ctx: context } = await harness(accepted, { mock: normalConfig({
-      backoff: { jitterRatio: 1 },
+      backoff: { jitter: 'symmetric', jitterRatio: 1 },
     }) }))
     const acceptedAgent = await context.agentLoop.create(SessionId('retry-after-accepted'), { provider: 'mock', model: 'mock' })
     const scheduled = waitForRetry(context, acceptedAgent, 1)
@@ -424,6 +427,87 @@ describe('provider-routed retry policy', () => {
     expect(rejectedAgent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
   })
 
+  it('spreads default full-jitter local backoff below each exponential delay', async () => {
+    vi.useFakeTimers()
+    const samples = [0.25, 0.75]
+    const adapter = new ScriptedAdapter([
+      new LlmError('busy one', 'SERVER'),
+      new LlmError('busy two', 'SERVER'),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { jitterRatio: 1 },
+    }) }, undefined, { random: () => samples.shift() ?? 0.5 }))
+    const agent = await context.agentLoop.create(SessionId('retry-full-jitter'), { provider: 'mock', model: 'mock' })
+    const first = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await first).data.delayMs).toBe(375)
+    const second = waitForRetry(context, agent, 2)
+    await vi.advanceTimersByTimeAsync(375)
+    expect((await second).data.delayMs).toBe(250)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(250)
+    await idle
+    expect(adapter.requests).toHaveLength(3)
+  })
+
+  it('never retries before an accepted provider Retry-After and spreads full jitter above it up to maxDelayMs', async () => {
+    vi.useFakeTimers()
+    const samples = [0.5, 1]
+    const adapter = new ScriptedAdapter([
+      new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
+      new LlmError('wait longer', 'RATE_LIMIT', { providerRetryAfterMs: 8_000 }),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { jitterRatio: 1 },
+    }) }, undefined, { random: () => samples.shift() ?? 0 }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-full-jitter'), { provider: 'mock', model: 'mock' })
+    const first = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    // The spread spans the larger of the requested and the exponential delay.
+    expect((await first).data.delayMs).toBe(3_000)
+    const second = waitForRetry(context, agent, 2)
+    await vi.advanceTimersByTimeAsync(2_999)
+    expect(adapter.requests).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect((await second).data.delayMs).toBe(10_000)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await idle
+    expect(adapter.requests).toHaveLength(3)
+  })
+
+  it('schedules distinct waits for agents answered by the same rate-limit burst', async () => {
+    vi.useFakeTimers()
+    const agents = 8
+    const samples = Array.from({ length: agents }, (_, index) => index / agents)
+    const adapter = new ScriptedAdapter([
+      ...Array.from({ length: agents }, () => new LlmError('burst', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 2_000 })),
+      ...Array.from({ length: agents }, () => textResponse('done')),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { jitterRatio: 1 },
+    }) }, undefined, { random: () => samples.shift() ?? 0 }))
+    const created = await Promise.all(Array.from({ length: agents }, async (_, index) =>
+      await context!.agentLoop.create(SessionId(`retry-burst-${index}`), { provider: 'mock', model: 'mock' })))
+    const scheduled = created.map(agent => waitForRetry(context!, agent, 1))
+
+    for (const agent of created) {
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    }
+    const delays = (await Promise.all(scheduled)).map(event => event.data.delayMs)
+    expect(new Set(delays).size).toBe(agents)
+    expect(Math.min(...delays)).toBeGreaterThanOrEqual(2_000)
+    expect(Math.max(...delays)).toBeLessThan(4_000)
+
+    await vi.advanceTimersByTimeAsync(4_000)
+    await Promise.all(created.map(agent => agent.whenIdle()))
+    expect(adapter.requests).toHaveLength(agents * 2)
+  })
+
   it('uses local jittered backoff when always mode receives an over-cap Retry-After', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
@@ -433,6 +517,7 @@ describe('provider-routed retry policy', () => {
     ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
       initialDelayMs: 2,
       maxDelayMs: 4,
+      jitter: 'symmetric',
       jitterRatio: 0.5,
     }) }, undefined, { random: () => 1 }))
     const agent = await context.agentLoop.create(SessionId('retry-always-over-cap'), {
@@ -695,6 +780,7 @@ describe('provider-routed retry policy', () => {
     ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
       initialDelayMs: 1,
       maxDelayMs: 4,
+      jitter: 'symmetric',
       jitterRatio: 0.1,
     }) }, undefined, { random: () => 1 }))
     const agent = await context.agentLoop.create(SessionId('retry-always-unbounded'), {
