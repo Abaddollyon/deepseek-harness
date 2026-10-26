@@ -53,8 +53,6 @@ interface SandboxExecutionPolicy {
   mode: SandboxMode
   /** Absolute root directory `workspace-write` may write under. */
   workspaceRoot: string
-  /** Further absolute roots `workspace-write` may write under; absent or empty means none. */
-  additionalRoots?: readonly string[]
   /**
    * Extra physical absolute directories `workspace-write` may also write under.
    * Absence means none. The enforcing host rejects missing, non-directory, and

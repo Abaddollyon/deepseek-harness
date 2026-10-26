@@ -177,8 +177,8 @@ interface ContinuableCreateSpec {
 /**
  * Where a child runs when it does not join its parent's composition: another
  * Agent preset (for example one bound to a different SSH host) and a cwd in
- * that preset's execution world. The child's session header records both, so
- * cold resume rejoins the same preset. A target starts the child fresh: a
+ * that preset's execution world. The child's session header records both, and
+ * its recorded preset selection lets cold resume rejoin the same preset. A target starts the child fresh: a
  * provider that also supplies a seed is refused.
  */
 interface ChildExecutionTarget {

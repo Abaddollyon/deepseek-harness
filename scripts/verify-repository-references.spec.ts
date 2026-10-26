@@ -81,6 +81,14 @@ describe('maintained repository reference policy', () => {
     }
   })
 
+  it('skips the Python lockfile, whose artifact sizes can equal abbreviated commit identifiers', () => {
+    // Built at run time so this spec's own source names no commit.
+    const size = ['634', '4383'].join('')
+    const line = `size = ${size}, upload-time = "2026-10-09T00:00:00Z"`
+    expect(findRepositoryReferences('python/sdk/uv.lock', line, new Set([size]))).toEqual([])
+    expect(findRepositoryReferences('python/sdk/notes.md', line, new Set([size]))).toHaveLength(1)
+  })
+
   it('rejects complete and abbreviated commit identifiers in tracked, staged, and new files', (test) => {
     const fixture = repository(test)
     fixture.write('tracked.md', `release\n${fixture.commit}\n${fixture.commit.toUpperCase()}\n`)
