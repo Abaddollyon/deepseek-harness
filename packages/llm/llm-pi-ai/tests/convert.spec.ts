@@ -988,13 +988,13 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it('adds a failed response status and Retry-After, letting the status classify unrecognized text', () => {
-    const reworded = assistant({ stopReason: 'error', errorMessage: 'You have hit your ChatGPT usage limit.' })
+    const reworded = assistant({ stopReason: 'error', errorMessage: 'admission full' })
     expect(mapStopReason(reworded, undefined, { status: 429, retryAfterMs: 5_000 })).toEqual({
       kind: 'error',
-      failure: { message: 'You have hit your ChatGPT usage limit.', code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 5_000 },
+      failure: { message: 'admission full', code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 5_000 },
     })
     expect(mapStopReason(reworded, undefined, { status: 503 }))
-      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit.', code: 'SERVER', status: 503 } })
+      .toEqual({ kind: 'error', failure: { message: 'admission full', code: 'SERVER', status: 503 } })
     expect(mapStopReason(reworded, undefined, { status: 408 })).toMatchObject({ failure: { code: 'TIMEOUT', status: 408 } })
     expect(mapStopReason(reworded, undefined, { status: 404 })).toMatchObject({ failure: { code: 'PI_AI_ERROR', status: 404 } })
     // Recognized text keeps its code; a successful response belongs to a later stream failure.
@@ -1002,6 +1002,28 @@ describe('mapStopReason / mapUsage', () => {
       .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 1 } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'terminated' }), undefined, { status: 200, retryAfterMs: 1 }))
       .toEqual({ kind: 'error', failure: { message: 'terminated', code: 'TRANSPORT' } })
+  })
+
+  it('fails pi-ai\'s Codex usage-limit sentence as QUOTA whatever the status, with its stated reset', () => {
+    const exhausted = (errorMessage: string) => assistant({ stopReason: 'error', errorMessage })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit.', code: 'QUOTA', status: 429 } })
+    // The stated minutes cannot read as an authentication status.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.')))
+      .toEqual({
+        kind: 'error',
+        failure: { message: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.', code: 'QUOTA', providerRetryAfterMs: 401 * 60_000 },
+      })
+    // A response header's exact delay wins over the rounded sentence.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~5 min.'), undefined, { status: 429, retryAfterMs: 90_000 }))
+      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 90_000 } })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~0 min.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit. Try again in ~0 min.', code: 'QUOTA', status: 429 } })
+    // A reset sentence without the usage-limit sentence is no delay.
+    expect(mapStopReason(exhausted('server busy. Try again in ~5 min.'))).toEqual({
+      kind: 'error',
+      failure: { message: 'server busy. Try again in ~5 min.', code: 'PI_AI_ERROR' },
+    })
   })
 
   it.each([

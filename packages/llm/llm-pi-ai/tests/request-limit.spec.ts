@@ -49,7 +49,7 @@ describe('RouteRequestLimiter', () => {
     expect(admitted).toEqual(['a1', 'b1'])
   })
 
-  it('returns an empty slot to a request aborted while queued and admits the next one', async () => {
+  it('rejects a request aborted while queued with its abort reason and admits the next one', async () => {
     const limiter = new RouteRequestLimiter()
     const { admitted, start, release } = tracker(limiter)
     const controller = new AbortController()
@@ -58,11 +58,10 @@ describe('RouteRequestLimiter', () => {
     const aborted = limiter.acquire('route', 1, controller.signal)
     void start('next', 'route', 1)
     await settle()
-    controller.abort(new Error('turn cancelled'))
+    const reason = new Error('turn cancelled')
+    controller.abort(reason)
 
-    const empty = await aborted
-    empty[Symbol.dispose]()
-    await settle()
+    await expect(aborted).rejects.toBe(reason)
     expect(admitted).toEqual(['first'])
     release('first')
     await settle()
@@ -72,16 +71,35 @@ describe('RouteRequestLimiter', () => {
   it('admits an already aborted request only while the route has capacity', async () => {
     const limiter = new RouteRequestLimiter()
     const { admitted, start, release } = tracker(limiter)
-    const signal = AbortSignal.abort(new Error('already cancelled'))
+    const reason = new Error('already cancelled')
+    const signal = AbortSignal.abort(reason)
     await start('aborted-with-capacity', 'route', 1, signal)
-    const full = await limiter.acquire('route', 1, signal)
-    full[Symbol.dispose]()
+    await expect(limiter.acquire('route', 1, signal)).rejects.toBe(reason)
     void start('waiting', 'route', 1)
     await settle()
     expect(admitted).toEqual(['aborted-with-capacity'])
     release('aborted-with-capacity')
     await settle()
     expect(admitted).toEqual(['aborted-with-capacity', 'waiting'])
+  })
+
+  it('forgets a route once its last admitted or queued request leaves', async () => {
+    const limiter = new RouteRequestLimiter()
+    const { start, release } = tracker(limiter)
+    const controller = new AbortController()
+    void start('limited', 'limited', 1)
+    void start('unlimited', 'unlimited', undefined)
+    await settle()
+    const leaving = limiter.acquire('limited', 1, controller.signal)
+    await settle()
+    expect(limiter.activeRoutes).toBe(2)
+
+    controller.abort(new Error('turn cancelled'))
+    await expect(leaving).rejects.toThrow('turn cancelled')
+    release('unlimited')
+    expect(limiter.activeRoutes).toBe(1)
+    release('limited')
+    expect(limiter.activeRoutes).toBe(0)
   })
 
   it('admits queued requests when a later request raises or removes the limit', async () => {

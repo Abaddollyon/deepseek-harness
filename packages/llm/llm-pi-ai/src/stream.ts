@@ -35,6 +35,15 @@ export function mapUsage(usage: PiUsage): TokenUsage {
   }
 }
 
+/**
+ * pi-ai's Codex adapter rewrites every 429 that carries a JSON error body into
+ * this sentence, plan exhaustion (`usage_limit_reached`) included, and appends
+ * the plan and `Try again in ~N min.` when the body names them. The rewrite
+ * erases the provider's code, so the sentence marks a terminal quota failure.
+ */
+const CODEX_USAGE_LIMIT = /\bYou have hit your ChatGPT usage limit\b/i
+const CODEX_USAGE_LIMIT_RESET = /\bTry again in ~(\d+) min\b/i
+
 // XXX(pi-ai upstream): pi-ai flattens the caught error to `error.message`
 // (api/anthropic-messages.js: `errorMessage = error instanceof Error ?
 // error.message : JSON.stringify(error)`), discarding the original Error and its
@@ -53,6 +62,8 @@ function classifyPiAiError(message: string): string {
   // Checked before status codes: the stream id can read like one (`stream ID 401;`).
   if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
   if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
+  // Checked before status codes: the stated reset can read like one (`~401 min`).
+  if (CODEX_USAGE_LIMIT.test(message)) return QUOTA_EXCEEDED_CODE
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
@@ -134,19 +145,28 @@ function statusFailureCode(status: number): string | undefined {
   return status >= 500 ? 'SERVER' : undefined
 }
 
+/** The reset delay pi-ai's Codex usage-limit sentence states, in milliseconds. */
+function codexUsageLimitResetMs(text: string): number | undefined {
+  if (!CODEX_USAGE_LIMIT.test(text)) return undefined
+  const minutes = CODEX_USAGE_LIMIT_RESET.exec(text)?.[1]
+  return minutes === undefined ? undefined : positiveDelay(Number(minutes) * 60_000)
+}
+
 /**
  * Classify pi-ai error text, then add the failed HTTP response's status and
  * requested delay. Text classification wins; the status decides only text the
- * classifier leaves as `PI_AI_ERROR`, such as a provider's reworded 429 body.
+ * classifier leaves as `PI_AI_ERROR`, such as a provider's reworded 503 body.
+ * A response header's delay wins over the reset a Codex usage-limit sentence states.
  */
 function errorFailure(text: string, response: ObservedProviderResponse | undefined): LlmFailure {
   const classified = classifyPiAiError(text)
-  if (response === undefined || response.status < 400) return { message: text, code: classified }
+  const failed = response !== undefined && response.status >= 400 ? response : undefined
+  const retryAfterMs = failed?.retryAfterMs ?? codexUsageLimitResetMs(text)
   return {
     message: text,
-    code: classified === 'PI_AI_ERROR' ? statusFailureCode(response.status) ?? classified : classified,
-    status: response.status,
-    ...response.retryAfterMs === undefined ? {} : { providerRetryAfterMs: response.retryAfterMs },
+    code: failed !== undefined && classified === 'PI_AI_ERROR' ? statusFailureCode(failed.status) ?? classified : classified,
+    ...failed === undefined ? {} : { status: failed.status },
+    ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
   }
 }
 
@@ -160,7 +180,10 @@ function errorFailure(text: string, response: ObservedProviderResponse | undefin
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
  *   to non-retryable `PI_AI_ERROR` failures. Known status-less overloads map to
- *   `SERVER`. An error after a failed HTTP `response` carries its `status` and
+ *   `SERVER`, and pi-ai's Codex usage-limit sentence maps to non-retryable
+ *   `QUOTA` whatever the status, carrying its stated reset as
+ *   `providerRetryAfterMs` when no response header named a delay. An error
+ *   after a failed HTTP `response` carries its `status` and
  *   `providerRetryAfterMs`, and unrecognized text after a 408, 429, or 5xx maps
  *   to `TIMEOUT`, `RATE_LIMIT`, or `SERVER`; other unclassified errors remain `PI_AI_ERROR`.
  */

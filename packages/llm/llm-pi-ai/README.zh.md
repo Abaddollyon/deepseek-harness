@@ -87,7 +87,7 @@ kind: "package-reference"
 | `requestImageMaxBytes` | `1 MiB` | 每张请求图片在 base64 扩展前的编码字节目标 |
 | `maxRequestImageBytes` | `20 MiB` | base64 图片载荷总上限，保留图片超过时请求以 `IMAGE_OFFLOAD_REQUIRED` 失败 |
 | `retryPolicy` | normal，5 次重试 | 由 `dsh-llm-retry` 执行的提供方自有重试策略 |
-| `maxConcurrentRequests` | 不限 | 该路由在本 Host 中同时流式传输的请求上限；其余请求按到达顺序等待，调用方中止会使其离开队列 |
+| `maxConcurrentRequests` | 不限 | 该路由在本 Host 中同时流式传输的请求上限；其余请求按到达顺序等待，等待期间调用方中止会使请求在 pi-ai 发送之前以 `ABORTED` 结束 |
 | `authMode` | `provider` | `proxy` 只发送 `apiKeyEnv` 的值或不发送凭据（`openai-completions`、`openai-responses`，或 `claude-code` 模式下的 `anthropic-messages`），绝不读取、刷新或提供已存储或环境中的提供方凭据；需要显式且不含内嵌凭据的 http(s) `baseURL` |
 | `anthropicRequestMode` | `provider` | `claude-code` 无论有无密钥都发送 Claude Code 请求格式；仅限 `anthropic-messages` 路由 |
 | `modelDiscovery.source` | `provider` | `openai-compatible` 或 `anthropic` 列出路由自己的 `baseURL`，而不是由已安装目录回答 |
@@ -140,7 +140,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。没有 HTTP 状态的提供方过载映射为可重试的 `SERVER`；HTTP/2 流重置与 codex-lb 上游 WebSocket 截断（带上游关闭、接收失败或锚点被拒的 `stream_incomplete`）映射为可重试的 `TRANSPORT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
-适配器通过交给 pi-ai 的 `fetch` 观察每个 HTTP 响应。错误响应之后的失败会携带该响应的 `status`，并以 `providerRetryAfterMs` 携带它在 `retry-after-ms` 或 `retry-after`（秒数或 HTTP 日期）中要求的延迟，`dsh-llm-retry` 会遵循该延迟。在 408、429 或 5xx 之后、分类器无法识别的错误文本会映射为 `TIMEOUT`、`RATE_LIMIT` 或 `SERVER`，因此被 pi-ai 改写为用量上限的 Codex 429 仍可重试。
+适配器在其整个生命周期内交给 pi-ai 同一个 `fetch`，并通过它观察每个模型响应，因此 pi-ai 按 `fetch` 缓存的客户端（例如 Anthropic 工作负载身份联合客户端及其 token）可跨请求保留。每个请求只读取自己的最新响应，没有收到响应就失败的尝试不携带任何响应，联合 token 请求这类凭据交换也不算模型响应。错误响应之后的失败会携带该响应的 `status`，并以 `providerRetryAfterMs` 携带它在 `retry-after-ms` 或 `retry-after`（秒数或 HTTP 日期）中要求的延迟，`dsh-llm-retry` 会遵循该延迟。在 408、429 或 5xx 之后、分类器无法识别的错误文本会映射为 `TIMEOUT`、`RATE_LIMIT` 或 `SERVER`。pi-ai 会把每个携带 JSON 错误正文的 Codex 429（包括套餐用尽）改写为 `You have hit your ChatGPT usage limit…`；该句以不可重试的 `QUOTA` 失败，并在没有响应头给出延迟时，以 `providerRetryAfterMs` 携带句中所述的 `Try again in ~N min`。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 
@@ -179,6 +179,7 @@ Config 更新严格验证发生变化的 provider。初始加载将已存储的�
 | [`src/context.ts`](src/context.ts) | Harness 到 pi-ai 的上下文转换、图片处理、回放恢复 |
 | [`src/stream.ts`](src/stream.ts) | 把 pi-ai 事件转换为 harness `StreamChunk` 值，解析 `Retry-After` |
 | [`src/request-limit.ts`](src/request-limit.ts) | `maxConcurrentRequests` 的逐路由先进先出准入 |
+| [`src/response-observer.ts`](src/response-observer.ts) | 适配器唯一的 `fetch`，把每个提供方响应归属到其请求 |
 | [`src/replay.ts`](src/replay.ts) | 带版本的 `ReplayEnvelope` 存储与校验 |
 | [`src/discovery.ts`](src/discovery.ts) | 面向配置界面的端点询问 |
 
@@ -281,6 +282,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **对话更新支持只来自已安装的 pi-ai 目录**——原生系统与工具更新需要目录模型的对话中 compat 标志，profile 不能设置这些标志。手工声明的路由与未标记的模型会以用户角色提醒接收后续系统文本，并在每次请求开头接收完整的当前工具列表。
 - **图片只在 user 与工具结果消息中被接受**——system、developer 或 assistant 历史中的图片在两条转换路径上都会以 `UNSUPPORTED_CONTENT` 失败。
 - **提供方 HTTP 状态只来自被观察的 `fetch`**——Google 适配器拒绝自定义 `fetch`，Bedrock 通过 AWS SDK 签名请求，WebSocket 传输绕过 `fetch`，因此它们的失败既不携带 `status` 也不携带 `providerRetryAfterMs`；SSE 的 `retry:` 字段与错误正文中的重试提示不会被读取。
+- **暂时性 Codex 429 与套餐用尽以相同方式失败**——pi-ai 的用量上限改写会丢弃提供方错误 code，因此 codex-lb 的 `rate_limit_exceeded` 429 同样以 `QUOTA` 失败，normal mode 不会重试它。
 - **`maxConcurrentRequests` 只统计一个适配器的流**——队列位于本 Host 的适配器实例中，因此访问同一池的其他进程不计入，且槽位会一直保留到流结束，包括消费方缓慢时。
 - **重试策略由提供方自有，而非 SDK 重试**——pi-ai SDK 重试保持禁用，因此持久 agent（智能体）步骤与 `llm/retry` 事件拥有每个可见尝试，直接 `ctx.llm.stream()` 调用仍是单次尝试。
 - **流式 JSON 工具调用参数避免逐 delta 重复解析**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@1.3.0.patch`](../../../patches/@earendil-works__pi-ai@1.3.0.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。完成事件提供解析后的参数；Responses 可能在参数完成和输出项完成时分别解析。本适配器只读取 delta 字符串与最终参数。同一补丁还加入了 `anthropicRequestMode: claude-code` 所设置的 Anthropic `requestMode` 流选项。每次升级 pi-ai 时都要重新应用或撤销该补丁。

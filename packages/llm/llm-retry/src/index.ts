@@ -70,14 +70,17 @@ function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => nu
 }
 
 /**
- * Wait for an accepted provider delay. Full jitter never waits less than the
- * requested delay and spreads concurrent Agents answered by one rate-limit
- * burst above it; symmetric jitter waits exactly the requested delay.
+ * Wait for a provider-requested delay, accepted up to `maxDelayMs`. Full jitter
+ * never waits less than the accepted delay and spreads concurrent Agents
+ * answered by one rate-limit burst above it; symmetric jitter waits exactly the
+ * accepted delay. A longer request waits exactly `maxDelayMs`, so neither mode
+ * ends the turn on it or retries at once.
  */
 function providerDelay(config: ResolvedRetryPolicy, retry: number, requestedMs: number, random: () => number): number {
-  if (config.jitter === 'symmetric') return requestedMs
-  const spread = config.jitterRatio * random() * Math.max(exponentialDelay(config, retry), requestedMs)
-  return Math.min(requestedMs + spread, config.maxDelayMs)
+  const acceptedMs = Math.min(requestedMs, config.maxDelayMs)
+  if (config.jitter === 'symmetric') return acceptedMs
+  const spread = config.jitterRatio * random() * Math.max(exponentialDelay(config, retry), acceptedMs)
+  return Math.min(acceptedMs + spread, config.maxDelayMs)
 }
 
 // The key omits `jitter`: changing only the spread strategy keeps an in-progress retry chain's budget.
@@ -238,19 +241,11 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = previous?.retryId ?? RetryId(randomUUID())
-    let delayMs: number
-    if (failure.providerRetryAfterMs !== undefined
+    const delayMs = failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
-      && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > policy.maxDelayMs) {
-        if (policy.mode === 'normal') return next()
-        delayMs = localDelay(policy, retry, random)
-      } else {
-        delayMs = providerDelay(policy, retry, failure.providerRetryAfterMs, random)
-      }
-    } else {
-      delayMs = localDelay(policy, retry, random)
-    }
+      && failure.providerRetryAfterMs > 0
+      ? providerDelay(policy, retry, failure.providerRetryAfterMs, random)
+      : localDelay(policy, retry, random)
 
     return backoff(agent, turn, step, failure, provider, policy, policyKey, retry, retryId, delayMs, signal)
   }

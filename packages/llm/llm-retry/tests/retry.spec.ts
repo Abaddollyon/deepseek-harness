@@ -396,7 +396,7 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('uses a bounded provider Retry-After verbatim under symmetric jitter and delegates an over-cap instruction', async () => {
+  it('uses a bounded provider Retry-After verbatim under symmetric jitter', async () => {
     vi.useFakeTimers()
     const accepted = new ScriptedAdapter([
       new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
@@ -413,18 +413,36 @@ describe('provider-routed retry policy', () => {
     await vi.advanceTimersByTimeAsync(2_000)
     await acceptedIdle
     expect(accepted.requests).toHaveLength(2)
+  })
 
-    await context.fiber.dispose()
-    const rejected = new ScriptedAdapter([
-      new LlmError('wait too long', 'RATE_LIMIT', { providerRetryAfterMs: 10_001 }),
+  it.each([
+    ['normal', 'full', 0],
+    ['normal', 'symmetric', 0],
+    ['always', 'full', 1],
+    ['always', 'symmetric', 1],
+  ] as const)('waits exactly maxDelayMs in %s mode under %s jitter when the provider asks for longer', async (mode, jitter, sample) => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('wait too long', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 20_000 }),
+      textResponse('done'),
     ])
-    ;({ ctx: context } = await harness(rejected))
-    const rejectedAgent = await context.agentLoop.create(SessionId('retry-after-rejected'), { provider: 'mock', model: 'mock' })
-    const rejectedIdle = waitForIdle(context, rejectedAgent)
-    rejectedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    await rejectedIdle
-    expect(rejected.requests).toHaveLength(1)
-    expect(rejectedAgent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    const backoff = { jitter, jitterRatio: 1 }
+    ;({ ctx: context } = await harness(adapter, {
+      mock: mode === 'normal' ? normalConfig({ backoff }) : alwaysConfig(backoff),
+    }, undefined, { random: () => sample }))
+    const agent = await context.agentLoop.create(SessionId(`retry-over-cap-${mode}-${jitter}`), { provider: 'mock', model: 'mock' })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    // Neither ends the turn on the instruction nor retries at once, whatever the jitter sample.
+    expect((await scheduled).data.delayMs).toBe(10_000)
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(adapter.requests).toHaveLength(1)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(1)
+    await idle
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
   })
 
   it('spreads default full-jitter local backoff below each exponential delay', async () => {
@@ -506,33 +524,6 @@ describe('provider-routed retry policy', () => {
     await vi.advanceTimersByTimeAsync(4_000)
     await Promise.all(created.map(agent => agent.whenIdle()))
     expect(adapter.requests).toHaveLength(agents * 2)
-  })
-
-  it('uses local jittered backoff when always mode receives an over-cap Retry-After', async () => {
-    vi.useFakeTimers()
-    const adapter = new ScriptedAdapter([
-      new LlmError('wait too long', 'AUTH', { providerRetryAfterMs: 10 }),
-      textResponse('done'),
-    ])
-    ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
-      initialDelayMs: 2,
-      maxDelayMs: 4,
-      jitter: 'symmetric',
-      jitterRatio: 0.5,
-    }) }, undefined, { random: () => 1 }))
-    const agent = await context.agentLoop.create(SessionId('retry-always-over-cap'), {
-      provider: 'mock',
-      model: 'mock',
-    })
-    const scheduled = waitForRetry(context, agent, 1)
-
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    expect((await scheduled).data.delayMs).toBe(3)
-    const idle = waitForIdle(context, agent)
-    await vi.advanceTimersByTimeAsync(3)
-    await idle
-
-    expect(adapter.requests).toHaveLength(2)
   })
 
   it('delegates non-transient failures without scheduling a timer', async () => {

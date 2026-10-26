@@ -34,7 +34,8 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
  * - `symmetric` waits `min(d * (1 - r + 2 * r * u), maxDelayMs)` locally and
  *   exactly `p` for an accepted provider delay.
  *
- * `r = 0` makes both strategies deterministic.
+ * A provider delay is accepted up to `maxDelayMs`, so a longer one waits
+ * exactly `maxDelayMs`. `r = 0` makes both strategies deterministic.
  */
 export type RetryJitter = 'full' | 'symmetric'
 
@@ -42,7 +43,7 @@ export type RetryJitter = 'full' | 'symmetric'
 export interface BackoffConfig {
   /** Initial local exponential-backoff delay in milliseconds (default 500). */
   initialDelayMs?: number
-  /** Maximum locally scheduled or accepted provider delay in milliseconds (default 10000). */
+  /** Longest retry wait in milliseconds; a longer provider-requested delay waits this long (default 10000). */
   maxDelayMs?: number
   /** Random spread strategy (default `full`). */
   jitter?: RetryJitter
