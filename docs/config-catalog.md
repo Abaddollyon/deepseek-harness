@@ -1343,7 +1343,8 @@ export interface Config {
 ## `@deepseek-ai/dsh-experimental-tool-agent-team`
 
 - `inject`: `agents` · `agentTeams` · `tools` · `systemPrompt` · `subagents` · `sessionProjections` · `llm`
-- `source`: [`packages/experimental/tool-agent-team/src/index.ts:44`](../packages/experimental/tool-agent-team/src/index.ts)
+- `refs`: `ChildRouteDefaults` (`@deepseek-ai/dsh-tool-subagent/route-selection`)
+- `source`: [`packages/experimental/tool-agent-team/src/index.ts:37`](../packages/experimental/tool-agent-team/src/index.ts)
 
 ```ts config-catalog
 /** Tool routing configuration. */
@@ -1369,16 +1370,7 @@ export interface Config {
  * LLM route defaults for every teammate. Provider and model form one route
  * and are configured together.
  */
-export interface TeammateDefaults {
-  /** LLM provider id of the teammate route. */
-  readonly provider?: string
-  /** Model id interpreted by `provider`. */
-  readonly model?: string
-  /** Adapter-owned reasoning effort; checked against the effective route before each teammate starts. */
-  readonly reasoningEffort?: string
-  /** Positive output-token limit per teammate request. */
-  readonly maxTokens?: number
-}
+export type TeammateDefaults = ChildRouteDefaults
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-experimental-tool-agent-team -->
 
@@ -1891,7 +1883,7 @@ export interface Config extends ProtocolConfig, ModelListingConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:271`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:277`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2016,6 +2008,12 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Maximum model requests this route streams at once in this Host; further
+   * requests wait in arrival order until one finishes, and a caller's abort
+   * leaves the queue. Omission leaves the route unlimited.
+   */
+  maxConcurrentRequests?: number
 }
 
 /** Who authenticates a route's requests: pi-ai's provider-native auth, or a proxy in front of the provider. */
@@ -2344,7 +2342,7 @@ export interface LspLocalServerConfig {
 ## `@deepseek-ai/dsh-mcp-client`
 
 - `inject`: `tools`
-- `source`: [`packages/mcp/mcp-client/src/index.ts:104`](../packages/mcp/mcp-client/src/index.ts)
+- `source`: [`packages/mcp/mcp-client/src/index.ts:113`](../packages/mcp/mcp-client/src/index.ts)
 
 ```ts config-catalog
 /** Configuration for one stdio or Streamable HTTP MCP server. */
@@ -3277,7 +3275,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-skill-filesystem`
 
 - `inject`: `skills`
-- `source`: [`packages/skill/skill-filesystem/src/index.ts:48`](../packages/skill/skill-filesystem/src/index.ts)
+- `source`: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
 
 ```ts config-catalog
 /** Local filesystem skill provider configuration. */
@@ -3306,6 +3304,8 @@ export interface Config {
   watchFollowSymlinks?: boolean
   /** Bundled skill root; defaults to `$DSH_BUNDLED_SKILL_DIR` when default roots are included, otherwise mounts none. */
   bundledSkillDir?: string
+  /** Maximum skill files whose parsed frontmatter discovery reuses while their file version is unchanged. */
+  frontmatterCacheMaxEntries?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-skill-filesystem -->
@@ -4761,7 +4761,8 @@ export interface Config {
 ## `@deepseek-ai/dsh-workflow-ptc`
 
 - `inject`: `subagents` · `ptcRuntime` · `sandboxPolicy` · `workingDirectory` · `sessionProjections`
-- `source`: [`packages/workflow/workflow-ptc/src/index.ts:52`](../packages/workflow/workflow-ptc/src/index.ts)
+- `refs`: `ChildRouteDefaults` (`@deepseek-ai/dsh-tool-subagent/route-selection`)
+- `source`: [`packages/workflow/workflow-ptc/src/index.ts:48`](../packages/workflow/workflow-ptc/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config (all optional — `static Config` supplies the defaults). */
@@ -4790,16 +4791,7 @@ export interface Config {
  * LLM route defaults for every `agent()` child. Provider and model form one
  * route and are configured together.
  */
-export interface ChildAgentDefaults {
-  /** LLM provider id of the child route. */
-  provider?: string
-  /** Model id interpreted by `provider`. */
-  model?: string
-  /** Adapter-owned reasoning effort; checked against the effective route before each child starts. */
-  reasoningEffort?: string
-  /** Positive output-token limit per child request. */
-  maxTokens?: number
-}
+export type ChildAgentDefaults = ChildRouteDefaults
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-workflow-ptc -->
 
