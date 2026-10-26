@@ -693,7 +693,10 @@ async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
 /** Select a preset before a session starts its first turn. A Session whose
  * log records the preset and whose Agent runs its current revision keeps its
- * composition; nothing is logged or announced.
+ * composition; nothing is logged or announced. A preset in another execution
+ * world than the Session's current one (an SSH host, or the Host when leaving
+ * one) is accepted only when the Session's cwd and every additional root are
+ * directories in that world.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.

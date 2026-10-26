@@ -680,7 +680,8 @@ Concrete tool registry and scoped executor dispatcher.
 ```ts cordis-catalog
 /**
  * Register globally or in the calling agent scope. Scoped tools shadow
- * globals; duplicates within one layer and the reserved `run_code` name fail.
+ * globals; duplicates within one layer and the reserved `run_code` and
+ * `tool_search` names fail.
  * @param definition - tool schema, execution, and optional finalization/presentation callbacks.
  * @param options - optional step-time activation condition.
  * @returns the exact disposer that unregisters the tool.
@@ -695,6 +696,27 @@ register(definition: ToolDefinition, options: ToolRegistrationOptions = {}): () 
  * @returns the exact disposer that lifts this restriction.
  */
 restrict(filter: ToolRestriction): () => void
+
+/**
+ * List the calling scope's tools named by `policy` by name only instead of
+ * applying the deployment default policy. Nearest scope on the chain wins,
+ * so a preset's standing declaration covers every agent joined under it.
+ * Scoped only, and one declaration per scope.
+ * @param policy - include and exclude name patterns.
+ * @returns the exact disposer that restores the deployment default.
+ * @throws when called on an unscoped context, a pattern is empty, or the scope already declared a policy.
+ */
+deferAs(policy: ToolDeferPolicy): () => void
+
+/**
+ * Attach a deferred tool's declaration to its argument error, because the
+ * model calling it may never have read that declaration. A call inside a
+ * program gets its executor's SDK format, a direct call the JSON schema.
+ * @param error - the tool's argument validation failure.
+ * @param exec - the failed call.
+ * @returns the error, extended when the tool is deferred for the caller.
+ */
+explainArgsError(error: ToolArgsError, exec: ToolExecution): ToolArgsError
 
 /**
  * Look up a tool as one scope sees it (scoped
@@ -728,7 +750,9 @@ executable(name: string, scope?: ScopeKey, toolSet?: ResolvedToolSet): ToolDefin
 async resolve(context: ToolActivationContext): Promise<ResolvedToolSet>
 
 /**
- * Read the visible capability definitions for descriptions and program bindings.
+ * Read the visible capability definitions for descriptions and program
+ * bindings. While the scope defers one of them, the reserved `tool_search`
+ * lookup follows them.
  * @param scope - viewing Agent or preset; omitted selects the global view.
  * @param toolSet - step admission; omit only to inspect registered definitions.
  * @returns definitions after scoped shadowing and restrictions, limited to the step's admission when given.

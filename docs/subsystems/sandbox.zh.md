@@ -209,10 +209,12 @@ The sandbox-policy service (`ctx.sandboxPolicy`). Owns the deployment default mo
  * Resolve the complete policy for one capability call. An approved explicit
  * mode outranks the session's last `sandbox/mode` event, which outranks the
  * deployment default. A session cwd and the session's recorded additional
- * paths are its workspace-write boundary; the configured root is the
+ * paths are its workspace-write boundary, and the configured extra
+ * directories are writable beside them; the configured root is the
  * fallback for agentless calls and sessions without a cwd.
  * @param request - optional session and approved mode override.
- * @returns the fully resolved per-call mode, absolute workspace root, and any additional roots.
+ * @returns the fully resolved per-call mode, absolute workspace root, and
+ * any additional writable roots (session roots first, then configured extras).
  */
 resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy
 

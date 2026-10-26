@@ -281,18 +281,20 @@ applyIndexTaps(html: string): string
  * Fresh per call, so subscribers read live state (module graph, theme
  * preference, the Peer's access) at emit time.
  * @param peer - the Peer the page speaks for.
+ * @param context - index selection passed to every listener.
  * @returns rows in subscriber activation order.
  */
-collectIndexInjections(peer: PeerScope): IndexInjection[]
+collectIndexInjections(peer: PeerScope, context: IndexRenderContext = {}): IndexInjection[]
 
 /**
  * Render one index.html body for one Peer: the structured injection table
  * first, then the raw `tapIndex` transforms over the result.
  * @param html - the raw index.html body.
  * @param peer - the Peer the page speaks for.
+ * @param context - index selection passed to injection listeners.
  * @returns the transformed body.
  */
-renderIndex(html: string, peer: PeerScope): string
+renderIndex(html: string, peer: PeerScope, context: IndexRenderContext = {}): string
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
@@ -339,9 +341,10 @@ Collect the structured index injection table for the page `peer` speaks for. Emi
  * fresh at emit time.
  * @param table - Mutable row table; listeners append in activation order.
  * @param peer - The Peer the rendered page speaks for.
+ * @param context - Index selected by the rendering owner; absent selects the ordinary index.
  * @mode emit
  */
-'webserver/index-inject'(table: IndexInjection[], peer: PeerScope): void
+'webserver/index-inject'(table: IndexInjection[], peer: PeerScope, context?: IndexRenderContext): void
 ```
 
 Source: [`packages/host/webserver/src/index.ts`](../../packages/host/webserver/src/index.ts)
