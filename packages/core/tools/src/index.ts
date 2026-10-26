@@ -57,6 +57,10 @@ const DEFER_LOADING_ONLY = compileToolDeferPolicy({})
 
 /** Registry configuration. */
 export interface ToolsConfig {
+  /** Removed. Mount a native or PTC tool executor instead. */
+  mode?: never
+  /** Moved to the PTC tool executor configuration. */
+  maxParallelSubCalls?: never
   /**
    * Tools listed by name only for scopes that declare no policy of their own
    * ({@link ToolsService.deferAs} shadows it per scope). A deferred tool stays
