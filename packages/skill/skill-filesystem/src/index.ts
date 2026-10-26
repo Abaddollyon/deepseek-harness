@@ -40,6 +40,7 @@ const USER_AGENTS_RANK = 500
 const DEFAULT_WATCH_STABILITY_THRESHOLD_MS = 200
 const DEFAULT_WATCH_POLL_INTERVAL_MS = 100
 const DEFAULT_WATCH_MAX_PROJECTS = 128
+const DEFAULT_FRONTMATTER_CACHE_MAX_ENTRIES = 1024
 
 export const name = 'skill-filesystem'
 export const inject = ['skills']
@@ -70,6 +71,8 @@ export interface Config {
   watchFollowSymlinks?: boolean
   /** Bundled skill root; defaults to `$DSH_BUNDLED_SKILL_DIR` when default roots are included, otherwise mounts none. */
   bundledSkillDir?: string
+  /** Maximum skill files whose parsed frontmatter discovery reuses while their file version is unchanged. */
+  frontmatterCacheMaxEntries?: number
 }
 
 export const Config: Schema<Config> = z.object({
@@ -85,6 +88,7 @@ export const Config: Schema<Config> = z.object({
   watchMaxProjects: z.number().default(DEFAULT_WATCH_MAX_PROJECTS),
   watchFollowSymlinks: z.boolean().default(true),
   bundledSkillDir: z.string(),
+  frontmatterCacheMaxEntries: z.number().default(DEFAULT_FRONTMATTER_CACHE_MAX_ENTRIES),
 })
 
 interface SkillRoot {
@@ -103,17 +107,66 @@ interface SkillRootEntry {
 }
 
 interface SkillText {
+  kind: 'text'
   path: string
   content: string
 }
 
-interface ParsedSkill extends SkillText {
+/** Catalog fields parsed from one skill file's frontmatter. */
+interface SkillFrontmatter {
+  path: string
   name: string
   description: string
   whenToUse?: string
   invocation: SkillInvocationPolicy
   metadata?: Record<string, unknown>
 }
+
+/** A skill file the provider skips; `reason` completes its `skill file <path> ignored:` warning. */
+interface IgnoredSkillFile {
+  kind: 'ignored'
+  reason: string
+}
+
+interface AbsentSkillFile {
+  kind: 'absent'
+}
+
+/** Text read from a probed skill file, or why it yielded none. */
+type SkillRead = SkillText | IgnoredSkillFile | AbsentSkillFile
+
+/** Parsed frontmatter plus the untrimmed body that follows it. */
+type ParsedSkillText =
+  | { kind: 'skill'; frontmatter: SkillFrontmatter; body: string }
+  | IgnoredSkillFile
+
+/** Discovery result for one skill file version; it retains no body text. */
+type FrontmatterOutcome =
+  | { kind: 'skill'; frontmatter: SkillFrontmatter }
+  | IgnoredSkillFile
+  | AbsentSkillFile
+
+/**
+ * A located regular skill file whose identity and freshness token were observed
+ * before its text is read, so a file that changes after the probe reads as a
+ * newer version on the next probe.
+ */
+interface SkillFileProbe {
+  /** Reader-qualified resolved identity: the `ctx.fs` target key or the host real path. */
+  identity: string
+  /** Freshness token of the probed file; `undefined` when the entry cannot be versioned. */
+  version: string | undefined
+  /** Read the probed file's text; an abort rejects with the signal's reason. */
+  read: (signal?: AbortSignal) => Promise<SkillRead>
+}
+
+interface FrontmatterCacheEntry {
+  identity: string
+  version: string
+  outcome: Promise<FrontmatterOutcome>
+}
+
+const ABSENT_SKILL_FILE: AbsentSkillFile = Object.freeze({ kind: 'absent' })
 
 interface LocalLocator {
   path: string
@@ -153,6 +206,7 @@ export class FileSystemSkillProvider implements SkillProvider {
   private readonly agentsHome: string
   private readonly customSkillDirs: string[]
   private readonly watchManager: SkillWatchManager
+  private readonly frontmatter: SkillFrontmatterCache
   private readonly bundledSkillDir: string | undefined
   private disposal: Promise<void> | undefined
 
@@ -166,7 +220,15 @@ export class FileSystemSkillProvider implements SkillProvider {
     this.dshHome = resolveDshHome(config.dshHome)
     this.agentsHome = resolveAgentsHome(config.agentsHome)
     this.customSkillDirs = (config.customSkillDirs ?? []).map(root => resolve(root))
-    this.watchManager = new SkillWatchManager(ctx, control.invalidate, resolveWatchConfig(config))
+    const frontmatterCacheMaxEntries = config.frontmatterCacheMaxEntries ?? DEFAULT_FRONTMATTER_CACHE_MAX_ENTRIES
+    assertPositiveInteger('frontmatterCacheMaxEntries', frontmatterCacheMaxEntries)
+    this.frontmatter = new SkillFrontmatterCache(frontmatterCacheMaxEntries)
+    this.watchManager = new SkillWatchManager(
+      ctx,
+      control.invalidate,
+      (path) => { this.frontmatter.evict(path) },
+      resolveWatchConfig(config),
+    )
     control.signal.addEventListener('abort', () => { void this.dispose() }, { once: true })
     // The environment bundled root is a default root: an isolated provider
     // must see only its explicit roots, or every such provider would
@@ -193,7 +255,7 @@ export class FileSystemSkillProvider implements SkillProvider {
     }
     const candidates: SkillCandidate[] = []
     for (const root of roots) {
-      for (const skill of await discoverRoot(root, this.ctx, this.name)) {
+      for (const skill of await discoverRoot(root, this.ctx, this.name, this.frontmatter)) {
         candidates.push(skill)
       }
     }
@@ -201,26 +263,28 @@ export class FileSystemSkillProvider implements SkillProvider {
   }
 
   /**
-   * Load a complete local skill body from the candidate's file locator.
+   * Load a complete local skill body from the candidate's file locator. Every
+   * load re-reads and re-parses the file; only discovery reuses frontmatter.
    * @param candidate - the winning candidate returned by this provider.
    * @param options - lookup options whose signal cancels filesystem reads.
    * @returns the full local skill, or `undefined` if the file disappeared.
    */
   async get(candidate: SkillCandidate, options: SkillLookupOptions): Promise<SkillDefinition | undefined> {
     const locator = candidate.locator as LocalLocator
-    const parsed = await parseSkillFile(locator.path, this.ctx, options.signal, candidate.source === 'bundled')
-    if (parsed === undefined) return undefined
+    const loaded = await loadSkillFile(locator.path, this.ctx, options.signal, candidate.source === 'bundled')
+    if (loaded === undefined) return undefined
+    const { frontmatter } = loaded
     return {
-      name: parsed.name,
-      description: parsed.description,
-      ...parsed.whenToUse !== undefined ? { whenToUse: parsed.whenToUse } : {},
-      invocation: parsed.invocation,
+      name: frontmatter.name,
+      description: frontmatter.description,
+      ...frontmatter.whenToUse !== undefined ? { whenToUse: frontmatter.whenToUse } : {},
+      invocation: frontmatter.invocation,
       source: candidate.source,
       provider: this.name,
       resourceBase: { kind: 'directory', path: locator.directory },
-      path: parsed.path,
-      ...parsed.metadata !== undefined ? { metadata: parsed.metadata } : {},
-      content: parsed.content,
+      path: frontmatter.path,
+      ...frontmatter.metadata !== undefined ? { metadata: frontmatter.metadata } : {},
+      content: loaded.content,
     }
   }
 
@@ -283,7 +347,11 @@ interface WatchHandle {
   close(): Promise<void> | void
 }
 
-/** Owns bounded host watchers while discovery and reads remain on the filesystem service. */
+/**
+ * Owns bounded host watchers while discovery and reads remain on the filesystem service.
+ * Each relevant change evicts the changed skill path, or the whole root after a
+ * root transition or watcher failure, before it invalidates the catalog.
+ */
 class SkillWatchManager {
   private readonly roots = new Map<string, RootWatchState>()
   private readonly projects = new Map<string, Set<string>>()
@@ -294,6 +362,7 @@ class SkillWatchManager {
   constructor(
     private readonly ctx: Context,
     private readonly invalidate: () => void,
+    private readonly evict: (path: string) => void,
     private readonly config: ResolvedWatchConfig,
   ) {}
 
@@ -336,6 +405,7 @@ class SkillWatchManager {
     if (this.closing) return
     const normalized = resolve(path)
     if (![...this.roots.values()].some(state => isPotentialSkillPath(state.root, normalized))) return
+    this.evict(normalized)
     this.invalidate()
   }
 
@@ -482,6 +552,7 @@ class SkillWatchManager {
       /* v8 ignore stop */
     }
     if (this.closing || state.owners.size === 0 || sameWatchMode(mode, current)) return
+    this.evict(state.root.path)
     this.queueInvalidation()
     state.unhealthy = true
     this.scheduleRewatch(state)
@@ -558,6 +629,8 @@ class SkillWatchManager {
   ): void {
     const target = resolve(path)
     if (this.closing || !isRelevantWatchEvent({ ...state.root, path: mode.anchor }, event, target)) return
+    // Relevance proved containment; locator paths use the configured root, not the canonical anchor.
+    this.evict(join(state.root.path, relative(mode.anchor, target)))
     this.queueInvalidation()
     if (target === mode.anchor && event === 'unlinkDir') {
       state.unhealthy = true
@@ -569,6 +642,7 @@ class SkillWatchManager {
     if (this.closing) return
     this.ctx.logger.warn(`skill-filesystem: watcher for ${state.root.path} failed: ${errorMessage(error)}`)
     state.unhealthy = true
+    this.evict(state.root.path)
     this.queueInvalidation()
     this.scheduleRewatch(state)
   }
@@ -727,7 +801,12 @@ function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === code
 }
 
-async function discoverRoot(root: SkillRoot, ctx: Context, provider: string): Promise<SkillCandidate[]> {
+async function discoverRoot(
+  root: SkillRoot,
+  ctx: Context,
+  provider: string,
+  cache: SkillFrontmatterCache,
+): Promise<SkillCandidate[]> {
   const skills: SkillCandidate[] = []
   const entries = await listSkillRootEntries(root, ctx)
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -738,20 +817,25 @@ async function discoverRoot(root: SkillRoot, ctx: Context, provider: string): Pr
         ? { path: entry.path, directory: root.path }
         : undefined
     if (locator === undefined) continue
-    const parsed = await parseSkillFile(locator.path, ctx, undefined, root.trustedHost === true)
-    if (parsed === undefined) continue
+    const outcome = await cache.read(ctx, locator.path, root.trustedHost === true)
+    if (outcome.kind === 'absent') continue
+    if (outcome.kind === 'ignored') {
+      warnIgnoredSkillFile(ctx, locator.path, outcome)
+      continue
+    }
+    const { frontmatter } = outcome
     skills.push({
-      name: parsed.name,
-      description: parsed.description,
-      ...parsed.whenToUse !== undefined ? { whenToUse: parsed.whenToUse } : {},
-      invocation: parsed.invocation,
+      name: frontmatter.name,
+      description: frontmatter.description,
+      ...frontmatter.whenToUse !== undefined ? { whenToUse: frontmatter.whenToUse } : {},
+      invocation: frontmatter.invocation,
       provider,
       source: root.source,
       rank: root.rank,
       locator,
       resourceBase: { kind: 'directory', path: locator.directory },
-      path: parsed.path,
-      ...parsed.metadata !== undefined ? { metadata: parsed.metadata } : {},
+      path: frontmatter.path,
+      ...frontmatter.metadata !== undefined ? { metadata: frontmatter.metadata } : {},
     })
   }
   return skills
@@ -801,48 +885,149 @@ async function listSkillRootEntriesFromNode(root: SkillRoot, ctx: Context): Prom
   return result
 }
 
-async function parseSkillFile(path: string, ctx: Context, signal?: AbortSignal, trustedHost = false): Promise<ParsedSkill | undefined> {
-  const raw = await readSkillText(ctx, path, signal, trustedHost)
+/**
+ * Discovery-side frontmatter reuse for one provider registration, shared by
+ * every Agent and cwd that lists through it. An entry is keyed by locator path
+ * and reused only while a fresh probe reports the same resolved identity and
+ * freshness token, so a list still costs one resolve and one stat per skill
+ * file but no read or YAML parse for an unchanged file. Concurrent discoveries
+ * of one version share a single read. Read failures and absent files are never
+ * retained, so a later discovery retries them.
+ */
+class SkillFrontmatterCache {
+  private readonly entries = new Map<string, FrontmatterCacheEntry>()
+
+  constructor(private readonly maxEntries: number) {}
+
+  /**
+   * Observe one skill file for discovery.
+   * @param ctx - provider context whose optional `ctx.fs` performs non-host reads.
+   * @param path - candidate locator path.
+   * @param trustedHost - whether the root reads through host Node I/O.
+   * @returns the frontmatter outcome of the file version a fresh probe observed.
+   */
+  async read(ctx: Context, path: string, trustedHost: boolean): Promise<FrontmatterOutcome> {
+    const probe = await probeSkillFile(ctx, path, undefined, trustedHost)
+    if (probe === undefined) {
+      this.entries.delete(path)
+      return ABSENT_SKILL_FILE
+    }
+    const version = probe.version
+    if (version === undefined) return await readFrontmatter(probe)
+    const current = this.entries.get(path)
+    if (current !== undefined && current.identity === probe.identity && current.version === version) {
+      this.entries.delete(path)
+      this.entries.set(path, current)
+      return await current.outcome
+    }
+    const entry: FrontmatterCacheEntry = { identity: probe.identity, version, outcome: readFrontmatter(probe) }
+    this.entries.delete(path)
+    this.entries.set(path, entry)
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next()
+      /* v8 ignore next -- the loop condition proves one entry exists. */
+      if (oldest.done) break
+      this.entries.delete(oldest.value)
+    }
+    try {
+      const outcome = await entry.outcome
+      if (outcome.kind === 'absent') this.forget(path, entry)
+      return outcome
+    } catch (error) {
+      this.forget(path, entry)
+      throw error
+    }
+  }
+
+  /**
+   * Drop the entry for `path` and every entry below it.
+   * @param path - a skill file, bundle directory, or root path.
+   */
+  evict(path: string): void {
+    this.entries.delete(path)
+    const prefix = `${path}${sep}`
+    for (const key of [...this.entries.keys()]) {
+      if (key.startsWith(prefix)) this.entries.delete(key)
+    }
+  }
+
+  private forget(path: string, entry: FrontmatterCacheEntry): void {
+    if (this.entries.get(path) === entry) this.entries.delete(path)
+  }
+}
+
+async function readFrontmatter(probe: SkillFileProbe): Promise<FrontmatterOutcome> {
+  const read = await probe.read()
+  if (read.kind !== 'text') return read
+  const parsed = parseSkillText(read)
+  return parsed.kind === 'skill' ? { kind: 'skill', frontmatter: parsed.frontmatter } : parsed
+}
+
+/**
+ * Read and parse one skill file without reusing discovery state.
+ * @param path - candidate locator path.
+ * @param ctx - provider context whose optional `ctx.fs` performs non-host reads.
+ * @param signal - cancels the probe and the read.
+ * @param trustedHost - whether the root reads through host Node I/O.
+ * @returns the frontmatter and trimmed body, or `undefined` for an absent or ignored file.
+ */
+async function loadSkillFile(
+  path: string,
+  ctx: Context,
+  signal: AbortSignal | undefined,
+  trustedHost: boolean,
+): Promise<{ frontmatter: SkillFrontmatter; content: string } | undefined> {
+  const probe = await probeSkillFile(ctx, path, signal, trustedHost)
+  const read = probe === undefined ? ABSENT_SKILL_FILE : await probe.read(signal)
   signal?.throwIfAborted()
-  if (raw === undefined) {
+  const parsed = read.kind === 'text' ? parseSkillText(read) : read
+  if (parsed.kind === 'absent') return undefined
+  if (parsed.kind === 'ignored') {
+    warnIgnoredSkillFile(ctx, path, parsed)
     return undefined
   }
+  return { frontmatter: parsed.frontmatter, content: parsed.body.trim() }
+}
+
+function warnIgnoredSkillFile(ctx: Context, path: string, ignored: IgnoredSkillFile): void {
+  ctx.logger.warn(`skill file ${path} ignored: ${ignored.reason}`)
+}
+
+function ignoredSkillFile(reason: string): IgnoredSkillFile {
+  return { kind: 'ignored', reason }
+}
+
+function parseSkillText(raw: SkillText): ParsedSkillText {
   let parsed
   try {
     parsed = parseFrontmatter(raw.content)
   } catch (error) {
-    ctx.logger.warn(`skill file ${path} ignored: invalid YAML frontmatter: ${errorMessage(error)}`)
-    return undefined
+    return ignoredSkillFile(`invalid YAML frontmatter: ${errorMessage(error)}`)
   }
-  if (!parsed) {
-    ctx.logger.warn(`skill file ${path} ignored: missing YAML frontmatter`)
-    return undefined
-  }
+  if (!parsed) return ignoredSkillFile('missing YAML frontmatter')
   const name = stringField(parsed.data, 'name')
   const description = stringField(parsed.data, 'description')
   if (name === undefined || description === undefined) {
-    ctx.logger.warn(`skill file ${path} ignored: frontmatter requires name and description`)
-    return undefined
+    return ignoredSkillFile('frontmatter requires name and description')
   }
-  if (!isSkillName(name)) {
-    ctx.logger.warn(`skill file ${path} ignored: invalid skill name "${name}"`)
-    return undefined
-  }
+  if (!isSkillName(name)) return ignoredSkillFile(`invalid skill name "${name}"`)
   let invocation
   try {
     invocation = parseInvocationPolicy(parsed.data)
   } catch (error) {
-    ctx.logger.warn(`skill file ${path} ignored: invalid invocation frontmatter: ${errorMessage(error)}`)
-    return undefined
+    return ignoredSkillFile(`invalid invocation frontmatter: ${errorMessage(error)}`)
   }
   return {
-    name,
-    description,
-    ...optionalString(parsed.data, 'whenToUse'),
-    invocation,
-    ...optionalMetadata(parsed.data),
-    path: raw.path,
-    content: parsed.body.trim(),
+    kind: 'skill',
+    frontmatter: {
+      name,
+      description,
+      ...optionalString(parsed.data, 'whenToUse'),
+      invocation,
+      ...optionalMetadata(parsed.data),
+      path: raw.path,
+    },
+    body: parsed.body,
   }
 }
 
@@ -850,27 +1035,52 @@ function optionalFileSystem(ctx: Context): FileSystem | undefined {
   return ctx.get('fs')
 }
 
-async function readSkillText(ctx: Context, path: string, signal?: AbortSignal, trustedHost = false): Promise<SkillText | undefined> {
+async function probeSkillFile(
+  ctx: Context,
+  path: string,
+  signal: AbortSignal | undefined,
+  trustedHost: boolean,
+): Promise<SkillFileProbe | undefined> {
   signal?.throwIfAborted()
   const fs = optionalFileSystem(ctx)
   if (fs !== undefined && !trustedHost) {
-    return await readSkillTextFromFileSystem(ctx, fs, path, signal)
+    return await probeSkillFileInFileSystem(fs, path, signal)
   }
+  return await probeSkillFileOnHost(path, signal)
+}
+
+async function probeSkillFileOnHost(path: string, signal: AbortSignal | undefined): Promise<SkillFileProbe | undefined> {
+  let resolvedPath
+  let info
   try {
-    const resolvedPath = await realpath(path)
-    return { path: resolvedPath, content: await readFile(resolvedPath, { encoding: 'utf8', signal }) }
+    resolvedPath = await realpath(path)
+    info = await stat(resolvedPath, { bigint: true })
   } catch (error) {
     signal?.throwIfAborted()
     if (isAbsentSkillPathError(error)) return undefined
     throw error
   }
+  return {
+    identity: `host:${resolvedPath}`,
+    // The same identity and nanosecond freshness fields `dsh-fs-local` derives its version from.
+    version: info.isFile() ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}` : undefined,
+    read: async (readSignal) => {
+      try {
+        return { kind: 'text', path: resolvedPath, content: await readFile(resolvedPath, { encoding: 'utf8', signal: readSignal }) }
+      } catch (error) {
+        readSignal?.throwIfAborted()
+        /* v8 ignore next -- Only a deletion racing between the probe's stat and this read reaches it. */
+        if (isAbsentSkillPathError(error)) return ABSENT_SKILL_FILE
+        throw error
+      }
+    },
+  }
 }
 
-async function readSkillTextFromFileSystem(
-  ctx: Context, fs: FileSystem, path: string, signal?: AbortSignal,
-): Promise<SkillText | undefined> {
+async function probeSkillFileInFileSystem(
+  fs: FileSystem, path: string, signal: AbortSignal | undefined,
+): Promise<SkillFileProbe | undefined> {
   // A missing or temporarily inaccessible skill file is not fatal to discovery.
-  signal?.throwIfAborted()
   let target
   try {
     target = await fs.resolve(path)
@@ -888,14 +1098,19 @@ async function readSkillTextFromFileSystem(
     throw error
   }
   if (info === undefined || info.type !== 'file') return undefined
-  try {
-    return { path: fs.processPath(target), content: await fs.readText(target, signal) }
-  } catch (error) {
-    signal?.throwIfAborted()
-    if (isAbsentSkillPathError(error)) return undefined
-    if (!hasErrorCode(error, 'FS_NOT_TEXT')) throw error
-    ctx.logger.warn(`skill file ${path} ignored: ${fsReadErrorMessage(target, error)}`)
-    return undefined
+  return {
+    identity: `fs:${target.targetKey}`,
+    version: info.version,
+    read: async (readSignal) => {
+      try {
+        return { kind: 'text', path: fs.processPath(target), content: await fs.readText(target, readSignal) }
+      } catch (error) {
+        readSignal?.throwIfAborted()
+        if (isAbsentSkillPathError(error)) return ABSENT_SKILL_FILE
+        if (!hasErrorCode(error, 'FS_NOT_TEXT')) throw error
+        return ignoredSkillFile(fsReadErrorMessage(target, error))
+      }
+    },
   }
 }
 
