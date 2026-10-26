@@ -56,6 +56,17 @@ export interface DeferredToolEntry {
 }
 
 /**
+ * One scope's deferral over the tools it sees for a step, as the registry
+ * hands it to the selected executor.
+ */
+export interface ToolDeferral {
+  /** Tools the scope's defer policy lists by name only, activated or not. */
+  readonly deferrable: ReadonlySet<string>
+  /** Deferrable tools the agent has not activated with a direct `tool_search` call. */
+  readonly deferred: ReadonlySet<string>
+}
+
+/**
  * Order tools by name in code-unit order, the order every SDK rendering uses.
  * @param a - one tool.
  * @param b - another tool.

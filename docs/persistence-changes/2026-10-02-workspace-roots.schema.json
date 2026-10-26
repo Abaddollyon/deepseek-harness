@@ -1,80 +1,16 @@
 {
   "formatVersion": 2,
   "roots": [
-    {
-      "key": "event:workspace/roots",
-      "kind": "event",
-      "event": "workspace/roots",
-      "surface": false,
-      "digest": "1c875e99ac34f443149f4787f2c7dd160981ad48b09c98e18cc5737ae5c02fad",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "data",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "ignorable",
-                "type": 4,
-                "optional": true
-              },
-              {
-                "name": "seq",
-                "type": 5,
-                "optional": false
-              },
-              {
-                "name": "time",
-                "type": 5,
-                "optional": false
-              },
-              {
-                "name": "type",
-                "type": 6,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "additionalPaths",
-                "type": 2,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "array",
-            "element": 3
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "literal",
-            "value": true
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "literal",
-            "value": "workspace/roots"
-          }
-        ]
-      }
-    }
+    {"key":"event:workspace/roots","kind":"event","event":"workspace/roots","surface":false,"digest":"1c875e99ac34f443149f4787f2c7dd160981ad48b09c98e18cc5737ae5c02fad"}
   ],
-  "types": []
+  "types": [],
+  "nodes": {
+    "0657d3ca5ac4e7bf": {"kind":"primitive","type":"number"},
+    "1c875e99ac34f443": {"kind":"object","properties":[{"name":"data","type":"d43b4b569e57df04","optional":false},{"name":"ignorable","type":"dacf3d5f3e4ff619","optional":true},{"name":"seq","type":"0657d3ca5ac4e7bf","optional":false},{"name":"time","type":"0657d3ca5ac4e7bf","optional":false},{"name":"type","type":"8dfdcf023cdecd82","optional":false}],"indices":[]},
+    "4cd48f3e5108bd6e": {"kind":"primitive","type":"string"},
+    "8dfdcf023cdecd82": {"kind":"literal","value":"workspace/roots"},
+    "93c33d9687613293": {"kind":"array","element":"4cd48f3e5108bd6e"},
+    "d43b4b569e57df04": {"kind":"object","properties":[{"name":"additionalPaths","type":"93c33d9687613293","optional":false}],"indices":[]},
+    "dacf3d5f3e4ff619": {"kind":"literal","value":true}
+  }
 }

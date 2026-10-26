@@ -34,7 +34,7 @@ import {
 } from '@deepseek-ai/node-addon-system/landlock-run'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { SandboxProvider, SandboxUnavailableError, canonicalPath } from '@deepseek-ai/dsh-sandbox'
+import { SandboxProvider, SandboxUnavailableError, SandboxUnsupportedPolicyError, canonicalPath } from '@deepseek-ai/dsh-sandbox'
 import type { ConfinedArgv, ConfinedSandboxMode, RunnerFailureRule, SandboxEnforcement, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AclWriteGrant, assertTempRootOutsideWorkspace, registerAclDiagnosisSkill, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
@@ -324,11 +324,7 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   async confine(argv: readonly string[], policy: SandboxPolicy, signal?: AbortSignal): Promise<ConfinedArgv> {
     signal?.throwIfAborted()
-    policy = {
-      ...policy,
-      workspaceRoot: canonicalPath(policy.workspaceRoot),
-      ...policy.additionalRoots === undefined ? {} : { additionalRoots: policy.additionalRoots.map(canonicalPath) },
-    }
+    policy = { ...policy, workspaceRoot: canonicalPath(policy.workspaceRoot) }
     if (this.runnerCommand !== undefined) {
       return Promise.resolve<ConfinedArgv>({
         argv: [...this.runnerCommand, ...bwrapProfileArgs(policy), '--', ...argv],
@@ -367,13 +363,12 @@ export class LocalSandboxProvider extends SandboxProvider {
    * `--temp-write-sid` and grants nothing itself. Agentless workspace-write
    * calls pass the ambient temp ROOT and no SID flags: the runner creates and
    * removes a random private child directory for that one invocation.
-   * Workspace-write with additional roots fails closed with `SANDBOX_UNAVAILABLE`.
    * @param policy - the resolved per-call policy.
    * @returns the runner invocation.
    */
   private windowsAclRunnerArgv(policy: SandboxPolicy): string[] {
-    if (policy.mode === 'workspace-write' && (policy.additionalRoots?.length ?? 0) > 0) {
-      throw new SandboxUnavailableError(policy.mode, 'the windows-acl runner grants only the primary workspace root, not additional roots')
+    if (policy.mode === 'workspace-write' && (policy.additionalWritableRoots?.length ?? 0) > 0) {
+      throw new SandboxUnsupportedPolicyError('Windows ACL confinement does not support additional writable directories; remove the extra grants or use a supported host')
     }
     const sessionId = policy.sessionId
     if (sessionId === undefined || policy.mode === 'read-only') {

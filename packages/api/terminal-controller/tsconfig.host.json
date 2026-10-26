@@ -58,6 +58,9 @@
     },
     {
       "path": "../../util/lazy-require"
+    },
+    {
+      "path": "../../util/values"
     }
   ]
 }
