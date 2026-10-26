@@ -10,14 +10,19 @@ import * as vm from 'node:vm'
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-ptc-runtime'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
 import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
-import { subagentModelSelectionPolicy, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import {
+  childRouteAgentOptions,
+  childRouteDefaultsSchema,
+  subagentModelSelectionPolicy,
+  subagentModelSelectionProjectionDefinition,
+} from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import type { ChildRouteDefaults } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { PtcWorkflowRun } from './host.ts'
 import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
@@ -37,16 +42,7 @@ export type {
  * LLM route defaults for every `agent()` child. Provider and model form one
  * route and are configured together.
  */
-export interface ChildAgentDefaults {
-  /** LLM provider id of the child route. */
-  provider?: string
-  /** Model id interpreted by `provider`. */
-  model?: string
-  /** Adapter-owned reasoning effort; checked against the effective route before each child starts. */
-  reasoningEffort?: string
-  /** Positive output-token limit per child request. */
-  maxTokens?: number
-}
+export type ChildAgentDefaults = ChildRouteDefaults
 
 /** Plugin config (all optional — `static Config` supplies the defaults). */
 export interface Config {
@@ -71,25 +67,6 @@ export interface Config {
 }
 
 type ResolvedConfig = Required<Omit<Config, 'agentOptions'>> & Pick<Config, 'agentOptions'>
-
-/**
- * Convert configured child defaults into Agent options.
- * @param defaults - the configured defaults, if any.
- * @returns the Agent options, or undefined when nothing is configured.
- * @throws when only one of provider and model is configured.
- */
-function childAgentDefaults(defaults: ChildAgentDefaults | undefined): AgentOptions | undefined {
-  if (defaults === undefined) return undefined
-  if ((defaults.provider === undefined) !== (defaults.model === undefined)) {
-    throw new Error('workflow-ptc: configure `agentOptions.provider` and `agentOptions.model` together')
-  }
-  return {
-    ...defaults.provider === undefined ? {} : { provider: defaults.provider },
-    ...defaults.model === undefined ? {} : { model: defaults.model },
-    ...defaults.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(defaults.reasoningEffort) },
-    ...defaults.maxTokens === undefined ? {} : { maxTokens: defaults.maxTokens },
-  }
-}
 
 /** A body that still carries the Claude Code-style meta header (meta rides the seam as data here). */
 const META_STATEMENT = /^\s*export\s+const\s+meta\b/
@@ -151,13 +128,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
 
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
-    // A union keeps an omitted field absent instead of an empty object.
-    agentOptions: z.union([z.const(undefined), z.object({
-      provider: z.string().min(1),
-      model: z.string().min(1),
-      reasoningEffort: z.string().min(1),
-      maxTokens: z.natural().min(1),
-    })]),
+    agentOptions: childRouteDefaultsSchema,
     maxConcurrentAgents: z.natural().default(0),
     maxTotalAgents: z.natural().min(1).default(1000),
     maxItemsPerCall: z.natural().min(1).default(4096),
@@ -175,7 +146,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
     // schemastery (static Config) has already filled the defaulted fields;
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
-    this.childDefaults = childAgentDefaults(config.agentOptions)
+    this.childDefaults = childRouteAgentOptions('workflow-ptc', config.agentOptions)
   }
 
   protected async [Service.init](): Promise<void> {
