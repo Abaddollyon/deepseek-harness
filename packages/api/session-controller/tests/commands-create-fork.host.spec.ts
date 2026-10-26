@@ -22,6 +22,26 @@ async function expectFailure(operation: Promise<unknown>, code: string): Promise
   await expect(operation).rejects.toMatchObject({ code })
 }
 
+/** A Workspace double: settled no-op methods, with `fields` replacing what a test reads. */
+function fakeWorkspace(fields: Partial<Workspace> & Pick<Workspace, 'id'>): Workspace {
+  return {
+    path: '/workspace',
+    agentPreset: undefined,
+    additionalPaths: [],
+    title: 'workspace',
+    createdAt: '',
+    updatedAt: '',
+    sessionIds: [],
+    setTitle: () => Promise.resolve(),
+    setAdditionalPaths: () => Promise.resolve(),
+    attachSession: () => Promise.resolve(),
+    insertSessionBefore: () => Promise.resolve(),
+    detachSession: () => Promise.resolve(),
+    status: () => Promise.resolve('ok'),
+    ...fields,
+  }
+}
+
 /** The Agent controller with a fixed Agent composition, and optionally a fixed creation outcome. */
 function controllerAgents(
   ctx: Context,
@@ -77,9 +97,8 @@ describe('Session creation failures', () => {
 
   it('creates Sessions in a remote Workspace under its preset and keeps remote presets out of Host Workspaces', async () => {
     const ctx = await baseContext()
-    const workspace = (id: string, path: string, agentPreset: string | undefined, additionalPaths: readonly string[]): Workspace => ({
-      id: id as WorkspaceId, path, agentPreset, additionalPaths, sessionIds: [], attachSession: () => Promise.resolve(),
-    }) as unknown as Workspace
+    const workspace = (id: string, path: string, agentPreset: string | undefined, additionalPaths: readonly string[]): Workspace =>
+      fakeWorkspace({ id: id as WorkspaceId, path, agentPreset, additionalPaths })
     const workspaces: Record<string, Workspace> = {
       remote: workspace('remote', '/srv/app', 'host-x', ['/srv/lib']),
       local: workspace('local', '/workspace', undefined, []),
@@ -119,12 +138,10 @@ describe('Session creation failures', () => {
     await missing.fiber.dispose()
 
     const failed = await baseContext()
-    const workspace = {
+    const workspace = fakeWorkspace({
       id: 'workspace-1' as WorkspaceId,
-      path: '/workspace',
-      additionalPaths: [],
       attachSession: () => Promise.reject(new Error('read-only workspace')),
-    } as unknown as Workspace
+    })
     failed.provide('workspaceRegistry', {
       get: () => workspace,
       list: () => [workspace],

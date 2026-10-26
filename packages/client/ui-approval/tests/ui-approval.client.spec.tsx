@@ -416,7 +416,7 @@ describe('ApprovalPanel', () => {
       requestKey: 'app-approval', title: 'Control this app?', canAnswer: () => true,
       onAllow: async () => {}, onReject: async () => {}, renderSlot,
       t: (key: string) => ({ waiting: 'Waiting' })[key] ?? key,
-    } as unknown as FactoryComponentPropsOf<'conversation.approval.card'>} />)
+    } as FactoryComponentPropsOf<'conversation.approval.card'>} />)
     expect(screen.getByText('Waiting')).toBeTruthy()
     expect(renderSlot).not.toHaveBeenCalledWith('conversation.approval.lead', expect.anything(), expect.anything())
   })

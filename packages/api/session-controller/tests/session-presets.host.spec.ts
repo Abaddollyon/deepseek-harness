@@ -33,7 +33,7 @@ function stubAgent(
   selection: ProjectionHandle<ModelSelectionProjectionState>,
 ): Agent {
   const model = new AgentModel(() => selection.stateOf(session), session, options)
-  return { id: session.id, session, status: 'idle', options, model } as unknown as Agent
+  return Object.assign({ id: session.id, session, status: 'idle' } as unknown as Agent, { options, model })
 }
 
 /** A stored Session the persistence double serves until an Agent resumes it. */
