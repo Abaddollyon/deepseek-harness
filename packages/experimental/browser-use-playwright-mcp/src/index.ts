@@ -43,6 +43,7 @@ export function apply(ctx: Context, config: Config): void {
   mountSessionMcp(ctx, {
     name: 'playwright-mcp',
     exclusive: config.mode === 'attach',
+    serverStart: config.serverStart,
     command: process.execPath,
     args,
     env,

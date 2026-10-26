@@ -9,7 +9,7 @@ kind: "package-library"
 
 ## 概述
 
-浏览器提供方使用此库，在一个 Session 的多个轮次之间复用浏览器，并在该 Session 的运行时释放时关闭其资源。一个 Session 的操作按顺序运行，隔离的 Session 则可以独立推进。附加模式将一个外部浏览器保留给单个 Session。此库还连接提供方拥有的 MCP 服务器，并在 Session 首次模型请求前发现其工具。
+浏览器提供方使用此库，在一个 Session 的多个轮次之间复用浏览器，并在该 Session 的运行时释放时关闭其资源。一个 Session 的操作按顺序运行，隔离的 Session 则可以独立推进。附加模式将一个外部浏览器保留给单个 Session。此库还连接提供方拥有的 MCP 服务器，并在 Session 首次模型请求前发现其工具；服务器进程可以等到 Session 首次浏览器调用时再启动。
 
 ## 目录
 
@@ -31,7 +31,9 @@ kind: "package-library"
 
 MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中的 `mountSessionMcp`，提供固定服务器名称、可执行文件、参数与所有权策略。挂载上下文必须提供 `workingDirectory`。获取连接时通过[工作目录服务](../../session/working-directory/README.zh.md)验证或恢复当前目录，并将其设为 MCP 服务器进程的初始目录。Session 后续选择其他目录时，保留的服务器继续使用该目录。辅助库在每个后续 Agent 的 `agent/created` 事件中等待一次有作用域的客户端启动与发现尝试。Agent 创建或恢复在发现完成后结束，随后才运行排队输入；成功的客户端跨轮次归该 Session 所有。
 
-附加连接被占用时，本次激活永久跳过启动，但其他工作继续运行。连接释放不会触发被跳过激活的重试；新创建或恢复的 Agent 可以获取连接。启动失败或取消会拒绝 Agent 创建或恢复，并触发包含客户端清理的创建回滚。服务器始终运行在 Host 上；若 Session 的 Agent preset 拥有另一个执行世界（例如 SSH 主机），它在 Host 的临时目录而非工作目录中启动。对这类 Session，启动失败改为让本次激活没有浏览器工具与说明，并记录一条注明该 Session 的警告。重连已禁用。加载或重新加载提供方只作用于后续的 Agent 激活。
+`serverStart` 决定每个 Session 的服务器进程何时启动。`activation` 在上述等待的启动过程中启动它。使用 `first-use` 时，首个启动服务器的 Session 记录该服务器的启动交换（协商、初始化与工具发现），之后的每个 Session 对相同请求接收已记录的响应，因此其激活无需进程即可声明相同的工具、指导与资源服务器。Session 自己的服务器在其首个其他请求时启动，通常是首次浏览器工具或资源调用，并使用激活时经验证的目录。服务器先接收已应答的请求；若某个响应与记录不同，记录即被丢弃，下一个 Session 重新记录，工具列表变化还会让该 Session 的客户端重新列出工具。记录进行期间激活的 Session 会等待记录完成。记录归提供方的本次激活所有。
+
+附加连接被占用时，本次激活永久跳过启动，但其他工作继续运行。连接释放不会触发被跳过激活的重试；新创建或恢复的 Agent 可以获取连接。启动失败或取消会拒绝 Agent 创建或恢复，并触发包含客户端清理的创建回滚。由记录应答的 Session 在激活期间没有可失败的服务器启动；之后的启动失败会使触发它的请求失败，并关闭该 Session 的连接。服务器始终运行在 Host 上；若 Session 的 Agent preset 拥有另一个执行世界（例如 SSH 主机），它在 Host 的临时目录而非工作目录中启动。对这类 Session，启动失败改为让本次激活没有浏览器工具与说明，并记录一条注明该 Session 的警告。重连已禁用。加载或重新加载提供方只作用于后续的 Agent 激活。
 
 调用方在等待 Agent 创建或恢复完成后，即可检查提示词组装和作用域工具定义。
 
@@ -49,7 +51,7 @@ MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中�
 
 因释放而取消时，在 AgentHandle 等待空闲前开始资源清理。清理先关闭资源再等待运行中的操作，使连接清理能够中断不支持 abort 的上游 API。关闭失败会拒绝释放并保留所有权。Agent 作用域清理防止使用同一持久 id 恢复的 Session 继承之前的浏览器。
 
-[MCP 辅助库](src/mcp.ts)在串行 `agent/created` 中建立连接；[AgentLoop](../../core/agent-loop/README.zh.md#understand-the-implementation)保留排队输入并负责创建回滚。提示词组装读取已初始化的目录。辅助库在资源清理期间保留提供方注册，并通过 [MCP 客户端](../../mcp/mcp-client/README.zh.md)处理传输、schema 发现、结果转换与持久图像接纳。
+[MCP 辅助库](src/mcp.ts)在串行 `agent/created` 中建立连接；使用 `first-use` 时，客户端通过[启动传输](src/startup.ts)连接，它按提供方激活共享一份记录，并在服务进程上探测，而不使用单独的 SDK 探测进程；[AgentLoop](../../core/agent-loop/README.zh.md#understand-the-implementation)保留排队输入并负责创建回滚。提示词组装读取已初始化的目录。辅助库在资源清理期间保留提供方注册，并通过 [MCP 客户端](../../mcp/mcp-client/README.zh.md)处理传输、schema 发现、结果转换与持久图像接纳。
 
 </details>
 
@@ -71,7 +73,7 @@ MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中�
 
 #### KV Cache 影响
 
-发现的工具 schema 与提供方指导决定请求前缀变化；常规浏览器资源复用不改变这些 schema。目录恢复追加用户上下文，不替换系统提示词前缀。
+发现的工具 schema 与提供方指导决定请求前缀变化；常规浏览器资源复用不改变这些 schema，已记录的启动响应会重现已启动服务器返回的 schema 与指导。目录恢复追加用户上下文，不替换系统提示词前缀。
 
 ## 已知限制与延期工作
 
@@ -82,6 +84,7 @@ MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中�
 - **MCP 激活** — 提供方不接管已有的活动 Agent；被占用的附加连接不会在本次激活中重试。
 - **附加范围** — 独占所有权作用于一个资源管理器，不约束独立提供方、进程或外部浏览器客户端。
 - **取消** — abort 信号与连接关闭无法撤销已交付的浏览器操作。同时忽略两者的上游操作可能延迟清理。
+- **已记录的启动** — `first-use` 将首个 Session 的启动响应提供给之后的 Session，因此协商、初始化或工具列表依赖 Session 目录的服务器需要使用 `activation`，收到初始化前协议探测即退出的服务器同样需要。之后每个 Session 的首次浏览器调用需要等待其服务器启动。
 - **恢复** — 关闭失败会保留所有权；此管理器不重试释放，也不从 Session 日志恢复浏览器状态。
 - **共享宿主运行时** — profile 会把本包与 dsh 安装并排安装，因此 `@deepseek-ai/dsh-scope` 与 `@deepseek-ai/dsh-mcp-client` 保持为 peer 依赖。写成 `dependencies` 会再装一份 `dsh-scope`，它的作用域标记宿主注册表读不到：每个 Agent 的 MCP 工具都会注册到全局工具层，第二个 Agent 的创建随之失败。
 

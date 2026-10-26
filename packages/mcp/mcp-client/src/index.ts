@@ -14,6 +14,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Transport } from '@modelcontextprotocol/client'
 import z from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -26,6 +27,14 @@ import type {} from '@deepseek-ai/dsh-tools'
 export { createMcpToolDefinition } from './tools.ts'
 export type { McpResult, McpToolDefinitionOptions } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client'
+
+/**
+ * Supply one connection generation's transport around its configured transport.
+ * @param open - create the configured stdio or Streamable HTTP transport; call it at most once.
+ * @returns the transport this generation's MCP client connects through.
+ */
+export type TransportWrapper = (open: () => Transport) => Transport
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -152,6 +161,26 @@ export const Config = z.union([
  * @returns startup readiness after connection and initial tool discovery settle.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  await mount(ctx, config, undefined)
+}
+
+/**
+ * Build an mcp-client plugin whose connection generations connect through `wrap`.
+ * It accepts the same {@link Config} and keeps the namespace, startup, tool, and disposal behavior of the plugin module.
+ * @param wrap - caller-owned wrapper around each generation's configured transport.
+ * @returns a plugin object mounted with `ctx.plugin(plugin, config)`.
+ */
+export function withTransportWrapper(wrap: TransportWrapper): {
+  name: typeof name
+  inject: typeof inject
+  Config: typeof Config
+  apply: (ctx: Context, config: Config) => Promise<void>
+} {
+  return { name, inject, Config, apply: (ctx: Context, config: Config) => mount(ctx, config, wrap) }
+}
+
+/** Shared plugin body for the module entry and {@link withTransportWrapper}. */
+async function mount(ctx: Context, config: Config, wrap: TransportWrapper | undefined): Promise<void> {
   // Fail loud at load: reconnect misconfiguration (including programmatic
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
@@ -178,7 +207,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
   // quiesces in-flight work, and unregisters the current generation.
-  const connection = startConnection(ctx, config, reconnect)
+  const connection = startConnection(ctx, config, reconnect, wrap)
   registerServerContext(ctx, config.serverName, connection)
   let stopping: Promise<void> | undefined
   const dispose = (): Promise<void> => stopping ??= connection.dispose()

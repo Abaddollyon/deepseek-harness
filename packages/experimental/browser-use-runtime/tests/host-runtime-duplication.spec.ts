@@ -58,7 +58,7 @@ it('rejects a missing working-directory provider before mounting browser resourc
   const ctx = new Context()
   contexts.push(ctx)
   expect(() => { mountSessionMcp(ctx, {
-    name: 'browser-fixture', exclusive: false, command: process.execPath, args: [FIXTURE],
+    name: 'browser-fixture', exclusive: false, serverStart: 'first-use', command: process.execPath, args: [FIXTURE],
   }) }).toThrow('browser-fixture: browser MCP requires a working-directory provider')
   expect(ctx.get('browserUse')).toBeUndefined()
 })
@@ -89,7 +89,7 @@ it('keeps every Agent browser tool in that Agent scope under the shipped layout'
     inject: ['browserUse', 'agents', 'tools', 'systemPrompt'],
     apply(provider: Context) {
       mountSessionMcp(provider, {
-        name: 'browser-fixture', exclusive: false, command: process.execPath, args: [FIXTURE, root],
+        name: 'browser-fixture', exclusive: false, serverStart: 'first-use', command: process.execPath, args: [FIXTURE, root],
       })
     },
   })

@@ -49,7 +49,7 @@ export async function verifyMcpBrowser(
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('Fixture has no TCP listener')
     const url = `http://127.0.0.1:${address.port}/${namespace}-${mode}`
-    let browserConfig: BrowserMcpConfig = { mode: 'launch', headless: true, executablePath: executable }
+    let browserConfig: BrowserMcpConfig = { mode: 'launch', headless: true, executablePath: executable, serverStart: 'first-use' }
     if (mode === 'attach') {
       const profile = join(root, 'external-profile')
       external = spawn(executable, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' })
@@ -57,7 +57,7 @@ export async function verifyMcpBrowser(
       const portFile = join(profile, 'DevToolsActivePort')
       let port: string | undefined
       await vi.waitFor(async () => { port = (await readFile(portFile, 'utf8')).split('\n')[0]; expect(Number(port)).toBeGreaterThan(0) }, { timeout: 20000 })
-      browserConfig = { mode: 'attach', endpoint: `http://127.0.0.1:${port}` }
+      browserConfig = { mode: 'attach', endpoint: `http://127.0.0.1:${port}`, serverStart: 'first-use' }
     }
     const modules = new Map<string, unknown>([
       ['browserUse', BrowserUse], ['prompt', SystemPrompt], ['tools', Tools], ['toolExecutor', NativeToolExecutor], ['llm', Llm],
@@ -88,6 +88,15 @@ export async function verifyMcpBrowser(
     expect(result.isError, JSON.stringify(result.content)).toBe(false)
     expect(observed.has(`/${namespace}-${mode}`)).toBe(true)
     expect(result.content.length).toBeGreaterThan(0)
+    if (mode === 'launch') {
+      // A later Session declares the first Session's recorded catalog and starts its own server at its first call.
+      const later = await ctx.agents.create({ sessionId: SessionId('browser-upstream-later'), meta: { cwd: root } })
+      await later.agent.whenIdle()
+      expect(ctx.tools.schemas(later.agent)).toEqual(schemas)
+      const visited = await executeToolFixture(ctx, { agent: later.agent, name: `mcp__${namespace}__${navigate.name}`, arguments: navigate.arguments(url), callId: ToolCallId('navigate-later'), signal: new AbortController().signal })
+      expect(visited.isError, JSON.stringify(visited.content)).toBe(false)
+      await later.dispose()
+    }
     await owner.dispose()
     expect(ctx.tools.schemas(owner.agent)).toEqual([])
     if (browserConfig.mode === 'attach') {

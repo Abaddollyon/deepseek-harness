@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-working-directory'
 import type { PtcBindingFunction, PtcJsonValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
+import { parentAgentOptionsForDelegation, SubagentError } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
@@ -150,6 +150,10 @@ export class PtcWorkflowRun implements WorkflowRun {
   private readonly children = new Map<number, ChildRecord>()
   private readonly pending = new Set<Promise<unknown>>()
   private readonly liveAgents = new Map<number, WorkflowAgentInfo>()
+  /** Published children whose result has not settled; each holds one subagent capacity slot. */
+  private runningChildren = 0
+  /** Child starts waiting for one of this run's running children to settle. */
+  private readonly capacityWaiters = new Set<() => void>()
   private started = 0
   private terminal = false
   private cancelReason: string | undefined
@@ -294,27 +298,71 @@ export class PtcWorkflowRun implements WorkflowRun {
       this.requireActive()
     }
     const callId = ++this.started
-    const run = await this.subagents.startActivation({
+    const cwd = await this.cwd
+    const run = await this.admitted(() => this.subagents.startActivation({
       provider: providerName,
       label: request.label ?? `${this.meta.name} child ${callId}`,
       delivery: 'caller',
       signal: this.controller.signal,
       request: {
-        cwd: await this.cwd,
+        cwd,
         prompt: [{ type: 'text', text: request.prompt }],
         parent: this.parent,
         ...request.schema === undefined ? {} : { outputSchema: request.schema },
         ...agentOptions === undefined ? {} : { agentOptions },
       },
-    })
+    }))
     const record: ChildRecord = { callId, run }
     this.children.set(callId, record)
+    this.runningChildren += 1
+    const settled = (): void => { this.childSettled() }
+    void run.result.then(settled, settled)
     // A provider can publish after the signal fired while startup was pending.
     if (this.controller.signal.aborted) {
       await this.disposeChild(record)
       throw new Error('workflow child started after cancellation')
     }
     return { callId, childId: run.childId }
+  }
+
+  /**
+   * Start one child, waiting while the parent's subagent capacity is full and this run still has a running child.
+   * A running child holds a slot, never waits for this run, and releases the slot before its result settles; without
+   * one the capacity failure propagates unchanged, because nothing this run owns would free a slot.
+   * @param start - one admission attempt.
+   * @returns the published activation.
+   */
+  private async admitted(start: () => Promise<SubagentActivation>): Promise<SubagentActivation> {
+    for (;;) {
+      try {
+        return await start()
+      } catch (error: unknown) {
+        if (!(error instanceof SubagentError) || error.code !== 'ACTIVATION_LIMIT_REACHED' || this.runningChildren === 0) throw error
+      }
+      await this.nextChildSettlement()
+      this.requireActive()
+    }
+  }
+
+  /** Resolve after the next of this run's running children settles, or when the run stops. */
+  private nextChildSettlement(): Promise<void> {
+    const signal = this.controller.signal
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        signal.removeEventListener('abort', wake)
+        this.capacityWaiters.delete(wake)
+        resolve()
+      }
+      signal.addEventListener('abort', wake, { once: true })
+      this.capacityWaiters.add(wake)
+    })
+  }
+
+  /** One settlement frees at most one slot; once no running child remains, every waiter retries and starts or fails. */
+  private childSettled(): void {
+    this.runningChildren -= 1
+    if (this.runningChildren === 0) for (const wake of [...this.capacityWaiters]) wake()
+    else [...this.capacityWaiters][0]?.()
   }
 
   private async childResult(record: ChildRecord): Promise<PtcJsonValue> {

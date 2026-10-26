@@ -1,5 +1,5 @@
 /** Private stdio browser fixture; each process owns independent state. */
-import { appendFileSync, existsSync, watch } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
@@ -7,6 +7,8 @@ const [root, mode] = process.argv.slice(2)
 const record = (event, values = {}) => appendFileSync(join(root, 'events.ndjson'), JSON.stringify({ event, pid: process.pid, ...values }) + '\n')
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
 let counter = 0
+// `vary` mode lists a tool description that names how many fixture processes have started.
+const starts = () => readFileSync(join(root, 'events.ndjson'), 'utf8').split('\n').filter(line => line.includes('"event":"start"')).length
 record('start', { cwd: process.cwd() })
 process.once('exit', () => record('exit'))
 const lines = createInterface({ input: process.stdin })
@@ -36,13 +38,13 @@ lines.on('line', line => {
       if (mode === 'fail') process.exit(1)
       if (mode === 'hold') return
       reply(request.id, {
-        protocolVersion: request.params.protocolVersion, capabilities: { tools: {}, resources: {} },
+        protocolVersion: request.params.protocolVersion, capabilities: { tools: mode === 'vary' ? { listChanged: true } : {}, resources: {} },
         serverInfo: { name: 'browser-fixture', version: '1' }, instructions: 'BROWSER_FIXTURE_INSTRUCTION: use this Session browser.',
       })
       break
     case 'tools/list':
       reply(request.id, { tools: [
-        { name: 'visit', description: 'Visit the fixture page.', inputSchema: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } },
+        { name: 'visit', description: mode === 'vary' ? `Visit the fixture page from server ${starts()}.` : 'Visit the fixture page.', inputSchema: { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } },
         { name: 'disconnect', description: 'Disconnect the fixture.', inputSchema: { type: 'object', properties: {} } },
       ] })
       break
