@@ -186,15 +186,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
             }
             return next()
           })
-          // Reconnect is disabled, so the client opens at most one transport generation.
-          const generation: { transport?: DeferredServerTransport } = {}
-          const client = shared === undefined
-            ? McpClient
-            : McpClient.withTransportWrapper((open) => {
-              generation.transport = shared.wrap(open)
-              return generation.transport
-            })
-          await scope.ctx.plugin(client, McpClient.Config({
+          const config = McpClient.Config({
             transport: 'stdio',
             serverName: options.name,
             command: options.command,
@@ -204,7 +196,17 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
             ...options.toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs: options.toolCallTimeoutMs },
             failOnStartupError: true,
             reconnect: { enabled: false },
-          }))
+          })
+          // Reconnect is disabled, so the client opens at most one transport generation.
+          const generation: { transport?: DeferredServerTransport } = {}
+          const client = shared === undefined
+            ? McpClient
+            : McpClient.withTransportWrapper((open) => {
+              // The replayed startup precedes the call that started the server, so it shares that call's timeout.
+              generation.transport = shared.wrap(open, config.toolCallTimeoutMs)
+              return generation.transport
+            })
+          await scope.ctx.plugin(client, config)
           generation.transport?.commit()
           signal.throwIfAborted()
           return {

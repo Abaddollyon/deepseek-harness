@@ -410,6 +410,40 @@ describe('workflow child capacity', () => {
     } finally { await run.dispose() }
   })
 
+  it.each([
+    { running: 1, others: 'no other running child' },
+    { running: 2, others: 'another running child' },
+  ])('retries a refused start at once when one of its children settled during that start, with $others', async ({ running }) => {
+    const held = Array.from({ length: running }, () => Promise.withResolvers<SubagentResult>())
+    const refused = Promise.withResolvers<SubagentActivation>()
+    const { ctx, start } = await setup(async (bindings) => {
+      const children = []
+      for (const [index] of held.entries()) children.push(await bindings.startChild!({ prompt: `held ${index}` }))
+      const racing = bindings.startChild!({ prompt: 'racing' })
+      await vi.waitFor(() => { expect(activation).toHaveBeenCalledTimes(running + 1) })
+      // The first child settles while the pool is still refusing the start that it would have admitted.
+      held[0]!.resolve({ output: [], stopReason: 'completed' })
+      await new Promise(resolve => setImmediate(resolve))
+      refused.reject(new SubagentError('subagent limit reached', 'ACTIVATION_LIMIT_REACHED'))
+      const admitted = await racing
+      expect(admitted).toMatchObject({ childId: 'admitted' })
+      for (const waiting of held.slice(1)) waiting.resolve({ output: [], stopReason: 'completed' })
+      for (const child of [...children, admitted]) await bindings.disposeChild!(child)
+      return completed
+    })
+    const activation = vi.spyOn(ctx.subagents, 'startActivation')
+    for (const [index, result] of held.entries()) {
+      activation.mockResolvedValueOnce({ childId: SessionId(`held-${index}`), result: result.promise, dispose: () => Promise.resolve() })
+    }
+    activation.mockReturnValueOnce(refused.promise)
+      .mockResolvedValueOnce({ childId: SessionId('admitted'), result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: () => Promise.resolve() })
+    const run = start()
+    try {
+      expect((await run.result).stopReason).toBe('completed')
+      expect(activation).toHaveBeenCalledTimes(running + 2)
+    } finally { await run.dispose() }
+  })
+
   it('stops a capacity wait when the run is cancelled', async () => {
     const waitingStarted = Promise.withResolvers<undefined>()
     const { ctx, start } = await setup(async (bindings) => {

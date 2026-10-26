@@ -49,7 +49,7 @@ An owning consumer may set `WorkflowStartRequest.subagentProvider` and lower `Wo
 
 The Node PTC provider's `maxPendingCalls` also limits workflow concurrency: child startup, result waits and disposal use those slots. Progress batches use at most one additional slot. Leave headroom when setting `maxConcurrentAgents`.
 
-Children also share the parent tree's [subagent capacity](../../subagent/subagent/README.md). When that capacity is full and the run still has a running child, `agent()` waits for one of the run's children to settle and retries, because a running child holds a slot and never waits for its run. Without a running child of its own, the run fails as before (`ACTIVATION_LIMIT_REACHED`), since nothing it owns would free a slot. Cancelling the run ends the wait.
+Children also share the parent tree's [subagent capacity](../../subagent/subagent/README.md). When that capacity is full and the run still has a running child, `agent()` waits for one of the run's children to settle and retries, because a running child holds a slot and never waits for its run. A start that is refused after one of the run's children settled during that attempt retries at once. Without a running child of its own and without such a settlement, the run fails as before (`ACTIVATION_LIMIT_REACHED`), since nothing it owns would free a slot. Cancelling the run ends the wait.
 
 ### Results and failures
 

@@ -27,10 +27,20 @@ interface StartupStep {
   readonly reply?: Reply
 }
 
-/** Whether a transport answers from the record or records a new exchange. */
+/** How one recording ended. */
+type Recorded =
+  /** A complete exchange that later Sessions replay. */
+  | { readonly kind: 'replayable'; readonly steps: readonly StartupStep[] }
+  /** A complete exchange that later Sessions cannot replay, so each starts its own server. */
+  | { readonly kind: 'unreplayable' }
+  /** The transport closed before its exchange completed; the next Session records again. */
+  | { readonly kind: 'incomplete' }
+
+/** Whether a transport answers from the record, records a new exchange, or only starts its server. */
 type Claim =
   | { readonly kind: 'replay'; readonly steps: readonly StartupStep[] }
-  | { readonly kind: 'record'; readonly finish: (steps: readonly StartupStep[] | undefined) => void }
+  | { readonly kind: 'record'; readonly finish: (recorded: Recorded) => void }
+  | { readonly kind: 'start' }
 
 /** Record access granted by {@link SharedServerStart} to its transports. */
 interface StartupRecord {
@@ -45,7 +55,7 @@ interface Recording {
   /** Recorded requests still waiting for their reply. */
   readonly pending: Map<RequestId, RecordedStep>
   replayable: boolean
-  readonly finish: (steps: readonly StartupStep[] | undefined) => void
+  readonly finish: (recorded: Recorded) => void
 }
 
 /** One step while its reply is still being recorded. */
@@ -88,21 +98,56 @@ function expected(step: StartupStep, message: JSONRPCMessage): boolean {
     && isDeepStrictEqual(message.params, step.params)
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** The tools capability of a recorded `initialize` result, if it declares one. */
+function initializedTools(step: StartupStep): Readonly<Record<string, unknown>> | undefined {
+  if (step.method !== 'initialize' || step.reply === undefined || !('result' in step.reply)) return undefined
+  const capabilities = step.reply.result.capabilities
+  return isRecord(capabilities) && isRecord(capabilities.tools) ? capabilities.tools : undefined
+}
+
+/**
+ * Whether a replaying client can learn that a started server lists other tools. The MCP
+ * client handles `notifications/tools/list_changed` only when initialization declared
+ * `tools.listChanged`, and the replay can declare it only in an `initialize` result.
+ * @param steps - one completed startup exchange.
+ * @returns whether the exchange includes an `initialize` result that declares tools.
+ */
+function announcesToolChanges(steps: readonly StartupStep[]): boolean {
+  return steps.some(step => initializedTools(step) !== undefined)
+}
+
+/**
+ * The reply a replaying client receives for one recorded request. A replayed `initialize`
+ * result declares `tools.listChanged`, so the client lists its tools again when the
+ * Session's started server lists other tools than the record.
+ */
+function replayedReply(step: StartupStep, reply: Reply): Reply {
+  const tools = initializedTools(step)
+  if (tools === undefined || !('result' in reply) || !isRecord(reply.result.capabilities)) return reply
+  return { result: { ...reply.result, capabilities: { ...reply.result.capabilities, tools: { ...tools, listChanged: true } } } }
+}
+
 /**
  * Owns the startup exchange recorded for one provider's fixed server command.
  * The record assumes that the server's startup replies depend only on that
- * command, never on a Session's working directory.
+ * command, never on a Session's working directory. After one completed exchange
+ * that cannot be replayed, later Sessions start their own servers without waiting.
  */
 export class SharedServerStart {
   private steps: readonly StartupStep[] | undefined
+  private unreplayable = false
   private recording: Promise<void> | undefined
   private readonly record: StartupRecord
 
   /**
    * @param label - provider name used in diagnostics.
-   * @param warn - reports a started server whose startup replies differ from the record.
+   * @param warn - reports a started server whose startup replies differ from the record, and an exchange that cannot be replayed.
    */
-  constructor(label: string, warn: (message: string) => void) {
+  constructor(label: string, private readonly warn: (message: string) => void) {
     this.record = {
       label,
       claim: signal => this.claim(signal),
@@ -116,24 +161,30 @@ export class SharedServerStart {
   /**
    * Wrap one Session's server transport.
    * @param open - creates the configured stdio transport for that Session's own server.
+   * @param timeoutMs - time a started server has to answer the startup requests replayed to it; the Session's tool-call timeout.
    * @returns a transport that answers from the record while it can and otherwise starts and forwards to the server.
    */
-  wrap(open: () => Transport): DeferredServerTransport {
-    return new DeferredServerTransport(this.record, open)
+  wrap(open: () => Transport, timeoutMs: number): DeferredServerTransport {
+    return new DeferredServerTransport(this.record, open, timeoutMs)
   }
 
-  /** Wait for an exchange being recorded, then replay the record or record a new one. */
+  /** Wait for an exchange being recorded, then replay the record, record a new one, or start without one. */
   private async claim(signal: AbortSignal): Promise<Claim> {
-    while (this.recording !== undefined) await settledUnlessAborted(this.recording, signal)
+    while (this.recording !== undefined) await unlessAborted(this.recording, signal)
     signal.throwIfAborted()
+    if (this.unreplayable) return { kind: 'start' }
     if (this.steps !== undefined) return { kind: 'replay', steps: this.steps }
     const recorded: PromiseWithResolvers<void> = Promise.withResolvers()
     this.recording = recorded.promise
     // Each recording transport calls `finish` exactly once: from commit, from closure, or from a start closed while claiming.
     return {
       kind: 'record',
-      finish: (steps) => {
-        if (steps !== undefined) this.steps = steps
+      finish: (outcome) => {
+        if (outcome.kind === 'replayable') this.steps = outcome.steps
+        else if (outcome.kind === 'unreplayable') {
+          this.unreplayable = true
+          this.warn(`${this.record.label}: the browser server's startup exchange cannot be replayed; each later Session starts its own server during activation`)
+        }
         this.recording = undefined
         recorded.resolve()
       },
@@ -141,16 +192,19 @@ export class SharedServerStart {
   }
 }
 
-/** Wait for a promise that never rejects unless the signal aborts first. */
-function settledUnlessAborted(promise: Promise<void>, signal: AbortSignal): Promise<void> {
-  signal.throwIfAborted()
-  return new Promise((resolve, reject) => {
+/** Settle like a promise, or reject with the signal's reason if it aborts first. */
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const abort = (): void => { reject(signal.reason as Error) }
-    signal.addEventListener('abort', abort, { once: true })
-    void promise.then(() => {
+    void promise.then((value) => {
       signal.removeEventListener('abort', abort)
-      resolve()
+      resolve(value)
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', abort)
+      reject(error instanceof Error ? error : new Error(String(error), { cause: error }))
     })
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
   })
 }
 
@@ -158,9 +212,12 @@ function settledUnlessAborted(promise: Promise<void>, signal: AbortSignal): Prom
  * One Session's stdio server transport. It answers client messages that match
  * the recorded startup exchange in order; the first other message starts the
  * Session's own server, sends it the answered messages, withholds the replies
- * the client already received, and forwards all later traffic. Without a
- * record it starts the server immediately and records the exchange until
- * {@link commit}. A started server's close closes this transport.
+ * the client already received, and forwards all later traffic. That server must
+ * answer the replayed requests within the configured timeout, or the transport
+ * closes and the triggering message fails. Without a record it starts the
+ * server immediately and records the exchange until {@link commit}, unless the
+ * provider's exchange cannot be replayed. A started server's close closes this
+ * transport.
  */
 export class DeferredServerTransport implements Transport {
   onclose?: () => void
@@ -180,8 +237,13 @@ export class DeferredServerTransport implements Transport {
   /**
    * @param record - the provider's shared startup record.
    * @param open - creates the configured transport for this Session's own server.
+   * @param timeoutMs - time a started server has to answer the replayed startup requests.
    */
-  constructor(private readonly record: StartupRecord, private readonly open: () => Transport) {}
+  constructor(
+    private readonly record: StartupRecord,
+    private readonly open: () => Transport,
+    private readonly timeoutMs: number,
+  ) {}
 
   /** Process id of the started server, or `null` before it starts; its presence selects stdio protocol negotiation. */
   get pid(): number | null {
@@ -196,19 +258,20 @@ export class DeferredServerTransport implements Transport {
 
   /**
    * Answer from the record, or start the server and record its exchange when no record exists.
-   * Waits while another Session of the provider records one.
+   * Waits while another Session of the provider records one; starts the server without recording
+   * once the provider's exchange cannot be replayed.
    */
   async start(): Promise<void> {
     const claim = await this.record.claim(this.stopped.signal)
     if (this.stopped.signal.aborted) {
-      if (claim.kind === 'record') claim.finish(undefined)
+      if (claim.kind === 'record') claim.finish({ kind: 'incomplete' })
       throw this.disconnected()
     }
     if (claim.kind === 'replay') {
       this.state = { kind: 'replay', steps: claim.steps, next: 0 }
       return
     }
-    this.recording = { steps: [], pending: new Map(), replayable: true, finish: claim.finish }
+    if (claim.kind === 'record') this.recording = { steps: [], pending: new Map(), replayable: true, finish: claim.finish }
     await this.startServer()
   }
 
@@ -226,14 +289,17 @@ export class DeferredServerTransport implements Transport {
   }
 
   /**
-   * Keep the exchange recorded so far for later Sessions. It is kept only when every
-   * recorded request has its reply and the server sent nothing else.
+   * Keep the exchange recorded so far for later Sessions. It is replayable only when every
+   * recorded request has its reply, the server sent nothing else, and an `initialize` result
+   * declares tools, so a replaying client can learn of a changed tool list. Otherwise later
+   * Sessions of the provider start their own servers.
    */
   commit(): void {
     const recording = this.recording
     if (recording === undefined) return
     this.recording = undefined
-    recording.finish(recording.replayable && recording.pending.size === 0 ? structuredClone(recording.steps) : undefined)
+    const replayable = recording.replayable && recording.pending.size === 0 && announcesToolChanges(recording.steps)
+    recording.finish(replayable ? { kind: 'replayable', steps: structuredClone(recording.steps) } : { kind: 'unreplayable' })
   }
 
   /** Forward the negotiated versions to the server once it starts. */
@@ -270,7 +336,7 @@ export class DeferredServerTransport implements Transport {
           ...id === undefined ? {} : { id },
           ...step.reply === undefined ? {} : { reply: step.reply },
         })
-        if (id !== undefined && step.reply !== undefined) this.deliverLater(responseTo(id, step.reply))
+        if (id !== undefined && step.reply !== undefined) this.deliverLater(responseTo(id, replayedReply(step, step.reply)))
         return
       }
       await this.startServer()
@@ -282,6 +348,11 @@ export class DeferredServerTransport implements Transport {
   }
 
   private async startServer(): Promise<void> {
+    const expired = new AbortController()
+    const timer = setTimeout(() => {
+      expired.abort(new Error(`${this.record.label}: the browser server did not answer its startup requests within ${this.timeoutMs} ms`))
+    }, this.timeoutMs)
+    timer.unref()
     try {
       const server = this.open()
       this.state = { kind: 'live', server }
@@ -290,29 +361,32 @@ export class DeferredServerTransport implements Transport {
       server.onclose = () => { this.reportClose() }
       if (this.supportedVersions !== undefined) server.setSupportedProtocolVersions?.(this.supportedVersions)
       if (this.protocolVersion !== undefined) server.setProtocolVersion?.(this.protocolVersion)
-      await server.start()
+      await unlessAborted(server.start(), expired.signal)
       let toolsChanged = false
       let changed = false
       for (const { message, method, id, reply } of this.answered.splice(0)) {
         if (id === undefined || reply === undefined) {
-          await server.send(message)
+          await unlessAborted(server.send(message), expired.signal)
           continue
         }
         const withheld: PromiseWithResolvers<Reply | undefined> = Promise.withResolvers()
         this.withheld.set(id, withheld)
-        await server.send(message)
-        const actual = await withheld.promise
+        await unlessAborted(server.send(message), expired.signal)
+        const actual = await unlessAborted(withheld.promise, expired.signal)
         if (actual === undefined) throw this.disconnected()
         if (isDeepStrictEqual(actual, reply)) continue
         changed = true
         if (method === 'tools/list') toolsChanged = true
       }
       if (changed) this.record.invalidate()
-      // The client re-lists from this server before it handles the message that started it.
+      // The client lists its tools again through `send`, so the message that started this
+      // server reaches it first; a call to a tool the server no longer lists gets its error reply.
       if (toolsChanged) this.onmessage?.({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })
     } catch (error) {
       await this.close()
       throw error
+    } finally {
+      clearTimeout(timer)
     }
   }
 
@@ -362,7 +436,7 @@ export class DeferredServerTransport implements Transport {
     this.stopped.abort(this.disconnected())
     const recording = this.recording
     this.recording = undefined
-    recording?.finish(undefined)
+    recording?.finish({ kind: 'incomplete' })
     for (const withheld of this.withheld.values()) withheld.resolve(undefined)
     this.withheld.clear()
     if (this.closeReported) return

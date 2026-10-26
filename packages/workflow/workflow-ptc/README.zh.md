@@ -49,7 +49,7 @@ kind: "package-reference"
 
 Node PTC 提供方的 `maxPendingCalls` 也限制工作流并发：子 agent 启动、结果等待与资源释放会占用这些名额。进度批次至多再占用一个名额。设置 `maxConcurrentAgents` 时应预留余量。
 
-子 agent 还共享父级树的 [subagent 容量](../../subagent/subagent/README.zh.md)。容量已满且本次运行仍有运行中的子 agent 时，`agent()` 会等待本次运行的某个子 agent 结算后重试，因为运行中的子 agent 占用一个名额且从不等待其所属运行。若本次运行没有自己的运行中子 agent，运行仍像以前一样失败（`ACTIVATION_LIMIT_REACHED`），因为它拥有的任何东西都不会释放名额。取消运行会结束等待。
+子 agent 还共享父级树的 [subagent 容量](../../subagent/subagent/README.zh.md)。容量已满且本次运行仍有运行中的子 agent 时，`agent()` 会等待本次运行的某个子 agent 结算后重试，因为运行中的子 agent 占用一个名额且从不等待其所属运行。若某次启动尝试期间本次运行的某个子 agent 已结算，而该尝试仍被拒绝，则立即重试。若本次运行没有自己的运行中子 agent，也没有这样的结算，运行仍像以前一样失败（`ACTIVATION_LIMIT_REACHED`），因为它拥有的任何东西都不会释放名额。取消运行会结束等待。
 
 ### 结果与失败
 

@@ -726,7 +726,7 @@ describe('First-use server start', () => {
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(2)
   })
 
-  it('updates a Session whose started server lists different tools and records anew for the next Session', async () => {
+  it('updates a Session whose started server lists different tools without declaring list changes, and records anew for the next Session', async () => {
     const { ctx, root } = await firstUse('vary')
     const warnings: unknown[][] = []
     ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
@@ -740,6 +740,53 @@ describe('First-use server start', () => {
     expect(warnings.flat().join('\n')).toContain('answered its startup requests differently from the recorded exchange')
     const third = await ctx.agents.create({ sessionId: SessionId('third'), meta: { cwd: root } })
     expect(visitDescription(third.agent)).toBe('Visit the fixture page from server 3.')
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
+  })
+
+  it('fails a call to a tool the started server no longer lists with its error, then removes that tool', async () => {
+    const { ctx, root } = await firstUse('drop')
+    const browserTools = (agent: Agent) => ctx.tools.schemas(agent).map(tool => tool.name).filter(name => name.startsWith('mcp__browser-fixture__'))
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    expect(browserTools(second.agent)).toEqual(browserTools(first.agent))
+    const refused = await execute(ctx, second.agent)
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('Unknown tool: visit')
+    await expect.poll(() => browserTools(second.agent)).toEqual(['mcp__browser-fixture__disconnect'])
+    expect(browserTools(first.agent)).toContain(TOOL)
+    expect((await execute(ctx, first.agent)).isError).toBe(false)
+  })
+
+  it('closes a later Session server that does not answer its replayed startup within the tool-call timeout', async () => {
+    const { ctx, root } = await load(false, 'hang', 1000, undefined, 'first-use')
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    expect((await execute(ctx, second.agent)).isError).toBe(true)
+    const hung = (await events(root)).filter(event => event.event === 'start')[1]!.pid
+    await expect.poll(() => {
+      try { process.kill(hung, 0) } catch (error) {
+        return (error as NodeJS.ErrnoException).code
+      }
+      return 'running'
+    }).toBe('ESRCH')
+    const disconnected = await execute(ctx, second.agent)
+    expect(disconnected.isError).toBe(true)
+    expect(JSON.stringify(disconnected.content)).toContain('Not connected')
+    expect((await execute(ctx, first.agent)).isError).toBe(false)
+  })
+
+  it('starts each later Session server during activation without waiting once the startup exchange cannot be replayed', async () => {
+    const { ctx, root } = await firstUse('chatty')
+    const warnings: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
+    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
+    const later = await Promise.all(['second', 'third'].map(id => ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root } })))
+    expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
+    expect(warnings.flat().filter(warning => String(warning).includes('startup exchange cannot be replayed'))).toHaveLength(1)
+    for (const { agent } of later) {
+      expect(ctx.tools.schemas(agent)).toEqual(ctx.tools.schemas(first.agent))
+      expect((await execute(ctx, agent)).isError).toBe(false)
+    }
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
   })
 })

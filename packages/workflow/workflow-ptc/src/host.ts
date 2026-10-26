@@ -152,6 +152,8 @@ export class PtcWorkflowRun implements WorkflowRun {
   private readonly liveAgents = new Map<number, WorkflowAgentInfo>()
   /** Published children whose result has not settled; each holds one subagent capacity slot. */
   private runningChildren = 0
+  /** Settled children so far; a change across a refused start means a slot may have been freed during that start. */
+  private childSettlements = 0
   /** Child starts waiting for one of this run's running children to settle. */
   private readonly capacityWaiters = new Set<() => void>()
   private started = 0
@@ -328,18 +330,22 @@ export class PtcWorkflowRun implements WorkflowRun {
   /**
    * Start one child, waiting while the parent's subagent capacity is full and this run still has a running child.
    * A running child holds a slot, never waits for this run, and releases the slot before its result settles; without
-   * one the capacity failure propagates unchanged, because nothing this run owns would free a slot.
+   * one the capacity failure propagates unchanged, because nothing this run owns would free a slot. A child that
+   * settled while the refused attempt was in progress may have freed a slot that attempt missed, so the start retries
+   * at once instead of waiting or failing.
    * @param start - one admission attempt.
    * @returns the published activation.
    */
   private async admitted(start: () => Promise<SubagentActivation>): Promise<SubagentActivation> {
     for (;;) {
+      const settlements = this.childSettlements
       try {
         return await start()
       } catch (error: unknown) {
-        if (!(error instanceof SubagentError) || error.code !== 'ACTIVATION_LIMIT_REACHED' || this.runningChildren === 0) throw error
+        if (!(error instanceof SubagentError) || error.code !== 'ACTIVATION_LIMIT_REACHED') throw error
+        if (this.childSettlements === settlements && this.runningChildren === 0) throw error
       }
-      await this.nextChildSettlement()
+      if (this.childSettlements === settlements) await this.nextChildSettlement()
       this.requireActive()
     }
   }
@@ -361,6 +367,7 @@ export class PtcWorkflowRun implements WorkflowRun {
   /** One settlement frees at most one slot; once no running child remains, every waiter retries and starts or fails. */
   private childSettled(): void {
     this.runningChildren -= 1
+    this.childSettlements += 1
     if (this.runningChildren === 0) for (const wake of [...this.capacityWaiters]) wake()
     else [...this.capacityWaiters][0]?.()
   }
