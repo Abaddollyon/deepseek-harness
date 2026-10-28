@@ -235,14 +235,14 @@ function formatRetainedGrep(retained: RetainedItems<GrepMatch>, spillRef?: Spill
 
 /**
  * Pending-call presentation: a search card titled by the pattern (and target /
- * include filter).
+ * include filter). An exact empty include contributes no filter suffix.
  *
  * @param args - the raw tool arguments; `pattern`, `path`, and `include` feed the title.
  * @returns the generic card view (`kind: 'search'`) shown while the call runs.
  */
 export function presentGrepCall(args: { pattern: string; path?: string; include?: string }): GenericCallView {
   const where = args.path !== undefined ? ` in ${args.path}` : ''
-  const filter = args.include !== undefined ? ` (${args.include})` : ''
+  const filter = args.include !== undefined && args.include !== '' ? ` (${args.include})` : ''
   return { card: 'generic', title: `Grep ${args.pattern}${where}${filter}`, kind: 'search', rawInput: args.pattern }
 }
 

@@ -1,5 +1,6 @@
 /** PTC execution plugin for the mounting Agent, preset, or deployment scope. @module */
 import type { Context } from '@deepseek-ai/cordis'
+import type { PtcProgramFormat } from '@deepseek-ai/dsh-ptc-runtime'
 import { RUN_CODE_NAME, ToolNotFoundError, projectToolSchema } from '@deepseek-ai/dsh-tools'
 import type {
   DeferredToolEntry, ToolDefinition, ToolDeferral, ToolExecutor, ToolModelInput, ToolPromptSection, ToolBatchInput, ToolBatchResult,
@@ -12,7 +13,7 @@ import { Config } from './config.ts'
 
 const PTC_ONLY_INSTRUCTION = `\`${RUN_CODE_NAME}\` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.`
 
-type SdkRenderer = (schemas: readonly ToolSdkSchema[], programFormat: 'function-body' | 'repl', deferred: readonly DeferredToolEntry[]) => string
+type SdkRenderer = (schemas: readonly ToolSdkSchema[], programFormat: PtcProgramFormat, deferred: readonly DeferredToolEntry[]) => string
 
 const SDK_RENDERERS = {
   typescript: renderToolsSdk,

@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-agent-tool-presentation",
   "description": "Per-agent tool deferral (name-only index with tool_search); its deprecated mode still selects dsh-tool-executor-native or dsh-tool-executor-ptc",
-  "version": "0.2.1-rc.3",
+  "version": "0.2.2-alpha.2",
   "publishConfig": {
     "access": "public"
   },
