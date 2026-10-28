@@ -133,6 +133,8 @@ export const VIEWER_ENDPOINT_CLASSES = {
   'workspace/rename': 'owner-only', // owner renames a Workspace
   'workspace/unarchiveSession': 'owner-only', // owner unarchives a Session
   'workspace/unpinSession': 'owner-only', // owner unpins a Session
+  'workspace/updatePaths': 'owner-only', // owner changes a Workspace's roots
+  'workspace/worlds': 'owner-only', // lists the owner's execution hosts, SSH machines included
   'workspaceFiles/changes': 'owner-only', // owner Workspace file access
   'workspaceFiles/list': 'owner-only', // owner Workspace file access
   'workspaceFiles/read': 'owner-only', // owner Workspace file access

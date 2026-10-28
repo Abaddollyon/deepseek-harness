@@ -1568,6 +1568,7 @@ describe('connected generation', () => {
 
   it('reopens a Session journal that failed terminally before the Host reconnected', async ({ mock, remote, start }) => {
     mock.stream(FOLLOW, followScript(ok({
+      cursor: 5,
       records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[],
       hasMore: false,
       modelSelection: { provider: 'deepseek-official', model: 'deepseek-chat' },
