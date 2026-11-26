@@ -110,10 +110,10 @@ describe('Session creation failures', () => {
     } as never)
     const presets = { defaultId: 'standard', ownsWorld: (id: string) => id === 'host-x' }
     ctx.provide('agentPresets', presets as never)
-    const createSession = vi.fn(publishedSession(ctx, SessionId('in-remote')))
+    const createSession = vi.fn(publishedSession(ctx, brandString<SessionId>('in-remote')))
     const controller = new SessionCommandController(ctx, controllerAgents(ctx, { createSession }), '/default')
 
-    await controller.create({ sessionId: SessionId('in-remote'), workspaceId: 'remote' as WorkspaceId })
+    await controller.create({ sessionId: brandString<SessionId>('in-remote'), workspaceId: 'remote' as WorkspaceId })
     expect(createSession).toHaveBeenLastCalledWith(expect.objectContaining({
       sessionId: 'in-remote', cwd: '/srv/app', agentPreset: 'host-x', additionalPaths: ['/srv/lib'],
     }))

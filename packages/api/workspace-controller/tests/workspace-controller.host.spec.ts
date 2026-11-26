@@ -184,7 +184,7 @@ describe('WorkspaceController commands', () => {
     ctx.provide('agentPresets', { serviceForPreset: () => undefined, ownsWorld: (id: string) => id === 'host-y' } as never)
     const app = stageDir(root, 'app')
     const { workspace } = await controller.create({ path: app })
-    const offline = ctx.sessions.create(SessionId('offline-host'), { meta: { cwd: app, agentPreset: 'host-y' } })
+    const offline = ctx.sessions.create(brandString<SessionId>('offline-host'), { meta: { cwd: app, agentPreset: 'host-y' } })
     await expect(ctx.workspaceRegistry.get(workspace.workspaceId)?.attachSession(offline.id))
       .rejects.toThrow('it runs in agent preset \'host-y\', not the Host')
     await expect(controller.create({ path: app, agentPreset: 'host-y' }))

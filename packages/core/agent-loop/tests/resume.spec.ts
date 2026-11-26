@@ -204,7 +204,7 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
       textResponse('found it'),
     ]), defer)
     fixture(ctx1, 'fetch')
-    const sessionId = SessionId('deferred-resume')
+    const sessionId = brandString<SessionId>('deferred-resume')
     const created = await ctx1.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
     created.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'find fetch' }], source: { kind: 'user' } }))
     await waitForIdle(ctx1, created.agent)
@@ -1074,7 +1074,7 @@ describe('the session-persistence Agent Note: AgentLoop factory create/resume', 
 
   it.skipIf(process.platform === 'win32')('disposal keeps pending input and its unstarted claimed batch for a resumed lifecycle', async () => {
     const { ctx: first, root } = await persistentHarness(new MockAdapter([]))
-    const sessionId = SessionId('dispose-keeps-inbox')
+    const sessionId = brandString<SessionId>('dispose-keeps-inbox')
     const handle = await first.agents.create({ sessionId, agentOptions: { provider: 'mock', model: 'mock' } })
     const preStep = Promise.withResolvers<undefined>()
     first.on('agent/pre-step', async ({ signal }, next) => {

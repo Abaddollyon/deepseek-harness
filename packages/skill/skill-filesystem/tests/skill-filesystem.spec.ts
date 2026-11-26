@@ -1105,7 +1105,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'edited-skill', 'First description')
     const path = join(root, 'edited-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('edited-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('edited-v1'), type: 'file', size: 1 })
     const description = async (index: number): Promise<string | undefined> =>
       (await ctx.skills.list({ cwd: await agentCwd(project, index) })).find(skill => skill.name === 'edited-skill')?.description
 
@@ -1113,7 +1113,7 @@ describe('discovery frontmatter reuse', () => {
     expect(fs.readTextSignals).toHaveLength(2)
 
     await writeSkill(root, 'edited-skill', 'Second description')
-    fs.statOverrides.set(path, { version: FsVersion('edited-v2'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('edited-v2'), type: 'file', size: 1 })
     expect(await description(1)).toBe('Second description')
     expect(fs.readTextSignals).toHaveLength(3)
 
@@ -1122,7 +1122,7 @@ describe('discovery frontmatter reuse', () => {
     expect(await description(2)).toBe('Second description')
     expect(fs.readTextSignals).toHaveLength(3)
 
-    ctx.emit('fs/observed', { targetKey: path as never, displayPath: path }, { kind: 'present', version: FsVersion('edited-v2') }, { name: 'edit' })
+    ctx.emit('fs/observed', { targetKey: path as never, displayPath: path }, { kind: 'present', version: brandString<FsVersion>('edited-v2') }, { name: 'edit' })
     expect(await description(3)).toBe('Third description')
     expect(fs.readTextSignals).toHaveLength(4)
   })
@@ -1132,7 +1132,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'flaky-skill', 'Flaky skill')
     const path = join(root, 'flaky-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('flaky-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('flaky-v1'), type: 'file', size: 1 })
     fs.errorReadPaths.add(path)
 
     expect(await ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })).toEqual({ skills: [], complete: false })
@@ -1149,7 +1149,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'racing-skill', 'Second version')
     const path = join(root, 'racing-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('racing-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('racing-v1'), type: 'file', size: 1 })
     const firstRead = Promise.withResolvers<string>()
     let reads = 0
     fs.readTextOverride = async (target) => {
@@ -1159,7 +1159,7 @@ describe('discovery frontmatter reuse', () => {
 
     const superseded = ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })
     await waitFor(async () => reads, count => count === 1)
-    fs.statOverrides.set(path, { version: FsVersion('racing-v2'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('racing-v2'), type: 'file', size: 1 })
     expect(await ctx.skills.list({ cwd: await agentCwd(project, 1) })).toMatchObject([{ description: 'Second version' }])
     firstRead.reject(new Error('read temporarily failed'))
 
@@ -1225,7 +1225,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'watched-skill', 'Before watcher')
     const path = join(root, 'watched-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home, { watch: true, watchStabilityThresholdMs: 20, watchPollIntervalMs: 10 })
-    fs.statOverrides.set(path, { version: FsVersion('pinned'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('pinned'), type: 'file', size: 1 })
     let index = 0
     const description = async (): Promise<string | undefined> => {
       index += 1

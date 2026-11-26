@@ -1094,8 +1094,8 @@ describe('Workspaces in an Agent preset\'s execution world', () => {
     expect(workspace.additionalPaths).toEqual(['/srv/lib'])
 
     result.setSessions([remoteHeader('remote', 'host-x'), remoteHeader('local', 'standard')])
-    await workspace.attachSession(SessionId('remote'))
-    await expect(workspace.attachSession(SessionId('local'))).rejects.toThrow(/runs in the Host, not agent preset 'host-x'/)
+    await workspace.attachSession(brandString<SessionId>('remote'))
+    await expect(workspace.attachSession(brandString<SessionId>('local'))).rejects.toThrow(/runs in the Host, not agent preset 'host-x'/)
     expect(workspace.sessionIds).toEqual(['remote'])
     expect(await workspace.status()).toBe('ok')
     dispose()
@@ -1108,7 +1108,7 @@ describe('Workspaces in an Agent preset\'s execution world', () => {
     first.registry.setPathWorlds(() => remoteWorld)
     const workspace = await first.registry.create('/srv/app', undefined, 'host-x')
     first.setSessions([remoteHeader('remote', 'host-x')])
-    await workspace.attachSession(SessionId('remote'))
+    await workspace.attachSession(brandString<SessionId>('remote'))
     await first.fiber.dispose()
 
     const restarted = await harness({ pool, sessions: [remoteHeader('remote', 'host-x')] })
