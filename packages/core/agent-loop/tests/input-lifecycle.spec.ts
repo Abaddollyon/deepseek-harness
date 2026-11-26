@@ -83,7 +83,7 @@ it('cancellation still aborts the running request when queue clearing fails', as
   }
 })
 
-it('waits for admitted maintenance after a queue-clear failure before releasing its Session', async () => {
+it('waits for admitted maintenance and keeps pending input without a queue write before releasing its Session', async () => {
   const { ctx, agent, handle } = await harness()
   const release = Promise.withResolvers<undefined>()
   const waiting = Promise.withResolvers<'waiting'>()
@@ -94,7 +94,9 @@ it('waits for admitted maintenance after a queue-clear failure before releasing 
     await release.promise
     agent.session.append('request/context', { provider: 'mock', model: 'mock' })
   })
-  agent.inject(input('pending'))
+  const pending = input('pending')
+  agent.inject(pending)
+  // Disposal keeps the inbox, so any queue-clear write here would fail the disposal.
   const stopRejecting = ctx.on('internal/dispatch', (_mode, name, args) => {
     if (name !== 'session/event') return
     const [session, event] = args as [Session, SessionEvent]
@@ -111,8 +113,9 @@ it('waits for admitted maintenance after a queue-clear failure before releasing 
     expect(ctx.sessions.get(agent.id)).toBe(agent.session)
     release.resolve(undefined)
     await work
-    expect(await closing).toEqual(new Error('queue clear failed'))
+    expect(await closing).toBeUndefined()
     expect(scopeDisposed).toBe(true)
+    expect(agent.inbox.nextStep).toEqual([pending])
     expect(agent.session.snapshotEvents().at(-1)?.type).toBe('request/context')
   } finally {
     stopRejecting()

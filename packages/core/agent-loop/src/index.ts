@@ -486,7 +486,6 @@ export class AgentLoop extends Service implements AgentFactory {
     let detachAgent: (() => void) | undefined
     let disposing: Promise<void> | undefined
     let publication: ReturnType<typeof Promise.withResolvers<void>> | undefined
-    let ready = false
     const machineReady = Promise.withResolvers<void>()
     // Reverse teardown, memoized so every racing owner awaits one quiescence:
     // stop the machine, unwind the scope, drain and close the session's write
@@ -504,19 +503,17 @@ export class AgentLoop extends Service implements AgentFactory {
       try {
         // Creation listeners retain the session and scope through their awaits.
         if (publication !== undefined) await publication.promise
-        // Disposal IS a disposed-cause cancel followed by quiescence. New work
-        // sent after this point is the sender's bug — the registries are about
-        // to drop the agent, so nothing should still hold it.
+        // Disposal IS a disposed-cause cancel followed by quiescence. Pending
+        // inbox input is durable session state, so it stays for a later resume.
+        // New work sent after this point is the sender's bug — the registries
+        // are about to drop the agent, so nothing should still hold it.
         /* v8 ignore next -- Cordis effect teardown waits for synchronous setup before observing the machine slot. */
         if (machine === undefined) await machineReady.promise
         /* v8 ignore next -- setup failure untracks this disposer before resolving without a machine. */
         if (machine !== undefined) {
-          try {
-            machine.cancel({ kind: 'disposed' }, { keepInbox: !ready })
-          } catch (error: unknown) {
-            failures.push(error)
-          }
-          // A failed queue write must not release resources underneath work.
+          // Keeping the inbox writes no queue event, so this cancel cannot fail
+          // on persistence before quiescence.
+          machine.cancel({ kind: 'disposed' }, { keepInbox: true })
           await machine.whenIdle()
         }
       } catch (error: unknown) {
@@ -637,7 +634,6 @@ export class AgentLoop extends Service implements AgentFactory {
           detachAgent = loopCtx.agents.enter(agent)
           await loopCtx.agents.announce(agent, source, abort.signal)
           assertLive()
-          ready = true
           callerSignal?.removeEventListener('abort', onCallerAbort)
           return { agent, dispose }
         } catch (error: unknown) {

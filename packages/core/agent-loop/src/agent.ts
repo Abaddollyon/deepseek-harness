@@ -131,6 +131,8 @@ export class ReactLoopAgent implements Agent {
   private assistantAttemptCounter = 0
   /** Identities fully frozen by this loop; weak references do not retain replaced history. */
   private readonly frozenMessages = new WeakSet<Message>()
+  /** Activities cancelled by disposal or with `wake: false`: no wake replays or latches behind them. */
+  private readonly parkedActivities = new WeakSet<AbortController>()
 
   constructor(
     private loopCtx: Context,
@@ -192,7 +194,10 @@ export class ReactLoopAgent implements Agent {
     } finally {
       // Queue persistence must not prevent cancellation of admitted work.
       if (this.phase.kind !== 'idle') {
-        if (!options.keepInbox) this.phase.wakeRequested = false
+        // Disposal and `wake: false` keep the inbox for later work but never replay or latch a wake.
+        const parked = cause.kind === 'disposed' || options.wake === false
+        if (parked) this.parkedActivities.add(this.phase.abort)
+        if (!options.keepInbox || parked) this.phase.wakeRequested = false
         this.phase.abort.abort(cause)
       }
     }
@@ -234,9 +239,8 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'idle') {
       // Maintenance and aborted drivers cannot deliver the wake: latch it for
       // replay at convergence. Live drivers claim queued work themselves;
-      // disposal never latches, so teardown waits on no model turn.
-      const reason = abortedCancelCause(this.phase.abort.signal)
-      if (reason?.kind !== 'disposed' && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
+      // a parked activity never latches, so teardown waits on no model turn.
+      if (!this.parkedActivities.has(this.phase.abort) && (this.phase.kind === 'maintenance' || wakeAfterAbort)) {
         this.phase.wakeRequested = true
       }
       return
@@ -287,13 +291,15 @@ export class ReactLoopAgent implements Agent {
     /* v8 ignore next -- private callers establish the running phase before proposing a step */
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
+    const steeringCount = this.inbox.nextStep.length
     const claimed = this.inbox.claim(target, position.turn)
-    const selection = this.model.current()
-    if (selection === undefined) {
-      throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or record a model selection`)
-    }
-    const toolSet = await this.loopCtx.tools.resolve({ agent: this, modelSelection: selection, signal })
+    let toolSet: ResolvedToolSet | undefined
     try {
+      const selection = this.model.current()
+      if (selection === undefined) {
+        throw new Error(`agent "${this.id}" has no provider/model: set AgentOptions.provider and AgentOptions.model or record a model selection`)
+      }
+      toolSet = await this.loopCtx.tools.resolve({ agent: this, modelSelection: selection, signal })
       const assembly = await this.loopCtx.systemPrompt.assemble({ ...assembleContextFor(this, signal), modelSelection: selection, toolSet })
       signal.throwIfAborted()
       const decision = await this.dispatch.waterfall(
@@ -314,9 +320,27 @@ export class ReactLoopAgent implements Agent {
       }
       return { ...decision, assembly, selection, toolSet }
     } catch (error: unknown) {
-      toolSet.dispose()
+      toolSet?.dispose()
+      // No step admitted the claimed batch yet. Lifecycle disposal returns it
+      // for a later lifecycle; other cancellations and pre-step failures end
+      // it here, with listeners restoring what they own.
+      if (abortedCancelCause(signal)?.kind === 'disposed') this.restoreClaimed(claimed, steeringCount)
       throw error
     }
+  }
+
+  /**
+   * Return an unstarted claimed batch to the front of the lists it came from,
+   * skipping messages a pre-step listener already queued again.
+   * @param claimed - the batch removed by {@link ReactLoopInbox.claim}.
+   * @param steeringCount - how many leading `claimed` entries came from `next-step`.
+   */
+  private restoreClaimed(claimed: readonly UserMessage[], steeringCount: number): void {
+    const pending = new Set([...this.inbox.nextStep, ...this.inbox.nextTurn].map(message => message.id))
+    const unclaimed = (messages: readonly UserMessage[]): UserMessage[] =>
+      messages.filter(message => !pending.has(message.id))
+    this.inbox.splice('next-turn', 0, 0, unclaimed(claimed.slice(steeringCount)))
+    this.inbox.splice('next-step', 0, 0, unclaimed(claimed.slice(0, steeringCount)))
   }
 
   /** Open one turn before claiming its first proposed step. */

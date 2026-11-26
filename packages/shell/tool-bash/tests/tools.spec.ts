@@ -814,7 +814,7 @@ describe('sandbox escalation through the generic task producer', () => {
     expect(bash.modes).toEqual([])
   })
 
-  it('rejects injected escalation without a sandbox and narrower escalation without prompting', async () => {
+  it('rejects injected escalation without a sandbox and runs a narrower request confined without prompting', async () => {
     const plain = await setup()
     const { command, description, sandbox_permissions, justification } = escalate
     for (const args of [escalate, { command, description, sandbox_permissions }, { command, description, justification }]) {
@@ -823,11 +823,12 @@ describe('sandbox escalation through the generic task producer', () => {
       expect(unavailable).toMatchObject({ error: { info: { name: 'ToolArgsError', code: 'INVALID_ARGS' } } })
     }
 
-    const { ctx } = await setupSandboxed(true)
+    const { ctx, bash } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
     const result = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('danger-full-access'))
-    expect(text(result)).toContain('not strictly wider')
+    expect(result.isError).toBe(false)
+    expect(bash.modes).toEqual(['workspace-write'])
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
@@ -836,7 +837,7 @@ describe('sandbox escalation through the generic task producer', () => {
       data: { mode: 'unknown-mode' },
       seq: malformed.session.seq,
     })
-    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
+    expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('is not a supported mode')
   })
 
   it.each(['workspace-write', 'danger-full-access'] as const)('runs a repeated %s request without approval', async (mode) => {
