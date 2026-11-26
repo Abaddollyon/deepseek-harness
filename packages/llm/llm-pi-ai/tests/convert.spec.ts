@@ -8,7 +8,7 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
-import { mapStopReason, mapUsage, toStreamChunks } from '../src/stream.ts'
+import { mapStopReason, mapUsage, parseRetryAfterMs, toStreamChunks } from '../src/stream.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
@@ -971,6 +971,93 @@ describe('mapStopReason / mapUsage', () => {
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
   })
 
+  it.each([
+    // Status-less overloads: codex-lb failed response, Anthropic SSE error, OpenAI sentence.
+    ['server_is_overloaded: Our servers are currently overloaded. Please try again later.', 'SERVER'],
+    ['{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', 'SERVER'],
+    ['The server is overloaded. Please try again later.', 'SERVER'],
+    // codex-lb upstream WebSocket truncations and rejected continuation anchors.
+    ['stream_incomplete: Upstream websocket closed before response.completed', 'TRANSPORT'],
+    ['stream_incomplete: Upstream websocket closed without a complete handshake', 'TRANSPORT'],
+    ['stream_incomplete: Codex upstream websocket receive failed via proxy endpoint ep_1: OSError', 'TRANSPORT'],
+    ['stream_incomplete: The previous response anchor was rejected upstream; retry the request.', 'TRANSPORT'],
+    ['openai-codex API error (404): {"message":"Upstream websocket closed before response.completed","type":"server_error","code":"bridge_previous_response_not_found"}', 'TRANSPORT'],
+    // HTTP/2 stream resets.
+    ['stream error: stream ID 1; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
+    ['Stream closed with error code NGHTTP2_REFUSED_STREAM', 'TRANSPORT'],
+    ['HTTP/2 stream 0 was reset with RST_STREAM', 'TRANSPORT'],
+    // A stream id that reads like an HTTP status stays a reset.
+    ['stream error: stream ID 401; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
+    ['HTTP/2 stream 429 was reset with RST_STREAM', 'TRANSPORT'],
+    // Look-alikes stay unclassified, and an HTTP status keeps precedence.
+    ['Tool schema has overloaded signatures', 'PI_AI_ERROR'],
+    ['not_overloaded_error', 'PI_AI_ERROR'],
+    ['stream_incomplete: Websocket scope cancelled before response.completed', 'PI_AI_ERROR'],
+    ['bridge_previous_response_not_found: The previous response referenced by this request no longer exists upstream', 'PI_AI_ERROR'],
+    ['stream error: stream ID 1; INTERNAL_ERROR', 'PI_AI_ERROR'],
+    ['certificate received from peer failed validation', 'PI_AI_ERROR'],
+    ['HTTP 401: Our servers are currently overloaded.', 'AUTH'],
+  ] as const)('classifies %j as %s', (errorMessage, code) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code } })
+  })
+
+  it('adds a failed response status and Retry-After, letting the status classify unrecognized text', () => {
+    const reworded = assistant({ stopReason: 'error', errorMessage: 'admission full' })
+    expect(mapStopReason(reworded, undefined, { status: 429, retryAfterMs: 5_000 })).toEqual({
+      kind: 'error',
+      failure: { message: 'admission full', code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 5_000 },
+    })
+    expect(mapStopReason(reworded, undefined, { status: 503 }))
+      .toEqual({ kind: 'error', failure: { message: 'admission full', code: 'SERVER', status: 503 } })
+    expect(mapStopReason(reworded, undefined, { status: 408 })).toMatchObject({ failure: { code: 'TIMEOUT', status: 408 } })
+    expect(mapStopReason(reworded, undefined, { status: 404 })).toMatchObject({ failure: { code: 'PI_AI_ERROR', status: 404 } })
+    // Recognized text keeps its code; a successful response belongs to a later stream failure.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' }), undefined, { status: 429, retryAfterMs: 1 }))
+      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 1 } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'terminated' }), undefined, { status: 200, retryAfterMs: 1 }))
+      .toEqual({ kind: 'error', failure: { message: 'terminated', code: 'TRANSPORT' } })
+  })
+
+  it('fails pi-ai\'s Codex usage-limit sentence as QUOTA whatever the status, with its stated reset', () => {
+    const exhausted = (errorMessage: string) => assistant({ stopReason: 'error', errorMessage })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit.', code: 'QUOTA', status: 429 } })
+    // The stated minutes cannot read as an authentication status.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.')))
+      .toEqual({
+        kind: 'error',
+        failure: { message: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.', code: 'QUOTA', providerRetryAfterMs: 401 * 60_000 },
+      })
+    // A response header's exact delay wins over the rounded sentence.
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~5 min.'), undefined, { status: 429, retryAfterMs: 90_000 }))
+      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 90_000 } })
+    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~0 min.'), undefined, { status: 429 }))
+      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit. Try again in ~0 min.', code: 'QUOTA', status: 429 } })
+    // A reset sentence without the usage-limit sentence is no delay.
+    expect(mapStopReason(exhausted('server busy. Try again in ~5 min.'))).toEqual({
+      kind: 'error',
+      failure: { message: 'server busy. Try again in ~5 min.', code: 'PI_AI_ERROR' },
+    })
+  })
+
+  it.each([
+    ['delta-seconds', { 'retry-after': '3' }, 3_000],
+    ['fractional seconds', { 'retry-after': ' 1.5 ' }, 1_500],
+    ['an HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:05 GMT' }, 5_000],
+    ['milliseconds over seconds', { 'retry-after-ms': '250', 'retry-after': '9' }, 250],
+    ['seconds after malformed milliseconds', { 'retry-after-ms': 'soon', 'retry-after': '2' }, 2_000],
+    ['seconds after zero milliseconds', { 'retry-after-ms': '0', 'retry-after': '2' }, 2_000],
+    ['seconds after empty milliseconds', { 'retry-after-ms': '', 'retry-after': '2' }, 2_000],
+    ['nothing for a past HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }, undefined],
+    ['nothing for zero seconds', { 'retry-after': '0' }, undefined],
+    ['nothing for malformed text', { 'retry-after': 'later' }, undefined],
+    ['nothing for an empty header', { 'retry-after': ' ' }, undefined],
+    ['nothing without either header', {}, undefined],
+  ] as const)('parses %s from Retry-After headers', (_label, headers, expected) => {
+    expect(parseRetryAfterMs(new Headers(headers), Date.parse('Wed, 21 Oct 2026 07:28:00 GMT'))).toBe(expected)
+  })
+
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
     expect(mapStopReason(assistant({
       stopReason: 'error',
@@ -990,16 +1077,21 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(silent, 100)).toEqual({
       kind: 'error',
       failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"',
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
+          + ' (input 101, cache-read 0)',
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
 
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
-    expect(mapStopReason(truncated, 100)).toMatchObject({
+    expect(mapStopReason(truncated, 100)).toEqual({
       kind: 'error',
-      failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
+      failure: {
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
+          + ' (input 80, cache-read 19)',
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      },
     })
   })
 
@@ -1012,6 +1104,13 @@ describe('mapStopReason / mapUsage', () => {
       cacheWriteTokens: 2,
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
+  })
+
+  it('maps the provider-reported reasoning split without adding it to output', () => {
+    expect(mapUsage({ ...usage(10, 12), reasoning: 7 }))
+      .toEqual({ inputTokens: 10, outputTokens: 12, totalTokens: 22, reasoningTokens: 7 })
+    expect(mapUsage({ ...usage(10, 5), reasoning: 0 }))
+      .toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15, reasoningTokens: 0 })
   })
 })
 

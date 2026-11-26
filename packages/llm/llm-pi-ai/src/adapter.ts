@@ -27,6 +27,7 @@
  */
 
 import type {
+  AnthropicOptions,
   Api,
   AuthContext,
   CredentialStore,
@@ -62,6 +63,8 @@ import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { resolveImageRequestBudget } from './image-policy.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
+import { RouteRequestLimiter } from './request-limit.ts'
+import { ProviderResponseObserver } from './response-observer.ts'
 import { toStreamChunks } from './stream.ts'
 import { bindThinkingToPrefix } from './prefix-binding.ts'
 import type { PrefixDigests } from './prefix-binding.ts'
@@ -146,15 +149,60 @@ export interface PiAiAuthInjection {
   authContext: AuthContext
 }
 
+/**
+ * The auth one snapshot's collection resolves through. A proxy route's
+ * gateway owns its provider accounts, so the collection never reads or
+ * refreshes a credential stored under that route's id; every other route
+ * sees the store unchanged.
+ * @param auth - the plugin-wide auth injection.
+ * @param profiles - the snapshot's resolved profiles.
+ * @returns the injection for this snapshot's collection.
+ */
+function snapshotAuth(
+  auth: PiAiAuthInjection,
+  profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
+): PiAiAuthInjection {
+  const proxied = new Set([...profiles.values()].flatMap(profile => profile.authMode === 'proxy' ? [profile.provider] : []))
+  if (proxied.size === 0) return auth
+  const { credentials } = auth
+  return {
+    authContext: auth.authContext,
+    credentials: {
+      read: (providerId, options) => proxied.has(providerId) ? Promise.resolve(undefined) : credentials.read(providerId, options),
+      list: options => credentials.list(options),
+      modify: (providerId, mutate, options) => proxied.has(providerId)
+        ? Promise.reject(new LlmError(`llm-pi-ai: proxy route "${providerId}" stores no provider credential`, 'INVALID_CONFIG'))
+        : credentials.modify(providerId, mutate, options),
+      delete: (providerId, options) => credentials.delete(providerId, options),
+    },
+  }
+}
+
+/**
+ * pi-ai APIs whose HTTP requests go through a caller-supplied `fetch`. The
+ * Google adapters reject a custom `fetch`, Bedrock signs through the AWS SDK,
+ * and WebSocket transports bypass `fetch`, so their failures carry no status.
+ */
+const FETCH_OBSERVING_APIS: ReadonlySet<Api> = new Set<Api>([
+  'anthropic-messages',
+  'azure-openai-responses',
+  'mistral-conversations',
+  'openai-codex-responses',
+  'openai-completions',
+  'openai-responses',
+  'pi-messages',
+])
+
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
 function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
   apiKey: string | undefined,
-): SimpleStreamOptions {
+): SimpleStreamOptions & Pick<AnthropicOptions, 'requestMode'> {
   const enabledReasoning: ThinkingLevel | undefined = reasoning === 'off' ? undefined : reasoning
   return {
     ...apiKey === undefined ? {} : { apiKey },
+    ...profile.anthropicRequestMode === 'claude-code' ? { requestMode: 'claude-code' as const } : {},
     ...enabledReasoning === undefined ? {} : { reasoning: enabledReasoning },
     ...profile.thinkingBudgets === undefined ? {} : { thinkingBudgets: profile.thinkingBudgets },
     ...profile.cacheRetention === undefined ? {} : { cacheRetention: profile.cacheRetention },
@@ -236,6 +284,33 @@ function reasoningInfo(
   }
 }
 
+/**
+ * pi-ai's OpenAI protocols refuse a request that carries neither a key nor an
+ * `Authorization` header. A keyless proxy route hands them this placeholder and
+ * removes the `Authorization` header the OpenAI SDK builds from it, so the
+ * gateway receives no credential and the SDK never reads an ambient key.
+ */
+const KEYLESS_PROXY_KEY = 'keyless-proxy'
+
+/** Protocols whose keyless proxy requests go through {@link KEYLESS_PROXY_KEY}. */
+const KEYLESS_PROXY_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
+
+/**
+ * Whether one request is a keyless proxy request on a protocol that needs {@link KEYLESS_PROXY_KEY}.
+ * @param headers - the request's prepared headers: profile headers plus any a
+ *   `prepareHeaders` contributor added. An `Authorization` header there is the
+ *   route's credential, so the request is not keyless.
+ */
+function isKeylessProxyRequest(
+  profile: ResolvedPiAiProviderProfile,
+  model: Model<Api>,
+  apiKey: string | undefined,
+  headers: Readonly<Record<string, string>>,
+): boolean {
+  return apiKey === undefined && profile.authMode === 'proxy' && KEYLESS_PROXY_APIS.has(model.api)
+    && !Object.keys(headers).some(name => name.toLowerCase() === 'authorization')
+}
+
 /** Native header TypeErrors can echo credentials; other plugin errors own their public message. */
 function requestHeaderDiagnostic(error: unknown): string {
   if (error instanceof TypeError) {
@@ -282,6 +357,8 @@ function requestHeaders(
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
+  private readonly requestLimiter = new RouteRequestLimiter()
+  private readonly responses = new ProviderResponseObserver()
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
@@ -303,7 +380,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels(this.config.auth)
+    const models: MutableModels = createModels(snapshotAuth(this.config.auth, profiles))
     for (const profile of profiles.values()) {
       if (profile.piProvider !== undefined) models.setProvider(profile.piProvider)
     }
@@ -405,6 +482,15 @@ export class PiAiAdapter extends LlmAdapter {
     return this.streamWithSnapshot(options, this.current())
   }
 
+  /** Wait for a request slot; a caller abort while queued ends the request before pi-ai sees it. */
+  private async admit(provider: string, limit: number | undefined, signal: AbortSignal | undefined): Promise<Disposable> {
+    try {
+      return await this.requestLimiter.acquire(provider, limit, signal)
+    } catch (error: unknown) {
+      throw new LlmError(`pi-ai request to provider "${provider}" aborted while waiting for a request slot`, 'ABORTED', { cause: error })
+    }
+  }
+
   private async * streamWithSnapshot(
     options: GenerateOptions,
     snapshot: PiAiSnapshot,
@@ -433,8 +519,10 @@ export class PiAiAdapter extends LlmAdapter {
       model,
       options.reasoningEffort ?? profile.reasoning,
     )
-    const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    const resolvedKey = await this.config.resolveApiKey(options.provider, profile)
 
+    // Held until this stream ends; queueing precedes the watchdog because waiting is not provider idleness.
+    using _slot = await this.admit(options.provider, profile.maxConcurrentRequests, options.signal)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -470,15 +558,23 @@ export class PiAiAdapter extends LlmAdapter {
       const { context, digest } = bindThinkingToPrefix(converted, model.api, prefixDigests, manualThinking, (count) => {
         this.config.onThinkingOmitted?.({ provider: options.provider, model: options.model, count })
       })
-      const events = snapshot.models.streamSimple(model, context, {
+      const headers = requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders)
+      // Decided on the prepared headers: a `prepareHeaders` contributor may supply the credential itself.
+      const keyless = isKeylessProxyRequest(profile, model, resolvedKey, headers)
+      const apiKey = keyless ? KEYLESS_PROXY_KEY : resolvedKey
+      const observed = this.responses.observe(() => snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
+        ...FETCH_OBSERVING_APIS.has(model.api) ? { fetch: this.responses.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
-        headers: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders),
-      })
-      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id, digest)[Symbol.asyncIterator]()
+        headers: keyless ? { ...headers, Authorization: null } : headers,
+      }))
+      const chunks = toStreamChunks(
+        observed.result, model.contextWindow, options.signal, model.id, digest, observed.lastResponse,
+      )
+      const iterator = chunks[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

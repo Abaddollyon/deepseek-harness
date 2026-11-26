@@ -24,6 +24,7 @@ import type { ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-ll
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import {
   CACHE_CONTROL_FORMATS,
+  catalogModels,
   CHAT_TEMPLATE_VARS,
   MAX_TOKENS_FIELDS,
   MODALITIES,
@@ -100,10 +101,51 @@ export type {
   PiAiThinkingFormat,
 } from './catalog.ts'
 
+/** Who authenticates a route's requests: pi-ai's provider-native auth, or a proxy in front of the provider. */
+export type PiAiAuthMode = 'provider' | 'proxy'
+
+/** Anthropic Messages request format: the one the credential selects, or Claude Code's. */
+export type PiAiAnthropicRequestMode = 'provider' | 'claude-code'
+
+/** Listing protocol model discovery uses for a configured route. */
+export type PiAiModelDiscoverySource = 'provider' | 'openai-compatible' | 'anthropic'
+
+/** Model discovery choices for one configured route. */
+export interface PiAiModelDiscoveryProfile {
+  /**
+   * `provider` (default) answers a catalog route from the installed catalog
+   * and lists any other route by its protocol. `openai-compatible` lists
+   * `GET {baseURL}/models` with bearer auth; `anthropic` lists
+   * `GET {root}/v1/models` with `x-api-key`. Both read the route's own
+   * endpoint, headers, and `apiKeyEnv`, independently of its generation API.
+   */
+  source?: PiAiModelDiscoverySource
+}
+
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
+  /**
+   * `provider` (default) keeps pi-ai's provider-native auth: stored sign-ins,
+   * their refresh, and ambient environment discovery. `proxy` declares a
+   * gateway that owns provider accounts itself: the route never reads,
+   * refreshes, or offers a stored or ambient provider credential, sends the
+   * {@link apiKeyEnv} value when one is configured, and otherwise sends no
+   * credential, which `openai-completions`, `openai-responses`, and
+   * `anthropic-messages` in `claude-code` mode serve. `proxy` requires an
+   * explicit http(s) {@link baseURL} without embedded credentials.
+   */
+  authMode?: PiAiAuthMode
+  /**
+   * `claude-code` sends Anthropic requests in Claude Code format — identity
+   * headers, beta features, system preamble, and tool names — whatever
+   * credential the route carries, and permits a keyless request. Valid only on
+   * a route whose models speak `anthropic-messages`. Default `provider`.
+   */
+  anthropicRequestMode?: PiAiAnthropicRequestMode
+  /** How the configuration surface's model discovery lists this route. */
+  modelDiscovery?: PiAiModelDiscoveryProfile
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -209,15 +251,29 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Maximum model requests this route streams at once in this Host; further
+   * requests wait in arrival order until one finishes, and a caller's abort
+   * leaves the queue. Omission leaves the route unlimited.
+   */
+  maxConcurrentRequests?: number
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'requestImageMaxBytes'> {
+  extends Omit<PiAiProviderProfile,
+    'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'requestImageMaxBytes'
+    | 'authMode' | 'anthropicRequestMode' | 'modelDiscovery'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
+  /** Resolved authentication owner. */
+  authMode: PiAiAuthMode
+  /** Resolved Anthropic request format. */
+  anthropicRequestMode: PiAiAnthropicRequestMode
+  /** Resolved model-discovery listing protocol. */
+  modelDiscoverySource: PiAiModelDiscoverySource
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
   /** Positive finite provider-idle interval after defaulting. */
@@ -360,6 +416,9 @@ const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
+  authMode: z.union(['provider', 'proxy']),
+  anthropicRequestMode: z.union(['provider', 'claude-code']),
+  modelDiscovery: z.object({ source: z.union(['provider', 'openai-compatible', 'anthropic']) }),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -385,6 +444,7 @@ const profile = z.object({
   requestImageMaxDimension: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   requestImageMaxBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   retryPolicy: RetryPolicySchema,
+  maxConcurrentRequests: z.number().step(1).min(1),
 })
 
 /** Runtime schema for {@link Config}. */
@@ -438,6 +498,24 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
   }
 }
 
+/** Reject a proxy route whose endpoint is missing, not http(s), or carries credentials. */
+function assertProxyEndpoint(provider: string, baseURL: string | undefined): void {
+  const url = baseURL === undefined ? null : URL.parse(baseURL)
+  if (url === null || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.username !== '' || url.password !== '') {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" sets authMode proxy, which needs an explicit http(s) baseURL`
+      + ' without embedded credentials',
+    )
+  }
+}
+
+/** Whether every model the route serves speaks Anthropic Messages. */
+function speaksAnthropicMessages(provider: string, api: string | undefined): boolean {
+  if (api !== undefined) return api === 'anthropic-messages'
+  const installed = [...catalogModels(provider).values()]
+  return installed.length > 0 && installed.every(model => model.api === 'anthropic-messages')
+}
+
 /**
  * Resolve scalar defaults and materialize each route's serviceable models.
  * Deferred catalog validation retains diagnostics without deleting configured
@@ -471,6 +549,16 @@ export function resolveProfiles(
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
     assertValidHeaders(provider, source.headers)
+    const authMode = source.authMode ?? 'provider'
+    if (authMode === 'proxy') assertProxyEndpoint(provider, source.baseURL)
+    const anthropicRequestMode = source.anthropicRequestMode ?? 'provider'
+    if (anthropicRequestMode === 'claude-code' && !speaksAnthropicMessages(provider, source.api)) {
+      throw new Error(`llm-pi-ai: provider "${provider}" sets anthropicRequestMode claude-code, which needs api anthropic-messages`)
+    }
+    const modelDiscoverySource = source.modelDiscovery?.source ?? 'provider'
+    if (modelDiscoverySource !== 'provider' && source.baseURL === undefined) {
+      throw new Error(`llm-pi-ai: provider "${provider}" sets modelDiscovery.source ${modelDiscoverySource}, which needs a baseURL`)
+    }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
@@ -508,6 +596,10 @@ export function resolveProfiles(
         throw new Error(`llm-pi-ai: provider "${provider}" ${field} must be a positive safe integer`)
       }
     }
+    if (source.maxConcurrentRequests !== undefined
+      && (!Number.isSafeInteger(source.maxConcurrentRequests) || source.maxConcurrentRequests <= 0)) {
+      throw new Error(`llm-pi-ai: provider "${provider}" maxConcurrentRequests must be a positive safe integer`)
+    }
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty
     // list here is always one someone typed — and unlike an entry's, nothing
@@ -544,17 +636,24 @@ export function resolveProfiles(
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
         namesCredential: source.apiKeyEnv !== undefined,
+        authMode,
       })
     } catch (error) {
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
       catalogError ??= error.message
     }
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, requestImageMaxBytes, ...rest } = source
+    const {
+      apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, requestImageMaxBytes,
+      authMode: _authMode, anthropicRequestMode: _anthropicRequestMode, modelDiscovery: _modelDiscovery, ...rest
+    } = source
     resolved.set(provider, {
       ...rest,
       ...requestImageMaxBytes === undefined ? {} : { maxImageBytes: requestImageMaxBytes },
       provider,
       displayName,
+      authMode,
+      anthropicRequestMode,
+      modelDiscoverySource,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       maxRequestImageBytes,

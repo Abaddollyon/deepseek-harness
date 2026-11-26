@@ -10,16 +10,19 @@
 
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { BuiltinLlmFailureCode, FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { BuiltinLlmFailureCode, FinishReason, LlmFailure, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
 
 /**
- * Map pi-ai usage (reasoning folded into output by pi-ai).
+ * Map pi-ai usage. pi-ai keeps reasoning inside output and reports the
+ * provider's split, when there is one, as `usage.reasoning`: a sub-breakdown
+ * of output, never an additional bucket.
  * @param usage - cumulative usage from the terminal pi-ai event.
  * @returns harness counts with pi-ai's exact total; cache fields appear only
- *   when non-zero (pi-ai reports zeros, not absence).
+ *   when non-zero (pi-ai reports zeros, not absence), and `reasoningTokens`
+ *   only when the provider reports the split, including a reported zero.
  */
 export function mapUsage(usage: PiUsage): TokenUsage {
   return {
@@ -28,8 +31,18 @@ export function mapUsage(usage: PiUsage): TokenUsage {
     totalTokens: usage.totalTokens,
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
+    ...usage.reasoning === undefined ? {} : { reasoningTokens: usage.reasoning },
   }
 }
+
+/**
+ * pi-ai's Codex adapter rewrites every 429 that carries a JSON error body into
+ * this sentence, plan exhaustion (`usage_limit_reached`) included, and appends
+ * the plan and `Try again in ~N min.` when the body names them. The rewrite
+ * erases the provider's code, so the sentence marks a terminal quota failure.
+ */
+const CODEX_USAGE_LIMIT = /\bYou have hit your ChatGPT usage limit\b/i
+const CODEX_USAGE_LIMIT_RESET = /\bTry again in ~(\d+) min\b/i
 
 // pi-ai's SDK-backed providers render an HTTP failure as `<status> <body>`
 // (Anthropic and OpenAI SDK `APIError`, pi-messages `<status> <statusText>: …`).
@@ -47,6 +60,17 @@ const LEADING_HTTP_STATUS = /^[45]\d\d\b/
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): BuiltinLlmFailureCode {
+  // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
+  // stream ID N; <CODE>; received from peer`. Both fragments are required:
+  // bare `stream error` is generic phrasing, and `received from peer` alone
+  // appears in unrelated wording (TLS certificates). Node renders the reset
+  // code as NGHTTP2_* and intermediaries name the RST_STREAM frame. The peer
+  // reset one stream, not the connection, so resending the request can succeed.
+  // Checked before status codes: the stream id can read like one (`stream ID 401;`).
+  if (/\bstream error\b/i.test(message) && /received from peer/i.test(message)) return 'TRANSPORT'
+  if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
+  // Checked before status codes: the stated reset can read like one (`~401 min`).
+  if (CODEX_USAGE_LIMIT.test(message)) return QUOTA_EXCEEDED_CODE
   const statusSource = LEADING_HTTP_STATUS.exec(message)?.[0] ?? message
   if (/\b(?:401|403)\b/.test(statusSource)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
@@ -56,6 +80,10 @@ function classifyPiAiError(message: string): BuiltinLlmFailureCode {
   if (/\b413\b/.test(statusSource) || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
   if (/\b400\b/.test(statusSource) || /invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(statusSource)) return 'SERVER'
+  // An overload reported in-stream without an HTTP status: codex-lb's
+  // `server_is_overloaded` failed response, Anthropic's `overloaded_error` SSE
+  // error, and the OpenAI overload sentence. Unknown failures stay unclassified.
+  if (/\b(?:servers? (?:are|is) (?:currently )?overloaded|overloaded_error|server_is_overloaded)\b/i.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -64,6 +92,18 @@ function classifyPiAiError(message: string): BuiltinLlmFailureCode {
   // finish_reason`). The connection dropped mid-response, so this is a transport
   // truncation, not a model-level error.
   if (/stream ended (?:before|without)\b/i.test(message)) return 'TRANSPORT'
+  // codex-lb reports a lost upstream WebSocket as a failed response: its
+  // `stream_incomplete` code with an upstream-transport or rejected-anchor
+  // fragment, or `bridge_previous_response_not_found` carrying the close
+  // message. Each is a truncation a fresh attempt can complete; any other
+  // `stream_incomplete` reason (a cancelled scope) stays out of the retry loop.
+  if ((/\bbridge_previous_response_not_found\b/i.test(message)
+    && /upstream websocket closed before response\.completed/i.test(message))
+    || /previous response anchor was rejected upstream/i.test(message)
+    || (/\bstream_incomplete\b/i.test(message) && (/anchor|previous_response/i.test(message)
+      || /upstream websocket (?:closed before response\.completed|closed without a complete handshake|receive failed)/i.test(message)))) {
+    return 'TRANSPORT'
+  }
   if (/\b(?:network|connection|socket|fetch)\b|\bECONN[A-Z]+\b/i.test(message)
     || /\b(?:other side closed|HTTP2 request did not get a response|WebSocket closed unexpectedly)\b/i.test(message)
     // undici renders a mid-stream socket drop as a bare `terminated` (its
@@ -75,26 +115,103 @@ function classifyPiAiError(message: string): BuiltinLlmFailureCode {
   return 'PI_AI_ERROR'
 }
 
+/** HTTP facts of the last response one pi-ai request received, observed through its `fetch`. */
+export interface ObservedProviderResponse {
+  /** HTTP status code. */
+  readonly status: number
+  /** Positive provider-requested retry delay in milliseconds, resolved when the response arrived. */
+  readonly retryAfterMs?: number
+}
+
+function positiveDelay(value: number): number | undefined {
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Parse a provider-requested retry delay. A valid positive `retry-after-ms`
+ * (milliseconds, which the OpenAI and Anthropic SDKs also honour) wins over
+ * `retry-after`, which carries delta-seconds or an HTTP-date.
+ * @param headers - response headers.
+ * @param nowMs - receipt time in epoch milliseconds, used to resolve an HTTP-date.
+ * @returns the positive delay in milliseconds, or `undefined` when both headers
+ *   are absent, malformed, zero, or name a past date.
+ */
+export function parseRetryAfterMs(headers: Headers, nowMs: number): number | undefined {
+  const milliseconds = headers.get('retry-after-ms')?.trim()
+  const millisecondDelay = milliseconds === undefined || milliseconds === '' ? undefined : positiveDelay(Number(milliseconds))
+  if (millisecondDelay !== undefined) return millisecondDelay
+  const retryAfter = headers.get('retry-after')?.trim()
+  if (retryAfter === undefined || retryAfter === '') return undefined
+  const seconds = Number(retryAfter)
+  return Number.isNaN(seconds) ? positiveDelay(Date.parse(retryAfter) - nowMs) : positiveDelay(seconds * 1000)
+}
+
+/** Failure codes an HTTP status determines when pi-ai's flattened error text is unrecognized. */
+function statusFailureCode(status: number): BuiltinLlmFailureCode | undefined {
+  if (status === 408) return 'TIMEOUT'
+  if (status === 429) return 'RATE_LIMIT'
+  return status >= 500 ? 'SERVER' : undefined
+}
+
+/** The reset delay pi-ai's Codex usage-limit sentence states, in milliseconds. */
+function codexUsageLimitResetMs(text: string): number | undefined {
+  if (!CODEX_USAGE_LIMIT.test(text)) return undefined
+  const minutes = CODEX_USAGE_LIMIT_RESET.exec(text)?.[1]
+  return minutes === undefined ? undefined : positiveDelay(Number(minutes) * 60_000)
+}
+
+/**
+ * Classify pi-ai error text, then add the failed HTTP response's status and
+ * requested delay. Text classification wins; the status decides only text the
+ * classifier leaves as `PI_AI_ERROR`, such as a provider's reworded 503 body.
+ * A response header's delay wins over the reset a Codex usage-limit sentence states.
+ */
+function errorFailure(text: string, response: ObservedProviderResponse | undefined): LlmFailure {
+  const classified = classifyPiAiError(text)
+  const failed = response !== undefined && response.status >= 400 ? response : undefined
+  const retryAfterMs = failed?.retryAfterMs ?? codexUsageLimitResetMs(text)
+  return {
+    message: text,
+    code: failed !== undefined && classified === 'PI_AI_ERROR' ? statusFailureCode(failed.status) ?? classified : classified,
+    ...failed === undefined ? {} : { status: failed.status },
+    ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+  }
+}
+
 /**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param response - the last HTTP response the request received, when its transport exposed one.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures.
+ *   to non-retryable `PI_AI_ERROR` failures. Known status-less overloads map to
+ *   `SERVER`, and pi-ai's Codex usage-limit sentence maps to non-retryable
+ *   `QUOTA` whatever the status, carrying its stated reset as
+ *   `providerRetryAfterMs` when no response header named a delay. An error
+ *   after a failed HTTP `response` carries its `status` and
+ *   `providerRetryAfterMs`, and unrecognized text after a 408, 429, or 5xx maps
+ *   to `TIMEOUT`, `RATE_LIMIT`, or `SERVER`; other unclassified errors remain `PI_AI_ERROR`.
  */
-export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
+export function mapStopReason(
+  message: AssistantMessage,
+  contextWindow?: number,
+  response?: ObservedProviderResponse,
+): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
+    // Without provider wording, pi-ai detects overflow only from usage against
+    // the resolved window, so the fallback can name both.
     return {
       kind: 'error',
       failure: {
-        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
+        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}" at resolved context`
+          + ` window ${contextWindow} tokens (input ${message.usage.input}, cache-read ${message.usage.cacheRead})`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     }
@@ -128,10 +245,8 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       kind: 'aborted',
       failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' satisfies BuiltinLlmFailureCode },
     }
-    case 'error': {
-      const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
-    }
+    case 'error':
+      return { kind: 'error', failure: errorFailure(message.errorMessage ?? 'pi-ai stream error', response) }
   }
 }
 
@@ -145,6 +260,7 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  *   in-band terminal error an aborted finish.
  * @param requestedModel - request model identity recorded for durable replay.
  * @param prefixDigest - request-context digest recorded for durable replay.
+ * @param lastResponse - reads the last HTTP response of this request when the terminal event arrives.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event, or
  *   `MALFORMED_RESPONSE` when completed tool arguments are invalid. Length-limited
@@ -156,6 +272,7 @@ export async function* toStreamChunks(
   callerSignal?: AbortSignal,
   requestedModel?: string,
   prefixDigest?: string,
+  lastResponse?: () => ObservedProviderResponse | undefined,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -229,7 +346,7 @@ export async function* toStreamChunks(
         }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.message, contextWindow),
+          reason: mapStopReason(event.message, contextWindow, lastResponse?.()),
           replayState: toPiReplayState(event.message, requestedModel, prefixDigest),
         }
         return
@@ -242,6 +359,7 @@ export async function* toStreamChunks(
           reason: mapStopReason(
             callerSignal?.aborted ? { ...event.error, stopReason: 'aborted' } : event.error,
             contextWindow,
+            lastResponse?.(),
           ),
         }
         return
