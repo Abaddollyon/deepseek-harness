@@ -32,7 +32,7 @@ import { MissingTemplateValue } from './templates.ts'
 import { McpToolRegistrationError, syncTools } from './tools.ts'
 import { McpToolLoader } from './tool-loading.ts'
 import type { ToolDisposers } from './tools.ts'
-import type { Config } from './index.ts'
+import type { Config, TransportWrapper } from './index.ts'
 
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
@@ -129,10 +129,12 @@ export interface ConnectionHandle extends ServerContext {
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
  * @param status - Instance status cell this supervisor publishes transitions to.
  * @param oauth - optional passive grant and refresh provider.
+ * @param wrap - optional caller wrapper around each generation's configured transport.
  * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
  */
 export function startConnection(
   ctx: Context, config: Config, policy: ResolvedReconnectPolicy, status: McpStatusCell, oauth?: McpOAuthCredentials,
+  wrap?: TransportWrapper,
 ): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
   const binding = new McpTemplateBinding(ctx, config)
@@ -323,7 +325,7 @@ export function startConnection(
       capabilities: {}, versionNegotiation: { mode: 'auto' },
       listChanged: { tools: { autoRefresh: false, debounceMs: 0, onChanged: () => { void refreshTools() } } },
     })
-    const record: Generation = { wire: new McpGeneration(client, config.closeTimeoutMs, error => diagnostic(error, 'cleanup')) }
+    const record: Generation = { wire: new McpGeneration(client, config.closeTimeoutMs, error => diagnostic(error, 'cleanup'), wrap) }
     current = record
     status.opened()
     status.update({ state: 'connecting', attempt: failedAttempts })

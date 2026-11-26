@@ -16,6 +16,7 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
+import type { Transport } from '@modelcontextprotocol/client'
 import z from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { resolveReconnectPolicy, startConnection } from './connection.ts'
@@ -42,6 +43,15 @@ export type * from './types.ts'
 export type { McpOAuthAuthorization } from './oauth.ts'
 export type { McpOAuthConfig, McpOAuthConfigInput } from './oauth-options.ts'
 export type { McpProbeOptions } from './probe.ts'
+export type { JSONRPCMessage, Transport } from '@modelcontextprotocol/client'
+
+/**
+ * Supply one connection generation's transport around its configured transport.
+ * The generation still instruments the returned transport's `start`, `close`, and `onclose`.
+ * @param open - create the configured stdio or Streamable HTTP transport; call it at most once.
+ * @returns the transport this generation's MCP client connects through.
+ */
+export type TransportWrapper = (open: () => Transport) => Transport
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -149,6 +159,26 @@ export const Config = z.union([StdioSchema, StreamableHttpSchema]) as z<ConfigIn
  * @returns startup readiness after connection and initial tool discovery settle.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  await mount(ctx, config, undefined)
+}
+
+/**
+ * Build an mcp-client plugin whose connection generations connect through `wrap`.
+ * It accepts the same {@link Config} and keeps the namespace, status, startup, tool, and disposal behavior of the plugin module.
+ * @param wrap - caller-owned wrapper around each generation's configured transport.
+ * @returns a plugin object mounted with `ctx.plugin(plugin, config)`.
+ */
+export function withTransportWrapper(wrap: TransportWrapper): {
+  name: typeof name
+  inject: typeof inject
+  Config: typeof Config
+  apply: (ctx: Context, config: Config) => Promise<void>
+} {
+  return { name, inject, Config, apply: (ctx: Context, config: Config) => mount(ctx, config, wrap) }
+}
+
+/** Shared plugin body for the module entry and {@link withTransportWrapper}. */
+async function mount(ctx: Context, config: Config, wrap: TransportWrapper | undefined): Promise<void> {
   if (hasOAuthWithAuthorizationHeader(config)) {
     throw new Error('MCP OAuth and an Authorization header cannot be configured together')
   }
@@ -192,7 +222,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!status.closure().closeConfirmed || status.closure().cleanupError !== undefined) {
     throw new Error(`mcp-client(${config.serverName}): previous connection cleanup is incomplete; restart the Host`)
   }
-  const connection = startConnection(ctx, config, reconnect, status, oauth)
+  const connection = startConnection(ctx, config, reconnect, status, oauth, wrap)
   let stopping: Promise<void> | undefined
   const dispose = (): Promise<void> => stopping ??= connection.dispose()
   // Cordis announces unload before awaiting an unfinished apply(). Closing

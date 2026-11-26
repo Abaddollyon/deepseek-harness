@@ -1,6 +1,20 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setImmediate as nextTurn } from 'node:timers/promises'
-import { describe, expect, it, vi } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import type { JSONRPCMessage, Transport } from '@deepseek-ai/dsh-mcp-client'
+import { connectionStatusIn } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { SharedServerStart } from '../src/startup.ts'
 import type { DeferredServerTransport } from '../src/startup.ts'
 
@@ -332,5 +346,89 @@ describe('recording the startup exchange', () => {
   it('rejects messages sent before the transport starts', async () => {
     const transport = new SharedServerStart('fixture', vi.fn()).wrap(() => new FakeServer(server(1)), TIMEOUT_MS)
     await expect(transport.send(INITIALIZE)).rejects.toThrow('fixture: the browser server transport is not connected')
+  })
+})
+
+describe('inside an mcp-client connection generation', () => {
+  const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url))
+
+  /** A tool registry that mounts browser-fixture clients through one provider's shared start. */
+  async function provider() {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-browser-startup-'))
+    const ctx = new Context()
+    onTestFinished(async () => {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    })
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
+    const shared = new SharedServerStart('browser-fixture', vi.fn())
+    const starts = async (): Promise<number[]> => (await readFile(join(root, 'events.ndjson'), 'utf8').catch(() => ''))
+      .split('\n').filter(Boolean).map(line => JSON.parse(line) as { event: string; pid: number })
+      .filter(item => item.event === 'start').map(item => item.pid)
+    /** Mount one Session's client the way `mountSessionMcp` does in `first-use` mode. */
+    const mount = async (serverName: string) => {
+      const config = McpClient.Config({
+        transport: 'stdio', serverName, command: process.execPath, args: [fixture, root], cwd: root,
+        failOnStartupError: true, reconnect: { enabled: false },
+      })
+      const wrapped: DeferredServerTransport[] = []
+      const fiber = await ctx.plugin(McpClient.withTransportWrapper((open) => {
+        const transport = shared.wrap(open, config.toolCallTimeoutMs)
+        wrapped.push(transport)
+        return transport
+      }), config)
+      expect(wrapped).toHaveLength(1)
+      const transport = wrapped[0]!
+      transport.commit()
+      return { fiber, transport }
+    }
+    return { ctx, mount, starts }
+  }
+
+  it('keeps a deferred transport working after the generation replaces its start, close and onclose', async () => {
+    const { ctx, mount, starts } = await provider()
+    const recorder = await mount('first')
+    // The connection generation instruments the transport it receives as own properties.
+    expect(Object.hasOwn(recorder.transport, 'start')).toBe(true)
+    expect(Object.hasOwn(recorder.transport, 'close')).toBe(true)
+    expect(recorder.transport.onclose).toBeTypeOf('function')
+    expect(await starts()).toHaveLength(1)
+
+    const replayed = await mount('second')
+    expect(Object.hasOwn(replayed.transport, 'start')).toBe(true)
+    expect(replayed.transport.pid).toBeNull()
+    expect(ctx.tools.schemas().map(schema => schema.name)).toContain('mcp__second__visit')
+    expect(await starts()).toHaveLength(1)
+
+    const result = await executeToolFixture(ctx, {
+      name: 'mcp__second__visit', arguments: { label: 'deferred' }, callId: brandString<ToolCallId>('visit'), signal: new AbortController().signal,
+    })
+    expect(result.content).toEqual([{ type: 'text', text: 'Visit 1: deferred' }])
+    const pids = await starts()
+    expect(pids).toHaveLength(2)
+    expect(replayed.transport.pid).toBe(pids[1])
+
+    // A replayed transport that never started a server still reports closure through the generation's `onclose`.
+    const unused = await mount('third')
+    await unused.fiber.dispose()
+    expect(connectionStatusIn(unused.fiber)?.closure()).toEqual({ closeConfirmed: true })
+    expect(await starts()).toHaveLength(2)
+
+    // The generation's memoized `close` reaches the started server.
+    await replayed.fiber.dispose()
+    expect(connectionStatusIn(replayed.fiber)?.closure()).toEqual({ closeConfirmed: true })
+    await recorder.fiber.dispose()
+    expect(connectionStatusIn(recorder.fiber)?.closure()).toEqual({ closeConfirmed: true })
+    for (const pid of pids) {
+      await expect.poll(() => {
+        try { process.kill(pid, 0) } catch (error) {
+          return (error as NodeJS.ErrnoException).code
+        }
+        return 'running'
+      }).toBe('ESRCH')
+    }
   })
 })

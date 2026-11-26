@@ -91,10 +91,10 @@ export async function verifyMcpBrowser(
     expect(result.content.length).toBeGreaterThan(0)
     if (mode === 'launch') {
       // A later Session declares the first Session's recorded catalog and starts its own server at its first call.
-      const later = await ctx.agents.create({ sessionId: SessionId('browser-upstream-later'), meta: { cwd: root } })
+      const later = await ctx.agents.create({ sessionId: brandString<SessionId>('browser-upstream-later'), meta: { cwd: root } })
       await later.agent.whenIdle()
       expect(ctx.tools.schemas(later.agent)).toEqual(schemas)
-      const visited = await executeToolFixture(ctx, { agent: later.agent, name: `mcp__${namespace}__${navigate.name}`, arguments: navigate.arguments(url), callId: ToolCallId('navigate-later'), signal: new AbortController().signal })
+      const visited = await executeToolFixture(ctx, { agent: later.agent, name: `mcp__${namespace}__${navigate.name}`, arguments: navigate.arguments(url), callId: brandString<ToolCallId>('navigate-later'), signal: new AbortController().signal })
       expect(visited.isError, JSON.stringify(visited.content)).toBe(false)
       await later.dispose()
     }

@@ -4,7 +4,7 @@ import type { AuthProvider, Client, FetchLike, Transport } from '@modelcontextpr
 import { withDeadline } from './deadline.ts'
 import { McpLocalError } from './diagnostic.ts'
 import { createTransport } from './transport.ts'
-import type { Config } from './index.ts'
+import type { Config, TransportWrapper } from './index.ts'
 import type { McpCloseResult } from './types.ts'
 
 /** Tracks actual tasks separately from their interruptible callers. */
@@ -18,10 +18,17 @@ export class McpGeneration {
   private closeObserved = false
   private closing: Promise<McpCloseResult> | undefined
 
+  /**
+   * @param client - the MCP client this generation connects.
+   * @param closeTimeoutMs - budget for transport closure and owned work during {@link close}.
+   * @param diagnostic - renders a cleanup failure for the close result.
+   * @param wrap - optional caller wrapper around the configured transport; the generation still owns the returned transport's `start`, `close` and `onclose`.
+   */
   constructor(
     readonly client: Client,
     private readonly closeTimeoutMs: number,
     private readonly diagnostic: (error: unknown) => string,
+    private readonly wrap?: TransportWrapper,
   ) {}
 
   /**
@@ -34,10 +41,12 @@ export class McpGeneration {
    */
   connect(config: Config, timeoutMs: number | undefined, fetch?: FetchLike, authProvider?: Required<AuthProvider>): Promise<void> {
     this.lifetime.signal.throwIfAborted()
-    const transport = this.transport = createTransport(config, fetch, authProvider === undefined ? undefined : {
+    const open = (): Transport => createTransport(config, fetch, authProvider === undefined ? undefined : {
       token: () => this.run(() => authProvider.token()),
       onUnauthorized: context => this.run(() => authProvider.onUnauthorized(context)),
     })
+    // A wrapper may defer `open` until its first message; the generation instruments whatever transport it returns.
+    const transport = this.transport = this.wrap === undefined ? open() : this.wrap(open)
     const close = transport.close.bind(transport)
     let closing: Promise<void> | undefined
     transport.close = () => closing ??= close()

@@ -325,9 +325,9 @@ describe('Session MCP Loader composition', () => {
     const { ctx, root } = await load()
     const host = await realpath(tmpdir())
     const local = await realpath(root)
-    await ctx.agents.create({ sessionId: SessionId('local'), meta: { cwd: root } })
+    await ctx.agents.create({ sessionId: brandString<SessionId>('local'), meta: { cwd: root } })
     ctx.provide('agentPresets', { composedPreset: () => 'remote', ownsWorld: (id: string) => id === 'remote' } as never)
-    const remote = await ctx.agents.create({ sessionId: SessionId('remote'), meta: { cwd: root } })
+    const remote = await ctx.agents.create({ sessionId: brandString<SessionId>('remote'), meta: { cwd: root } })
     expect(ctx.tools.schemas(remote.agent).map(tool => tool.name)).toContain(TOOL)
     expect((await events(root)).filter(event => event.event === 'start').map(event => event.cwd))
       .toEqual([local, local, host, host])
@@ -337,10 +337,10 @@ describe('Session MCP Loader composition', () => {
     const { ctx } = await load(false, 'fail')
     const warnings: unknown[][] = []
     ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
-    await expect(ctx.agents.create({ sessionId: SessionId('host') })).rejects.toThrow('initial connection')
+    await expect(ctx.agents.create({ sessionId: brandString<SessionId>('host') })).rejects.toThrow('initial connection')
     ctx.provide('agentPresets', { composedPreset: () => 'remote', ownsWorld: (id: string) => id === 'remote' } as never)
-    const remote = await ctx.agents.create({ sessionId: SessionId('remote') })
-    expect(ctx.agents.get(SessionId('remote'))).toBe(remote.agent)
+    const remote = await ctx.agents.create({ sessionId: brandString<SessionId>('remote') })
+    expect(ctx.agents.get(brandString<SessionId>('remote'))).toBe(remote.agent)
     expect(ctx.tools.schemas(remote.agent).filter(tool => tool.name.startsWith('mcp__browser-fixture__'))).toEqual([])
     expect((await warm(ctx, remote.agent)).sections.map(section => section.name)).not.toContain('mcp:browser-fixture')
     expect(warnings.flat().join('\n')).toContain('browser tools are unavailable to Session remote')
@@ -670,14 +670,14 @@ describe('First-use server start', () => {
   it('declares the recorded tools, instructions and resources without a process until a Session first uses its browser', async () => {
     const { ctx, root, browser } = await firstUse()
     await ctx.plugin(McpResources)
-    const first = await ctx.agents.create({ sessionId: SessionId('recorder'), meta: { cwd: root } })
+    const first = await ctx.agents.create({ sessionId: brandString<SessionId>('recorder'), meta: { cwd: root } })
     const recorded = await warm(ctx, first.agent)
     const afterRecording = await events(root)
     // The recording Session probes in place: one process answers discovery and initialization.
     expect(afterRecording.filter(event => event.event === 'start')).toHaveLength(1)
     expect(afterRecording.filter(event => event.event === 'probe')).toHaveLength(1)
 
-    const replayed = await Promise.all(['second', 'third', 'fourth'].map(id => ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root } })))
+    const replayed = await Promise.all(['second', 'third', 'fourth'].map(id => ctx.agents.create({ sessionId: brandString<SessionId>(id), meta: { cwd: root } })))
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(1)
     for (const { agent } of replayed) {
       const assembly = await warm(ctx, agent)
@@ -706,10 +706,10 @@ describe('First-use server start', () => {
 
   it('holds Sessions created during the first recording until it completes, then answers them from it', async () => {
     const { ctx, root } = await firstUse('gate')
-    const recording = observeActivation(ctx.agents.create({ sessionId: SessionId('recorder'), meta: { cwd: root } }))
+    const recording = observeActivation(ctx.agents.create({ sessionId: brandString<SessionId>('recorder'), meta: { cwd: root } }))
     await expect.poll(async () => (await events(root)).some(event => event.event === 'probe')).toBe(true)
     let waited = false
-    const waiting = observeActivation(ctx.agents.create({ sessionId: SessionId('waiting'), meta: { cwd: root } }).then((handle) => {
+    const waiting = observeActivation(ctx.agents.create({ sessionId: brandString<SessionId>('waiting'), meta: { cwd: root } }).then((handle) => {
       waited = true
       return handle
     }))
@@ -724,8 +724,8 @@ describe('First-use server start', () => {
 
   it('records again after a failed start and rejects that activation as before', async () => {
     const { ctx, root } = await firstUse('fail')
-    await expect(ctx.agents.create({ sessionId: SessionId('first') })).rejects.toThrow('initial connection')
-    await expect(ctx.agents.create({ sessionId: SessionId('second') })).rejects.toThrow('initial connection')
+    await expect(ctx.agents.create({ sessionId: brandString<SessionId>('first') })).rejects.toThrow('initial connection')
+    await expect(ctx.agents.create({ sessionId: brandString<SessionId>('second') })).rejects.toThrow('initial connection')
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(2)
   })
 
@@ -734,14 +734,14 @@ describe('First-use server start', () => {
     const warnings: unknown[][] = []
     ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
     const visitDescription = (agent: Agent) => ctx.tools.schemas(agent).find(tool => tool.name === TOOL)?.description
-    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
-    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    const first = await ctx.agents.create({ sessionId: brandString<SessionId>('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: brandString<SessionId>('second'), meta: { cwd: root } })
     expect(visitDescription(first.agent)).toBe('Visit the fixture page from server 1.')
     expect(visitDescription(second.agent)).toBe('Visit the fixture page from server 1.')
     expect((await execute(ctx, second.agent)).isError).toBe(false)
     await expect.poll(() => visitDescription(second.agent)).toBe('Visit the fixture page from server 2.')
     expect(warnings.flat().join('\n')).toContain('answered its startup requests differently from the recorded exchange')
-    const third = await ctx.agents.create({ sessionId: SessionId('third'), meta: { cwd: root } })
+    const third = await ctx.agents.create({ sessionId: brandString<SessionId>('third'), meta: { cwd: root } })
     expect(visitDescription(third.agent)).toBe('Visit the fixture page from server 3.')
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
   })
@@ -749,8 +749,8 @@ describe('First-use server start', () => {
   it('fails a call to a tool the started server no longer lists with its error, then removes that tool', async () => {
     const { ctx, root } = await firstUse('drop')
     const browserTools = (agent: Agent) => ctx.tools.schemas(agent).map(tool => tool.name).filter(name => name.startsWith('mcp__browser-fixture__'))
-    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
-    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    const first = await ctx.agents.create({ sessionId: brandString<SessionId>('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: brandString<SessionId>('second'), meta: { cwd: root } })
     expect(browserTools(second.agent)).toEqual(browserTools(first.agent))
     const refused = await execute(ctx, second.agent)
     expect(refused.isError).toBe(true)
@@ -762,8 +762,8 @@ describe('First-use server start', () => {
 
   it('closes a later Session server that does not answer its replayed startup within the tool-call timeout', async () => {
     const { ctx, root } = await load(false, 'hang', 1000, undefined, 'first-use')
-    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
-    const second = await ctx.agents.create({ sessionId: SessionId('second'), meta: { cwd: root } })
+    const first = await ctx.agents.create({ sessionId: brandString<SessionId>('first'), meta: { cwd: root } })
+    const second = await ctx.agents.create({ sessionId: brandString<SessionId>('second'), meta: { cwd: root } })
     expect((await execute(ctx, second.agent)).isError).toBe(true)
     const hung = (await events(root)).filter(event => event.event === 'start')[1]!.pid
     await expect.poll(() => {
@@ -774,7 +774,7 @@ describe('First-use server start', () => {
     }).toBe('ESRCH')
     const disconnected = await execute(ctx, second.agent)
     expect(disconnected.isError).toBe(true)
-    expect(JSON.stringify(disconnected.content)).toContain('Not connected')
+    expect(JSON.stringify(disconnected.content)).toContain('server is disconnected')
     expect((await execute(ctx, first.agent)).isError).toBe(false)
   })
 
@@ -782,8 +782,8 @@ describe('First-use server start', () => {
     const { ctx, root } = await firstUse('chatty')
     const warnings: unknown[][] = []
     ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
-    const first = await ctx.agents.create({ sessionId: SessionId('first'), meta: { cwd: root } })
-    const later = await Promise.all(['second', 'third'].map(id => ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root } })))
+    const first = await ctx.agents.create({ sessionId: brandString<SessionId>('first'), meta: { cwd: root } })
+    const later = await Promise.all(['second', 'third'].map(id => ctx.agents.create({ sessionId: brandString<SessionId>(id), meta: { cwd: root } })))
     expect((await events(root)).filter(event => event.event === 'start')).toHaveLength(3)
     expect(warnings.flat().filter(warning => String(warning).includes('startup exchange cannot be replayed'))).toHaveLength(1)
     for (const { agent } of later) {
