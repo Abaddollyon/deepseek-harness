@@ -15,17 +15,13 @@
  * @module @deepseek-ai/dsh-mcp-client
  */
 
-import { Context } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { Transport } from '@modelcontextprotocol/client'
 import z from '@deepseek-ai/schemastery'
-import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
-import { hasOAuthWithAuthorizationHeader, StdioSchema, StreamableHttpSchema } from './config.ts'
+import { StdioSchema, StreamableHttpSchema } from './config.ts'
 import type { ConfigInput } from './config.ts'
-import { registerServerContext } from './server-context.ts'
-import { registerStatusCell } from './status.ts'
-import { McpOAuthCredentials } from './oauth-credentials.ts'
+import { mount } from './mount.ts'
 import type { McpOAuthConfig } from './oauth-options.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
@@ -58,13 +54,6 @@ export const name = 'mcp-client'
 
 /** Services required by this plugin. */
 export const inject = ['tools']
-
-/**
- * Live `serverName` reservations per registration scope. Agent-scoped MCP
- * servers may reuse a namespace in another Agent, while global instances and
- * duplicates inside one Agent remain mutually exclusive.
- */
-const activeServerNames = new WeakMap<object, Set<string>>()
 
 // ---- Config ----
 
@@ -160,88 +149,4 @@ export const Config = z.union([StdioSchema, StreamableHttpSchema]) as z<ConfigIn
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   await mount(ctx, config, undefined)
-}
-
-/**
- * Build an mcp-client plugin whose connection generations connect through `wrap`.
- * It accepts the same {@link Config} and keeps the namespace, status, startup, tool, and disposal behavior of the plugin module.
- * @param wrap - caller-owned wrapper around each generation's configured transport.
- * @returns a plugin object mounted with `ctx.plugin(plugin, config)`.
- */
-export function withTransportWrapper(wrap: TransportWrapper): {
-  name: typeof name
-  inject: typeof inject
-  Config: typeof Config
-  apply: (ctx: Context, config: Config) => Promise<void>
-} {
-  return { name, inject, Config, apply: (ctx: Context, config: Config) => mount(ctx, config, wrap) }
-}
-
-/** Shared plugin body for the module entry and {@link withTransportWrapper}. */
-async function mount(ctx: Context, config: Config, wrap: TransportWrapper | undefined): Promise<void> {
-  if (hasOAuthWithAuthorizationHeader(config)) {
-    throw new Error('MCP OAuth and an Authorization header cannot be configured together')
-  }
-  const oauth = config.transport === 'streamable-http' && config.oauth !== undefined
-    ? new McpOAuthCredentials(ctx, config.oauth)
-    : undefined
-  // Fail loud at load: reconnect misconfiguration (including programmatic
-  // construction that bypassed Schemastery) rejects THIS instance before any
-  // effect registers.
-  const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
-
-  // Namespace reservations are scope-local; status belongs to the actual
-  // Fiber and survives its reloads and final disposal.
-  let status!: ReturnType<typeof registerStatusCell>
-  ctx.effect(() => {
-    const owner = scopeOf(ctx) ?? ctx[Context.root]
-    let names = activeServerNames.get(owner)
-    if (!names) {
-      names = new Set()
-      activeServerNames.set(owner, names)
-    }
-    if (names.has(config.serverName)) {
-      throw new Error(
-        `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
-      )
-    }
-    names.add(config.serverName)
-    status = registerStatusCell(ctx.fiber, (message, error) => {
-      ctx.logger.warn(`mcp-client(${config.serverName}): ${message}`)
-      if (!config.expandTemplates && !(config.transport === 'streamable-http' && config.oauth !== undefined)) ctx.logger.warn(error)
-    })
-    return () => {
-      if (ctx.fiber.uid === null) status.detach()
-      names.delete(config.serverName)
-    }
-  }, 'mcp-client.serverName')
-
-  // The supervisor owns the client/transport generations, the reconnect
-  // loop, and the live tool registrations; disposal stops reconnection,
-  // quiesces in-flight work, and unregisters the current generation.
-  if (!status.closure().closeConfirmed || status.closure().cleanupError !== undefined) {
-    throw new Error(`mcp-client(${config.serverName}): previous connection cleanup is incomplete; restart the Host`)
-  }
-  const connection = startConnection(ctx, config, reconnect, status, oauth, wrap)
-  let stopping: Promise<void> | undefined
-  const dispose = (): Promise<void> => stopping ??= connection.dispose()
-  // Cordis announces unload before awaiting an unfinished apply(). Closing
-  // the transport here releases startup requests that are still awaiting a reply.
-  // oxlint-disable-next-line typescript/no-misused-promises -- Cordis contains observer failures; the effect also awaits this promise.
-  ctx.on('internal/plugin', (fiber) => {
-    if (fiber !== ctx.fiber || fiber.uid !== null) return
-    return dispose()
-  }, { global: true })
-  ctx.effect(() => dispose, 'mcp-client.connection')
-  registerServerContext(ctx, config.serverName, connection)
-
-  // Block plugin activation on the initial connection + tool discovery so
-  // Cordis consumers observe the tools immediately after the fiber activates.
-  // When failOnStartupError is true, a failed initial attempt rejects the
-  // fiber (Cordis rolls it back); otherwise the error is logged and the
-  // supervisor applies its reconnect or credential-wait policy.
-  const outcome = await connection.ready
-  if (outcome.error !== undefined && config.failOnStartupError) {
-    throw new Error(`mcp-client(${config.serverName}): initial connection or tool synchronization failed`, { cause: outcome.error })
-  }
 }

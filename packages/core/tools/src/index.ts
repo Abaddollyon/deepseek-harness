@@ -671,8 +671,6 @@ function jsonDeclaration({ name, description, parameters }: ToolDefinition): Pic
 
 export default ToolsService
 
-export { TOOL_SEARCH_NAME } from './defer.ts'
-export { nativeIndexLead, programIndexLead, renderDeferredIndex } from './defer.ts'
 export type { DeferredToolEntry, ToolDeferConfig, ToolDeferPolicy, ToolDeferral } from './defer.ts'
 export * from './contracts.ts'
 export * from './executor.ts'

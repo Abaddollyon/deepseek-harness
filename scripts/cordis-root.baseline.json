@@ -62,7 +62,7 @@
   "packages/host/frontend-static/tests/frontend-static.spec.ts": {
     "e9ced37d23b7f2f7af77caaa3c4ace319974f275186f14c1d32093f0658f73af": 1
   },
-  "packages/mcp/mcp-client/src/index.ts": {
+  "packages/mcp/mcp-client/src/mount.ts": {
     "3755d2978651498c26c74bf7d3552cae5dd33d7f28e3c405cd282098e40a7c58": 1
   },
   "packages/preset/agent-preset-registry/src/mount.ts": {

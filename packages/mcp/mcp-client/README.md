@@ -146,7 +146,9 @@ This section explains the design decisions behind the bridge and points at the c
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema, `serverName` reservation, activation await, host startup |
+| [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema and `apply` |
+| [`src/mount.ts`](src/mount.ts) | Shared plugin body: `serverName` reservation, activation await, host startup |
+| [`src/transport-wrapper.ts`](src/transport-wrapper.ts) | Transport-wrapped plugin objects (`./transport-wrapper`) |
 | [`src/config.ts`](src/config.ts) | Schemas of the stdio, Streamable HTTP, and host configuration shapes, and the OAuth header rule |
 | [`src/host.ts`](src/host.ts) | The MCP client host: validation, instances below the host, probes, and authorization owners |
 | [`src/connection.ts`](src/connection.ts) | Connection supervisor: client generations, reconnect policy, attempt budget, disposal |
@@ -168,7 +170,7 @@ This section explains the design decisions behind the bridge and points at the c
 
 The exported `createMcpToolDefinition(ctx, options)` adapts an upstream tool schema and raw-result callback to the same canonical values, errors, and durable image projection. Each callback receives the exact `ToolExecution`, including its Agent and cancellation signal; SDK spec-type validation checks its result before projection. Callers own registration, cancellation deadlines, and provider teardown. The native Cua Driver provider uses this adapter without opening an MCP transport.
 
-The exported `withTransportWrapper(wrap)` returns a plugin object with this plugin's name, injections, and `Config` whose connection generations connect through `wrap(open)`; `open()` creates the configured transport. The wrapper owns the transport it returns, while the plugin keeps namespace reservation, status, startup, tool synchronization, reconnection, and disposal. Each connection generation still replaces `start`, `close`, and `onclose` on the returned transport to track its start and confirmed closure, so that transport must report its own closure through `onclose`. `McpClientHost` probes connect without the wrapper. The [experimental browser runtime](../../experimental/browser-use-runtime/README.md) uses it to start a Session's server at first use.
+`withTransportWrapper(wrap)` from `@deepseek-ai/dsh-mcp-client/transport-wrapper` returns a plugin object with this plugin's name, injections, and `Config` whose connection generations connect through `wrap(open)`; `open()` creates the configured transport. The wrapper owns the transport it returns, while the plugin keeps namespace reservation, status, startup, tool synchronization, reconnection, and disposal. Each connection generation still replaces `start`, `close`, and `onclose` on the returned transport to track its start and confirmed closure, so that transport must report its own closure through `onclose`. `McpClientHost` probes connect without the wrapper. The [experimental browser runtime](../../experimental/browser-use-runtime/README.md) uses it to start a Session's server at first use.
 
 ### Lifecycle and sync
 

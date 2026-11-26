@@ -27,7 +27,7 @@ export type {
 } from './types.ts'
 export { workspaceDomainState, workspaceRecord, workspaceDomainSpec } from './spec.ts'
 export type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
-export { hostPathWorld, normalizeAdditionalWorkspacePaths, realpathNormalize } from './paths.ts'
+export { realpathNormalize } from './paths.ts'
 export type { WorkspacePathWorld } from './paths.ts'
 
 /** Identifies one workspace record (see `src/types.ts` for the brand rationale). */

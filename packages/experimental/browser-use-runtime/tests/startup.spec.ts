@@ -8,6 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import { withTransportWrapper } from '@deepseek-ai/dsh-mcp-client/transport-wrapper'
 import type { JSONRPCMessage, Transport } from '@deepseek-ai/dsh-mcp-client'
 import { connectionStatusIn } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -375,7 +376,7 @@ describe('inside an mcp-client connection generation', () => {
         failOnStartupError: true, reconnect: { enabled: false },
       })
       const wrapped: DeferredServerTransport[] = []
-      const fiber = await ctx.plugin(McpClient.withTransportWrapper((open) => {
+      const fiber = await ctx.plugin(withTransportWrapper((open) => {
         const transport = shared.wrap(open, config.toolCallTimeoutMs)
         wrapped.push(transport)
         return transport

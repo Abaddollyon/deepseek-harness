@@ -20,6 +20,7 @@ import { BrowserAuth } from '@deepseek-ai/dsh-host-authentication-token/src/brow
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import type { ClientSurfaceDefinition, ClientSurfaceRegistry } from '@deepseek-ai/dsh-client-modules'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
+import type { WebEntryUrl } from '@deepseek-ai/dsh-host-webserver'
 import * as FrontendStatic from '../src/index.ts'
 
 const heldIndex = vi.hoisted(() => ({
@@ -133,6 +134,15 @@ async function request(
   }
 }
 
+/** Collect the mounted token plugin's authenticated entry URL for one base URL. */
+function tokenEntryUrl(loaded: Context, baseUrl: string): string {
+  const entries: WebEntryUrl[] = []
+  loaded.emit(loaded.webServer, 'webserver/entry-url', baseUrl, entries)
+  const [entry] = entries
+  if (entry === undefined || entries.length !== 1) throw new Error(`expected one token entry URL for ${baseUrl}`)
+  return entry.url
+}
+
 describe('real Loader composition', () => {
   it('serves a registered client surface path as an index with its own token exchange and variant', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
@@ -142,15 +152,14 @@ describe('real Loader composition', () => {
       rows.push({ kind: 'global', name: '__VARIANT__', value: renderContext?.variant ?? 'ordinary' })
     })
     const port = loaded.webServer.port
-    const auth = await BrowserAuth.create(loaded[Context.root], loaded.credentials, 30)
     const origin = `http://127.0.0.1:${String(port)}`
-    const exchange = await fetch(auth.authenticatedUrl(`${origin}/companion`), { redirect: 'manual' })
+    const exchange = await fetch(tokenEntryUrl(loaded, `${origin}/companion`), { redirect: 'manual' })
     expect(exchange.status).toBe(303)
     expect(exchange.headers.get('location')).toBe('./companion')
     const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
     if (cookie === undefined) throw new Error('surface exchange did not set a cookie')
     // An unregistered path keeps its route owner's handling of a token query: no exchange, no cookie.
-    const unregistered = await fetch(auth.authenticatedUrl(`${origin}/other`), { redirect: 'manual' })
+    const unregistered = await fetch(tokenEntryUrl(loaded, `${origin}/other`), { redirect: 'manual' })
     expect(unregistered.status).toBe(404)
     expect(unregistered.headers.get('set-cookie')).toBeNull()
 

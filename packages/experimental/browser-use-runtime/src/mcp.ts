@@ -7,6 +7,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { BrowserUseProviderName } from '@deepseek-ai/dsh-browser-use/types'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import { withTransportWrapper } from '@deepseek-ai/dsh-mcp-client/transport-wrapper'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { BrowserSessionError, SessionResources } from './index.ts'
@@ -202,7 +203,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
           const generation: { transport?: DeferredServerTransport } = {}
           const client = shared === undefined
             ? McpClient
-            : McpClient.withTransportWrapper((open) => {
+            : withTransportWrapper((open) => {
               // The replayed startup precedes the call that started the server, so it shares that call's timeout.
               generation.transport = shared.wrap(open, config.toolCallTimeoutMs)
               return generation.transport

@@ -18,6 +18,7 @@ import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import { withTransportWrapper } from '@deepseek-ai/dsh-mcp-client/transport-wrapper'
 import type { Transport } from '@deepseek-ai/dsh-mcp-client'
 
 const fixture = fileURLToPath(new URL('./fixtures/negotiation-lifecycle.mjs', import.meta.url))
@@ -41,7 +42,7 @@ it('connects through the wrapper around the configured stdio transport and close
   await writeFile(events, '')
   await writeFile(release, '')
   const opened: Transport[] = []
-  const plugin = McpClient.withTransportWrapper((open) => {
+  const plugin = withTransportWrapper((open) => {
     const transport = open()
     opened.push(transport)
     return transport
@@ -70,7 +71,7 @@ it('registers and calls tools through a wrapper transport that replaces the conf
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const serving = serveStdio(() => server, { transport: serverTransport })
   onTestFinished(() => serving.close())
-  await ctx.plugin(McpClient.withTransportWrapper(() => clientTransport), McpClient.Config({
+  await ctx.plugin(withTransportWrapper(() => clientTransport), McpClient.Config({
     transport: 'stdio', serverName: 'memory', command: 'never-started', failOnStartupError: true,
   }))
   expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(['mcp__memory__echo'])

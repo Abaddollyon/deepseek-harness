@@ -8,10 +8,12 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { PtcInspectableValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
-import ToolRuntime, { RUN_CODE_NAME, TOOL_SEARCH_NAME, defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { RUN_CODE_NAME, defineTool } from '@deepseek-ai/dsh-tools'
+import { TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { ToolDeferConfig, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -58,6 +60,7 @@ function register(ctx: Context, name: string): void {
 async function setup(mode: 'native' | 'ptc', defer?: ToolDeferConfig) {
   const ctx = new Context()
   provideWorkingDirectoryFixture(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, defer === undefined ? {} : { defer })
   await ctx.plugin(FakeRuntime)

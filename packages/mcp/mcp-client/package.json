@@ -22,6 +22,10 @@
       "types": "./lib/types/types.d.ts",
       "default": "./lib/types/types.js"
     },
+    "./transport-wrapper": {
+      "types": "./lib/types/transport-wrapper.d.ts",
+      "default": "./lib/types/transport-wrapper.js"
+    },
     "./src/*": "./src/*",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"

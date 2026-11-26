@@ -505,7 +505,7 @@ declare class Session {
   /**
    * Absolute directories this Session may use beside `header.cwd`, read from
    * its seq-0 `workspace/roots` event; empty without one. Fixed for the
-   * Session's lifetime: a seeded Session inherits its seed's roots.
+   * Session's lifetime: a seeded or restored Session reads its seed's roots.
    */
   readonly additionalPaths: readonly string[];
   /** The session identity, derived from its durable header's single copy. */
@@ -542,7 +542,8 @@ declare class Session {
    * @param additionalPaths - absolute directories beside `cwd`; without a seed a nonempty
    *   list becomes the seq-0 `workspace/roots` event, with a seed it must equal the seed's.
    * @returns a detached session.
-   * @throws when a seed event requires a missing message interpreter or fails validation.
+   * @throws when a seed event requires a missing message interpreter or fails validation,
+   *   or `additionalPaths` is invalid or differs from the seed's roots.
    */
   static create(
     id: SessionId,
@@ -622,6 +623,7 @@ declare class Session {
    * @param inputs - event payloads and surface intents in commit order. An empty array records no events.
    * @returns immutable committed events in the same order.
    * @throws if the Session cannot accept writes, including an empty append, or any candidate or synchronous dispatch validation fails.
+   *   A `workspace/roots` member is creation-only and always rejects the whole batch.
    */
   append(inputs: readonly SessionEventInput[]): readonly SessionEvent[];
   /**

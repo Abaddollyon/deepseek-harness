@@ -817,3 +817,5 @@ function toolAbortedBeforeDispatchResult(prior?: ToolExecutionResult): ToolExecu
 }
 
 export { executeToolBatch } from './batch.ts'
+// Executors render the deferred-tool index and reserve `tool_search` without importing the plugin entry.
+export { TOOL_SEARCH_NAME, nativeIndexLead, programIndexLead, renderDeferredIndex } from './defer.ts'

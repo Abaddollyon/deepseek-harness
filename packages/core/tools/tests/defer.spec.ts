@@ -10,8 +10,10 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { TOOL_ORDER_REST } from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { TOOL_SEARCH_NAME, ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
+import { TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { ToolDeferConfig, ToolExecution, ToolExecutionResult, ToolExecutor } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -42,6 +44,7 @@ function register(ctx: Context, name: string, description = `The ${name} tool. M
 
 async function setup(defer?: ToolDeferConfig) {
   const ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, defer === undefined ? {} : { defer })
   await ctx.plugin(NativeToolExecutor)
@@ -282,6 +285,7 @@ describe('deferral in the registry', () => {
   it('lists tool_search where toolOrder may name it', async () => {
     const ctx = new Context()
     try {
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SystemPrompt, { toolOrder: [TOOL_SEARCH_NAME, TOOL_ORDER_REST] })
       await ctx.plugin(ToolRuntime, { defer: { include: ['gbrain_*'] } })
       await ctx.plugin(NativeToolExecutor)

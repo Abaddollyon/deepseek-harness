@@ -8,7 +8,8 @@
 
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { PtcProgramFormat } from '@deepseek-ai/dsh-ptc-runtime'
-import { assertSupportedJsonSchema, programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools'
+import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
+import { programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { DeferredToolEntry, JsonSchemaNode, JsonSchemaScalar } from '@deepseek-ai/dsh-tools'
 /** Internal PTC mode projection: the model-facing schema plus the canonical output schema. */
 export interface ToolSdkSchema extends Readonly<ToolSchema> {

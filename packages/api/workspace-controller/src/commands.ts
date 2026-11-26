@@ -4,9 +4,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
+import { normalizeAdditionalWorkspacePaths, realpathNormalize } from '@deepseek-ai/dsh-workspace/paths'
 import {
-  normalizeAdditionalWorkspacePaths,
-  realpathNormalize,
   WorkspaceActiveSessionError,
   WorkspaceArchivedSessionPinError,
   WorkspaceMoveInvalidError,
