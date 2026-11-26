@@ -344,8 +344,8 @@ export class SessionCommandController {
   /**
    * Admit one prompt after Agent and attachment validation; the Remote method
    * has already validated the content and built the durable message source.
-   * Admission waits for the Agent's earlier admissions, model selections, and
-   * preset-default switches.
+   * Admission waits for the Agent's earlier image admissions, model selections,
+   * and preset-default switches; image prompts also join that serialization.
    * @param request - Session identity, prompt content, and delivery mode.
    * @param source - caller metadata recorded on the accepted ordinary or retry user message.
    * @returns acknowledgement that the Agent accepted the prompt.
@@ -415,7 +415,7 @@ export class SessionCommandController {
       }
       return { accepted: true }
     }
-    return this.agents.serializeImageAdmission(agent, admit)
+    return hasImage ? this.agents.serializeImageAdmission(agent, admit) : this.agents.afterSerializedAdmissions(agent, admit)
   }
 
   /** Recover first input acceptance, including claimed or removed messages, from unseen log entries. */

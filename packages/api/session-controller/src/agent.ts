@@ -288,6 +288,18 @@ export class ApiSessionAgentController {
   }
 
   /**
+   * Run an operation after the Agent's serialized work already queued, without
+   * joining the chain, so a text prompt waits for an earlier model selection or
+   * preset-default switch but prepares concurrently with other text prompts.
+   * @param agent - live Agent that owns the serialization chain.
+   * @param operation - asynchronous operation started once prior serialized work settles.
+   * @returns the operation result or rejection.
+   */
+  afterSerializedAdmissions<Value>(agent: Agent, operation: () => Promise<Value>): Promise<Value> {
+    return (this.imageAdmissionChains.get(agent) ?? Promise.resolve()).then(operation)
+  }
+
+  /**
    * Resolve the preset id and pre-publication Agent setup for a create or resume.
    * @param presetId - requested preset or the configured default when omitted.
    * @returns the resolved preset identity and Agent setup callback.

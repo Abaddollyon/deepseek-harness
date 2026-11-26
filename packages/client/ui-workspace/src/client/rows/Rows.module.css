@@ -134,7 +134,12 @@
   line-height: 18px;
 }
 
-.projectRow:hover .hostBadge,
+@media (hover: hover) {
+  .projectRow:hover .hostBadge {
+    display: none;
+  }
+}
+
 .projectRow.menuOpen .hostBadge {
   display: none;
 }

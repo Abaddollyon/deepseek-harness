@@ -52,7 +52,9 @@ it.each([false, true])('settles an activation after factory unload with queue-cl
     rejectClear()
     expect(ctx.agents.get(started.childId)).toBeUndefined()
     release.resolve(undefined)
-    const stopReason = rejectQueueClear ? 'error' : 'completed'
+    // Teardown keeps pending inbox input for a later resume (agent-loop README), so it writes no
+    // queue clear: a rejecting clear never runs and the activation settles as completed either way.
+    const stopReason = 'completed'
     expect(await started.result).toMatchObject({
       output: [{ type: 'text', text: 'answer' }],
       stopReason,

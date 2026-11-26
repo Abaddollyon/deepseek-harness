@@ -1079,7 +1079,7 @@ async function probeSkillFileOnHost(path: string, signal: AbortSignal | undefine
         readSignal?.throwIfAborted()
         /* v8 ignore next -- Only a deletion racing between the probe's stat and this read reaches it. */
         if (isAbsentSkillPathError(error)) return ABSENT_SKILL_FILE
-        throw error
+        throw new SkillError(`failed to read skill file ${path}: ${errorMessage(error)}`, 'SKILL_READ_FAILED', { cause: error })
       }
     },
   }

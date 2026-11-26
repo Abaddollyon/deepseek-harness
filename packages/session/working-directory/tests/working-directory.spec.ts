@@ -61,23 +61,23 @@ describe('Session working directories', () => {
     await mkdir(child)
     const host = f.ctx.fs
     const stats: string[] = []
-    // A stand-in execution-world filesystem: the Host provider with its metadata reads recorded.
-    const world = new Proxy(host, {
-      get(target, key) {
-        if (key === 'stat') {
-          return (fsTarget: Parameters<typeof host.stat>[0], signal?: AbortSignal) => {
-            stats.push(target.processPath(fsTarget))
-            return target.stat(fsTarget, signal)
-          }
-        }
-        const value: unknown = Reflect.get(target, key)
-        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+    // A stand-in execution-world filesystem: the Host provider with its metadata reads recorded. It
+    // overrides `stat` as an own property, since Cordis traces a returned Service through its
+    // property descriptors and would bypass a Proxy `get` trap.
+    const world: typeof host = Object.assign(Object.create(host) as typeof host, {
+      stat: (fsTarget: Parameters<typeof host.stat>[0], signal?: AbortSignal) => {
+        stats.push(host.processPath(fsTarget))
+        return host.stat(fsTarget, signal)
       },
     })
     const sibling = await f.harness.create(brandString<SessionId>('host-sibling'), {}, { cwd: f.root })
     f.ctx.on('working-directory/fs', (agent, next) => agent === f.agent ? world : next())
 
-    expect(f.ctx.workingDirectory.filesystem(f.agent)).toBe(world)
+    // The selected world arrives wrapped by Cordis tracing: identify it by its recorded reads.
+    const selected = f.ctx.workingDirectory.filesystem(f.agent)
+    await selected.stat(await selected.resolve(child))
+    expect(stats).toEqual([child])
+    stats.length = 0
     await expect(f.ctx.workingDirectory.set(f.agent, child)).resolves.toBe(child)
     expect(stats).toContain(child)
     stats.length = 0
