@@ -339,7 +339,7 @@ applyIndexTaps(html: string): string
  * Fresh per call, so subscribers read live state (module graph, theme
  * preference, the Peer's access) at emit time.
  * @param peer - the Peer the page speaks for.
- * @param context - index selection passed to every listener.
+ * @param context - index selection passed to every listener; omitted selects the ordinary index.
  * @returns rows in subscriber activation order.
  */
 collectIndexInjections(peer: PeerScope, context: IndexRenderContext = {}): IndexInjection[]
@@ -349,7 +349,7 @@ collectIndexInjections(peer: PeerScope, context: IndexRenderContext = {}): Index
  * first, then the raw `tapIndex` transforms over the result.
  * @param html - the raw index.html body.
  * @param peer - the Peer the page speaks for.
- * @param context - index selection passed to injection listeners.
+ * @param context - index selection passed to injection listeners; omitted selects the ordinary index.
  * @returns the transformed body.
  */
 renderIndex(html: string, peer: PeerScope, context: IndexRenderContext = {}): string

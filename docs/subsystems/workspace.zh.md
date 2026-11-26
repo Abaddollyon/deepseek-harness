@@ -497,7 +497,9 @@ Host Remote file reads and workspace directory observations over the composed fi
 ```ts cordis-catalog
 /**
  * Resolve the scope other Host services use to open the same `session/<id>/<path>` addresses:
- * a live Session's sandbox workspace root, else a stored Session's cached directory, else its header directory.
+ * a live Session's sandbox workspace root, else a stored Session's cached directory, else its header directory,
+ * together with the filesystem of an execution world the Session's Agent preset owns. Callers that read files
+ * themselves use `scope.fs`, and the Host's `fs` only when it is absent.
  * @param sessionId - Session identity received on the wire.
  * @param signal - cancellation for the persistence read of a stored Session.
  * @returns the scope, or undefined when no live or stored Session has that identity.
@@ -554,7 +556,8 @@ scopeOf(sessionId: SessionId, signal?: AbortSignal): Promise<WorkspaceFileScope 
  * @throws RemoteError `gateway/bad-request`: the query is blank.
  * @throws RemoteError `workspace-file/not-found`: the workspace root does not exist.
  * @throws RemoteError `workspace-file/not-directory`: the workspace root is not a directory.
- * @throws RemoteError `workspace-file/search-failed`: subprocess is missing, rg cannot launch or execute, or the search times out.
+ * @throws RemoteError `workspace-file/search-failed`: the Session runs in an Agent preset's own execution world,
+ *   subprocess is missing, rg cannot launch or execute, or the search times out.
  */
 @Remote async search( workspaceFileScope: WorkspaceFileScope, request: WorkspaceFileSearchRequest, signal: AbortSignal, ): Promise<WorkspaceFileSearchResult>
 

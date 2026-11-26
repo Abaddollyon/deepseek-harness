@@ -67,6 +67,15 @@ ensure(agent: Agent, signal?: AbortSignal): Promise<string>
  *   `working-directory/access` listener.
  */
 set(agent: Agent, path: string, signal?: AbortSignal): Promise<string>
+
+/**
+ * Select the filesystem that holds one Agent's working directory through the `working-directory/fs`
+ * waterfall: the Host filesystem unless a listener that owns the Agent's execution world supplies another.
+ * @param agent - Agent whose execution world is inspected.
+ * @returns the filesystem that validates the Agent's directories.
+ * @throws the error of a listener whose execution world is unavailable.
+ */
+filesystem(agent: Agent): Context['fs']
 ```
 
 Types: [Agent](core.zh.md) · [Session](session.zh.md)
@@ -95,6 +104,28 @@ Coordinate directory validation and publication with a resource operation on the
  * @mode waterfall
  */
 'working-directory/access'( request: { agent: Agent; path: string | null; signal: AbortSignal }, next: () => Promise<string>, ): Promise<string>
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/session/working-directory/src/index.ts`](../../packages/session/working-directory/src/index.ts)
+
+<a id="working-directoryfs--waterfall"></a>
+
+#### `working-directory/fs` — waterfall
+
+Select the filesystem that holds one Agent's working directory. A listener that owns the Agent's execution world, such as an agent preset over SSH, returns that world's filesystem or throws while it is unavailable; other listeners call `next()`, which ends at the Host filesystem.
+
+```ts cordis-catalog
+/**
+ * Select the filesystem that holds one Agent's working directory. A listener that owns the
+ * Agent's execution world, such as an agent preset over SSH, returns that world's filesystem or
+ * throws while it is unavailable; other listeners call `next()`, which ends at the Host filesystem.
+ * @param agent - Agent whose directory is validated or changed.
+ * @param next - delegate to the next listener or the Host filesystem.
+ * @mode waterfall
+ */
+'working-directory/fs'(agent: Agent, next: () => Context['fs']): Context['fs']
 ```
 
 Types: [Agent](core.zh.md)

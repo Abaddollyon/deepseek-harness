@@ -243,8 +243,9 @@ register(definition: ClientSurfaceDefinition): () => void
 findByPath(path: string): ClientSurfaceDefinition | undefined
 
 /**
- * Compose the current boot graph of one registered surface. The graph is
- * reused until the ordinary graph is next recomposed.
+ * Compose the current boot graph of one registered surface, its rows carrying
+ * the owner's synced values. The graph is reused until the ordinary graph is
+ * next recomposed or republished with changed synced values.
  * @param id - registered surface id.
  * @returns the graph served as that surface's `window.__DSH_BOOT__`.
  * @throws when the id is not registered or the graph cannot be composed.
