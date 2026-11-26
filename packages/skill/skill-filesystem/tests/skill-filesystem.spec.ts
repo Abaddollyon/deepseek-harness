@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
-import { FileSystem, FsError, FsVersion, type FsDirEntry, type FsEditOutcome, type FsEditRequest, type FsInfo, type FsPathInfo, type FsTarget, type FsWriteOutcome } from '@deepseek-ai/dsh-fs'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { FileSystem, FsError, type FsVersion, type FsDirEntry, type FsEditOutcome, type FsEditRequest, type FsInfo, type FsPathInfo, type FsTarget, type FsWriteOutcome } from '@deepseek-ai/dsh-fs'
 import * as SkillFileSystem from '../src/index.ts'
 
 /** Every temp dir created by this file, removed after each test. */
@@ -31,6 +32,10 @@ async function writeFlatSkill(root: string, name: string, description: string, b
 }
 
 class TestFileSystem extends FileSystem {
+  override async patchText(): Promise<never> { throw new FsError('patch unsupported by test provider', 'FS_IO_ERROR') }
+  override async deleteFile(): Promise<never> { throw new FsError('delete unsupported by test provider', 'FS_IO_ERROR') }
+  override async moveFile(): Promise<never> { throw new FsError('move unsupported by test provider', 'FS_IO_ERROR') }
+
   override watch(): never { throw new Error('Fixture does not support watching') }
   listDirCalls = 0
   failResolvePaths = new Set<string>()
@@ -68,7 +73,7 @@ class TestFileSystem extends FileSystem {
       const fs = await import('node:fs/promises')
       const info = await fs.stat(target.displayPath)
       return {
-        version: FsVersion(String(info.mtimeMs)),
+        version: brandString<FsVersion>(String(info.mtimeMs)),
         type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
         size: info.size,
       }
@@ -82,7 +87,7 @@ class TestFileSystem extends FileSystem {
       const fs = await import('node:fs/promises')
       const info = await fs.lstat(path)
       return {
-        version: FsVersion(String(info.mtimeMs)),
+        version: brandString<FsVersion>(String(info.mtimeMs)),
         type: info.isSymbolicLink() ? 'symlink' : info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
         size: info.size,
       }
@@ -133,7 +138,7 @@ class TestFileSystem extends FileSystem {
         name: entry.name,
         type,
         target: { targetKey: childPath as never, displayPath: childPath },
-        version: FsVersion('test'),
+        version: brandString<FsVersion>('test'),
         ...(size !== undefined ? { size } : {}),
       })
     }
@@ -143,7 +148,7 @@ class TestFileSystem extends FileSystem {
   override async writeText(target: FsTarget, content: string): Promise<FsWriteOutcome> {
     await mkdir(dirname(target.displayPath), { recursive: true })
     await writeFile(target.displayPath, content)
-    return { operation: 'create', version: FsVersion('test'), before: null, after: content }
+    return { operation: 'create', version: brandString<FsVersion>('test'), before: null, after: content }
   }
 
   override async editText(_target: FsTarget, _request: FsEditRequest): Promise<FsEditOutcome> {
@@ -216,6 +221,19 @@ describe('FileSystemSkillProvider', () => {
     const noGit = await tempDir('skill-no-git')
     await writeSkill(join(noGit, '.dsh/skills'), 'fallback-root', 'Fallback root')
     expect((await ctx.skills.list({ cwd: noGit })).map(skill => skill.name)).toContain('fallback-root')
+  })
+
+  it('reports an unreadable trusted-host skill file as SKILL_READ_FAILED', async () => {
+    const home = await tempDir('skill-unreadable-home')
+    const bundled = await tempDir('skill-unreadable-bundled')
+    await writeSkill(bundled, 'bundled-only', 'bundled skill')
+    const ctx = await setupLocal(home, { bundledSkillDir: bundled })
+    expect((await ctx.skills.list()).map(skill => skill.name)).toEqual(['bundled-only'])
+    const file = join(bundled, 'bundled-only/SKILL.md')
+    await rm(file)
+    await mkdir(file)
+    const failure = ctx.skills.get('bundled-only')
+    await expect(failure).rejects.toMatchObject({ name: 'SkillError', code: 'SKILL_READ_FAILED', cause: { code: 'EISDIR' } })
   })
 
   it('lets project skills override runtime while runtime overrides custom and user skills', async () => {
@@ -488,7 +506,7 @@ describe('FileSystemSkillProvider', () => {
     fs.failResolvePaths.add(join(nestedCwd, '.git'))
     fs.failStatPaths.add(join(project, 'packages/.git'))
     fs.statOverrides.set(join(project, '.git'), {
-      version: FsVersion('virtual-git'),
+      version: brandString<FsVersion>('virtual-git'),
       type: 'directory',
       size: 0,
     })
@@ -611,7 +629,7 @@ describe('FileSystemSkillProvider', () => {
     ctx.emit(
       'fs/observed',
       { targetKey: path as never, displayPath: path },
-      { kind: 'present', version: FsVersion('failed-read') },
+      { kind: 'present', version: brandString<FsVersion>('failed-read') },
       { name: 'edit' },
     )
     expect(await ctx.skills.snapshot()).toEqual({ skills: [], complete: false })
@@ -670,7 +688,7 @@ describe('FileSystemSkillProvider', () => {
       ctx.emit(
         'fs/observed',
         { targetKey: path as never, displayPath: path },
-        { kind: 'present', version: FsVersion('entry-failure') },
+        { kind: 'present', version: brandString<FsVersion>('entry-failure') },
         { name: 'write' },
       )
     }
@@ -819,7 +837,7 @@ describe('FileSystemSkillProvider', () => {
       ctx.emit(
         'fs/observed',
         { targetKey: displayPath as never, displayPath },
-        { kind: 'present', version: FsVersion('observed') },
+        { kind: 'present', version: brandString<FsVersion>('observed') },
         actor,
       )
     }
@@ -834,7 +852,7 @@ describe('FileSystemSkillProvider', () => {
     ctx.emit(
       'fs/observed',
       { targetKey: path as never, displayPath: path },
-      { kind: 'present', version: FsVersion('observed') },
+      { kind: 'present', version: brandString<FsVersion>('observed') },
       { name: 'edit' },
     )
 
@@ -1087,7 +1105,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'edited-skill', 'First description')
     const path = join(root, 'edited-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('edited-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('edited-v1'), type: 'file', size: 1 })
     const description = async (index: number): Promise<string | undefined> =>
       (await ctx.skills.list({ cwd: await agentCwd(project, index) })).find(skill => skill.name === 'edited-skill')?.description
 
@@ -1095,7 +1113,7 @@ describe('discovery frontmatter reuse', () => {
     expect(fs.readTextSignals).toHaveLength(2)
 
     await writeSkill(root, 'edited-skill', 'Second description')
-    fs.statOverrides.set(path, { version: FsVersion('edited-v2'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('edited-v2'), type: 'file', size: 1 })
     expect(await description(1)).toBe('Second description')
     expect(fs.readTextSignals).toHaveLength(3)
 
@@ -1104,7 +1122,7 @@ describe('discovery frontmatter reuse', () => {
     expect(await description(2)).toBe('Second description')
     expect(fs.readTextSignals).toHaveLength(3)
 
-    ctx.emit('fs/observed', { targetKey: path as never, displayPath: path }, { kind: 'present', version: FsVersion('edited-v2') }, { name: 'edit' })
+    ctx.emit('fs/observed', { targetKey: path as never, displayPath: path }, { kind: 'present', version: brandString<FsVersion>('edited-v2') }, { name: 'edit' })
     expect(await description(3)).toBe('Third description')
     expect(fs.readTextSignals).toHaveLength(4)
   })
@@ -1114,7 +1132,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'flaky-skill', 'Flaky skill')
     const path = join(root, 'flaky-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('flaky-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('flaky-v1'), type: 'file', size: 1 })
     fs.errorReadPaths.add(path)
 
     expect(await ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })).toEqual({ skills: [], complete: false })
@@ -1131,7 +1149,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'racing-skill', 'Second version')
     const path = join(root, 'racing-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home)
-    fs.statOverrides.set(path, { version: FsVersion('racing-v1'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('racing-v1'), type: 'file', size: 1 })
     const firstRead = Promise.withResolvers<string>()
     let reads = 0
     fs.readTextOverride = async (target) => {
@@ -1141,7 +1159,7 @@ describe('discovery frontmatter reuse', () => {
 
     const superseded = ctx.skills.snapshot({ cwd: await agentCwd(project, 0) })
     await waitFor(async () => reads, count => count === 1)
-    fs.statOverrides.set(path, { version: FsVersion('racing-v2'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('racing-v2'), type: 'file', size: 1 })
     expect(await ctx.skills.list({ cwd: await agentCwd(project, 1) })).toMatchObject([{ description: 'Second version' }])
     firstRead.reject(new Error('read temporarily failed'))
 
@@ -1207,7 +1225,7 @@ describe('discovery frontmatter reuse', () => {
     await writeSkill(root, 'watched-skill', 'Before watcher')
     const path = join(root, 'watched-skill/SKILL.md')
     const { ctx, fs } = await setupWithFileSystem(home, { watch: true, watchStabilityThresholdMs: 20, watchPollIntervalMs: 10 })
-    fs.statOverrides.set(path, { version: FsVersion('pinned'), type: 'file', size: 1 })
+    fs.statOverrides.set(path, { version: brandString<FsVersion>('pinned'), type: 'file', size: 1 })
     let index = 0
     const description = async (): Promise<string | undefined> => {
       index += 1

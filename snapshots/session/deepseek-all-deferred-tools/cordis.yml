@@ -1,0 +1,11 @@
+- insert:
+    - id: messages-all-deferred-tools-snapshot
+      name: '../../../packages/llm/llm-deepseek/tests/fixtures/all-deferred-tools.ts'
+
+# Our deferred-tool index claims a definition's `deferLoading` unless the
+# defer policy excludes it; excluding keeps the request all-deferred for the adapter.
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+  config:
+    defer:
+      exclude: [snapshot_pending]

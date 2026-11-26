@@ -8,10 +8,12 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
+import { PtcInspectableValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
-import ToolRuntime, { RUN_CODE_NAME, TOOL_SEARCH_NAME, defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { RUN_CODE_NAME, defineTool } from '@deepseek-ai/dsh-tools'
+import { TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { ToolDeferConfig, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -21,16 +23,15 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import * as PtcToolExecutor from '../src/index.ts'
 import { renderToolDeclarations } from '../src/ts-types.ts'
 import type { ToolSdkSchema } from '../src/ts-types.ts'
-import { renderToolDeclarationsPy } from '../src/py-types.ts'
 
-const { renderToolsSdk, renderToolsSdkPy } = PtcToolExecutor
+const { renderToolsSdk } = PtcToolExecutor
 const signal = new AbortController().signal
 
 /** A runtime whose program the test scripts through `behavior`. */
 class FakeRuntime extends PtcRuntime {
   readonly language: string
   readonly isolation = 'fake'
-  behavior: (request: PtcRunRequest) => Promise<PtcRunResult> = () => Promise.resolve({ logs: [] })
+  behavior: (request: PtcRunRequest) => Promise<PtcRunResult> = () => Promise.resolve({ output: [] })
 
   constructor(ctx: Context, config: { language?: string } = {}) {
     super(ctx)
@@ -56,12 +57,13 @@ function register(ctx: Context, name: string): void {
   }))
 }
 
-async function setup(mode: 'native' | 'ptc', defer?: ToolDeferConfig, language = 'typescript') {
+async function setup(mode: 'native' | 'ptc', defer?: ToolDeferConfig) {
   const ctx = new Context()
   provideWorkingDirectoryFixture(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, defer === undefined ? {} : { defer })
-  await ctx.plugin(FakeRuntime, { language })
+  await ctx.plugin(FakeRuntime)
   if (mode === 'native') await ctx.plugin(NativeToolExecutor)
   else await ctx.plugin(PtcToolExecutor)
   for (const name of ['bash', 'gbrain_query', 'gbrain_put_page', 'mcp__home__light_on']) register(ctx, name)
@@ -80,6 +82,16 @@ async function wireNames(ctx: Context, scope?: Agent): Promise<string[]> {
 
 function call(ctx: Context, name: string, args: Record<string, unknown>, agent?: Agent): Promise<ToolExecutionResult> {
   return executeModelToolFixture(ctx, { signal, callId: ToolCallId('call-1'), name, arguments: args, ...agent ? { agent } : {} })
+}
+
+/** A program's printed text, as the runtime captures it. */
+function printed(text: string): PtcRunResult {
+  return { output: [{ type: 'text', text }] }
+}
+
+/** The JSON object a binding delivers to the program, unwrapped from its inspection text. */
+function delivered<T>(value: unknown): T {
+  return (value instanceof PtcInspectableValue ? value.value : value) as T
 }
 
 function text(result: ToolExecutionResult): string {
@@ -104,27 +116,26 @@ describe('the SDK index and declaration fragments', () => {
     const [declarations, index] = sdk.split('## More tools') as [string, string]
     expect(declarations).toContain('  bash: {')
     expect(declarations).not.toContain('gbrain_put_page')
-    expect(index).toContain('`console.log((await tools.tool_search({ names: ["cua__tool_0"] })).declarations)`')
+    expect(index).toContain('`inspect((await tools.tool_search({ names: ["cua__tool_0"] })).declarations)`')
     expect(index).toContain('- `cua__*` (9 tools): tool_0, tool_1, tool_2, tool_3, tool_4, tool_5, tool_6, tool_7, tool_8')
     expect(index).toContain('- `gbrain_put_page` — Write a page.')
     expect(index).toMatch(/\n- `mcp__home__light_on`$/u)
     expect(renderToolsSdk([schema('bash')])).not.toContain('## More tools')
   })
 
-  it('renders the Python index with a Python call', () => {
-    const sdk = renderToolsSdkPy([schema('bash')], [{ name: 'gbrain_put_page', description: 'Write a page.' }])
-    expect(sdk).toContain('print((await tools.tool_search({"names": ["gbrain_put_page"]}))["declarations"])')
-    expect(sdk).toContain('- `gbrain_put_page` — Write a page.')
-  })
-
   it('renders fragments that merge into the SDK declarations', () => {
     const ts = renderToolDeclarations([schema('gbrain_put_page')])
     expect(ts).toMatch(/^```ts\ninterface ToolArgsMap \{\n {2}\/\*\* The gbrain_put_page tool\. \*\/\n {2}gbrain_put_page: \{/u)
     expect(ts).toContain('interface ToolOutputMap {\n  gbrain_put_page: string;\n}')
-    const py = renderToolDeclarationsPy([schema('gbrain_put_page')])
-    expect(py).toMatch(/^```python\nfrom typing import /u)
-    expect(py).toContain('class Tools(Protocol):\n    async def gbrain_put_page(self, args: GbrainPutPageArgs) -> str:')
-    expect(py).not.toContain('tools: Tools')
+  })
+
+  it('keeps the program image types in the SDK and in fragments', () => {
+    const sdk = renderToolsSdk([schema('read_image'), schema('cua')], 'function-body', [{ name: 'gbrain_put_page', description: 'Write a page.' }])
+    expect(sdk).toContain('declare class Image {')
+    expect(sdk).toContain('declare function inspect(...values: unknown[]): void;')
+    expect(sdk).toContain('  read_image: Image;')
+    expect(sdk).toContain('  cua: Image | string;')
+    expect(renderToolDeclarations([schema('read_image')])).toContain('  read_image: Image;')
   })
 })
 
@@ -150,9 +161,9 @@ describe('deferral under the PTC executor', () => {
 
     runtime.behavior = async (request) => {
       const functions = request.bindings[0]!.functions
-      const search = await functions[TOOL_SEARCH_NAME]!({ names: ['gbrain_put_page', 'bash'] }) as { tools: string[]; unknown: string[]; declarations: string }
+      const search = delivered<{ tools: string[]; unknown: string[]; declarations: string }>(await functions[TOOL_SEARCH_NAME]!({ names: ['gbrain_put_page', 'bash'] }))
       const written = await functions['gbrain_put_page']!({ value: 'v' })
-      return { logs: [search.declarations], value: { tools: search.tools, unknown: search.unknown, written } }
+      return printed(`${search.declarations}\n${JSON.stringify({ tools: search.tools, unknown: search.unknown, written }, null, 2)}`)
     }
     const result = await call(ctx, RUN_CODE_NAME, { code: 'x', description: 'Look up and call' })
     expect(result.isError).toBe(false)
@@ -164,24 +175,14 @@ describe('deferral under the PTC executor', () => {
     expect(text(await call(ctx, TOOL_SEARCH_NAME, { names: ['gbrain_put_page'] }))).toContain(`only \`${RUN_CODE_NAME}\` is callable directly`)
   })
 
-  it('returns Python declarations to a Python program', async () => {
-    const { ctx, runtime } = await setup('ptc', { include: ['gbrain_put_page'] }, 'python')
-    runtime.behavior = async (request) => {
-      const search = await request.bindings[0]!.functions[TOOL_SEARCH_NAME]!({ names: ['gbrain_put_page'] }) as { declarations: string }
-      return { logs: [search.declarations] }
-    }
-    expect(text(await call(ctx, RUN_CODE_NAME, { code: 'x', description: 'Look up' })))
-      .toContain('```python\nfrom typing import ')
-  })
-
   it('attaches the SDK declaration to a deferred tool\'s argument error inside a program', async () => {
     const { ctx, runtime } = await setup('ptc', { include: ['gbrain_put_page'] })
     runtime.behavior = async (request) => {
       try {
         await request.bindings[0]!.functions['gbrain_put_page']!({})
-        return { logs: [] }
+        return { output: [] }
       } catch (error) {
-        return { logs: [(error as Error).message] }
+        return printed((error as Error).message)
       }
     }
     const nested = text(await call(ctx, RUN_CODE_NAME, { code: 'x', description: 'Call without args' }))

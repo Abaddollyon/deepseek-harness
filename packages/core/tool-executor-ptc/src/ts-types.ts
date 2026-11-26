@@ -8,7 +8,8 @@
 
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { PtcProgramFormat } from '@deepseek-ai/dsh-ptc-runtime'
-import { assertSupportedJsonSchema, programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools'
+import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
+import { programIndexLead, renderDeferredIndex, TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { DeferredToolEntry, JsonSchemaNode, JsonSchemaScalar } from '@deepseek-ai/dsh-tools'
 /** Internal PTC mode projection: the model-facing schema plus the canonical output schema. */
 export interface ToolSdkSchema extends Readonly<ToolSchema> {
@@ -258,16 +259,13 @@ function renderSdkInstructions(programFormat: PtcProgramFormat): string {
 }
 
 /** Render tool execution and output instructions for the selected execution syntax. */
-function renderSdkProgramInstructions(programFormat: PtcProgramFormat): string {
-  const outputInstruction = programFormat === 'function-body'
-    ? 'Emit results with `return` and/or `console.log(...)`. Only what you print or return is program output.'
-    : 'Only values emitted as program output enter the conversation.'
+function renderSdkProgramInstructions(): string {
   return `Inside the program:
 
-- Call tools as \`await tools.name(args)\` — quoted access for exotic names: \`tools["my-tool"](args)\`. Every call resolves to the tool's typed canonical JSON value. Tool arguments must be lossless JSON.
+- Call tools as \`await tools.name(args)\` — quoted access for exotic names: \`tools["my-tool"](args)\`. Every call resolves to its declared value, which may be an Image. Tool arguments must be lossless JSON.
 - A FAILED tool call rejects with \`ToolCallError\`, whose \`toolName\` identifies the failed tool and whose \`message\` is human-readable — \`try/catch\` it to handle and continue.
 - Independent read-only calls MAY overlap under \`Promise.all\` (safe calls run concurrently; mutating calls run alone, in submission order). Sequence dependent work with \`await\`.
-- ${outputInstruction} A successful tool result containing an image is attached after the run so you can inspect it on the next step; every other intermediate result stays out of the conversation, so extract just what you need.
+- Show selected values and images with \`inspect(...values)\`; every other intermediate result stays out of the conversation, so extract just what you need.
 
 Program-only SDK bindings:`
 }
@@ -280,7 +278,7 @@ function acceptsExampleString(schema: JsonSchemaNode | undefined, value: string)
 }
 
 /** Render the bash example only when its literal arguments satisfy the current parameter schema. */
-function renderBashExample(schemas: ToolSdkSchema[], programFormat: PtcProgramFormat): string {
+function renderBashExample(schemas: ToolSdkSchema[]): string {
   const bash = schemas.find(schema => schema.name === 'bash')
   if (bash === undefined) return ''
   const parameters = bash.parameters as JsonSchemaNode
@@ -291,9 +289,7 @@ function renderBashExample(schemas: ToolSdkSchema[], programFormat: PtcProgramFo
   const needsDescription = required.includes('description')
   if (needsDescription && !acceptsExampleString(parameters.properties?.description, 'Show current directory')) return ''
   const description = needsDescription ? "description: 'Show current directory', " : ''
-  const program = programFormat === 'function-body'
-    ? `return await tools.bash({ ${description}command: 'pwd' })`
-    : `console.log(await tools.bash({ ${description}command: 'pwd' }))`
+  const program = `inspect(await tools.bash({ ${description}command: 'pwd' }))`
   return ` When no separate \`bash\` schema is supplied, invoke a declared \`bash\` binding inside \`run_code\`:\n\n\`run_code({ code: "${program}", description: "Show current directory" })\``
 }
 
@@ -338,10 +334,13 @@ function renderToolMaps(schemas: readonly ToolSdkSchema[], aliasMcpResult: boole
   for (const schema of byName(schemas)) {
     argsMembers.push(...docLines(schema.description, 1))
     argsMembers.push(`${pad(1)}${renderKey(schema.name)}: ${jsonSchemaToTs(schema.parameters, 1)};`)
-    const output = jsonSchemaToTs(schema.output, 1)
-    const shared = output === mcpResult
+    const rendered = jsonSchemaToTs(schema.output, 1)
+    const shared = schema.name !== 'read_image' && rendered === mcpResult
     usesMcpResult ||= shared
-    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${shared ? MCP_RESULT_TYPE : output};`)
+    // FIXME: Derive program return types from tool-declared adaptations, together with the binding adapter in ptc.ts.
+    const output = schema.name === 'read_image' ? 'Image'
+      : `${schema.name === 'cua' ? 'Image | ' : ''}${shared ? MCP_RESULT_TYPE : rendered}`
+    outputMembers.push(`${pad(1)}${renderKey(schema.name)}: ${output};`)
   }
   const argsMap = `interface ToolArgsMap {${argsMembers.length > 0 ? `\n${argsMembers.join('\n')}\n` : ''}}`
   const outputMap = `interface ToolOutputMap {${outputMembers.length > 0 ? `\n${outputMembers.join('\n')}\n` : ''}}`
@@ -384,6 +383,8 @@ export function renderToolsSdk(
   const sorted = byName(schemas)
   const maps = renderToolMaps(sorted, true)
   const declaration = [
+    'declare class Image { private constructor(); readonly attachmentId: string; readonly path: string; readonly width: number; readonly height: number; }',
+    'declare function inspect(...values: unknown[]): void;',
     maps.text,
     'type ToolName = keyof ToolOutputMap',
     ['declare class ToolCallError extends Error {', '  readonly name: "ToolCallError";', '  readonly toolName: ToolName;', '}'].join('\n'),
@@ -394,7 +395,7 @@ export function renderToolsSdk(
     ...maps.usesMcpResult ? [`type ${MCP_RESULT_TYPE} = ${jsonSchemaToTs(MCP_RESULT_SCHEMA)}`] : [],
   ].join('\n\n')
   const instructions = renderSdkInstructions(programFormat)
-  const programInstructions = renderSdkProgramInstructions(programFormat)
-  const index = renderDeferredIndex(deferred, programIndexLead(name => `console.log((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`))
-  return `${instructions}${renderBashExample(sorted, programFormat)}\n\n${programInstructions}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
+  const programInstructions = renderSdkProgramInstructions()
+  const index = renderDeferredIndex(deferred, programIndexLead(name => `inspect((await tools.${TOOL_SEARCH_NAME}({ names: ["${name}"] })).declarations)`))
+  return `${instructions}${renderBashExample(sorted)}\n\n${programInstructions}\n\n\`\`\`ts\n${jsonValue}\n\n${declaration}\n\`\`\`${index.length > 0 ? `\n\n${index}` : ''}`
 }

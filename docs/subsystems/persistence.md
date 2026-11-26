@@ -154,7 +154,11 @@ interface SessionHeader {
   readonly id: SessionId
   /** Non-negative safe-integer Unix epoch milliseconds when the session was created. */
   readonly createdAt: number
-  /** Absolute working directory the session was created in (if any). */
+  /**
+   * Canonical absolute working directory the session was created in (if any). Producers resolve the
+   * requested directory through the execution-world filesystem before recording it, so the later
+   * canonical directory records of the working-directory service compare with it lexically.
+   */
   readonly cwd?: string
   /**
    * Direct creator of a subagent Session. Ordinary forks omit this field;
@@ -200,7 +204,8 @@ Creating a `Session` through the store takes a `seed` (initial replay or fork hi
 /**
  * Options for creating a {@link Session} via the store. `seed` replays/forks
  * an existing event log; `meta` carries the caller-supplied storage fields the
- * store folds into a {@link SessionHeader}.
+ * store folds into a {@link SessionHeader}, plus the additional workspace roots
+ * recorded as the `workspace/roots` event.
  */
 interface CreateSessionOptions {
   /** Initial replay or fork history supplied at construction. */
@@ -215,26 +220,45 @@ interface CreateSessionOptions {
    * Storage metadata read once before publication. `isSeeded` marks fork
    * lineage; supplying replay history alone does not make it inherited.
    */
-  readonly meta?: {
-    readonly cwd?: string
-    readonly parentSession?: SessionId
-    readonly createdAt?: number
-    readonly isSeeded?: boolean
-    readonly origin?: 'subagent'
-    readonly delegationDepth?: number
-    readonly agentPreset?: string
-    /**
-     * Absolute directories the Session may use beside `cwd`. A nonempty list
-     * becomes the Session's `workspace/roots` event at seq 0; a seeded
-     * Session inherits that event from its seed, and a supplied list must
-     * then equal the inherited one. Not a header field.
-     */
-    readonly additionalPaths?: readonly string[]
-  }
+  readonly meta?: SessionCreationMeta
 }
 ```
 
-Replay/fork is therefore `ctx.agents.create({ sessionId, seed, meta })` — a fork additionally supplies `inheritedEventCount` with `meta.isSeeded: true`, and only agent-loop-published sessions persist, and the loop stores the seed through the new session's write handle before publication; resuming a *persisted* session into a live agent is `ctx.agents.resume({ resumeSessionId })`.
+`SessionHeaderMeta` names the header fields; `buildSessionHeader` folds the same fields into the header of a new Session. `SessionCreationMeta` adds `additionalPaths`, which the store records as the seq-0 `workspace/roots` event instead of a header field.
+
+```ts type-equiv
+/**
+ * Caller-supplied storage fields that `buildSessionHeader` folds into a new {@link SessionHeader}.
+ * `isSeeded` marks fork lineage; supplying replay history alone does not make it inherited.
+ */
+interface SessionHeaderMeta {
+  readonly cwd?: string
+  readonly parentSession?: SessionId
+  readonly createdAt?: number
+  readonly isSeeded?: boolean
+  readonly origin?: 'subagent'
+  readonly delegationDepth?: number
+  readonly agentPreset?: string
+}
+```
+
+```ts type-equiv
+/**
+ * Creation fields accepted by `ctx.sessions.create()`: the {@link SessionHeaderMeta}
+ * header fields plus the Session's additional workspace roots, which are not a header field.
+ */
+interface SessionCreationMeta extends SessionHeaderMeta {
+  /**
+   * Absolute directories the Session may use beside `cwd`. A nonempty list
+   * becomes the Session's `workspace/roots` event at seq 0; a seeded
+   * Session inherits that event from its seed, and a supplied list must
+   * then equal the inherited one. Not a header field.
+   */
+  readonly additionalPaths?: readonly string[]
+}
+```
+
+Direct replay uses `ctx.agents.create({ sessionId, seed, meta })`. A fork instead supplies `parentSource: { sessionId, endSeq, events }`, `inheritedEventCount`, and `meta.isSeeded: true`: the parent source names a parent, an exclusive prefix length, and child events continuing at that length. The factory loads and persists the parent prefix before child storage; `SessionPersistence.create()` stores that prefix and the child suffix before returning its writer. Only agent-loop-published Sessions follow the live persistence path. Resuming a persisted Session into a live Agent uses `ctx.agents.resume({ resumeSessionId })`.
 
 ## Preparation and restoration ownership
 
@@ -343,9 +367,10 @@ The optional `eventCount`/`sizeBytes` fields remain cheap backend observations f
 
 ## The backend
 
-The shipped provider implements the abstract `SessionPersistence` contract (`create`/`open`/`stat`/`list`, with per-session `SessionHandle`s carrying `read`/`append`/`flush`/`close` and optional cancellation throughout) and passes the shared persistence contract suite:
+The shipped providers implement the abstract `SessionPersistence` contract (`create`/`open`/`stat`/`list`, with per-session `SessionHandle`s carrying `read`/`append`/`flush`/`close` and optional cancellation throughout) and pass the shared persistence contract suite:
 
 - **[dsh-session-persistence-jsonl](../../packages/session/session-persistence-jsonl)** — an append-only logical JSONL log per session, stored as checksummed concatenated Zstandard frames by default or raw lines by configuration, with crash-safe atomic materialization, per-batch `fsync` appends, and torn-tail truncation before the first new append. `stat`/`list` carry `sizeBytes` and a best-effort `fs.stat`-derived revision.
+- **[dsh-session-persistence-sqlite](../../packages/session/session-persistence-sqlite)** — logical JSON event storage with indexed metadata and predecessor-linked Segments, each write stored as one frame of JSON lines, Zstandard-compressed by default. The optional provider imports existing JSONL on first open and coordinates concurrent readers with a single writer per Session; `stat`/`list` do not import history.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -354,6 +379,25 @@ The shipped provider implements the abstract `SessionPersistence` contract (`cre
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxdeepseekchatimport--deepseekchatimportservice"></a>
+
+### `ctx.deepseekChatImport` — `DeepseekChatImportService`
+
+Serves the owner-only export upload route and the limits the browser checks first.
+
+```ts cordis-catalog
+/**
+ * Report the limits the browser checks before uploading. Only the owner may
+ * import, so every other principal is refused.
+ * @param signal - Client cancellation or Remote withdrawal.
+ * @returns the largest accepted archive size.
+ * @throws {RemoteError} `deepseekChatImport/owner-only` for a caller that is not the owner.
+ */
+@Remote limits(signal: AbortSignal): DeepseekChatImportLimits
+```
+
+Source: [`packages/experimental/deepseek-chat-import/src/index.ts`](../../packages/experimental/deepseek-chat-import/src/index.ts)
 
 <a id="ctxsessionpersistence--sessionpersistence-abstract-seam"></a>
 
@@ -370,18 +414,25 @@ Freshness: once an `append` or `flush` resolves, reads started afterwards on thi
 ```ts cordis-catalog
 /**
  * Create a new stored session and take its write ownership.
+ * With `parentSource`, store the complete fork history before resolving; a
+ * backend may share the parent's stored prefix or copy it. A failed creation
+ * releases acquired write ownership; already committed history remains stored.
  * @param header - the immutable header (id, version, cwd, lineage) to store.
- * @param options - optional cancellation.
+ * @param options - cancellation, inherited-prefix count, and optional fork source.
  * @returns a `write` handle owned by the caller; close it to release ownership.
  * @throws {SessionAlreadyExistsError} when the id already exists.
+ * @throws {SessionPersistenceNotFoundError} when a sharing backend cannot find the fork parent.
+ * @throws {HarnessError} with `SESSION_FORK_PREFIX_NOT_PERSISTED` when a sharing backend finds the parent prefix not durable.
  */
 abstract create(header: SessionHeader, options?: SessionPersistenceCreateOptions): Promise<SessionHandle>
 
 /**
  * Open an existing stored session.
  *
- * `read` never takes ownership and works while another handle (or process)
- * holds write ownership. `write` atomically claims single-writer ownership;
+ * Returned `read` handles retain no write ownership and work while another
+ * handle (or process) holds write ownership. A first legacy read open may
+ * acquire ownership temporarily to import history into the selected backend.
+ * `write` atomically claims single-writer ownership;
  * an existing active owner rejects.
  * @param id - the stored session to open.
  * @param access - `read` or `write`.

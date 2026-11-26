@@ -19,9 +19,10 @@
  * @module @deepseek-ai/dsh-tool-fs-search/search-core
  */
 
-import { existsSync } from 'node:fs'
-import { isAbsolute, join, parse, relative, sep } from 'node:path'
+import { isAbsolute, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { spawnRipgrep } from '@deepseek-ai/dsh-util-ripgrep'
+export { resolveRgPath } from '@deepseek-ai/dsh-util-ripgrep'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { ItemRetainer, TextRetainer } from '@deepseek-ai/dsh-output-retention'
 import type { RetainedItems } from '@deepseek-ai/dsh-output-retention'
@@ -164,38 +165,10 @@ export function presentText(value: string | undefined): string | undefined {
   return value === undefined || value.trim().length === 0 ? undefined : value
 }
 
-let rgPathPromise: Promise<string> | undefined
-
 /**
- * The packaged ripgrep binary path, resolved lazily once per process.
- *
- * A single-file runtime uses the executable's `-rg` sidecar because a native
- * helper cannot be spawned from pkg's virtual filesystem. Node-mode builds
- * fall back to the platform package selected by `@vscode/ripgrep`. Resolving
- * at the call boundary keeps a missing or corrupt binary at the first search
- * call as `SEARCH_FAILED`, rather than failing the Loader composition.
- *
- * @returns the packaged binary's absolute path; the memoized promise rejects
- *   when the platform package cannot be resolved.
- */
-export function resolveRgPath(): Promise<string> {
-  rgPathPromise ??= Promise.resolve().then(async () => {
-    const executable = parse(process.execPath)
-    const executableSidecar = process.platform === 'win32'
-      ? join(executable.dir, `${executable.name}-rg.exe`)
-      : `${process.execPath}-rg`
-    if ('pkg' in process && existsSync(executableSidecar)) return executableSidecar
-    const dependency = (await import('@vscode/ripgrep')).rgPath
-    return process.versions.electron === undefined
-      ? dependency
-      : dependency.replace(/\.asar(?=[\\/])/u, '.asar.unpacked')
-  })
-  return rgPathPromise
-}
-
-/**
- * Run the packaged ripgrep binary with a plain argv vector and return its
- * complete raw stdout. The working directory is the calling agent's session
+ * Run ripgrep (the packaged binary, or the configured executable of the
+ * execution world) with a plain argv vector and return its complete raw
+ * stdout. The working directory is the calling agent's session
  * current directory when available, else
  * `process.cwd()`. `exec.signal` is forwarded so the cooperative tool timeout
  * (`@deepseek-ai/dsh-tool-call-timeout-policy`) and caller cancellation terminate the
@@ -227,7 +200,7 @@ export function resolveRgPath(): Promise<string> {
  * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
  * @param graceMs - the seam's terminate-escalation grace period.
  * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
- * @param rgPath - configured executable in the execution world; omitted selects {@link resolveRgPath}.
+ * @param rgPath - configured executable in the execution world; omitted selects the packaged binary.
  * @returns the complete stdout, the zero-result flag, and the resolved workdir.
  */
 export async function runRipgrep(
@@ -248,8 +221,8 @@ export async function runRipgrep(
     : await ctx.workingDirectory.ensure(exec.agent, exec.signal)
   let handle: SubprocessHandle
   try {
-    handle = ctx.subprocess.spawn({
-      argv: [rgPath ?? await resolveRgPath(), '--no-config', ...argv],
+    handle = await spawnRipgrep(ctx.subprocess, {
+      argv,
       cwd: workdir,
       stdio: {
         stdin: 'ignore',
@@ -258,7 +231,7 @@ export async function runRipgrep(
       },
       graceMs,
       signal: exec.signal,
-    } satisfies SubprocessSpawnSpec)
+    } satisfies SubprocessSpawnSpec, rgPath === undefined ? {} : { executable: rgPath })
   } catch (error: unknown) {
     // Node's spawn() throws synchronously for a NUL in argv, and the local
     // impl can throw synchronously when the signal aborts between the check

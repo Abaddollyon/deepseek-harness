@@ -10,8 +10,10 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { TOOL_ORDER_REST } from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { TOOL_SEARCH_NAME, ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
+import { TOOL_SEARCH_NAME } from '@deepseek-ai/dsh-tools/pipeline'
 import type { ToolDeferConfig, ToolExecution, ToolExecutionResult, ToolExecutor } from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -42,6 +44,7 @@ function register(ctx: Context, name: string, description = `The ${name} tool. M
 
 async function setup(defer?: ToolDeferConfig) {
   const ctx = new Context()
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, defer === undefined ? {} : { defer })
   await ctx.plugin(NativeToolExecutor)
@@ -86,6 +89,15 @@ describe('the defer policy', () => {
     expect(() => compileToolDeferPolicy({ include: [''] })).toThrow(/non-empty/)
   })
 
+  it('never defers an on-demand MCP server loader, whatever the patterns or its deferLoading flag say', () => {
+    const policy = compileToolDeferPolicy({ include: ['mcp__*', '*load_tools'] })
+    expect(policy.defers('mcp__notion__load_tools', false)).toBe(false)
+    expect(policy.defers('mcp__notion__load_tools', true)).toBe(false)
+    expect(policy.defers('mcp__notion__search', false)).toBe(true)
+    expect(policy.defers('load_tools', false)).toBe(true)
+    expect(policy.defers('mcp____load_tools', false)).toBe(true)
+  })
+
   it('keeps one capped sentence for the index', () => {
     expect(firstSentence('Run a query.  Then more.')).toBe('Run a query.')
     expect(firstSentence('No full stop here')).toBe('No full stop here')
@@ -120,6 +132,17 @@ describe('deferral in the registry', () => {
     expect(await wireNames(ctx)).toEqual(['bash', 'gbrain_put_page', 'gbrain_query', 'mcp__home__light_on'])
     expect(ctx.tools.get(TOOL_SEARCH_NAME)).toBeUndefined()
     await expect(call(ctx, TOOL_SEARCH_NAME, { query: 'x' })).resolves.toMatchObject({ isError: true })
+  })
+
+  it('keeps an on-demand MCP loader declared beside deferred tools of the same server', async () => {
+    const { ctx } = await setup({ include: ['mcp__*'] })
+    register(ctx, 'mcp__home__load_tools', 'Load tools from the home server.')
+    const names = await wireNames(ctx)
+    expect(names).toContain('mcp__home__load_tools')
+    expect(names).not.toContain('mcp__home__light_on')
+    const index = await indexOf(ctx)
+    expect(index).toContain('`mcp__home__light_on`')
+    expect(index).not.toContain('mcp__home__load_tools')
   })
 
   it('attaches the JSON declaration to a deferred tool\'s argument error on a direct call', async () => {
@@ -262,6 +285,7 @@ describe('deferral in the registry', () => {
   it('lists tool_search where toolOrder may name it', async () => {
     const ctx = new Context()
     try {
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SystemPrompt, { toolOrder: [TOOL_SEARCH_NAME, TOOL_ORDER_REST] })
       await ctx.plugin(ToolRuntime, { defer: { include: ['gbrain_*'] } })
       await ctx.plugin(NativeToolExecutor)

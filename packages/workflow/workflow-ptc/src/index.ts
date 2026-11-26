@@ -7,21 +7,17 @@
 import { randomUUID } from 'node:crypto'
 import { availableParallelism } from 'node:os'
 import * as vm from 'node:vm'
-import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-ptc-runtime'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
-import WorkflowEngine, { WorkflowError, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
+import WorkflowEngine, { WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
-import {
-  childRouteAgentOptions,
-  childRouteDefaultsSchema,
-  subagentModelSelectionPolicy,
-  subagentModelSelectionProjectionDefinition,
-} from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import { childRouteAgentOptions, childRouteDefaultsSchema } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import type { ChildRouteDefaults } from '@deepseek-ai/dsh-tool-subagent/route-selection'
 import { PtcWorkflowRun } from './host.ts'
 import { validateMeta } from './meta.ts'
@@ -124,7 +120,7 @@ function resolveMaxTotalAgents(requested: number | undefined, ceiling: number): 
  * the seam contract.
  */
 class PtcWorkflowEngine extends WorkflowEngine {
-  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy', 'workingDirectory', 'sessionProjections']
+  static inject = ['subagents', 'ptcRuntime', 'sandboxPolicy', 'workingDirectory']
 
   static Config: z<Config> = z.object({
     provider: z.string().default('spawn'),
@@ -137,8 +133,6 @@ class PtcWorkflowEngine extends WorkflowEngine {
 
   private readonly config: ResolvedConfig
   private readonly childDefaults: AgentOptions | undefined
-  /** Reader of each Session's allowed child routes; it stays readable for holder-owned runs after unload. */
-  private policyReader!: Parameters<typeof subagentModelSelectionPolicy>[0]
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -147,11 +141,6 @@ class PtcWorkflowEngine extends WorkflowEngine {
     // the assertion records that resolution, not a hidden fallback.
     this.config = config as ResolvedConfig
     this.childDefaults = childRouteAgentOptions('workflow-ptc', config.agentOptions)
-  }
-
-  protected async [Service.init](): Promise<void> {
-    // Shared with the subagent tool: the registry keeps one registration per key.
-    this.policyReader = await this.ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
   }
 
   /**
@@ -169,7 +158,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
     assertBodyParses(request.script, meta.name)
     const subagentProvider = resolveSubagentProvider(this.ctx, this.config.provider, request.subagentProvider)
     const maxTotalAgents = resolveMaxTotalAgents(request.maxTotalAgents, this.config.maxTotalAgents)
-    const id = WorkflowRunId(randomUUID())
+    const id = brandString<WorkflowRunId>(randomUUID())
     const info: WorkflowRunInfo = { id, meta }
     const limits: WorkerLimits = {
       maxConcurrentAgents: this.config.maxConcurrentAgents === 0
@@ -198,8 +187,6 @@ class PtcWorkflowEngine extends WorkflowEngine {
       init,
       subagentProvider,
       this.childDefaults,
-      // The policy is recorded once per Session, so the run start reads it.
-      subagentModelSelectionPolicy(this.policyReader, request.parent.session),
       runCtx.sandboxPolicy.resolve({ session: request.parent.session }),
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },
@@ -217,6 +204,7 @@ class PtcWorkflowEngine extends WorkflowEngine {
       this.emitWorkflowEvent('workflow/end', info, {
         stopReason: settled.stopReason,
         ...settled.error !== undefined ? { error: settled.error } : {},
+        ...settled.errorCode !== undefined ? { errorCode: settled.errorCode } : {},
         agentsStarted: settled.agentsStarted,
       })
     })

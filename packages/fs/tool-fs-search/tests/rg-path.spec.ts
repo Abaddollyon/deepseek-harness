@@ -8,8 +8,9 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import { resolveRgPath, runRipgrep } from '@deepseek-ai/dsh-tool-fs-search'
 
 // Any access to the mocked module's surface throws — the shape a missing
@@ -21,7 +22,15 @@ vi.mock('@vscode/ripgrep', () => new Proxy({}, {
 }))
 
 function execution(id: string): ToolExecution {
-  return { signal: new AbortController().signal, name: 'glob', callId: ToolCallId(id) } as never
+  const callId = brandString<ToolCallId>(id)
+  return {
+    signal: new AbortController().signal,
+    name: 'glob',
+    arguments: {},
+    callId,
+    rootCallId: callId,
+    token: Symbol(id) as ToolExecutionToken,
+  }
 }
 
 describe('lazy packaged-ripgrep resolution', () => {

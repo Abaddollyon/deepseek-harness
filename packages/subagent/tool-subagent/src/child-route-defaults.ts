@@ -1,6 +1,7 @@
 /** Deployment-configured LLM route defaults for children started by other delegation tools. */
 
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/types'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 
@@ -46,7 +47,7 @@ export function childRouteAgentOptions(owner: string, defaults: ChildRouteDefaul
   return {
     ...defaults.provider === undefined ? {} : { provider: defaults.provider },
     ...defaults.model === undefined ? {} : { model: defaults.model },
-    ...defaults.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(defaults.reasoningEffort) },
+    ...defaults.reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(defaults.reasoningEffort) },
     ...defaults.maxTokens === undefined ? {} : { maxTokens: defaults.maxTokens },
   }
 }

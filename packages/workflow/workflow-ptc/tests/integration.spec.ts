@@ -1,24 +1,28 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/types'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import SubagentModelSelectionConfig from '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { STRUCTURED_OUTPUT_TOOL } from '@deepseek-ai/dsh-subagent'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import PtcWorkflowEngine from '../src/index.ts'
 import type { Config as PtcWorkflowConfig } from '../src/index.ts'
 import { mountPtcRuntime } from './setup.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
+const effort = (id: string): ReasoningEffortId => brandString<ReasoningEffortId>(id)
+
 const REASONING = {
-  efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }, { id: ReasoningEffortId('high'), name: 'High' }],
-  defaultEffort: ReasoningEffortId('high'),
+  efforts: [{ id: effort('low'), name: 'Low' }, { id: effort('high'), name: 'High' }],
+  defaultEffort: effort('high'),
 }
 
 async function setup(
@@ -36,7 +40,7 @@ async function setup(
   await ctx.plugin(spawn, { providerName: 'spawn' })
   await ctx.plugin(PtcWorkflowEngine, engineConfig)
   ctx.llm.registerAdapter(['mock'], adapter)
-  const parent = await ctx.agentLoop.create(SessionId('parent'), parentOptions, { cwd })
+  const parent = await ctx.agentLoop.create(brandString<SessionId>('parent'), parentOptions, { cwd })
   return { ctx, parent, adapter }
 }
 
@@ -80,7 +84,7 @@ return { prose, verdict: judged.verdict, confidence: judged.confidence }`,
     // Both children were disposed to quiescence — no live child agents remain.
     expect(childIds.length).toBe(2)
     for (const childId of childIds) {
-      expect(ctx.agents.get(SessionId(childId))).toBeUndefined()
+      expect(ctx.agents.get(brandString<SessionId>(childId))).toBeUndefined()
     }
   })
 
@@ -105,7 +109,7 @@ return { got: judged === null ? 'null' : 'value' }`,
     const { ctx, parent, adapter } = await setup(
       [textResponse('high child'), textResponse('inherited child')],
       REASONING,
-      { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+      { provider: 'mock', model: 'mock', reasoningEffort: effort('low') },
     )
     const run = ctx.workflowEngine.start({
       meta: { name: 'effort', description: 'per-child reasoning effort' },
@@ -145,15 +149,15 @@ return [high, inherited]`,
 
   describe('configured child route defaults', () => {
     const XHIGH = {
-      efforts: [...REASONING.efforts, { id: ReasoningEffortId('xhigh'), name: 'Extra high' }],
-      defaultEffort: ReasoningEffortId('high'),
+      efforts: [...REASONING.efforts, { id: effort('xhigh'), name: 'Extra high' }],
+      defaultEffort: effort('high'),
     }
 
     it('starts every child on the configured route; a call effort overrides it and a changed route drops it', async () => {
       const { ctx, parent, adapter } = await setup(
         ['default child', 'low child', 'other model child', 'other provider child', 'named route child'].map(text => textResponse(text)),
         XHIGH,
-        { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+        { provider: 'mock', model: 'mock', reasoningEffort: effort('low') },
         { agentOptions: { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' } },
       )
       ctx.llm.registerAdapter(['alt'], adapter)
@@ -171,7 +175,7 @@ return [first, second, third, fourth, fifth]`,
       try {
         const result = await run.result
         expect(result.stopReason, result.error?.split('\n')[0]).toBe('completed')
-        expect(start.mock.calls.map(([spec]) => spec.request.agentOptions)).toEqual([
+        expect(start.mock.calls.map(([spec]) => spec.agentOptions)).toEqual([
           { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
           { provider: 'mock', model: 'mock', reasoningEffort: 'low' },
           { provider: 'mock', model: 'other' },
@@ -194,7 +198,7 @@ return [first, second, third, fourth, fifth]`,
         start: (request) => {
           seen.push(request)
           return Promise.resolve({
-            id: SessionId('fixed-child'),
+            id: brandString<SessionId>('fixed-child'),
             result: Promise.resolve({ output: [{ type: 'text' as const, text: 'fixed child' }], stopReason: 'completed' as const }),
             dispose: () => Promise.resolve(),
           })
@@ -214,29 +218,44 @@ return [first, second, third, fourth, fifth]`,
       }
     })
 
-    it('limits an explicit route to the Session\'s allowed routes when a selection policy is recorded', async () => {
+    it('limits an explicit route to the routes the enabled subagent model selection setting allows', async () => {
       const { ctx, parent } = await setup([textResponse('allowed child')], XHIGH)
-      parent.session.append('subagent/model-selection-policy', { allowedModels: [{ provider: 'mock', model: 'mock' }] })
+      await ctx.plugin(SubagentModelSelectionConfig, { enabled: true, allowedModels: [{ provider: 'mock', model: 'mock' }] })
       const start = vi.spyOn(ctx.subagents, 'startActivation')
       const refused = ctx.workflowEngine.start({
-        meta: { name: 'refused-route', description: 'route outside the pool' },
+        meta: { name: 'refused-route', description: 'route outside the setting' },
         script: "return await agent('go', { model: 'other' })",
         parent,
       })
       const allowed = ctx.workflowEngine.start({
-        meta: { name: 'allowed-route', description: 'route inside the pool' },
+        meta: { name: 'allowed-route', description: 'route inside the setting' },
         script: "return await agent('go', { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' })",
         parent,
       })
       try {
         const result = await refused.result
         expect(result.stopReason).toBe('error')
-        expect(result.error).toContain('child LLM route "mock/other" is not allowed for this Session')
+        expect(result.error).toContain('child LLM route "mock/other" is not allowed by the current subagent model selection setting')
         await expect(allowed.result).resolves.toMatchObject({ stopReason: 'completed', value: 'allowed child' })
         expect(start).toHaveBeenCalledTimes(1)
       } finally {
         await refused.dispose()
         await allowed.dispose()
+      }
+    })
+
+    it('accepts any explicit route while the subagent model selection setting is off', async () => {
+      const { ctx, parent } = await setup([textResponse('other child')], XHIGH)
+      await ctx.plugin(SubagentModelSelectionConfig, { enabled: false, allowedModels: [] })
+      const run = ctx.workflowEngine.start({
+        meta: { name: 'setting-off', description: 'route with the setting off' },
+        script: "return await agent('go', { model: 'other' })",
+        parent,
+      })
+      try {
+        await expect(run.result).resolves.toMatchObject({ stopReason: 'completed', value: 'other child' })
+      } finally {
+        await run.dispose()
       }
     })
 
@@ -268,7 +287,7 @@ return [first, second, third, fourth, fifth]`,
       const { ctx, parent, adapter } = await setup(
         [textResponse('same route'), textResponse('other model')],
         XHIGH,
-        { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('low') },
+        { provider: 'mock', model: 'mock', reasoningEffort: effort('low') },
         { agentOptions: { reasoningEffort: 'xhigh' } },
       )
       const start = vi.spyOn(ctx.subagents, 'startActivation')
@@ -279,7 +298,7 @@ return [first, second, third, fourth, fifth]`,
       })
       try {
         await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
-        expect(start.mock.calls.map(([spec]) => spec.request.agentOptions)).toEqual([
+        expect(start.mock.calls.map(([spec]) => spec.agentOptions)).toEqual([
           { provider: 'mock', model: 'mock', reasoningEffort: 'xhigh' },
           { model: 'other' },
         ])
@@ -300,7 +319,7 @@ return [first, second, third, fourth, fifth]`,
       const run = ctx.workflowEngine.start({ meta: { name: 'effort-only', description: 'effort only' }, script: "return await agent('go')", parent })
       try {
         await expect(run.result).resolves.toMatchObject({ stopReason: 'completed' })
-        expect(start.mock.calls[0]?.[0].request.agentOptions).toEqual({ reasoningEffort: 'low', maxTokens: 512 })
+        expect(start.mock.calls[0]?.[0].agentOptions).toEqual({ reasoningEffort: 'low', maxTokens: 512 })
       } finally {
         await run.dispose()
       }
@@ -309,7 +328,7 @@ return [first, second, third, fourth, fifth]`,
       const routedRun = routed.ctx.workflowEngine.start({ meta: { name: 'route-only', description: 'route only' }, script: "return await agent('go')", parent: routed.parent })
       try {
         await expect(routedRun.result).resolves.toMatchObject({ stopReason: 'completed' })
-        expect(routedStart.mock.calls[0]?.[0].request.agentOptions).toEqual({ provider: 'mock', model: 'mock' })
+        expect(routedStart.mock.calls[0]?.[0].agentOptions).toEqual({ provider: 'mock', model: 'mock' })
       } finally {
         await routedRun.dispose()
       }
@@ -338,7 +357,7 @@ return [first, second, third, fourth, fifth]`,
       await expect(run.result).resolves.toMatchObject({ value: 'child complete', stopReason: 'completed', agentsStarted: 1 })
       expect(logs).toEqual(Array.from({ length: 200 }, (_, index) => String(index)))
       expect(starts).toHaveLength(1)
-      expect(ctx.agents.get(SessionId(starts[0]!))).toBeUndefined()
+      expect(ctx.agents.get(brandString<SessionId>(starts[0]!))).toBeUndefined()
     } finally {
       await run.dispose()
     }

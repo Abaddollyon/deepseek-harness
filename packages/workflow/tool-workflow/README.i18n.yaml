@@ -18,8 +18,8 @@
   en: a0a9d655187f285d
   zh: 230b4556fff9f08b
 /deepseek-ai-dsh-tool-workflow/use-this-package/calling-the-tool:
-  en: aeebba9469f0558d
-  zh: e2e74d4272e94201
+  en: 6c0da68a33e5501e
+  zh: ff683dd4de65fc7b
 /deepseek-ai-dsh-tool-workflow/use-this-package/what-to-expect-during-a-run:
   en: 19ec4f830edb8e1a
   zh: 8579ae5274aca6de
@@ -36,8 +36,8 @@
   en: 6d09119d1393c254
   zh: a7cc03daa59650ec
 /deepseek-ai-dsh-tool-workflow/understand-the-implementation/run-lifecycle:
-  en: 20c592b2fd678503
-  zh: 5d741f6c278fbd11
+  en: b828cd96c8b48d13
+  zh: 017fa1167aeeb225
 /deepseek-ai-dsh-tool-workflow/understand-the-implementation/background-lifecycle:
   en: 35950b2015800ec5
   zh: 5ae6f5a5e53dc585
@@ -87,8 +87,8 @@
   en: 9717b983b6a857e3
   zh: 611a2dadf7c0c706
 /deepseek-ai-dsh-tool-workflow/model-experience/tool-call-history-and-result/what-the-model-sees:
-  en: 53e1d0dd990e19b2
-  zh: 4de5fd53bcf480a6
+  en: 66edcef1b10d63a2
+  zh: 1b805e424c40da2d
 /deepseek-ai-dsh-tool-workflow/model-experience/tool-call-history-and-result/token-effect:
   en: d6781caa38e229bb
   zh: 3119e084ddcd7adb

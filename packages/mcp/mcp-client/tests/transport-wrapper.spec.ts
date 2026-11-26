@@ -1,4 +1,5 @@
 /** Caller-wrapped connection transports keep the plugin's lifecycle and tool behavior. */
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -12,10 +13,12 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { McpServer } from '@modelcontextprotocol/server'
 import { serveStdio } from '@modelcontextprotocol/server/stdio'
 import { z } from 'zod'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
+import { withTransportWrapper } from '@deepseek-ai/dsh-mcp-client/transport-wrapper'
 import type { Transport } from '@deepseek-ai/dsh-mcp-client'
 
 const fixture = fileURLToPath(new URL('./fixtures/negotiation-lifecycle.mjs', import.meta.url))
@@ -23,6 +26,7 @@ const fixture = fileURLToPath(new URL('./fixtures/negotiation-lifecycle.mjs', im
 async function registry(): Promise<Context> {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(NativeToolExecutor)
@@ -38,7 +42,7 @@ it('connects through the wrapper around the configured stdio transport and close
   await writeFile(events, '')
   await writeFile(release, '')
   const opened: Transport[] = []
-  const plugin = McpClient.withTransportWrapper((open) => {
+  const plugin = withTransportWrapper((open) => {
     const transport = open()
     opened.push(transport)
     return transport
@@ -67,12 +71,12 @@ it('registers and calls tools through a wrapper transport that replaces the conf
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const serving = serveStdio(() => server, { transport: serverTransport })
   onTestFinished(() => serving.close())
-  await ctx.plugin(McpClient.withTransportWrapper(() => clientTransport), McpClient.Config({
+  await ctx.plugin(withTransportWrapper(() => clientTransport), McpClient.Config({
     transport: 'stdio', serverName: 'memory', command: 'never-started', failOnStartupError: true,
   }))
   expect(ctx.tools.schemas().map(schema => schema.name)).toEqual(['mcp__memory__echo'])
   const result = await executeToolFixture(ctx, {
-    name: 'mcp__memory__echo', arguments: { word: 'wrapped' }, callId: ToolCallId('echo'), signal: new AbortController().signal,
+    name: 'mcp__memory__echo', arguments: { word: 'wrapped' }, callId: brandString<ToolCallId>('echo'), signal: new AbortController().signal,
   })
   expect(result.content).toEqual([{ type: 'text', text: 'wrapped' }])
 })

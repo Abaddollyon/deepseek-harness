@@ -10,7 +10,7 @@
 
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { FinishReason, LlmFailure, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { BuiltinLlmFailureCode, FinishReason, LlmFailure, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
@@ -44,6 +44,13 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 const CODEX_USAGE_LIMIT = /\bYou have hit your ChatGPT usage limit\b/i
 const CODEX_USAGE_LIMIT_RESET = /\bTry again in ~(\d+) min\b/i
 
+// pi-ai's SDK-backed providers render an HTTP failure as `<status> <body>`
+// (Anthropic and OpenAI SDK `APIError`, pi-messages `<status> <statusText>: …`).
+// The body can quote another hop's status, such as a gateway 500 that embeds its
+// upstream's 401, so when a message leads with a status the status rules read
+// only that status; other wordings scan the whole message.
+const LEADING_HTTP_STATUS = /^[45]\d\d\b/
+
 // XXX(pi-ai upstream): pi-ai flattens the caught error to `error.message`
 // (api/anthropic-messages.js: `errorMessage = error instanceof Error ?
 // error.message : JSON.stringify(error)`), discarding the original Error and its
@@ -52,7 +59,7 @@ const CODEX_USAGE_LIMIT_RESET = /\bTry again in ~(\d+) min\b/i
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
-function classifyPiAiError(message: string): string {
+function classifyPiAiError(message: string): BuiltinLlmFailureCode {
   // HTTP/2 stream resets: nghttp2 reports a peer reset as `stream error:
   // stream ID N; <CODE>; received from peer`. Both fragments are required:
   // bare `stream error` is generic phrasing, and `received from peer` alone
@@ -64,14 +71,15 @@ function classifyPiAiError(message: string): string {
   if (/RST_STREAM|NGHTTP2_/i.test(message)) return 'TRANSPORT'
   // Checked before status codes: the stated reset can read like one (`~401 min`).
   if (CODEX_USAGE_LIMIT.test(message)) return QUOTA_EXCEEDED_CODE
-  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
+  const statusSource = LEADING_HTTP_STATUS.exec(message)?.[0] ?? message
+  if (/\b(?:401|403)\b/.test(statusSource)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
-  if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
+  if (/\b429\b/.test(statusSource) || /rate.?limit/i.test(message)) return 'RATE_LIMIT'
   // A rejected request body (gateway or provider size cap): resending the
   // same request cannot succeed, so it is invalid, not transient.
-  if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
-  if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
-  if (/\b5\d\d\b/.test(message)) return 'SERVER'
+  if (/\b413\b/.test(statusSource) || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
+  if (/\b400\b/.test(statusSource) || /invalid.?request/i.test(message)) return 'INVALID_REQUEST'
+  if (/\b5\d\d\b/.test(statusSource)) return 'SERVER'
   // An overload reported in-stream without an HTTP status: codex-lb's
   // `server_is_overloaded` failed response, Anthropic's `overloaded_error` SSE
   // error, and the OpenAI overload sentence. Unknown failures stay unclassified.
@@ -139,7 +147,7 @@ export function parseRetryAfterMs(headers: Headers, nowMs: number): number | und
 }
 
 /** Failure codes an HTTP status determines when pi-ai's flattened error text is unrecognized. */
-function statusFailureCode(status: number): string | undefined {
+function statusFailureCode(status: number): BuiltinLlmFailureCode | undefined {
   if (status === 408) return 'TIMEOUT'
   if (status === 429) return 'RATE_LIMIT'
   return status >= 500 ? 'SERVER' : undefined
@@ -227,15 +235,15 @@ export function mapStopReason(
     case 'toolUse': return { kind: 'tool-calls' }
     case 'pending': return {
       kind: 'error',
-      failure: { message: `pi-ai stream for model "${message.model}" ended pending`, code: 'PI_AI_ERROR' },
+      failure: { message: `pi-ai stream for model "${message.model}" ended pending`, code: 'PI_AI_ERROR' satisfies BuiltinLlmFailureCode },
     }
     case 'deferred': return {
       kind: 'error',
-      failure: { message: `pi-ai deferred response for model "${message.model}" is not supported`, code: 'PI_AI_ERROR' },
+      failure: { message: `pi-ai deferred response for model "${message.model}" is not supported`, code: 'PI_AI_ERROR' satisfies BuiltinLlmFailureCode },
     }
     case 'aborted': return {
       kind: 'aborted',
-      failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' },
+      failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' satisfies BuiltinLlmFailureCode },
     }
     case 'error':
       return { kind: 'error', failure: errorFailure(message.errorMessage ?? 'pi-ai stream error', response) }
@@ -251,6 +259,7 @@ export function mapStopReason(
  * @param callerSignal - caller cancellation state; an aborted caller makes any
  *   in-band terminal error an aborted finish.
  * @param requestedModel - request model identity recorded for durable replay.
+ * @param prefixDigest - request-context digest recorded for durable replay.
  * @param lastResponse - reads the last HTTP response of this request when the terminal event arrives.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event, or
@@ -262,6 +271,7 @@ export async function* toStreamChunks(
   contextWindow?: number,
   callerSignal?: AbortSignal,
   requestedModel?: string,
+  prefixDigest?: string,
   lastResponse?: () => ObservedProviderResponse | undefined,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
@@ -337,7 +347,7 @@ export async function* toStreamChunks(
         yield {
           type: 'finish',
           reason: mapStopReason(event.message, contextWindow, lastResponse?.()),
-          replayState: toPiReplayState(event.message, requestedModel),
+          replayState: toPiReplayState(event.message, requestedModel, prefixDigest),
         }
         return
       case 'error':

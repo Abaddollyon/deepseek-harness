@@ -14,7 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, ToolArgsError, ToolContextUnavailableError } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolExecution, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -23,9 +23,11 @@ import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 // Type-only: `ctx.get('spillStore')` resolves when an optional spill backend is composed.
 import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type {
-  WorkflowResult, WorkflowRun, WorkflowRunId, WorkflowStopReason,
+  WorkflowResult, WorkflowRun, WorkflowStopReason,
 } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
 import { createWorkflowRecordMirror } from './record.ts'
 import type { WorkflowRecordMirror } from './record.ts'
 import type {
@@ -196,17 +198,17 @@ function presentWorkflowResult(args: WorkflowCallArgs, result: { content: Conten
 }
 
 /** A non-`completed` stop reason means the script did not finish cleanly. */
-function stopReasonError(result: WorkflowResult): string | undefined {
+function stopReasonError(result: WorkflowResult): WorkflowError | undefined {
   switch (result.stopReason) {
     case 'completed':
       return undefined
     case 'cancelled':
-      return `workflow run was cancelled${result.error !== undefined ? ` (${result.error})` : ''}`
+      return new WorkflowError(`workflow run was cancelled${result.error !== undefined ? ` (${result.error})` : ''}`, 'CANCELLED')
     case 'error':
-      return `workflow run failed: ${result.error ?? 'unknown error'}`
+      return new WorkflowError(`workflow run failed: ${result.error ?? 'unknown error'}`, result.errorCode ?? 'RUN_FAILED')
     /* v8 ignore start -- defensive: WorkflowStopReason is a closed union, exhaustive by construction; a future variant fails here loudly */
     default:
-      return `workflow run ended abnormally (${String(result.stopReason satisfies never)})`
+      return new WorkflowError(`workflow run ended abnormally (${String(result.stopReason satisfies never)})`, 'RUN_FAILED')
     /* v8 ignore stop */
   }
 }
@@ -343,7 +345,7 @@ function startBackgroundRun(
 ): { kind: 'background'; jobId: JobId; runId: WorkflowRunId } {
   const jobs = ctx.get('jobs')
   if (jobs === undefined) {
-    throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+    throw new ToolContextUnavailableError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
   }
   let run!: WorkflowRun
   const jobId = jobs.start({
@@ -398,6 +400,7 @@ export function apply(ctx: Context, config: Config): void {
     name: `tool:${toolName}`,
     order: ctx.systemPrompt.getSectionOrder('TOOL_WORKFLOW'),
     text: `Use the ${toolName} tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration: you write a JavaScript script (the tool description documents the exact format) that fans work out across many subagents with phases and structured results. For one or two delegations, prefer plain subagent calls.`,
+    retirement: `The ${toolName} tool is no longer available. Its instructions no longer apply.`,
   })
   ctx.tools.register(defineTool({
     name: toolName,
@@ -483,11 +486,12 @@ export function apply(ctx: Context, config: Config): void {
         // The loop sets `exec.agent` for every model-driven call; its absence
         // means a non-agent caller invoked the tool directly, which has no
         // parent to attribute the children to. Fail loud rather than guess.
-        throw new Error('workflow tool requires a calling agent (exec.agent was undefined)')
+        throw new ToolContextUnavailableError('workflow tool requires a calling agent (exec.agent was undefined)')
       }
       if (args.run_in_background === true) {
         if (!enableRunInBackground) {
-          throw new Error('run_in_background is disabled for this tool')
+          // The schema omits the field when disabled, so the model corrects by omitting it.
+          throw new ToolArgsError(['run_in_background is disabled for this tool'])
         }
         // No pre-abort check here, unlike bash/pwsh: ToolRuntime re-reads the
         // caller signal right before execute(), and this branch reaches
@@ -528,9 +532,11 @@ export function apply(ctx: Context, config: Config): void {
         result = await run.result
         const error = stopReasonError(result)
         if (error !== undefined) {
-          // Map a non-clean finish to an isError result (the registry turns a
-          // throw into an isError). Report the reason, not partial output.
-          throw new Error(error)
+          // Caller cancellation keeps the registry's AbortError identity; any
+          // other non-clean finish becomes a coded isError result. Report the
+          // reason, not partial output.
+          exec.signal.throwIfAborted()
+          throw error
         }
         // Only an oversized value awaits its spill; an in-cap value returns without an extra turn.
         const projected = projectResult(ctx, resultSpill(parent, exec, args.meta.name), result.value as JsonValue, maxResultChars)
@@ -547,7 +553,7 @@ export function apply(ctx: Context, config: Config): void {
           // synthesize cancelled member endings while reaching quiescence.
           await run.dispose()
           /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
-          if (result === undefined) throw new Error('workflow run settled without a result')
+          if (result === undefined) throw new WorkflowError('workflow run settled without a result', 'RUN_FAILED')
           recorder.finish(run.id, result.stopReason)
         } finally {
           recorder.abandon(run.id)

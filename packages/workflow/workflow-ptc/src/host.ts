@@ -1,20 +1,23 @@
 /** Workflow child ownership and progress over the shared sandboxed PTC executor. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/types'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import type { PtcBindingFunction, PtcJsonValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { parentAgentOptionsForDelegation, SubagentError } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { assertAllowedModelSelection } from '@deepseek-ai/dsh-tool-subagent/route-selection'
-import type { AllowedModelRoute } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import type {} from '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { assertNever, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
-import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowMeta, WorkflowResult, WorkflowRun, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
+import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowErrorCode, WorkflowMeta, WorkflowResult, WorkflowRun } from '@deepseek-ai/dsh-workflow'
 import { WORKFLOW_GUEST_SOURCE } from './guest-source.ts'
 import type { WorkflowProgress } from './guest-types.ts'
 import { renderThrown } from './realm.ts'
@@ -76,7 +79,8 @@ function childRequest(value: unknown): ChildStartRequest {
  * configured defaults. A call that changes the configured route without naming
  * an effort drops the configured effort, which belongs to that route. The
  * configured route is the defaults' provider and model, each falling back to
- * the parent's, so naming that route keeps the effort.
+ * the parent's, so naming that route keeps the effort. An effort-only call
+ * keeps the configured or parent route.
  * @param defaults - configured child defaults, if any.
  * @param request - the `agent()` call.
  * @param parent - the parent's current route.
@@ -86,7 +90,7 @@ function childAgentOptions(defaults: AgentOptions | undefined, request: ChildSta
   const perCall: AgentOptions = {
     ...request.provider === undefined ? {} : { provider: request.provider },
     ...request.model === undefined ? {} : { model: request.model },
-    ...request.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) },
+    ...request.reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(request.reasoningEffort) },
   }
   if (defaults === undefined) return Object.keys(perCall).length === 0 ? undefined : perCall
   const routeChanged = (request.provider !== undefined && request.provider !== (defaults.provider ?? parent.provider))
@@ -101,7 +105,7 @@ function agentInfo(value: unknown): WorkflowAgentInfo {
   return {
     seq: info.seq as number,
     label: text(info.label, 'agent label'),
-    childId: SessionId(text(info.childId, 'child id')),
+    childId: brandString<SessionId>(text(info.childId, 'child id')),
     ...info.phase === undefined ? {} : { phase: text(info.phase, 'agent phase') },
   }
 }
@@ -126,6 +130,18 @@ function progressBatch(value: unknown): WorkflowProgress[] {
   return value.map(progress)
 }
 
+/** Every fatal code a guest may report; `satisfies` keeps the set aligned with the seam union. */
+const WORKFLOW_ERROR_CODES: ReadonlySet<string> = new Set(Object.keys({
+  SCRIPT_PARSE: true, META_INVALID: true, INVALID_ARGUMENT: true, UNSUPPORTED_OPTION: true, UNSUPPORTED_SCHEMA: true,
+  AGENT_CAP: true, ITEM_CAP: true, AGENT_START: true, AGENT_RESULT: true, RESULT_UNSERIALIZABLE: true, CANCELLED: true,
+  RUN_FAILED: true,
+} satisfies Record<WorkflowErrorCode, true>))
+
+function errorCode(value: unknown): WorkflowErrorCode {
+  if (typeof value !== 'string' || !WORKFLOW_ERROR_CODES.has(value)) throw new Error('invalid workflow error code')
+  return value as WorkflowErrorCode
+}
+
 function workflowResult(value: unknown): WorkflowResult {
   const result = object(value)
   if (result.stopReason !== 'completed' && result.stopReason !== 'error' && result.stopReason !== 'cancelled') throw new Error('invalid workflow stop reason')
@@ -136,6 +152,7 @@ function workflowResult(value: unknown): WorkflowResult {
     stopReason: result.stopReason,
     agentsStarted: result.agentsStarted as number,
     ...result.error === undefined ? {} : { error: text(result.error, 'error') },
+    ...result.errorCode === undefined ? {} : { errorCode: errorCode(result.errorCode) },
   }
 }
 
@@ -173,7 +190,6 @@ export class PtcWorkflowRun implements WorkflowRun {
     private readonly init: WorkerInit,
     private readonly provider: string,
     private readonly childDefaults: AgentOptions | undefined,
-    private readonly allowedRoutes: readonly AllowedModelRoute[] | undefined,
     private readonly policy: SandboxExecutionPolicy,
     private readonly observer: ExecutionObserver,
     private readonly signal?: AbortSignal,
@@ -265,25 +281,30 @@ export class PtcWorkflowRun implements WorkflowRun {
   }
 
   /**
-   * Limit a call's explicit route to the parent Session's allowed routes with
-   * the subagent tool's own assertion. Without a recorded selection policy any
-   * route is accepted (the subagent tool would allow only the parent's route),
-   * so a deployment without model-selection settings keeps `agent()`'s
-   * independent route overrides; configured defaults are not a choice the
-   * script made. The list is read at run start, so the run needs no engine
-   * service later.
+   * Limit a call's explicit route to the routes the Host's subagent model
+   * selection setting allows, with the subagent tool's own assertion. The
+   * setting is read on every call, so an edit applies to the next `agent()`.
+   * A call that names no provider, model or effort is not checked: configured
+   * defaults are not a choice the script made. While the setting is off, or
+   * its service is not loaded, any route is accepted (the subagent tool would
+   * allow only the parent's route), so `agent()` keeps its independent route
+   * overrides.
    * @param request - the `agent()` call.
    * @param parentOptions - the parent's current route.
    * @param agentOptions - the child's merged route.
+   * @throws {SubagentError} `MODEL_ROUTE_NOT_ALLOWED` when the setting excludes the effective route,
+   *   or `INVALID_MODEL_SELECTION_SETTINGS` when the enabled setting is malformed.
    */
   private assertAllowedRoute(request: ChildStartRequest, parentOptions: AgentOptions, agentOptions: AgentOptions | undefined): void {
-    const routes = this.allowedRoutes
+    if (request.provider === undefined && request.model === undefined && request.reasoningEffort === undefined) return
+    const routes = this.ctx.get('subagentModelSelection')?.allowedRoutes()
     if (routes === undefined) return
-    assertAllowedModelSelection({ routes }, parentOptions, agentOptions, {
-      ...request.provider === undefined ? {} : { provider: request.provider },
-      ...request.model === undefined ? {} : { model: request.model },
-      ...request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort },
-    })
+    const provider = agentOptions?.provider ?? parentOptions.provider
+    const model = agentOptions?.model ?? parentOptions.model
+    if (provider === undefined || model === undefined) {
+      throw new Error('cannot select a child LLM route without an effective provider and model')
+    }
+    assertAllowedModelSelection({ routes }, parentOptions, { provider, model }, false)
   }
 
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
@@ -306,13 +327,11 @@ export class PtcWorkflowRun implements WorkflowRun {
       label: request.label ?? `${this.meta.name} child ${callId}`,
       delivery: 'caller',
       signal: this.controller.signal,
-      request: {
-        cwd,
-        prompt: [{ type: 'text', text: request.prompt }],
-        parent: this.parent,
-        ...request.schema === undefined ? {} : { outputSchema: request.schema },
-        ...agentOptions === undefined ? {} : { agentOptions },
-      },
+      cwd,
+      prompt: [{ type: 'text', text: request.prompt }],
+      parent: this.parent,
+      ...request.schema === undefined ? {} : { outputSchema: request.schema },
+      ...agentOptions === undefined ? {} : { agentOptions },
     }))
     const record: ChildRecord = { callId, run }
     this.children.set(callId, record)
@@ -436,6 +455,7 @@ export class PtcWorkflowRun implements WorkflowRun {
           'function-body': PROGRAM,
           repl: `await (async () => {\n${PROGRAM}\n})()`,
           script: `(async () => {\n${PROGRAM}\n})()`,
+          'scoped-repl': `await (async () => {\n${PROGRAM}\n})()`,
         }[this.runtime.programFormat],
         bindings: [{ global: 'workflowHost', functions: this.bindings() }],
         cwd,

@@ -22,6 +22,7 @@ import { canonicalizeWatchPath, resolveAgentsHome, resolveDshHome } from '@deeps
 import {
   BUNDLED_SKILL_RANK,
   isSkillName,
+  SkillError,
   type SkillCandidate,
   type SkillDefinition,
   type SkillInvocationPolicy,
@@ -692,7 +693,7 @@ async function settleWatcherOpening(opening: Promise<void> | undefined): Promise
   if (opening === undefined) return
   try {
     await opening
-  } catch {
+  } catch (_watchStartupFailed) {
     // Watch startup already logged the underlying failure; teardown only contains it.
   }
 }
@@ -1065,7 +1066,7 @@ async function probeSkillFileOnHost(path: string, signal: AbortSignal | undefine
   } catch (error) {
     signal?.throwIfAborted()
     if (isAbsentSkillPathError(error)) return undefined
-    throw error
+    throw new SkillError(`failed to read skill file ${path}: ${errorMessage(error)}`, 'SKILL_READ_FAILED', { cause: error })
   }
   return {
     identity: `host:${resolvedPath}`,
@@ -1078,7 +1079,7 @@ async function probeSkillFileOnHost(path: string, signal: AbortSignal | undefine
         readSignal?.throwIfAborted()
         /* v8 ignore next -- Only a deletion racing between the probe's stat and this read reaches it. */
         if (isAbsentSkillPathError(error)) return ABSENT_SKILL_FILE
-        throw error
+        throw new SkillError(`failed to read skill file ${path}: ${errorMessage(error)}`, 'SKILL_READ_FAILED', { cause: error })
       }
     },
   }

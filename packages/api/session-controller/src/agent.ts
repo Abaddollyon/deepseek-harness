@@ -1,5 +1,6 @@
 /** Agent activation, composition, and initial model route owned by API Session. */
 
+import type {} from '@deepseek-ai/dsh-fs'
 import { randomUUID } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
@@ -10,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { AgentPresetDefaults } from '@deepseek-ai/dsh-agent-preset-registry'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
@@ -108,21 +109,11 @@ export type ApiSessionAgentResult =
 
 /**
  * Test whether generic Session routing must leave an identity to subagent routing.
- * @param ctx - Host context carrying the Agent ownership registry.
- * @param session - attached or live Session whose ownership is tested.
- * @param agent - live Agent when one exists for the Session.
+ * @param session - Attached or live Session whose origin is tested.
  * @returns whether subagent routing owns the Session identity.
  */
-export function hasApiSessionSubagentOwner(
-  ctx: Context,
-  session: Pick<Session, 'header'>,
-  agent: Agent | undefined,
-): boolean {
-  if (session.header.origin === 'subagent') return true
-  const parentId = session.header.parentSession
-  if (parentId === undefined || agent === undefined) return false
-  const parent = ctx.agents.get(parentId)
-  return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
+export function hasApiSessionSubagentOwner(session: Pick<Session, 'header'>): boolean {
+  return session.header.origin === 'subagent'
 }
 
 /**
@@ -204,7 +195,7 @@ export class ApiSessionAgentController {
     const live = this.liveAgent(sessionId)
     if (live !== undefined) return live
     const attached = this.ctx.sessions.get(sessionId)
-    if (attached !== undefined && hasApiSessionSubagentOwner(this.ctx, attached, undefined)) {
+    if (attached !== undefined && hasApiSessionSubagentOwner(attached)) {
       return { error: apiSessionSubagentOwnershipError(sessionId) }
     }
 
@@ -229,7 +220,7 @@ export class ApiSessionAgentController {
       const raced = this.liveAgent(sessionId)
       if (raced !== undefined) return raced
       const racedSession = this.ctx.sessions.get(sessionId)
-      if (racedSession !== undefined && hasApiSessionSubagentOwner(this.ctx, racedSession, undefined)) {
+      if (racedSession !== undefined && hasApiSessionSubagentOwner(racedSession)) {
         return { error: apiSessionSubagentOwnershipError(sessionId) }
       }
       if (error instanceof Error && error.name === 'SessionAlreadyOwnedError') {
@@ -297,6 +288,18 @@ export class ApiSessionAgentController {
   }
 
   /**
+   * Run an operation after the Agent's serialized work already queued, without
+   * joining the chain, so a text prompt waits for an earlier model selection or
+   * preset-default switch but prepares concurrently with other text prompts.
+   * @param agent - live Agent that owns the serialization chain.
+   * @param operation - asynchronous operation started once prior serialized work settles.
+   * @returns the operation result or rejection.
+   */
+  afterSerializedAdmissions<Value>(agent: Agent, operation: () => Promise<Value>): Promise<Value> {
+    return (this.imageAdmissionChains.get(agent) ?? Promise.resolve()).then(operation)
+  }
+
+  /**
    * Resolve the preset id and pre-publication Agent setup for a create or resume.
    * @param presetId - requested preset or the configured default when omitted.
    * @returns the resolved preset identity and Agent setup callback.
@@ -320,7 +323,7 @@ export class ApiSessionAgentController {
   private liveAgent(sessionId: SessionId): ApiSessionAgentResult | undefined {
     const agent = this.ctx.agents.get(sessionId)
     if (agent === undefined) return undefined
-    return hasApiSessionSubagentOwner(this.ctx, agent.session, agent)
+    return hasApiSessionSubagentOwner(agent.session)
       ? { error: apiSessionSubagentOwnershipError(sessionId) }
       : { agent }
   }
@@ -346,13 +349,12 @@ export class ApiSessionAgentController {
     if (observation.header.id !== sessionId || observation.header.cwd === undefined) {
       throw new ApiSessionNotFound(`session "${sessionId}" not found`)
     }
-    if (hasApiSessionSubagentOwner(this.ctx, { header: observation.header }, undefined)) {
+    if (hasApiSessionSubagentOwner({ header: observation.header })) {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
     const composition = await this.composeAgent(this.presetForObservation(observation))
     const published = this.ctx.sessions.get(sessionId)
-    const live = this.ctx.agents.get(sessionId)
-    if (published !== undefined && hasApiSessionSubagentOwner(this.ctx, published, live)) {
+    if (published !== undefined && hasApiSessionSubagentOwner(published)) {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
     return (await this.ctx.agents.resume({
@@ -377,11 +379,11 @@ export class ApiSessionAgentController {
   private async claim(sessionId: SessionId, request: ApiSessionCreateRequest): Promise<Agent> {
     const attached = this.ctx.sessions.get(sessionId)
     const live = this.ctx.agents.get(sessionId)
-    if (attached !== undefined && hasApiSessionSubagentOwner(this.ctx, attached, live)) {
+    if (attached !== undefined && hasApiSessionSubagentOwner(attached)) {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
     if (live !== undefined) {
-      if (live.session.header.cwd !== request.cwd) {
+      if (!await this.namesDirectory(live.session.header.cwd, request.cwd, this.presetForSession(live.session))) {
         throw new ApiSessionCwdConflict(live.id, request.cwd, live.session.header.cwd)
       }
       const composition = await this.composeAgent(request.agentPreset)
@@ -398,16 +400,16 @@ export class ApiSessionAgentController {
     let recordedPreset: string | undefined
     {
       using observed = observation
-      if (hasApiSessionSubagentOwner(this.ctx, { header: observed.header }, undefined)) {
+      if (hasApiSessionSubagentOwner({ header: observed.header })) {
         throw new ApiSessionSubagentOwnership(sessionId)
       }
-      if (observed.header.cwd !== request.cwd) {
+      recordedPreset = this.ctx.get('agentPresets') !== undefined ? this.presetForObservation(observed) : undefined
+      if (!await this.namesDirectory(observed.header.cwd, request.cwd, recordedPreset)) {
         throw new ApiSessionCwdConflict(sessionId, request.cwd, observed.header.cwd)
       }
       reusable = request.reusable(sessionId)
         && !observed.events.some(event => event.type === 'turn/start')
         && sameRoots(recordedRoots(observed.events), request.additionalPaths ?? [])
-      recordedPreset = reusable && this.ctx.get('agentPresets') !== undefined ? this.presetForObservation(observed) : undefined
     }
     const composition = await this.composeAgent(request.agentPreset)
     if (!reusable || !this.sameWorld(recordedPreset, composition.agentPreset)) return this.createMinted(request, composition)
@@ -538,7 +540,7 @@ export class ApiSessionAgentController {
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
-        cwd,
+        cwd: await this.canonical(cwd, composition.agentPreset),
         ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
@@ -594,6 +596,35 @@ export class ApiSessionAgentController {
     }
   }
 
+  /**
+   * The canonical spelling of a project directory, which new headers record; see SessionHeader.cwd.
+   * The directory resolves through the `fs` the preset mounts, as {@link ensureProjectDirectories}
+   * checks it, so a directory on an SSH host never gets a Host spelling. A preset that owns its
+   * execution world keeps the requested spelling while that provider is missing; other presets use
+   * the Host `fs`.
+   * @param cwd - requested project directory.
+   * @param agentPreset - preset whose execution world holds the directory, if any.
+   * @returns the directory as the execution world's processes open it.
+   */
+  private async canonical(cwd: string, agentPreset: string | undefined): Promise<string> {
+    const presets = this.ctx.get('agentPresets')
+    const own = agentPreset === undefined ? undefined : presets?.serviceForPreset(agentPreset, 'fs')
+    const fs = own ?? (agentPreset !== undefined && presets?.ownsWorld(agentPreset) === true ? undefined : this.ctx.get('fs'))
+    return fs === undefined ? cwd : fs.processPath(await fs.resolve(cwd))
+  }
+
+  /**
+   * Whether a request names the directory a Session header records: by the recorded spelling, or by a
+   * spelling such as a symlink whose canonical form the header records.
+   * @param recorded - the cwd the Session header records.
+   * @param requested - the cwd the request names.
+   * @param agentPreset - the Session's recorded preset, whose execution world holds `recorded`.
+   */
+  private async namesDirectory(recorded: string | undefined, requested: string, agentPreset: string | undefined): Promise<boolean> {
+    return recorded === requested
+      || (recorded !== undefined && recorded === await this.canonical(requested, agentPreset))
+  }
+
   private agentOptions(): AgentOptions {
     const defaults = this.ctx.agentDefaultModel
     // A Session that records no selection or request follows default changes.
@@ -630,7 +661,7 @@ export class ApiSessionAgentController {
         const requested: AgentModelSelection = {
           provider: declared.provider,
           model: declared.model,
-          ...(declared.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(declared.reasoningEffort) }),
+          ...(declared.reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(declared.reasoningEffort) }),
         }
         if (!await modelAvailable(this.ctx, requested)) throw new Error('not in the model catalog')
         await this.ctx.llm.resolveCallConfig(requested)

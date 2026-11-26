@@ -102,7 +102,11 @@ export interface SessionHeader {
   readonly id: SessionId
   /** Non-negative safe-integer Unix epoch milliseconds when the session was created. */
   readonly createdAt: number
-  /** Absolute working directory the session was created in (if any). */
+  /**
+   * Canonical absolute working directory the session was created in (if any). Producers resolve the
+   * requested directory through the execution-world filesystem before recording it, so the later
+   * canonical directory records of the working-directory service compare with it lexically.
+   */
   readonly cwd?: string
   /**
    * Direct creator of a subagent Session. Ordinary forks omit this field;
@@ -136,9 +140,38 @@ export interface SessionHeader {
 }
 
 /**
+ * Caller-supplied storage fields that `buildSessionHeader` folds into a new {@link SessionHeader}.
+ * `isSeeded` marks fork lineage; supplying replay history alone does not make it inherited.
+ */
+export interface SessionHeaderMeta {
+  readonly cwd?: string
+  readonly parentSession?: SessionId
+  readonly createdAt?: number
+  readonly isSeeded?: boolean
+  readonly origin?: 'subagent'
+  readonly delegationDepth?: number
+  readonly agentPreset?: string
+}
+
+/**
+ * Creation fields accepted by `ctx.sessions.create()`: the {@link SessionHeaderMeta}
+ * header fields plus the Session's additional workspace roots, which are not a header field.
+ */
+export interface SessionCreationMeta extends SessionHeaderMeta {
+  /**
+   * Absolute directories the Session may use beside `cwd`. A nonempty list
+   * becomes the Session's `workspace/roots` event at seq 0; a seeded
+   * Session inherits that event from its seed, and a supplied list must
+   * then equal the inherited one. Not a header field.
+   */
+  readonly additionalPaths?: readonly string[]
+}
+
+/**
  * Options for creating a {@link Session} via the store. `seed` replays/forks
  * an existing event log; `meta` carries the caller-supplied storage fields the
- * store folds into a {@link SessionHeader}.
+ * store folds into a {@link SessionHeader}, plus the additional workspace roots
+ * recorded as the `workspace/roots` event.
  */
 export interface CreateSessionOptions {
   /** Initial replay or fork history supplied at construction. */
@@ -153,22 +186,7 @@ export interface CreateSessionOptions {
    * Storage metadata read once before publication. `isSeeded` marks fork
    * lineage; supplying replay history alone does not make it inherited.
    */
-  readonly meta?: {
-    readonly cwd?: string
-    readonly parentSession?: SessionId
-    readonly createdAt?: number
-    readonly isSeeded?: boolean
-    readonly origin?: 'subagent'
-    readonly delegationDepth?: number
-    readonly agentPreset?: string
-    /**
-     * Absolute directories the Session may use beside `cwd`. A nonempty list
-     * becomes the Session's `workspace/roots` event at seq 0; a seeded
-     * Session inherits that event from its seed, and a supplied list must
-     * then equal the inherited one. Not a header field.
-     */
-    readonly additionalPaths?: readonly string[]
-  }
+  readonly meta?: SessionCreationMeta
 }
 
 /**
@@ -246,7 +264,7 @@ export type TurnEndReason = TurnEndReasonMap[keyof TurnEndReasonMap]
 
 /**
  * Logged request state outside derived history: call config and tools. The
- * system prompt is derived history — surface node 0, a `system/message` event.
+ * system prompt is derived history — the initial and subsequent `system/message` nodes.
  * The latest full `request/header` snapshot reconstructs the header; canonical
  * empty optional fields are absent.
  */
@@ -295,8 +313,10 @@ export interface SessionEventMap {
   /**
    * Absolute directories the Session may use beside its header `cwd`, fixed
    * when the Session is created. Valid only as seq 0 with `ignorable: true`;
-   * `Session.append()` refuses it. A reader that skips it confines the Session
-   * to `cwd`, and the model-visible policy text is logged separately.
+   * `Session.append()` refuses it, alone or in a batch. A reader that skips it
+   * confines the Session to `cwd`. The sandbox policy grants these roots again
+   * each time an Agent starts on the Session; the model-visible policy text is
+   * logged separately.
    */
   'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**
@@ -336,18 +356,15 @@ export interface SessionEventMap {
     headerSeq?: SessionSeq
   }
   /**
-   * The rendered system prompt on the model-visible surface. The loop appends
-   * the first one as surface node 0 before the step's first `user/message`.
-   * A prepared in-history route can append nonempty changes in a continuing
-   * series. An incapable route, or a new series whose effective text differs,
-   * normalizes text to the first system node; a series start whose latest
-   * surviving node already holds the rendering leaves it in place.
-   * Normalization empties nonempty later nodes, then rewrites the head if
-   * needed, through logged per-node replacements. An empty rendering always
-   * clears all active system nodes, leaving no older instructions model-visible.
-   * Empty later nodes are dormant and project to no message; an empty head with
-   * no active later node records "no system prompt". Restored nonempty text follows
-   * the same route and series rule; empty nodes never restore older text.
+   * System instructions and notices on the model-visible surface. The first
+   * accepted assembly reserves node 0, even with empty content. Later admissions
+   * append new or changed sections independently of the route's capabilities.
+   * Source metadata identifies canonical text and notices; retired records remove
+   * a source from committed state. Empty active text withdraws its instructions
+   * while preserving the source. Earlier messages retain their positions.
+   * `source.reset` replaces committed state, including when compaction rebuilds
+   * the initial system node from current instructions.
+   * Empty system nodes remain in the surface but produce no model message.
    */
   'system/message': { turn: number; step: number; message: SystemMessage }
   /**
@@ -418,8 +435,8 @@ export interface SessionEventMap {
   /**
    * Route metadata for the next request, logged only when the route, capacity,
    * or system prompt update mode changes. It does not participate in request
-   * reconstruction or header equality. Prompt admission uses the bound prepared
-   * call's capability, not this snapshot from an earlier request.
+   * reconstruction, header equality, or system-section admission. The bound
+   * prepared call's capabilities determine adapter representation.
    */
   'request/context': RequestContext
   /**
@@ -498,6 +515,11 @@ export type SurfaceIntent<T extends SurfaceEventType = SurfaceEventType> = {
   /** Complete non-empty set of known earlier source-event seqs. */
   sourceEventSeqs?: SessionSeq[]
 })
+
+/** One positional event call proposed for append, without assigned sequence or time. */
+export type SessionEventInput = {
+  [K in SessionEventType]: readonly [type: K, data: SessionEventMap[K], ...opts: K extends SurfaceEventType ? [opts: SurfaceIntent<K>] : []]
+}[SessionEventType]
 
 /**
  * One immutable entry in the session log.

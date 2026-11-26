@@ -7,7 +7,7 @@
 
 import * as vm from 'node:vm'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { extractTextContent } from '@deepseek-ai/dsh-llm/message'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { assertObjectJsonSchema, JsonSchemaError } from '@deepseek-ai/dsh-tools'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
@@ -38,14 +38,6 @@ const SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider',
 const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
 /** The supported-option list quoted by every option rejection. */
 const SUPPORTED_AGENT_OPTIONS_TEXT = [...SUPPORTED_AGENT_OPTIONS].join(', ')
-
-/** Flatten a child's final output blocks to text (the non-schema `agent()` result). */
-function outputText(blocks: ContentBlock[]): string {
-  return blocks
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map(block => block.text)
-    .join('')
-}
 
 /** A short display label derived from the prompt when the script passes none. */
 function defaultLabel(prompt: string): string {
@@ -114,7 +106,13 @@ export class WorkflowExecution {
       const value = raw === undefined ? null : this.materializeResult(raw)
       return { value, stopReason: 'completed', agentsStarted: this.started }
     } catch (error: unknown) {
-      return { value: null, stopReason: 'error', error: renderThrown(error), agentsStarted: this.started }
+      return {
+        value: null,
+        stopReason: 'error',
+        error: renderThrown(error),
+        ...error instanceof WorkflowError ? { errorCode: error.code } : {},
+        agentsStarted: this.started,
+      }
     }
   }
 
@@ -224,7 +222,7 @@ export class WorkflowExecution {
             return result.structured
           }
           this.observer.agentEnd({ ...info, outcome: 'completed' })
-          return outputText(result.output)
+          return extractTextContent(result.output)
         }
         this.observer.agentEnd({ ...info, outcome: 'failed' })
         return null

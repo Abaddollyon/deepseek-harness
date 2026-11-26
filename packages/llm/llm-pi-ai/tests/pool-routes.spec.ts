@@ -164,6 +164,31 @@ describe('keyless proxy on an OpenAI protocol', () => {
     expect(pool.headers[0]?.authorization).toBeUndefined()
     expect(result.message.content).toContainEqual(expect.objectContaining({ type: 'text', text: 'ok' }))
   })
+
+  it('keeps an Authorization header a header contributor prepared', async () => {
+    const pool = await poolServer({ sse: COMPLETION_REPLY })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['local'], new PiAiAdapter({
+      profiles: () => resolveProfiles({
+        local: { api: 'openai-completions', baseURL: `${pool.url}/v1`, authMode: 'proxy', models: [{ id: 'local-model' }] },
+      }),
+      resolveApiKey: () => Promise.resolve(undefined),
+      auth: memoryAuth({}),
+      prepareHeaders: (_request, headers) => {
+        headers.set('Authorization', 'Bearer contributed')
+        return headers
+      },
+    }))
+
+    await assemble(ctx, {
+      provider: 'local',
+      model: 'local-model',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'say ok' }], source: { kind: 'user' } })],
+    })
+
+    expect(pool.headers[0]?.authorization).toBe('Bearer contributed')
+  })
 })
 
 describe('pool route configuration', () => {
