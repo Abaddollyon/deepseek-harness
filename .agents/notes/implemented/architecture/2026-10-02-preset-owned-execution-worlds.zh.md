@@ -13,7 +13,7 @@ Status: implemented
 隔离了 `fs`、`subprocess`、`sandbox` 及使用它们的工具的 Agent 预设即为一个执行环境。Host 消费方通过预设注册表而非自身注入来访问该环境：
 
 - `agentPresets.serviceForPreset(id, name)` 在任何 Agent 加入之前读取预设当前修订在 `isolate` 域内发布的服务；`serviceFor(agent, name)` 仍是面向活动 Agent 的形式。
-- 若预设挂载了自己的 `fs`，Session 创建通过该 `fs` 检查 cwd。目录必须已存在于该环境中，且不会在 Host 上创建任何内容；其他预设保留 Host 上的 `mkdir`。
+- 若预设挂载了自己的 `fs`，Session 创建通过该 `fs` 检查 cwd。目录必须已存在于该环境中，且不会在 Host 上创建任何内容；其他预设保留 Host 上的 `mkdir`。头部记录该执行世界的 `fs` 解析出的 cwd 规范写法，指明的空白 Session 所记录的 cwd 也在其自身预设的执行世界中比较，因此远端目录绝不会得到 Host 写法。
 - `workspace-files` 通过 Session 投影所指定预设的 `fs` 读取，因此空白 Session 切换预设后同样生效。`terminal-controller` 通过 Agent 预设隔离的 `subprocess` 启动进程。
 - `agentPresets.ownsWorld(id)` 依据声明（隔离的 `fs` 或 `subprocess`）判断是否拥有执行环境。此类预设的提供方因行失败或主机离线而缺失时，Session 创建、Files、Terminal 与工作区路径检查会拒绝，而不是改用 Host 的服务；空白 Session 切换预设时，会在其进入的执行环境（包括 Host）中检查 cwd 与附加根目录。
 - `tool-fs-search` 接受 `rgPath`，因为打包的 ripgrep 二进制是 Host 路径。

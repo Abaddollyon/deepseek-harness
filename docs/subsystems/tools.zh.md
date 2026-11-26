@@ -186,7 +186,8 @@ interface ToolRestriction {
  * Which visible tools a scope defers. A tool is deferred when its definition
  * sets `deferLoading` or its name matches `include`, and its name matches no
  * `exclude` pattern. Patterns match whole tool names; `*` matches any run of
- * characters, including none.
+ * characters, including none. An on-demand MCP server's loader
+ * (`mcp__<server>__load_tools`) is never deferred, whatever the patterns say.
  */
 interface ToolDeferPolicy {
   /** Name patterns of tools listed by name only. */

@@ -204,7 +204,8 @@ interface SessionHeader {
 /**
  * Options for creating a {@link Session} via the store. `seed` replays/forks
  * an existing event log; `meta` carries the caller-supplied storage fields the
- * store folds into a {@link SessionHeader}.
+ * store folds into a {@link SessionHeader}, plus the additional workspace roots
+ * recorded as the `workspace/roots` event.
  */
 interface CreateSessionOptions {
   /** Initial replay or fork history supplied at construction. */
@@ -219,11 +220,11 @@ interface CreateSessionOptions {
    * Storage metadata read once before publication. `isSeeded` marks fork
    * lineage; supplying replay history alone does not make it inherited.
    */
-  readonly meta?: SessionHeaderMeta
+  readonly meta?: SessionCreationMeta
 }
 ```
 
-`SessionHeaderMeta` 列出这些由调用方提供的字段；`buildSessionHeader` 把同样的字段折叠进新 Session 的头部。
+`SessionHeaderMeta` 列出头部字段；`buildSessionHeader` 把同样的字段折叠进新 Session 的头部。`SessionCreationMeta` 增加 `additionalPaths`，存储把它记录为 seq 0 的 `workspace/roots` 事件，而不是头部字段。
 
 ```ts type-equiv
 /**
@@ -238,6 +239,22 @@ interface SessionHeaderMeta {
   readonly origin?: 'subagent'
   readonly delegationDepth?: number
   readonly agentPreset?: string
+}
+```
+
+```ts type-equiv
+/**
+ * Creation fields accepted by `ctx.sessions.create()`: the {@link SessionHeaderMeta}
+ * header fields plus the Session's additional workspace roots, which are not a header field.
+ */
+interface SessionCreationMeta extends SessionHeaderMeta {
+  /**
+   * Absolute directories the Session may use beside `cwd`. A nonempty list
+   * becomes the Session's `workspace/roots` event at seq 0; a seeded
+   * Session inherits that event from its seed, and a supplied list must
+   * then equal the inherited one. Not a header field.
+   */
+  readonly additionalPaths?: readonly string[]
 }
 ```
 

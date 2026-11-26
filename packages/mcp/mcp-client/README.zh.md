@@ -146,7 +146,9 @@ kind: "package-reference"
 
 | 文件 | 职责 |
 |---|---|
-| [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、`serverName` 预留、激活等待、宿主启动 |
+| [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema 与 `apply` |
+| [`src/mount.ts`](src/mount.ts) | 共享插件主体：`serverName` 预留、激活等待、宿主启动 |
+| [`src/transport-wrapper.ts`](src/transport-wrapper.ts) | 经传输包装的插件对象（`./transport-wrapper`） |
 | [`src/config.ts`](src/config.ts) | stdio、Streamable HTTP 与宿主三种配置形态的 schema，以及 OAuth 请求头规则 |
 | [`src/host.ts`](src/host.ts) | MCP 客户端宿主：配置校验、挂在宿主之下的实例、探测与授权所有者 |
 | [`src/connection.ts`](src/connection.ts) | 连接监督器：客户端世代、重连策略、尝试预算、dispose（资源释放） |
@@ -168,7 +170,7 @@ kind: "package-reference"
 
 导出的 `createMcpToolDefinition(ctx, options)` 将上游工具 schema 和原始结果回调适配到相同的规范值、错误和持久化图像投影。每次回调都收到原样的 `ToolExecution`，包括其 Agent 和取消信号；SDK 的规范类型校验会在投影前检查返回结果。调用方负责注册、取消截止时间和提供方卸载。原生 Cua Driver 提供方使用此适配函数，无需打开 MCP 传输。
 
-导出的 `withTransportWrapper(wrap)` 返回与本插件名称、注入和 `Config` 相同的插件对象，其每代连接通过 `wrap(open)` 建立；`open()` 创建配置的传输。包装器拥有它返回的传输，插件仍负责命名空间保留、启动、工具同步、重连与销毁。[实验性浏览器运行时](../../experimental/browser-use-runtime/README.zh.md)用它在首次使用时启动 Session 的服务器。
+`@deepseek-ai/dsh-mcp-client/transport-wrapper` 导出的 `withTransportWrapper(wrap)` 返回与本插件名称、注入和 `Config` 相同的插件对象，其每代连接通过 `wrap(open)` 建立；`open()` 创建配置的传输。包装器拥有它返回的传输，插件仍负责命名空间保留、状态、启动、工具同步、重连与销毁。每代连接仍会替换返回传输上的 `start`、`close` 与 `onclose`，以跟踪其启动与已确认的关闭，因此该传输必须通过 `onclose` 报告自身关闭。`McpClientHost` 的探测连接不经过包装器。[实验性浏览器运行时](../../experimental/browser-use-runtime/README.zh.md)用它在首次使用时启动 Session 的服务器。
 
 ### 生命周期与同步
 

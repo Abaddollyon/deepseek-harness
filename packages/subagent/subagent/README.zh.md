@@ -60,7 +60,7 @@ kind: "package-reference"
 
 ### 本地与外部子级
 
-`startActivation({ provider, label, name?, prompt, parent, signal, delivery })` 返回 `{ childId, name, messageId?, result, dispose }`。提供 `childId` 会选择本地后端，并保证返回 `messageId`。本地子级接受后续消息并支持冷恢复；外部子级只暴露一次执行，拒绝继续输入。`agentOptions` 覆盖后端支持的子级模型设置。`delivery: 'parent'` 提供面向模型的完成通知；`delivery: 'caller'` 让工作流等待结果，不发送父级通知，也不附加初始返回指导。本地父级投递需要持久化，调用方投递可以使用临时本地会话；冷恢复需要持久化与 Session 查询服务。
+`startActivation({ provider, label, name?, prompt, parent, signal, delivery })` 返回 `{ childId, name, messageId?, result, dispose }`。提供 `childId` 会选择本地后端，并保证返回 `messageId`。本地子级接受后续消息并支持冷恢复；外部子级只暴露一次执行，拒绝继续输入。`agentOptions` 覆盖后端支持的子级模型设置。`delivery: 'parent'` 提供面向模型的完成通知；`delivery: 'caller'` 让工作流等待结果，不发送父级通知，也不附加初始返回指导。本地父级投递需要持久化，调用方投递可以使用临时本地会话；冷恢复需要持久化与 Session 查询服务。本地子级（包括工作流子级）会记录父 Session 的附加目录。本地提供方的 `prepareContinuable` 可以返回 `target: { agentPreset, cwd? }`，让全新子级在另一个 Agent preset 下、在该 preset 执行世界中的某个绝对目录里运行。这样的子级加入该 preset 而非其父级的 preset，在该目录中启动且不带父级的附加目录，在其头部记录这两个值（该目录是它的原始项目，而非父级的），并记录 preset 选择，使冷恢复重新加入同一 preset。`target` 与 fork `seed` 同时出现会被拒绝，因为 seed 会把父级的工作区根目录带入另一个执行世界；显式指定与目标不同的 `agentPreset` 会以 `UNSUPPORTED_CAPABILITY` 被拒绝。
 
 `rootOf(agent)` 通过托管本地 Agent 已有的 Activation 解析树根，并校验子级和树根的确切存活实例。中间创建者退出不改变该树根；同 id 替代实例不能继承成员身份。普通存活 Agent 返回自身，非托管的委派 Agent 会被拒绝。查询不会激活 Session。
 

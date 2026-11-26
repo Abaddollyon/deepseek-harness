@@ -10,22 +10,26 @@ Status: implemented
 
 ## 决策
 
-`dsh-tools` 只列出延迟工具的名称。`defer` 配置字段（带 `*` 的完整名称模式 `include` 与 `exclude`）设置部署级策略，`ToolRuntime.deferAs()` 为一条作用域链遮蔽它，`tool-presentation` preset 行以 `defer` 字段暴露它。设置了 `deferLoading` 的工具除非被排除，否则同样延迟。没有策略时其他行为不变。
+`dsh-tools` 只列出延迟工具的名称。`defer` 配置字段（带 `*` 的完整名称模式 `include` 与 `exclude`）设置部署级策略，`ToolRuntime.deferAs()` 为一条作用域链遮蔽它，`tool-presentation` preset 行以 `defer` 字段暴露它。设置了 `deferLoading` 的工具除非被排除，否则同样延迟。没有策略时其他行为不变。按需 MCP 服务器的加载器（`mcp__<server>__load_tools`）无论模式如何都从不延迟。
 
 当某个作用域延迟了一个可见工具时，注册表会在 `run_code` 旁插入保留的 `tool_search` 查询工具。延迟的工具仍然注册且可调用：
 
-- 在 PTC 模式下，它们离开 `ToolArgsMap` 与 `ToolOutputMap`。SDK 代码块之后是 `## More tools` 索引，每个工具一行；超过八个工具的命名空间族合并为一行成员名称。程序内的 `tool_search` 以 SDK 自身的语言返回声明，这些声明留在历史中。
+- 在 PTC 模式下，它们离开 `ToolArgsMap` 与 `ToolOutputMap`。SDK 代码块之后是 `## More tools` 索引，每个工具一行；超过八个工具的命名空间族合并为一行成员名称。索引的示例用 `inspect(...)` 打印一次查找，程序内的 `tool_search` 返回一个 TypeScript 片段，它并入上述两个映射并留在历史中。自[仅 TypeScript 的 PTC 决策](../simplification/2026-11-12-typescript-only-ptc.zh.md)起，PTC 只支持 TypeScript；Python SDK 的索引与片段随之移除。
 - 在 native 模式下，它们离开已声明的工具列表，由 `tools:deferred` 段承载同样的仅列名称索引；该索引列出所有可延迟的工具，因此激活不会改变它。直接调用 `tool_search` 会返回其 JSON schema，并为该 agent 激活它们。agent loop 已经会把新声明的工具记录为 `tool-addition`，因此支持工具更新的路由在缓存历史之后加入它，其他路由则重新声明列表。
 - 在 `both` 下，直接调用 `tool_search` 只为 native 列表激活工具。SDK 仍按名称列出每个可延迟的工具，因此激活永远不会改写已缓存的 SDK 段。
 - 延迟工具的参数错误会附带该工具的声明。
 
 激活按 agent 保存在注册表中。在 `agent/created` 时，注册表从 agent 最后一次记录的请求头所声明的工具恢复其激活，因为该请求头已经记录了提供给模型的内容。
 
+上游的[按需加载 MCP 工具](2026-10-08-mcp-on-demand-tool-loading.zh.md)是一个独立的逐服务器机制，与本机制并存。它的加载器是 agent 进入该服务器目录的途径，而该目录只为能看到加载器的 agent 渲染，因此延迟加载器会让该服务器的工具藏在两次查询之后。它加载的工具注册在 agent 自己的作用域中，并像其他工具一样经过本策略。
+
 ## 考虑过的替代方案
 
 **为激活新增会话事件。** 它还能保留在工具结果与下一次请求头之间丢失的激活，但会为模型再次查询即可恢复的情况增加一个持久化类型、一个投影及其兼容性记录。
 
 **用查询到的工具重新渲染 SDK。** 查询后把声明加入系统提示词会使每次查询都让缓存前缀失效；让声明留在工具结果中可以保持提示词稳定。
+
+**用按需加载 MCP 工具取代本机制。** 该机制一次只覆盖一个 MCP 服务器，且只覆盖为它配置的服务器；本策略还会延迟记忆、计算机操作、作业和团队任务等非 MCP 工具，并让它们无需加载步骤即可调用。
 
 **默认延迟。** 改变每个部署发送的内容会让现有 preset 出乎意料；默认策略只延迟已经通过 `deferLoading` 要求延迟的工具。
 

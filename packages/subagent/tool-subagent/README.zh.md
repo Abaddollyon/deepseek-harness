@@ -46,6 +46,7 @@ kind: "package-reference"
 |---|---|---|
 | `provider` | 必填 | `ctx.subagents` 上的提供方名称（如 `spawn`、`fork`、`acp`） |
 | `toolName` | `subagent` | 面向模型的工具名称；每个已加载实例必须不同 |
+| `description` | — | 工具描述的开头，替换通用的委派说明（例如为别名实例写一行角色说明）；托管运行与模型选择相关的句子仍会追加在后面 |
 | `modelSelection` | `false` | 公开可选子级路由字段；要求提供方支持 `agentOptions` |
 | `modelDiscovery` | `false` | 注册 `list_subagent_models`；每个工具作用域仅在一个实例上启用 |
 | `agentOptions` | — | 配置的子级 `provider`、`model`、适配器所有的 `reasoningEffort` 与正整数 `maxTokens` 默认值；要求提供方支持 `agentOptions`，并会覆盖提供方持有的路由默认值 |
@@ -111,6 +112,8 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 工具注册、提供方生命周期镜像、activation 请求 |
 | [`src/preset-selection.ts`](src/preset-selection.ts) | preset 默认值、模型白名单与选择引导 |
 | [`src/model-selection.ts`](src/model-selection.ts) | 请求／配置合并与实时 LLM 路由预检 |
+| [`src/child-route-defaults.ts`](src/child-route-defaults.ts) | 其他委派工具所配置路由默认值的 `agentOptions` schema 与转换 |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` 导出，供其他委派工具（例如 workflow `agent()`）复用路由默认值、合并、白名单与预检规则 |
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | 每次委派和发现调用时读取的宿主所有 opt-in 设置 |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | 已停用 Session 策略事件的声明，保留以便读取已发布的 Session 日志 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |

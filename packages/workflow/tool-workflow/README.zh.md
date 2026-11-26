@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-tool-workflow` 让模型运行 JavaScript 编排，将工作委派给多个 subagent，并返回最终 JSON 值。仅当用户明确要求工作流或大型多 agent（智能体）编排时使用；一两项委派应优先使用普通 subagent 调用。前台执行等待所有工作结束；取消或异常完成返回错误，而不是部分成功。`run_in_background: true` 立即返回自有任务 id，并提供实时输出。部署方可以用 `toolName` 重命名工具，用 `maxResultChars` 限制渲染结果。
+`dsh-tool-workflow` 让模型运行 JavaScript 编排，将工作委派给多个 subagent，并返回最终 JSON 值。仅当用户明确要求工作流或大型多 agent（智能体）编排时使用；一两项委派应优先使用普通 subagent 调用。前台执行等待所有工作结束；取消或异常完成返回错误，而不是部分成功。`run_in_background: true` 立即返回自有任务 id，并提供实时输出。部署方可以用 `toolName` 重命名工具，用 `maxResultChars` 限制返回值。
 
 ## 目录
 
@@ -46,7 +46,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow` | 要注册的面向模型工具名称。 |
-| `maxResultChars` | `50000` | 渲染结果上限；更长的 JSON 会被截断并附上提示。 |
+| `maxResultChars` | `50000` | 序列化返回值上限；更长的 JSON 会通过 `ctx.spillStore` 保存，并替换为 `{ truncated: true, originalChars, spillPath, preview }`；未挂载 spill 后端时替换为 `{ truncated: true, originalChars, notice, preview }`。 |
 | `enableRunInBackground` | `true` | 公开 `run_in_background`；关闭后调用同样会被拒绝。 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-workflow)是每个受支持字段的穷尽式真源。
@@ -67,7 +67,7 @@ kind: "package-reference"
 
 ### 运行生命周期
 
-`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会对运行执行 dispose。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果：`exec.signal` 已中止时重新抛出调用方的中止原因，否则抛出 `WorkflowError`；完成时渲染 `{ kind, runId, agentsStarted, result }`，Native 渲染器只会在 `maxResultChars` 处截断该投影。
+`execute` 启动运行，并在 `try/finally` 内等待 `run.result`；该结构总会对运行执行 dispose。`exec.signal` 会桥接到 `run.cancel()`，包括启动前已经中止的情况。非 `completed` 结束原因会映射为报告原因的 `isError` 结果：`exec.signal` 已中止时重新抛出调用方的中止原因，否则抛出 `WorkflowError`；完成时返回 `{ kind, runId, agentsStarted, result }`。如果返回值的格式化 JSON 超过 `maxResultChars`，会通过会话范围的 `ctx.spillStore` 完整保存，`result` 变为 `{ truncated: true, originalChars, spillPath, preview }`。没有 spill 后端时，`result` 变为 `{ truncated: true, originalChars, notice, preview }`，其 `notice` 说明完整 JSON 未被保存。已挂载的后端保存失败时，调用（或后台任务）会失败，而不会返回残片。
 
 ### 后台生命周期
 
@@ -75,7 +75,7 @@ kind: "package-reference"
 
 ### 持久会话记录
 
-对于根 transport 执行（`exec.parent` 缺省），工具会用四个 log-only 事件把运行投影到调用方 agent 的会话：`start()` 返回后写 run-start，只记录 `run.id` 匹配的成员开始与结束，并且只在结果可用且 dispose 完全停稳后写 run-end。嵌套 transport 调用照常执行，但不写任何记录。会话追加操作首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变工具结果和清理。
+对于每个被接受的调用，无论是根调用还是由 `run_code` 分派（`exec.parent` 已设置），工具都会用四个 log-only 事件把运行投影到调用方 agent 的会话：`start()` 返回后写 run-start，只记录 `run.id` 匹配的成员开始与结束，并且只在结果可用且 dispose 完全停稳后写 run-end。PTC mode 下 `run_code` 是模型调用本工具的唯一途径，因此分派的运行与根调用完全一样地记录。会话追加操作首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变工具结果和清理。
 
 引擎的 `workflow/phase` 与 `workflow/log` 事件在本工具没有逐行的持久面：会话日志刻意只记录 run 与成员生命周期，Web transcript 由这些记录派生。后台运行的这些行改经任务观察 record 抵达人类，而 record 的瞬态是设计使然。
 
@@ -150,11 +150,11 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 #### 模型看到什么
 
-由模型编写的完整脚本、元数据与 args 会保留在 assistant 工具调用中。前台成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及美化打印且依赖数据的 JSON；达到上限时，会在新行添加 `… [truncated: <omitted> more characters]`。后台受理结果精确为 `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`，同样渲染的值稍后经任务完成播报与 `job_output` 抵达模型。调用方中止后的失败渲染中止原因；其他失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`（`ToolContextUnavailableError`）。中间子 agent 消息会被省略。
+由模型编写的完整脚本、元数据与 args 会保留在 assistant 工具调用中。前台成功结果精确为 `workflow "<name>" completed (<count> agent<optional-s>).`、换行、`Return value:`、换行，以及美化打印且依赖数据的 JSON；超大值会替换为 `{ truncated: true, originalChars, spillPath, preview }`，其 `spillPath` 保存完整 JSON；没有 spill 后端时，以说明仅保留预览的 `notice` 代替 `spillPath`。后台受理结果精确为 `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`，同样渲染的值稍后经任务完成播报与 `job_output` 抵达模型。调用方中止后的失败渲染中止原因；其他失败结果精确为 `Error: workflow run was cancelled`（可以追加后缀 ` (<error>)`）、`Error: workflow run failed: <error-or-unknown error>` 或防御性的 `Error: workflow run ended abnormally (<reason>)`；没有所属 agent 的调用变为 `Error: workflow tool requires a calling agent (exec.agent was undefined)`（`ToolContextUnavailableError`）。中间子 agent 消息会被省略。
 
 #### Token 影响
 
-调用 token 可能很多，并会保留到压缩（compaction）为止。结果渲染受 `maxResultChars` 限制；子模型 token 与父级保留的上下文相互独立。
+调用 token 可能很多，并会保留到压缩（compaction）为止。序列化返回值受 `maxResultChars` 限制，恢复元数据会增加有界的封装；子模型 token 与父级保留的上下文相互独立。
 
 #### KV Cache 影响
 
@@ -168,9 +168,9 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 这些限制说明该工具尚未支持什么。它们是当前约束，不是任务积压。
 
 - **后台运行不向模型报告中间值**——结算前的 `job_output` 只返回状态；返回值在完成时整体送达，取消仍会丢弃局部输出。
-- **`args` 必须是对象，Native 结果文本有界**——调用方把顶层数组／标量包装到字段中；规范工作流结果保持完整，超过 `maxResultChars` 的 JSON 会在面向模型的投影中截断，而不是存储在检索句柄背后。
+- **`args` 必须是对象，结果封装可能超过上限**——调用方把顶层数组／标量包装到字段中；`maxResultChars` 只限制序列化返回值，因此超大值的恢复元数据（包括预览）可能超过该上限。
 - **每次工具注册的工作流策略固定**——提供方选择、上限与工具名称属于部署配置，不是模型调用参数。
-- **持久记录只覆盖顶层且只供观察**——嵌套 PTC mode dispatch 不记录；记录故障会刻意退化为不完整前缀，而不改变执行。
+- **持久记录只供观察**——记录故障会刻意退化为不完整前缀，而不改变执行。
 - **尚无回放后台运行的 recorded-session 场景**——单元与真实引擎组合套件覆盖该路径；快照树只钉住 schema 与提示词文本。
 
 <a id="dev-note"></a>
@@ -181,6 +181,6 @@ Use the <toolName> tool ONLY when the user explicitly asks for a workflow or for
 
 本开发备注是维护者的工作上下文：尚未决定的开放方向。它明确不具权威性——已交付的行为、限制与既定理由以上文、包代码与相关 Agent Note 为准。
 
-开放方向：把截断的 JSON 存储在检索句柄背后，而不是剪裁投影；记录超出顶层的嵌套 dispatch；为后台路径补一个 recorded-session 场景。
+开放方向：为后台路径补一个 recorded-session 场景。
 
 </details>

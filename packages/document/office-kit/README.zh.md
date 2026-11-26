@@ -42,7 +42,7 @@ kind: "package-reference"
 
 Kit 缺失时提供方照常注册，例如未下载 Office sidecar 就启动的 Python SDK 可执行程序。此时需要新转换器的转换以代码为 `unavailable` 的 `OfficeKitError` 拒绝，提供方通过 `ctx.logger` 对每种不同的失败只报告一次。Kit 入口导入失败时行为相同。提供方只保留成功的导入，因此之后的转换会重新定位并导入 Kit。Office 预览对 `document-render/failed` 原因显示本地化的 `unavailable` 提示。
 
-浏览器通过 `officeKit.render` Remote 方法请求 PDF，参数为 Session 标识、Office 路径和优先级。此入口使用 `workspaceFiles` 完成授权和源版本检查，再通过 `fs.readBytes` 在转换预留容量内读取原始字节。进程内 `convert()` 不要求这些服务。响应保留源文件路径与版本，通过二进制 Remote 的 multipart 传输携带原生 PDF 字节，并携带缺失字体和转换 generation。`officeKit.generation` Remote 方法返回当前提供方 generation；`api/remotes` 负责挂载生成的 Client 描述符。
+浏览器通过 `officeKit.render` Remote 方法请求 PDF，参数为 Session 标识、Office 路径和优先级。此入口使用 `workspaceFiles` 完成授权和源版本检查，再通过 Session 作用域文件系统（属于该 Session 的执行世界；作用域未指定执行世界时为 Host 的文件系统）的 `readBytes` 在转换预留容量内读取原始字节。进程内 `convert()` 不要求这些服务。响应保留源文件路径与版本，通过二进制 Remote 的 multipart 传输携带原生 PDF 字节，并携带缺失字体和转换 generation。`officeKit.generation` Remote 方法返回当前提供方 generation；`api/remotes` 负责挂载生成的 Client 描述符。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|

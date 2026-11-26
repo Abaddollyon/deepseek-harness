@@ -41,6 +41,8 @@ ctx.sessions.get(sessionId)      // the live session
 ctx.sessions.list()              // every live session, in creation order
 ```
 
+`meta.additionalPaths`（`SessionCreationMeta`）为新会话提供 `cwd` 之外的绝对目录。会话把非空列表记录为 seq 0 处可忽略的 `workspace/roots` 事件，并通过 `session.additionalPaths` 公开；`append()` 拒绝该事件类型，无论单独追加还是在批次中，带种子或恢复的会话则从其种子读取该事件。构造和 `validateSessionLog()` 拒绝出现在可忽略 seq 0 位置以外的 `workspace/roots` 事件。不认识该事件的读取方会跳过它，并把会话限制在 `cwd` 内。这些根目录不是头部字段，本身也不授予任何权限：每次有 Agent 在该 Session 上启动时，`dsh-sandbox-policy` 都会把它们注册为该 Session 的可写目录。
+
 ### 校验日志与构建头部
 
 `validateSessionLog(header, events?, inheritedEventCount?, eventState?, projections?)` 执行构造 Session 时的全部检查，顺序和报错相同，但不构造 Session。不传 `eventState` 时它与 `Session.create()` 一致：先复制借入的事件和头部再校验；传 `detached` 或 `shared-frozen` 时它与 `Session.fromRestore()` 一致：就地校验并深度冻结头部，不复制事件。Session 标识取自 `header.id`，也不在内存中追加继承标记。

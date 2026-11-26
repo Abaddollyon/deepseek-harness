@@ -25,7 +25,7 @@ kind: "package-library"
 <a id="use-this-package"></a>
 ## 使用本包
 
-从本包导入 `spawnRipgrep`，传入组合的子进程服务与显式的 `SubprocessSpawnSpec`；其中 `argv` 只包含 rg 参数。返回的 handle 按请求提供已收集输出或管道流。stdout 为管道时，`readRipgrepLines` 逐条提供以换行或 NUL 分隔的 UTF-8 记录；回调返回 false 会终止 rg，并抑制剩余记录。该函数等待 stdout、进程结果与托管进程范围全部结束后返回。回调、流或提供方失败会在清理后拒绝。调用方按自身 signal 解释退出码与取消。
+从本包导入 `spawnRipgrep`，传入组合的子进程服务与显式的 `SubprocessSpawnSpec`；其中 `argv` 只包含 rg 参数。子进程提供方运行在另一个执行世界（例如 SSH 主机）时，把 `{ executable }` 作为第三个参数传入：绝对路径，或该执行世界 PATH 上的名称。不传时启动 Host 的打包二进制；空白的覆盖值会被拒绝。返回的 handle 按请求提供已收集输出或管道流。stdout 为管道时，`readRipgrepLines` 逐条提供以换行或 NUL 分隔的 UTF-8 记录；回调返回 false 会终止 rg，并抑制剩余记录。该函数等待 stdout、进程结果与托管进程范围全部结束后返回。回调、流或提供方失败会在清理后拒绝。调用方按自身 signal 解释退出码与取消。
 
 只需要可执行文件路径的消费方可以独立使用 `resolveRgPath`。解析与启动失败会拒绝调用，不阻止导入本包。本库是依赖，不是 profile 插件。
 
@@ -65,7 +65,7 @@ kind: "package-library"
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **要求同处一个执行环境的程序**——解析使用 Host 的打包二进制路径。远端子进程提供方没有该程序时调用失败；不查找系统 rg，也不回退到文件系统遍历。
+- **要求同处一个执行环境的程序**——解析使用 Host 的打包二进制路径。远端子进程提供方没有该程序时调用失败，除非调用方通过 `executable` 指定该执行世界自己的可执行文件；不自动查找系统 rg，也不回退到文件系统遍历。
 - **记录缓冲**——流式读取保留一条尚未完整的记录与当前流块；文件名可能含换行符的调用方使用 NUL 分隔符而不是换行符。记录按 UTF-8 解码，因此不是有效 UTF-8 的文件名会带着 U+FFFD 替换字符到达，无法用该字符串打开。
 
 <a id="dev-note"></a>

@@ -53,6 +53,10 @@ kind: "package-reference"
 
 层级仅使用已注册的规范路径，不扫描项目，也不解析符号链接别名。嵌套不会改变 Session 的工作目录、日志或 Workspace 归属。删除父 Workspace 后，子 Workspace 仍保持注册，并归入下一个已注册祖先；没有祖先时显示在根层级。
 
+Workspace 菜单中的**管理文件夹…**项在 `useWorkspaceAccess` 允许 `workspace/updatePaths` 时提供，它打开的对话框列出主文件夹，并通过同一目录流程编辑该 Workspace 的其他文件夹，保存时以 `workspaces.updatePaths()` 提交完整列表。对话框打开期间，添加流程会关闭，因为两者共用浏览器唯一的目录流程子 hole。只有之后创建的 Session 使用修改后的列表。Workspace 悬停卡片列出其他文件夹，Session 悬停卡片列出该 Session 记录的文件夹（读取其 `additionalPaths` 投影）。当其他执行主机可以容纳 Workspace（`workspaces.worlds()`）时，添加菜单还会提供**在 <主机> 上添加工作区…**，用于注册该主机上手动输入的文件夹路径；此类 Workspace 的文件夹对话框改为添加手动输入的路径，而不打开 Host 目录流程。位于其他执行主机上的 Workspace 会在其行上以徽标显示该主机名称，悬停时由行操作取代。
+
+不属于任何 Workspace 的 Session 显示在**聊天**下。该分组的新建会话操作，以及新会话选择器中的**不使用工作区**，都会在 Host 默认目录中创建不属于 Workspace 的 Session 并打开它。选择器的搜索只筛选 Workspace：输入查询时，不使用工作区的选项会从列表中移除。
+
 在不支持悬停的设备上，展开的 Workspace 行显示菜单和新建会话按钮，已归档的搜索结果始终显示取消归档按钮。
 
 ### 搜索
@@ -67,7 +71,7 @@ kind: "package-reference"
 
 “复制 Session ID”位于 Session 行“...”菜单的标识信息组。点击后关闭菜单并直接复制完整 ID，不打开对话框。复制成功或失败通过全局提示反馈；失败时可从菜单重试。复制不会 retain 会话、加载历史或调用 Host。
 
-Session 行内的 Rename 操作打开一个以该行显示标题预填的对话框；确认未修改的标题是有意允许的——这正是把当前自动标题钉住、不再被重新生成覆盖的手势。双击标题也会打开 Rename；对于未归档 Session，先发生的点击会打开其对话。当激活未聚焦窗口的那次点击不会传递给页面时（如在 macOS 上），下一次点击不会打开 Rename。Rename 使用临时 `workspaceOperation` reference，并等待首次历史打开。行内 Fork 正常读取普通冷历史。Host 报告源会话需要迁移时，应用级 Toast 提供打开该会话的操作；该操作仅导航，不重试 fork。成功的 fork 在源会话最后一个已完成轮次处创建分支，通过 Session Controller 递增继承的持久化标题，不 retain 子会话、不打开其历史，也不改变选择。Workspace 行内的 Delete 操作会打开确认框，说明保留边界；成功后该分组被移除，其 Session 则留在 Ungrouped 下。内置菜单使用结构化贡献，参见 [Session 行动作](#session-row-actions)。
+Session 行内的 Rename 操作打开一个以该行显示标题预填的对话框；确认未修改的标题是有意允许的——这正是把当前自动标题钉住、不再被重新生成覆盖的手势。双击标题也会打开 Rename；对于未归档 Session，先发生的点击会打开其对话。当激活未聚焦窗口的那次点击不会传递给页面时（如在 macOS 上），下一次点击不会打开 Rename。Rename 使用临时 `workspaceOperation` reference，并等待首次历史打开。行内 Fork 正常读取普通冷历史。Host 报告源会话需要迁移时，应用级 Toast 提供打开该会话的操作；该操作仅导航，不重试 fork。成功的 fork 在源会话最后一个已完成轮次处创建分支，通过 Session Controller 递增继承的持久化标题，不 retain 子会话、不打开其历史，也不改变选择。Workspace 行内的 Delete 操作会打开确认框，说明保留边界；成功后该分组被移除，其 Session 则留在**聊天**下。内置菜单使用结构化贡献，参见 [Session 行动作](#session-row-actions)。
 
 对静止的 Session，Archive 不经确认对话框直接提交，并保留 Session 的记账位置。仍有工作在跑的 Session 是唯一会先询问的情形：Host 拒绝普通归档并列出这些工作，侧栏随即打开"停止并归档"对话框，按族列出——进行中的回合、运行中的子代理、后台任务、定时提醒，各带名称——并写明恢复路径；确认后请 Host 按停止按钮同样的方式停止这些工作，归档集合持久化后即完成归档，停止在后台收敛；取消则让 Session 继续运行并保持可见。视图选项以一组显式三选一控制显隐：隐藏已归档（默认项）隐藏已归档 Session，全部对话（显示已归档）将其纳入列表，仅显示已归档则隐藏普通 Session，并丢弃没有归档 Session 的 Workspace；树形分组下，被丢弃 Workspace 的子级挂到最近一个仍显示的祖先下。可见的归档行置灰，并提供无障碍说明，告知取消归档后才能打开；Rename、Fork 与取消归档仍然可用。归档成功后的提示提供"撤销"动作，并在归档行仍被隐藏时附带"筛选已归档会话"动作，后者直接把筛选切到全部对话（显示已归档）；停止并归档显示同样的提示但措辞不同，撤销只恢复 Session，不会让被停止的工作继续。取消归档移除归档标记，但不恢复置顶，也不改变保存的位置。列表为空时显示居中的"图标在上、文字在下"占位；仅显示已归档视图用自己的文案（暂无已归档会话），并附"查看其他会话"文字按钮，点击把筛选切回隐藏已归档。
 
@@ -85,7 +89,7 @@ Session 行渲染运行时的实时 `pendingInteraction` 分类：审批显示**
 
 当成组的与平铺的 Session 行所对应的 Session 存在活动定时任务时，该行显示时钟标记。它是行首 `sidebar.session.row.leading` seat 的占用方，因此仅在该行主状态为 idle 时渲染，绝不与行自身的状态点同时出现；归档行该格同样留空，搜索结果没有该 seat，也不显示标记。它不是按钮，没有 Tab stop，点击其所在区域不会打开整行。标记自身的读取及其「活动」条件的确切含义由 [ui-schedule](../ui-schedule/README.zh.md) 负责。
 
-工作区标题的右键和省略号共用本包声明的 `workspace` 右键操作对象。重命名和删除沿用现有确认对话框，打开前再次检查工作区是否存在及操作权限；本机目录显示由 [ui-open-in-app](../ui-open-in-app/README.zh.md) 提供。没有修改权限时仍可使用本机和插件菜单操作。打开菜单不改变展开状态或选中的会话。
+工作区标题的右键和省略号共用本包声明的 `workspace` 右键操作对象。重命名、管理文件夹和删除使用浏览器的对话框，打开前再次检查工作区是否存在及操作权限；本机目录显示由 [ui-open-in-app](../ui-open-in-app/README.zh.md) 提供。没有修改权限时仍可使用本机和插件菜单操作。打开菜单不改变展开状态或选中的会话。
 
 会话行通过 [ui-context-menu](../ui-context-menu/README.zh.md) 在右键与省略号按钮间共享现有操作贡献。操作对象固定为被点击的会话，不改变选中状态；`sidebar.workspaces.session.menu.item` 仍是组件扩展位置。内置分组依次为置顶、重命名、分叉；复制 Session ID 和可选的本机目录显示；归档，复制 Session ID 与归档之前各有一条分割线。
 
@@ -95,7 +99,7 @@ Session 行渲染运行时的实时 `pendingInteraction` 分类：审批显示**
 
 `mainView` 引用保留 `conversation` 子要素。主视图离开一个非空白、未归档的 Session 时，导航先以不带子要素的 `recentViews` 引用保留它，因此其历史仍已加载，切回时无需再请求历史，而 Conversation 组装在重新显示前停止。运行中、等待用户或完成未读的最近访问会话始终保留且不计数；其余最近访问会话最多保留 `recentViewLimit` 个（默认 10），不含主视图 Session。`recentViewLimit` 是插件 Host `Config` 的 volatile 字段，在其 `cordis.yml` 行中设置，并经 [Client Modules](../modules/README.zh.md#synced-plugin-configuration) 同步到浏览器；修改后无需刷新页面即生效，按新上限释放或保留最近访问会话，已释放的 Session 不会回来。浏览器收到值之前，所有计数的最近访问会话都会保留。超出时先释放最早离开的未置顶会话，再释放最早离开的置顶会话；被释放的最近访问会话只有在主视图再次离开该 Session 时才会回来。Session 回到主视图、被移除或归档，或插件卸载时，会释放其最近访问引用。
 
-Session 行与 Workspace 行的可用操作来自浏览器根的访问 Hook：`useWorkspaceAccess` 门控 Workspace 的新建、重命名、删除与排序动作，`useSessionAccess` 门控 Session 行的重命名、分叉、重排拖拽、置顶、归档与取消归档动作，以及搜索结果的恢复控件。被拒绝的动作不渲染，但每个发往 Host 的请求仍以其授权为准。Ungrouped 标题行不提供新建会话，因为它没有可在其中新建会话的后备 Workspace。启动恢复会 retain 主 reference，不改变已选面板，也不取消后续导航。归档主 Session 会释放其 reference 并清除主选择。选择失败时保留当前全局面板。Session 行读取 `usePanelInfo`，在全局面板活跃时不显示 Session 选中样式；仅把焦点移到搜索框或目录选择器不会离开该面板。
+Session 行与 Workspace 行的可用操作来自浏览器根的访问 Hook：全局 `useRemoteAccess('session/create')` 门控**聊天**标题行的新建会话，`useWorkspaceAccess` 门控 Workspace 的新建、重命名、文件夹编辑（`workspace/updatePaths`）、删除与排序动作，`useSessionAccess` 门控 Session 行的重命名、分叉、重排拖拽、置顶、归档与取消归档动作，以及搜索结果的恢复控件。被拒绝的动作不渲染，但每个发往 Host 的请求仍以其授权为准。启动恢复会 retain 主 reference，不改变已选面板，也不取消后续导航。归档主 Session 会释放其 reference 并清除主选择。选择失败时保留当前全局面板。Session 行读取 `usePanelInfo`，在全局面板活跃时不显示 Session 选中样式；仅把焦点移到搜索框或目录选择器不会离开该面板。
 
 导航和启动恢复通过所选 Session 的 `follow` 获取投影，不会另行刷新该 Session 或其父会话的投影；例外是恢复已保存的空白会话时先重新加载该 Session 的投影，因为列表中的值是缓存提示，Host 非正常退出后可能落后于其日志。
 

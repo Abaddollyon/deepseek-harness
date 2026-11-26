@@ -115,7 +115,7 @@ Workspace 注册不意味着拥有其目录。未来的破坏性文件系统操�
 | [`src/entity.ts`](src/entity.ts) | 包私有 `Workspace` 实现及其唯一的 `mutate` 写入路径 |
 | [`src/spec.ts`](src/spec.ts) | 领域声明：记录 schema、注册表状态、`defineDomain` 规范 |
 | [`src/types.ts`](src/types.ts) | 公开 `Workspace` 接口与 `WorkspaceId` 品牌 |
-| [`src/paths.ts`](src/paths.ts) | `realpath` 唯一性规范 |
+| [`src/paths.ts`](src/paths.ts) | `realpath` 唯一性规范与附加目录规范化（`./paths`） |
 
 ### 持久形态
 

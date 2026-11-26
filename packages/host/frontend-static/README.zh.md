@@ -47,7 +47,7 @@ kind: "package-reference"
 
 除 index 外，所有提供的文件都由浏览器重新验证。这类响应携带 `cache-control: no-cache` 和由文件内容 SHA-1 生成的弱 ETag，因此文件内容变化后即使名字不变也会得到新的 ETag；`If-None-Match` 等于当前 ETag 的请求得到空的 304。渲染出的 index 不带缓存头。
 
-经 [`ctx.clientSurfaces`](../../client/modules/README.zh.md) 注册的路径同样是 index 入口：它以该 surface 的 id 作为 `renderIndex` 的 variant 渲染同一份 `index.html`，其 `authorizeIndex` 调用只在该确切路径接受启动 token，并重定向到其干净 URL。
+经 [`ctx.clientSurfaces`](../../client/modules/README.zh.md) 注册的路径同样是 index 入口：`auth` 选择器对它要求 Peer，它以该 surface 的 id 作为 `renderIndex` 的 variant 渲染同一份 `index.html`。[Token 插件](../authentication-token/README.zh.md)只在该确切路径接受启动 token，并重定向到其干净 URL。匹配路径时只读取已注册的路径；surface 图在准入之后才组合。
 
 ### 可观察的失败
 

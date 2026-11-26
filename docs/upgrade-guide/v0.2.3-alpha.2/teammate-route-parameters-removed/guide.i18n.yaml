@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.3-alpha.2/teammate-route-parameters-removed/guide.md
+/:
+  en: 9789dceb39fa73c3
+  zh: 8f2795c304b9873c
+/teammate-routes-come-from-the-subagent-tool:
+  en: 5a4aae554f3e79aa
+  zh: 07daf16c571a2b05
+/teammate-routes-come-from-the-subagent-tool/change:
+  en: d5bc168efb3a063e
+  zh: 6ca35e071997bf8a
+/teammate-routes-come-from-the-subagent-tool/migration:
+  en: 4c643c3f9d4748ef
+  zh: 23b54491f900aad6

@@ -28,8 +28,10 @@ interface SessionEventMap {
   /**
    * Absolute directories the Session may use beside its header `cwd`, fixed
    * when the Session is created. Valid only as seq 0 with `ignorable: true`;
-   * `Session.append()` refuses it. A reader that skips it confines the Session
-   * to `cwd`, and the model-visible policy text is logged separately.
+   * `Session.append()` refuses it, alone or in a batch. A reader that skips it
+   * confines the Session to `cwd`. The sandbox policy grants these roots again
+   * each time an Agent starts on the Session; the model-visible policy text is
+   * logged separately.
    */
   'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**

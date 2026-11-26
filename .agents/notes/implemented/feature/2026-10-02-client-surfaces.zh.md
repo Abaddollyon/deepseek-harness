@@ -12,7 +12,9 @@ Status: implemented
 
 [Client Modules](../../../../packages/client/modules/README.zh.md) 提供 `ctx.clientSurfaces`。宿主插件在 `ctx.effect` 内注册 `{ id, path, rootPlugin, roots }`；surface 启动图是 client-modules bootstrap 加上 `rootPlugin` 与 `roots` 的 `inject`/`external` 闭包。若根插件属于普通启动图，或所需的 `inject` 包未加载，注册失败；闭包不完整期间该路径不再渲染。`dsh.client.defaultRoot: false` 让仅服务 surface 的包留在普通启动图之外，除非某个普通根包依赖它；未声明该字段的包保持普通 Web 启动行为。
 
-[Frontend Static](../../../../packages/host/frontend-static/README.zh.md) 把已注册路径作为 index 入口提供。它把 surface 路径传给 Connection 的 `authorizeIndex`，后者只在该确切路径接受启动 token 并重定向到同一干净路径；它还把 surface id 作为 WebServer `IndexRenderContext` 的 `variant` 传入，使 Client Modules 注入 surface 启动图，其他 index 行保持共享。
+[Frontend Static](../../../../packages/host/frontend-static/README.zh.md) 把已注册路径作为 index 入口提供：其回退的 `auth` 选择器对该路径要求 Peer，因此 WebServer 像对待根路径一样通过 Connection 准入它，渲染时把 surface id 作为 WebServer `IndexRenderContext` 的 `variant` 传入。随后 Client Modules 注入 surface 启动图，并像普通启动图一样按渲染 Peer 的主体投影，其他 index 行保持共享。[Token 插件](../../../../packages/host/authentication-token/README.zh.md)的 `webserver/request` 监听器在根路径与每个已注册 surface 路径上交换启动 token；`BrowserAuth.authorizeIndex` 只在该确切交换路径接受 token，并重定向到同一干净路径。它在请求到达时读取 `ctx.clientSurfaces`，而不依赖 Client Modules。
+
+surface 启动图的行携带所有者的同步配置值，读取自普通组合的刷新结果，不重新计算。其客户端产物与普通启动图是同一批 combo 组合包，因此模块元数据会到达渲染器，闭包包含渲染器时，由它安装样式表。
 
 ## 考虑过的替代方案
 
@@ -24,4 +26,4 @@ Status: implemented
 
 ## 影响
 
-任何浏览器页面都可以通过现有 Connection cookie 与 RPC 通道，在已注册路径启动最小启动图。每次渲染 surface index 都会重新组合其启动图，其 batch 响应会一直提供，直到下一次普通重组替换该代际。注册必须在 `roots` 中列出每个运行时才发现的包，因为闭包只沿声明的 `inject` 与已加载的 `external` 行展开。
+任何浏览器页面都可以通过现有 Connection cookie 与 RPC 通道，在已注册路径启动最小启动图。surface 启动图在普通启动图变化后（包括仅同步值变化）的首次渲染时组合，其 batch 响应会一直提供，直到下一次普通重组替换该代际。`pluginEvents` 帧携带的是普通启动图，因此 surface 页面在下次加载时才看到新代码与同步值，而不是实时看到。注册必须在 `roots` 中列出每个运行时才发现的包，因为闭包只沿声明的 `inject` 与已加载的 `external` 行展开。

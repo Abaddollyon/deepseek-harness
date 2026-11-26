@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.3-alpha.2/default-child-route-removed/guide.md
+/:
+  en: 9c927140acda6a4e
+  zh: e6e10fe99698fab5
+/the-composition-wide-default-child-route-is-removed:
+  en: 0da5860ee9964b58
+  zh: ecd98f42f906a836
+/the-composition-wide-default-child-route-is-removed/change:
+  en: 10908bc202dde0bf
+  zh: 07b81fb4d1996584
+/the-composition-wide-default-child-route-is-removed/migration:
+  en: f43d73faf161d42f
+  zh: 6628d78a52549748

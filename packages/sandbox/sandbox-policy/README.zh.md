@@ -56,6 +56,8 @@ kind: "package-reference"
 
 插件通过自己的所属上下文调用 `ctx.sandboxPolicy.registerWritableRoot(session, directory)`，为该活跃 Session 的 `workspace-write` 权限添加一个物理绝对目录。该方法返回原始 Cordis effect 清理函数；插件卸载或显式清理只移除该次注册。重复注册与配置授权彼此独立。将会话专用插件挂载在 Agent 的上下文下，使其 effect 也随 Agent 结束。注册时验证路径写法；操作使用该授权前，目录必须已存在于执行主机上。路径检查与配置根目录相同。
 
+以附加工作区根目录创建的 Session（`meta.additionalPaths`，记录为其 seq 0 的 `workspace/roots` 事件；见 [dsh-session](../../core/session/README.zh.md)）通过同一注册方式获得这些目录。每次 `agent/created`（启动、恢复、clear 与 compact）时，服务都会为该 Agent 的 Session 注册每个已记录的根目录，由该 Agent 的上下文拥有，因此授权随 Agent 销毁而结束，日志的分离副本不会获得授权。配置的额外目录在前，已记录的根目录按记录顺序在后。注册前，服务通过工作目录服务为该 Agent 提供的文件系统（`working-directory/fs` waterfall，因此 SSH 主机等执行世界为自己的路径作答）以 `lstat` 检查每个根目录：缺失、不是目录、是符号链接或无法检查的根目录会被跳过并记录警告，而不是让每次写入都以 `SANDBOX_INVALID_ROOT` 失败。没有工作目录服务时，根目录不经检查直接注册，由执行限制时校验。这里有意从 Session 历史重新授予权限，而插件注册通常避免这样做：这些根目录是用户创建 Session 时的选择，而非插件的选择。
+
 注册与清理影响后续策略解析及下一次模型请求中记录的上下文。其他 Session（包括子 agent 的 Session）与无 agent 调用不会获得此授权。授权不随 Session 历史保存或继承；恢复或派生的 Session 需要自行注册。已经解析策略的操作与持久进程保留原权限，包括注册已被移除的目录。启动新进程才能使用当前授权。`read-only` 仍然只读。在 Windows 上，`write` 与 `edit` 执行额外目录授权，受沙箱限制的进程则忽略这些授权，保留工作区与私有临时目录访问权限；参见 [sandbox-local](../sandbox-local/README.zh.md#known-limitations-and-deferred-work)。
 
 ### 切换会话模式
@@ -86,7 +88,7 @@ kind: "package-reference"
 
 ### 模型可见文本
 
-`sandbox:policy` 贡献说明该模式与具体能力无关的文件操作约定，以及 `workspace-write` 下已记录的会话工作区和显式额外目录。带附加目录的会话会把它们解析进 `additionalWritableRoots`，排在配置的额外目录之前，因此 `workspace-write` 像对待工作区根目录一样授予写入，且每种模式的文本都会列出会话的全部工作区根目录。它不枚举已挂载能力；工具插件保留特定于操作的拒绝与升权引导，批准策略单独贡献给同一份快照，计划引导仍由 `dsh-plan-mode` 的系统段落管理。
+`sandbox:policy` 贡献说明该模式与具体能力无关的文件操作约定，以及 `workspace-write` 下已记录的会话工作区和显式额外目录。Session 记录的附加工作区根目录作为已注册的额外目录出现在其中，排在配置的目录之后，且只在 `workspace-write` 下出现。它不枚举已挂载能力；工具插件保留特定于操作的拒绝与升权引导，批准策略单独贡献给同一份快照，计划引导仍由 `dsh-plan-mode` 的系统段落管理。
 
 ### 源码地图
 
@@ -158,7 +160,7 @@ Current DSH file policy: danger-full-access. The DSH file sandbox does not restr
 
 这些限制界定了本包提供的策略范围。它们是当前的包级约束，并非通用沙箱对比，也不是待办事项清单。
 
-- **运行时授权不持久化**——配置目录由各会话共享；effect 注册属于一个存活 Session，恢复或派生后必须重新注册。后端支持情况见 [sandbox-local](../sandbox-local/README.zh.md)。
+- **运行时授权不持久化**——配置目录由各会话共享；effect 注册属于一个存活 Session，恢复或派生后必须重新注册。唯一的例外是 Session 记录的 `workspace/roots`，本服务会为该 Session 上启动的每个 Agent 重新注册它们；创建后被删除的根目录会被跳过，不会重新创建。后端支持情况见 [sandbox-local](../sandbox-local/README.zh.md)。
 - **仅限文件操作模式**——`SandboxMode` 管控文件操作；网络和进程策略不在其词汇中，因此这里没有限制它们的旋钮。
 - **有意概述临时区域**——强制执行后端会授予不同的平台临时区域，这些区域在策略解析后才会选定，因此无法在当前上下文中如实枚举。
 

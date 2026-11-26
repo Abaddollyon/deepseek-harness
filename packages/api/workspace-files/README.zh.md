@@ -38,7 +38,7 @@ kind: "package-reference"
 
 ### 寻址与路径
 
-`read`、`readBytes` 与 `stat` 接受绝对路径或相对于所选 Session 工作区根的路径。组合文件系统决定路径是否可读；本服务不额外要求文件读取限定于工作区。`readBytes` 携带 `options.baseFile` 时，从基准文件所在目录解析相对目标 `path`，基准文件或目标文件位于工作区外时同样适用。基准文件本身接受绝对路径或工作区相对路径。两个文件执行相同的普通文件检查；目标为空、绝对路径、URL 或含 NUL 时拒绝。文件结果报告文件系统执行环境中的绝对路径。所用文件系统为 Session 的 Agent 预设所隔离的文件系统（例如通过 SSH），否则为 Host 文件系统；预设取自 Session 投影，因此空白 Session 切换预设后同样生效。拥有自己执行环境的预设绝不回退到 Host 文件系统：该环境不可用时，其 Session 的查找会失败。`list` 仍限定于工作区，并以相对于该根的路径报告被列举目录。`changes` 使用相同的路径解析：文件监听沿用文件读取权限，目录监听仍限定于工作区。
+`read`、`readBytes` 与 `stat` 接受绝对路径或相对于所选 Session 工作区根的路径。组合文件系统决定路径是否可读；本服务不额外要求文件读取限定于工作区。`readBytes` 携带 `options.baseFile` 时，从基准文件所在目录解析相对目标 `path`，基准文件或目标文件位于工作区外时同样适用。基准文件本身接受绝对路径或工作区相对路径。两个文件执行相同的普通文件检查；目标为空、绝对路径、URL 或含 NUL 时拒绝。文件结果报告文件系统执行世界中的绝对路径。所用文件系统为 Session 的 Agent 预设所隔离的文件系统（例如通过 SSH），否则为 Host 文件系统；预设取自 Session 投影，因此空白 Session 切换预设后同样生效。拥有自己执行世界的预设绝不回退到 Host 文件系统：该执行世界不可用时，其 Session 的查找会失败。解析出的作用域只在预设拥有执行世界时以 `fs` 携带该文件系统；在 `scopeOf` 之后读取文件的服务使用 `scope.fs`，仅在其缺失时使用 Host 的 `fs`。`list` 仍限定于工作区，并以相对于该根的路径报告被列举目录。`changes` 使用相同的路径解析：文件监听沿用文件读取权限，目录监听仍限定于工作区。
 
 ### 分页
 
@@ -61,7 +61,7 @@ kind: "package-reference"
 
 `respectGitignore` 使用 ripgrep 原生忽略规则，包括其仓库检测、嵌套与祖先 `.gitignore`、`.git/info/exclude`、全局 Git 排除文件及 `.ignore`。关闭时传入 `--no-ignore`。本服务不解析 Git 配置，也不把 `core.ignorecase` 用于忽略匹配。`maxFileBytes` 不限制忽略文件；读取错误沿用 rg 的退出语义。
 
-每次调用通过按需获取的 `subprocess` 运行打包的 `rg --files --sort=path`。最多处理 rg 列出的 `search.maxEntries` 个文件，在此有界文件集内按深度与路径排序并截到 `search.maxResults`；匹配数超过结果上限时置 `truncated`。额外的一条文件记录只用于检测超限，不贡献匹配。超过文件数上限会终止 rg 并置 `incomplete`，rg 退出码 2 同样表示部分结果；退出码 1 表示无结果。链接文件与目录均不返回，也不跟随。取消信号传给子进程，调用等待进程清理后以 signal 的 reason 拒绝。缺少 subprocess、启动或执行失败以及超时均以 `workspace-file/search-failed` 失败，消息说明具体原因；不回退到 JS 遍历，其他文件操作不受影响。
+每次调用通过按需获取的 `subprocess` 运行打包的 `rg --files --sort=path`。最多处理 rg 列出的 `search.maxEntries` 个文件，在此有界文件集内按深度与路径排序并截到 `search.maxResults`；匹配数超过结果上限时置 `truncated`。额外的一条文件记录只用于检测超限，不贡献匹配。超过文件数上限会终止 rg 并置 `incomplete`，rg 退出码 2 同样表示部分结果；退出码 1 表示无结果。链接文件与目录均不返回，也不跟随。取消信号传给子进程，调用等待进程清理后以 signal 的 reason 拒绝。搜索只在 Host 的执行世界中运行：Agent 预设拥有自己执行世界（例如通过 SSH）的 Session 会在任何进程启动前以 `workspace-file/search-failed` 失败，因为打包的二进制与 Host 子进程无法列出该执行世界的文件。缺少 subprocess、启动或执行失败以及超时同样以 `workspace-file/search-failed` 失败，消息说明具体原因；不回退到 JS 遍历，其他文件操作不受影响。
 
 ### 变更流
 

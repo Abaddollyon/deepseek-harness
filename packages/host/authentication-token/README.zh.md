@@ -33,7 +33,7 @@ kind: "package-reference"
 
 在 WebApp runtime 上配置 `printUrl` 与 `openBrowser`，而非本插件。不发布启动入口时，认证仍然可用。
 
-携带启动 Token query 的根路径请求由原 Token 交换处理：成功的 `GET /` 返回303、写入 Cookie，并重定向到 `./`；无效凭据返回401。其他路径的请求交给其路由 owner。WebApp 就绪后收集入口时，本插件向传入的基地址追加进程 Token，同时保留 authority、路径与其他 query 字段。贡献的入口允许自动打开。Token 不读取 WebApp 服务，也不拥有打印、就绪判断或原生浏览器打开器。
+携带启动 Token query 的根路径请求由原 Token 交换处理：成功的 `GET /` 返回303、写入 Cookie，并重定向到 `./`；无效凭据返回401。经 Client Modules 的 [`ctx.clientSurfaces`](../../client/modules/README.zh.md) 注册的路径在该确切路径上以相同方式交换 Token，并重定向到相对于其目录的同一干净路径（`/companion` 重定向到 `./companion`）；插件在请求到达时才查找该服务，不依赖 Client Modules。其他路径的请求交给其路由 owner。WebApp 就绪后收集入口时，本插件向传入的基地址追加进程 Token，同时保留 authority、路径与其他 query 字段。贡献的入口允许自动打开。Token 不读取 WebApp 服务，也不拥有打印、就绪判断或原生浏览器打开器。
 
 浏览器会把同一 hostname 的 Cookie 发给每个 port，因此该 hostname 下所有已登录 authority 的 Cookie 会出现在同一个 `Cookie` 请求头中。成功的根路径交换因此还会让请求携带的其他 authority 的 Cookie 过期，只保留声明的签发时间最新的 16 个。它只选取符合生成格式的名称，并在不验证签名的情况下读取签发时间，因为其他 Harness home 使用不同的密钥签名。`/connect` 交换不让任何 Cookie 过期。
 
@@ -49,7 +49,7 @@ kind: "package-reference"
 <details>
 <summary>实现内部说明 — 点击展开</summary>
 
-插件准备签发器，通过 Connection 创建共享 Peer，并通过 `ctx.connection.authentication` 注册验证器：v1 Cookie 返回共享 Peer，v2 ID 验签后通过插件自己的 API Peer 映射表解析。页面与 API 调用使用相同验证。WebServer 请求监听器拥有根 Token 交换，匿名精确路由拥有 `/connect`。
+插件准备签发器，通过 Connection 创建共享 Peer，并通过 `ctx.connection.authentication` 注册验证器：v1 Cookie 返回共享 Peer，v2 ID 验签后通过插件自己的 API Peer 映射表解析。页面与 API 调用使用相同验证。WebServer 请求监听器拥有根路径与客户端 surface 的 Token 交换，匿名精确路由拥有 `/connect`。
 
 该路由旁的 `webserver/upgrade` 监听器委派非 mux 路径，并在 `/api/remote.mux` 上按 `apiPeers.get(peer.id) === peer` 识别自己拥有的 API Peer；浏览器共享 Peer 与其他 Provider 调用 `next()` 委派。此监听器位于路由准入后、协议处理前。Socket 关闭、错误及 upgrade 失败时，在异步释放前撤销 API 凭据。Peer 释放也会关闭其 Socket。清理幂等；Web 接线作用域移除监听器、撤销自己的 API 凭据、仅销毁自己拥有的 API Socket，并等待 Socket 关闭与 Peer 清理。迟到的中间件不能恢复已撤销的 Peer。同步 `webserver/entry-url` 监听器贡献带签名的 URL；事件和入口类型由 WebServer 声明，无需依赖 WebApp bundle。
 
@@ -83,7 +83,7 @@ kind: "package-reference"
 - 同一浏览器在同一 hostname 下最多保持 17 个 authority 的登录：最近一次登录的 authority，以及签发时间最新的另外 16 个。根路径交换按签发时间而非最近使用排序；Cookie 被过期的 authority 在下次加载页面时返回 401，直到重新打开其启动 URL。
 - 浏览器的 `Cookie` 请求头若已超过 Node.js 的 16,384 字节请求头上限，会在交换运行前收到 431，因此在用户清除该 hostname 的站点数据之前不会有任何 Cookie 过期。在不执行过期的 Host 上登录仍会增加 Cookie。
 - 明文 HTTP 不加密 bearer Cookie。Cookie 的 `Secure` 属性由监听器 TLS 决定。
-- Token 中间件只拥有根路径交换。其他 HTML 或产品路径仍由路由 owner 处理，包括这些路径上的 token query。
+- Token 中间件只拥有根路径与已注册客户端 surface 的 Token 交换。其他 HTML 或产品路径仍由路由 owner 处理，包括这些路径上的 token query。
 
 <a id="dev-note"></a>
 ### 开发备注

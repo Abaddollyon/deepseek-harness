@@ -95,6 +95,28 @@ kind: "package-reference"
 | `maxRequestImages` | `50` | 保留请求图片数量上限，保留图片超过时请求以 `IMAGE_OFFLOAD_REQUIRED` 失败。默认值取 Azure OpenAI 的 50 张上限；提供方接受更多图片的路由应调高 |
 | `imageOffloadCountQuantum` | `10`，不超过 `maxRequestImages` | 每次数量超限时省略的最老图片数 |
 | `retryPolicy` | normal，5 次重试 | 由 `dsh-llm-retry` 执行的提供方自有重试策略 |
+| `maxConcurrentRequests` | 不限 | 该路由在本 Host 中同时流式传输的请求上限；其余请求按到达顺序等待，等待期间调用方中止会使请求在 pi-ai 发送之前以 `ABORTED` 结束 |
+| `authMode` | `provider` | `proxy` 只发送 `apiKeyEnv` 的值或不发送凭据（`openai-completions`、`openai-responses`，或 `claude-code` 模式下的 `anthropic-messages`），绝不读取、刷新或提供已存储或环境中的提供方凭据；需要显式且不含内嵌凭据的 http(s) `baseURL` |
+| `anthropicRequestMode` | `provider` | `claude-code` 无论有无密钥都发送 Claude Code 请求格式；仅限 `anthropic-messages` 路由 |
+| `modelDiscovery.source` | `provider` | `openai-compatible` 或 `anthropic` 列出路由自己的 `baseURL`，而不是由已安装目录回答 |
+
+自有提供方账号的号池保留其目录路由键，使已保存会话保持原提供方，并把自己声明为代理（[理由](../../../.agents/notes/implemented/feature/2026-10-02-proxy-pool-routes.zh.md)）：
+
+```yaml
+providers:
+  openai-codex:
+    api: openai-responses
+    baseURL: http://127.0.0.1:2455/v1
+    apiKeyEnv: CODEX_POOL_API_KEY
+    authMode: proxy
+    modelDiscovery: { source: openai-compatible }
+  anthropic:
+    api: anthropic-messages
+    baseURL: http://127.0.0.1:3456
+    authMode: proxy
+    anthropicRequestMode: claude-code
+    modelDiscovery: { source: anthropic }
+```
 
 请求图片继承所选 pi-ai 模型的 `inputLimits.images.resize` 宽度、高度和 base64 字节上限。`requestImageMaxDimension` 用同一个值覆盖宽高，不能分别配置不同的宽度和高度上限。`requestImageMaxBytes` 按原始编码字节覆盖单图上限。最终硬上限为 `min(3 × floor(maxRequestImageBytes / (4 × requestImageBudgetCount)), requestImageMaxBytes 或目录上限或 1 MiB)`，其中目录上限通过 `3 × floor(catalogBytes / 4)` 换算。总预算须为每份预算至少提供 4 个 base64 字节。默认每张图分得 0.75 MiB，20 张达到该上限的图片最多占用 20 MiB base64 载荷。历史增长不会改变分摊张数；`maxRequestImages` 单独控制保留图片数量。目录缺少某个尺寸时，路由不限制该轴，总像素仍由 `requestImagePixelBudget` 控制。
 
@@ -128,7 +150,9 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 ### 失败与恢复
 
-pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
+pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。没有 HTTP 状态的提供方过载映射为可重试的 `SERVER`；HTTP/2 流重置与 codex-lb 上游 WebSocket 截断（带上游关闭、接收失败或锚点被拒的 `stream_incomplete`）映射为可重试的 `TRANSPORT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
+
+适配器在其整个生命周期内交给 pi-ai 同一个 `fetch`，并通过它观察每个模型响应，因此 pi-ai 按 `fetch` 缓存的客户端（例如 Anthropic 工作负载身份联合客户端及其 token）可跨请求保留。每个请求只读取自己的最新响应，没有收到响应就失败的尝试不携带任何响应，联合 token 请求这类凭据交换也不算模型响应。错误响应之后的失败会携带该响应的 `status`，并以 `providerRetryAfterMs` 携带它在 `retry-after-ms` 或 `retry-after`（秒数或 HTTP 日期）中要求的延迟，`dsh-llm-retry` 会遵循该延迟。在 408、429 或 5xx 之后、分类器无法识别的错误文本会映射为 `TIMEOUT`、`RATE_LIMIT` 或 `SERVER`。pi-ai 会把每个携带 JSON 错误正文的 Codex 429（包括套餐用尽）改写为 `You have hit your ChatGPT usage limit…`；该句以不可重试的 `QUOTA` 失败，并在没有响应头给出延迟时，以 `providerRetryAfterMs` 携带句中所述的 `Try again in ~N min`。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 
@@ -172,7 +196,9 @@ Config 更新严格验证发生变化的 provider。初始加载将已存储的�
 | [`src/models.ts`](src/models.ts) | 基于 pi-ai 窄入口的 model collection、静态 provider 与 reasoning level |
 | [`src/provider.ts`](src/provider.ts) | 受支持协议表与提供方构建 |
 | [`src/context.ts`](src/context.ts) | Harness 到 pi-ai 的上下文转换、图片处理、回放恢复 |
-| [`src/stream.ts`](src/stream.ts) | 把 pi-ai 事件转换为 harness `StreamChunk` 值 |
+| [`src/stream.ts`](src/stream.ts) | 把 pi-ai 事件转换为 harness `StreamChunk` 值，解析 `Retry-After` |
+| [`src/request-limit.ts`](src/request-limit.ts) | `maxConcurrentRequests` 的逐路由先进先出准入 |
+| [`src/response-observer.ts`](src/response-observer.ts) | 适配器唯一的 `fetch`，把每个提供方响应归属到其请求 |
 | [`src/replay.ts`](src/replay.ts) | 带版本的 `ReplayEnvelope` 存储与校验 |
 | [`src/prefix-binding.ts`](src/prefix-binding.ts) | 请求前缀变化后省略 Anthropic thinking |
 | [`src/discovery.ts`](src/discovery.ts) | 面向配置界面的端点询问 |
@@ -249,7 +275,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 
 #### Token 影响
 
-生成内容只在 loop 记录后才影响后续输入。提供方未单独报告推理 token 时，pi-ai 会把推理 token 并入输出用量，并原样保留其精确 `totalTokens` 值。
+生成内容只在 loop 记录后才影响后续输入。pi-ai 把推理 token 计入输出用量；提供方报告该细分时，适配器还会将其记录为 `reasoningTokens`，并原样保留 pi-ai 的精确 `totalTokens` 值。
 
 #### KV Cache 影响
 
@@ -274,14 +300,16 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **Anthropic 与 Gemini 模型发现最多读取 1,000 个模型**——请求使用 API 的最大页大小，但不会遍历 `has_more` 或 `nextPageToken`；第一页之外的条目需要手工添加。
 - **目录外模型需要明确的协议**——目录路由保留每个模型的协议，包括 `azure` 下的两种 Azure API。混合协议目录中不存在的模型需要显式设置路由级 `api`；该设置覆盖路由上的所有模型，且必须属于受支持的自定义协议。Azure 部署名称应通过 `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` 设置，模型 ID 保持为目录中的 ID。
 - **模态声明不受校验**——声明 `image` 而其网关不支持的模型会在提示词准入后被提供方拒绝。持久图片仍留在历史中，同一误声明模型可能再次失败；切换到纯文本模型仍然可行，因为共享 LLM 运行时会针对该请求把图片引用投影为稳定文本。
-- **未认证路由取决于其协议**——不点名凭据的路由解析为已配置但无密钥，但 pi-ai 的 OpenAI 兼容实现仍要求 API 密钥或 `Authorization` 标头，因此无密钥本地服务器需要由 `apiKeyEnv` 引用或 `headers` 中的 `Authorization` 条目提供的占位凭据。pi-ai 的 Gemini 实现会拒绝没有 API 密钥的请求，因此 `google-generative-ai` 路由始终需要 `apiKeyEnv`，其值以 `x-goog-api-key` 发送。
+- **未认证路由取决于其协议**——不点名凭据的路由解析为已配置但无密钥，但 pi-ai 的 OpenAI 兼容实现仍要求 API 密钥或 `Authorization` 标头，因此无密钥本地服务器需要由 `apiKeyEnv` 引用或 `headers` 中的 `Authorization` 条目提供的占位凭据，或设置 `authMode: proxy`，以不带 `Authorization` 标头的方式发送此类请求，除非 profile 标头或某个 `llm-pi-ai/request-headers` 贡献器提供了该标头。pi-ai 的 Gemini 实现会拒绝没有 API 密钥的请求，因此 `google-generative-ai` 路由始终需要 `apiKeyEnv`，其值以 `x-goog-api-key` 发送。
 - **Gemini 只接受四个推理等级**——在 `google-generative-ai` 上，pi-ai 的 Gemini 实现只发送 `minimal`、`low`、`medium` 或 `high`（不区分大小写），`reasoningEfforts` 的值为其他名称时请求失败；[模型页](../../client/ui-settings-models/README.zh.md)只为 `api` 指定该协议的路由提供这些档位。不带等级的请求（包括 `off`）会发送 pi-ai 的关闭思考配置，无法关闭思考的模型（例如 Gemini 2.5 Pro）可能拒绝该请求。
 - **不支持 `GenerateOptions.stop`**——pi-ai 的通用流式选项无法跨提供方保证停止序列行为。
 - **对话更新支持只来自已安装的 pi-ai 目录**——原生系统与工具更新需要目录模型的对话中 compat 标志，profile 不能设置这些标志。手工声明的路由与未标记的模型会以用户角色提醒接收后续系统文本，并在每次请求开头接收完整的当前工具列表。
 - **图片只在 user 与工具结果消息中被接受**——system、developer 或 assistant 历史中的图片在两条转换路径上都会以 `UNSUPPORTED_CONTENT` 失败。
-- **提供方 HTTP 状态不可用**——pi-ai 错误事件不跨提供方暴露稳定 HTTP 状态，失败按错误文本分类。信息以 4xx 或 5xx 状态码开头时（Anthropic 与 OpenAI SDK 的错误即如此），状态码规则只读取该状态码。其他格式（如 `Mistral API error (<status>): <body>`）仍会匹配信息中任意位置引用的状态码；配额、限流与无效请求的措辞规则读取整条信息，因此网关在 5xx 响应体中转述上游的 `insufficient_quota` 或 `invalid_request_error` 时，会分类为不重试的 `QUOTA` 或 `INVALID_REQUEST`。
+- **提供方 HTTP 状态只来自被观察的 `fetch`**——Google 适配器拒绝自定义 `fetch`，Bedrock 通过 AWS SDK 签名请求，WebSocket 传输绕过 `fetch`，因此它们的失败既不携带 `status` 也不携带 `providerRetryAfterMs`；SSE 的 `retry:` 字段与错误正文中的重试提示不会被读取。错误文本先决定失败 code，被观察到的 408、429 或 5xx 只决定文本未能分类的情况。信息以 4xx 或 5xx 状态码开头时（Anthropic 与 OpenAI SDK 的错误即如此），状态码规则只读取该状态码。其他格式（如 `Mistral API error (<status>): <body>`）仍会匹配信息中任意位置引用的状态码；配额、限流与无效请求的措辞规则读取整条信息，因此网关在 5xx 响应体中转述上游的 `insufficient_quota` 或 `invalid_request_error` 时，会分类为不重试的 `QUOTA` 或 `INVALID_REQUEST`。
+- **暂时性 Codex 429 与套餐用尽以相同方式失败**——pi-ai 的用量上限改写会丢弃提供方错误 code，因此 codex-lb 的 `rate_limit_exceeded` 429 同样以 `QUOTA` 失败，normal mode 不会重试它。
+- **`maxConcurrentRequests` 只统计一个适配器的流**——队列位于本 Host 的适配器实例中，因此访问同一池的其他进程不计入，且槽位会一直保留到流结束，包括消费方缓慢时。
 - **重试策略由提供方自有，而非 SDK 重试**——pi-ai SDK 重试保持禁用，因此持久 agent（智能体）步骤与 `llm/retry` 事件拥有每个可见尝试，直接 `ctx.llm.stream()` 调用仍是单次尝试。
-- **流式 JSON 工具调用参数避免逐 delta 重复解析**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@1.3.0.patch`](../../../patches/@earendil-works__pi-ai@1.3.0.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。完成事件提供解析后的参数；Responses 可能在参数完成和输出项完成时分别解析。本适配器只读取 delta 字符串与最终参数。每次升级 pi-ai 时都要重新应用或撤销该补丁。
+- **流式 JSON 工具调用参数避免逐 delta 重复解析**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@1.3.0.patch`](../../../patches/@earendil-works__pi-ai@1.3.0.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。完成事件提供解析后的参数；Responses 可能在参数完成和输出项完成时分别解析。本适配器只读取 delta 字符串与最终参数。同一补丁还加入了 `anthropicRequestMode: claude-code` 所设置的 Anthropic `requestMode` 流选项。每次升级 pi-ai 时都要重新应用或撤销该补丁。
 - **即使端点会接受，过期的 Anthropic thinking 也会被省略**——前缀检查取决于模型、账户和请求，而适配器无法观测这些因素，因此每次前缀变化以及每个不含 `prefixDigest` 的回放状态都会让模型失去这部分推理，Anthropic 会以输出 token 重新生成它。摘要覆盖 pi-ai 上下文对象，而不是线上请求体：对话中途切换认证或会改变线上请求的 compat 设置不会被检测到；改变 Anthropic 消息序列化的 pi-ai 升级需要在 [`src/prefix-binding.ts`](src/prefix-binding.ts) 中使用新的 `DIGEST_SEED`；本包构建这些对象的方式发生任何变化，都会使已记录的 thinking 被丢弃一次。
 - **跨越前缀变化的手动思考工具轮次仍可能被拒绝**——其未结束的 assistant 消息必须保留过期的 thinking 以满足手动思考要求，因此执行前缀检查的端点会拒绝每个请求，直到一条用户消息结束该轮次。在已安装的目录中，执行此检查的模型使用自适应思考。
 - **Chat Completions 中的 Gemini 工具调用思考签名由补丁保留**——同一补丁把 OpenAI 兼容流式响应里的 `tool_calls[].extra_content.google.thought_signature` 读入工具调用的重放签名，并在同一模型继续时以 `extra_content` 发回（上游 [earendil-works/pi#10157](https://github.com/earendil-works/pi/issues/10157)）；未打补丁时，Gemini 会以 HTTP 400 拒绝工具调用轮次的下一步。OpenRouter 的加密推理详情仍通过 `reasoning_details` 重放。

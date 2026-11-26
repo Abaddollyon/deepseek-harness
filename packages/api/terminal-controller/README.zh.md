@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用此包
 
-Web bundle 将此包与 subprocess provider、working-directory 服务、sandbox policy 和 Typert Gateway 一起挂载。`remote.terminal` 提供 `environment`、`shells`、`list`、`watch`、`create`、`retain`、`attach`、`rename` 和 `close`；每个操作均按 Session 标识限定范围。列表直接读取 Host 保留的终端，因此查看离线 Session 不会激活 Agent，也不会产生恢复错误。`watch` 在终端创建、移除以及每次状态发布后，以完整集合推送同一列表。
+Web bundle 将此包与 subprocess provider、working-directory 服务、sandbox policy 和 Typert Gateway 一起挂载。若 Session 的 Agent 预设隔离了自己的 `subprocess` provider（例如通过 SSH），终端会在那里而非 Host 上启动；该 provider 缺失时，创建终端会失败，而不是启动 Host shell。`remote.terminal` 提供 `environment`、`shells`、`list`、`watch`、`create`、`retain`、`attach`、`rename` 和 `close`；每个操作均按 Session 标识限定范围。列表直接读取 Host 保留的终端，因此查看离线 Session 不会激活 Agent，也不会产生恢复错误。`watch` 在终端创建、移除以及每次状态发布后，以完整集合推送同一列表。
 
 Shell 探测结果首先列出执行环境声明的默认 shell。仅当 provider 未声明默认值时，才在 POSIX 使用 `/bin/sh`，在 Windows 使用 `cmd.exe`。可选的 `shell` profile 通过可执行路径 `path`、显示名称 `name` 和参数 `args`（默认 `[]`）覆盖这一选择。选择器还会通过执行 provider 探测 `shellCandidates`，并省略确定未找到的候选。同一可执行文件名（不区分大小写，忽略 `.exe`）只列出最早的一项，因为 PATH 查找可能经由其他目录找到默认 shell，例如 merged-`/usr` 系统上 `/bin/bash` 对应的 `/usr/bin/bash`。创建请求接受探测返回的 `shellPath` 并再次验证；解析或传输失败会直接报告，不启动其他 shell。环境查询读取当前目录和限制，不校验文件系统或解析 shell，因此目录或默认 shell 不可用时仍可重新连接已有进程。POSIX 自动 profile 以交互模式启动，PowerShell 使用 `-NoLogo`，补全和启动配置仍由 shell 提供。新终端启动前通过[工作目录服务](../../session/working-directory/README.zh.md)校验当前目录，并采用该服务的恢复行为。已有终端保留其进程目录。用户终端使用执行环境中系统用户的权限，独立于 Agent 的沙箱模式和审批策略。操作系统和容器的限制仍然生效；DSH 不提升用户权限。Subprocess provider 继续清除环境中的凭据变量。
 
