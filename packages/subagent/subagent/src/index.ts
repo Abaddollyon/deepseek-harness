@@ -82,6 +82,7 @@ export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts
 export { SubagentRunId } from './types.ts'
 export { ROOT_AGENT_NAME } from './names.ts'
 export type {
+  ChildExecutionTarget,
   ContinuableCreateRequest,
   ContinuableCreateSpec,
   SubagentCapabilities,

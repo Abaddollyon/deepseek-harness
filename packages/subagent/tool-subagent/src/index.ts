@@ -52,6 +52,12 @@ export interface Config extends PresetSelectionConfig {
    */
   toolName?: string
   /**
+   * Model-facing lead of the tool description, replacing the generic
+   * delegation wording, for example a one-line role for an alias instance.
+   * The managed-run and model-selection sentences are still appended.
+   */
+  description?: string
+  /**
    * Expose optional child `provider`, `model`, and `reasoning_effort` fields.
    * Requires provider `agentOptions` support. Each call enforces the current
    * Host setting, or restricts explicit selection to the current parent route.
@@ -83,6 +89,7 @@ export interface Config extends PresetSelectionConfig {
 export const Config: z<Config> = z.object({
   provider: z.string().required(),
   toolName: z.string().default('subagent'),
+  description: z.string().min(1),
   modelSelection: z.boolean().default(false),
   modelDiscovery: z.boolean().default(false),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
@@ -141,6 +148,16 @@ function providerWording(inheritsConversation: boolean): { description: string; 
 }
 
 /**
+ * End a description lead with sentence punctuation so the appended
+ * behavior sentences read as separate sentences.
+ * @param lead - the configured or generic description lead.
+ * @returns the lead, with a period added when it ends without one.
+ */
+function leadSentence(lead: string): string {
+  return /[.!?]$/u.test(lead) ? lead : `${lead}.`
+}
+
+/**
  * Install one delegation-tool composition.
  * The owning composition shares its registrations across Agents; child startup resolves the selected preset.
  * @param ctx - Context that owns the registrations.
@@ -159,6 +176,11 @@ export function apply(ctx: Context, config: Config): void {
   // Direct apply() bypasses Schemastery's numeric constraints. A direct-apply
   // omission stays capless (the schema default only runs through the loader).
   if (config.maxDepth !== 'provider-managed') assertSubagentMaxDepth(config.maxDepth)
+  // Direct apply() also bypasses the schema's non-empty description check.
+  const descriptionLead = config.description?.trim()
+  if (descriptionLead?.length === 0) {
+    throw new Error('tool-subagent: `description` is configured but blank — remove the key or write the tool\'s role')
+  }
   const toolName = config.toolName ?? 'subagent'
 
   const modelSelectionEnabled = config.modelSelection === true
@@ -207,7 +229,7 @@ export function apply(ctx: Context, config: Config): void {
     const providerSource = config.modelDiscovery === true ? ' Use a provider id listed by `list_subagent_models`.' : ''
     const definition = defineTool({
       name: toolName,
-      description: wording.description
+      description: leadSentence(descriptionLead ?? wording.description)
         + ' This tool starts an independently managed subagent and immediately returns its name. If you are still online when it finishes, the runtime automatically delivers its completion notice. The notice includes the final answer unless the child sent you a message just before finishing.'
         + (subagentProvider.prepareContinuable !== undefined
           ? ' Use `send_message` to steer it while running or continue its conversation after it finishes.'

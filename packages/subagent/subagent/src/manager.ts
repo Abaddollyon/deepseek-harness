@@ -93,7 +93,7 @@ type MaterializeInputs = MaterializeBase & (
     create?: {
       /** Live creator used only while establishing the child. */
       parent: Agent
-      /** Absolute initial directory captured before provider preparation. */
+      /** Absolute initial directory: the provider target's directory, else the one captured before provider preparation. */
       cwd: string
       seed: readonly SessionEvent[] | undefined
       meta: NonNullable<CreateAgentOptions['meta']>
@@ -365,6 +365,22 @@ export class SubagentManager {
 
       const inheritedEventCount = SessionLogOffset(prepared.seed?.length ?? 0)
       const seed = prepared.seed
+      // A provider-selected execution target names its own world's directory
+      // and, unless the parent already runs there, mounts its preset like an
+      // explicit selection so cold resume restores it.
+      const target = prepared.target
+      if (target !== undefined && spec.agentPreset !== undefined && spec.agentPreset !== target.agentPreset) {
+        throw new SubagentError(
+          `subagent provider "${spec.provider}" runs its children in agent preset "${target.agentPreset}", not "${spec.agentPreset}"`,
+          'UNSUPPORTED_CAPABILITY',
+        )
+      }
+      const childCwd = target?.cwd ?? cwd
+      const selectedPreset = spec.agentPreset ?? (
+        target !== undefined && target.agentPreset !== parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+          ? target.agentPreset
+          : undefined
+      )
       let established!: Activation
       const messageId = await this.locks.run(childId, async () => {
         signal.throwIfAborted()
@@ -387,15 +403,15 @@ export class SubagentManager {
           path,
           create: {
             parent,
-            cwd,
+            cwd: childCwd,
             seed,
-            meta: childSessionMeta(parent, childDepth, prepared.seed !== undefined, spec.agentPreset),
+            meta: childSessionMeta(parent, childDepth, prepared.seed !== undefined, selectedPreset, target),
             inheritedEventCount,
             delegatedPolicies,
             descriptor,
           },
           agentOptions,
-          composition: { agentPreset: spec.agentPreset },
+          composition: { agentPreset: selectedPreset },
           signal,
           delivery: spec.delivery,
           outputSchema: spec.outputSchema,

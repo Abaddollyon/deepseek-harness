@@ -46,6 +46,7 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 |---|---|---|
 | `provider` | required | Provider name on `ctx.subagents` (e.g. `spawn`, `fork`, `acp`) |
 | `toolName` | `subagent` | Model-facing tool name; distinct for every loaded instance |
+| `description` | — | Lead of the tool description, replacing the generic delegation wording (for example a one-line role for an alias instance); the managed-run and model-selection sentences are still appended |
 | `modelSelection` | `false` | Expose optional child route fields; requires provider `agentOptions` support |
 | `modelDiscovery` | `false` | Register `list_subagent_models`; enable on one instance per tool scope |
 | `agentOptions` | — | Configured child `provider`, `model`, adapter-owned `reasoningEffort`, and positive `maxTokens` defaults; requires provider `agentOptions` support and overlays any provider-owned route defaults |
@@ -111,6 +112,8 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | [`src/index.ts`](src/index.ts) | Tool registration, provider lifecycle mirroring, activation requests |
 | [`src/preset-selection.ts`](src/preset-selection.ts) | Preset defaults, model allowlist, and selection guidance |
 | [`src/model-selection.ts`](src/model-selection.ts) | Request/config merge and live LLM route preflight |
+| [`src/child-route-defaults.ts`](src/child-route-defaults.ts) | `agentOptions` schema and conversion for route defaults that other delegation tools configure |
+| [`src/route-selection.ts`](src/route-selection.ts) | `/route-selection` export of the route defaults, merge, allowlist and preflight rules for other delegation tools, such as workflow `agent()` |
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | Host-owned opt-in setting read at each delegation and discovery call |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | Declaration of the retired Session policy event, kept so released Session logs stay readable |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |

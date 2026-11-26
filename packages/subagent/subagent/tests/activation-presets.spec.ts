@@ -158,7 +158,7 @@ describe('a child agent composed in-process', () => {
   it('refuses a forked seed with an execution target, whose seed would carry the parent\'s roots there', async () => {
     const { ctx } = await setupPresetHost()
     const parent = (await ctx.agents.create({
-      sessionId: SessionId('rooted-parent'),
+      sessionId: brandString<SessionId>('rooted-parent'),
       meta: { cwd: '/local/work', additionalPaths: ['/local/extra'] },
       agentOptions: { provider: 'mock', model: 'mock' },
       setup: async (agentCtx: Context) => void await ctx.agentPresets.mount(agentCtx, 'coding'),

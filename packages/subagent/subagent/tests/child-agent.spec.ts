@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/types'
-import { Session, type SessionId } from '@deepseek-ai/dsh-session'
-import { resolveChildAgentOptions, resolveChildDepth } from '../src/child-agent.ts'
+import SessionStore, { Session, type SessionId } from '@deepseek-ai/dsh-session'
+import { childSessionMeta, resolveChildAgentOptions, resolveChildDepth } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
   const id = brandString<SessionId>('parent')
@@ -86,6 +87,38 @@ describe('child Agent options', () => {
       maxTokens: 512,
       subagentDepth: 1,
     })
+  })
+})
+
+describe('child Session metadata', () => {
+  async function rootedParent(): Promise<{ ctx: Context, parent: Agent }> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const parentSession = ctx.sessions.prepare(brandString<SessionId>('rooted-parent'), {
+      meta: { cwd: '/work/app', additionalPaths: ['/work/lib'] },
+    })
+    return { ctx, parent: { id: parentSession.id, session: parentSession, ctx } as Agent }
+  }
+
+  it('gives a fresh child the parent Session additional roots', async () => {
+    const { ctx, parent } = await rootedParent()
+    const child = ctx.sessions.prepare(brandString<SessionId>('rooted-child'), { meta: childSessionMeta(parent, 1, false) })
+    expect(child.header.cwd).toBe('/work/app')
+    expect(child.additionalPaths).toEqual(['/work/lib'])
+  })
+
+  it('records an execution target\'s preset and directory without the parent\'s additional roots', async () => {
+    const { ctx, parent } = await rootedParent()
+    const meta = childSessionMeta(parent, 1, false, undefined, { agentPreset: 'remote', cwd: '/remote/work' })
+    const child = ctx.sessions.prepare(brandString<SessionId>('targeted-child'), { meta })
+    expect(child.header).toMatchObject({ cwd: '/remote/work', agentPreset: 'remote' })
+    expect(child.additionalPaths).toEqual([])
+  })
+
+  it('refuses an execution target for a child seeded from the parent\'s log', async () => {
+    const { parent } = await rootedParent()
+    expect(() => childSessionMeta(parent, 1, true, undefined, { agentPreset: 'remote', cwd: '/remote/work' }))
+      .toThrow('cannot run in agent preset "remote"')
   })
 })
 

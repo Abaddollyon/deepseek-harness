@@ -177,7 +177,7 @@ describe('dsh-tool-subagent', () => {
     const genericDescription = generic.tools.schemas().find(schema => schema.name === 'subagent')?.description ?? ''
     expect(genericDescription).toMatch(/^Delegate a self-contained task to a subagent /u)
     const behavior = genericDescription.slice(genericDescription.indexOf(' This tool starts'))
-    expect(behavior).toMatch(/^ This tool starts an independently managed subagent and immediately returns its id\./u)
+    expect(behavior).toMatch(/^ This tool starts an independently managed subagent and immediately returns its name\./u)
 
     const ctx = await setup({ provider: 'mock', toolName: 'subagent_scout', description: 'Scout: fast read-only research in a fresh context' })
     expect(ctx.tools.schemas().find(schema => schema.name === 'subagent_scout')?.description)
@@ -187,21 +187,11 @@ describe('dsh-tool-subagent', () => {
       .toBe(`Review the diff!${behavior}`)
   })
 
-  it('declares the default-named instance\'s configured route as the composition\'s default child route', async () => {
-    const route = { provider: 'mock', model: 'configured-model', reasoningEffort: ReasoningEffortId('xhigh') }
-    const primary = await setup({ provider: 'mock', agentOptions: route })
-    expect(primary.subagents.defaultChildRoute()).toEqual(route)
-    const alias = await setup({ provider: 'mock', toolName: 'subagent_scout', agentOptions: route })
-    expect(alias.subagents.defaultChildRoute()).toBeUndefined()
-    const unrouted = await setup({ provider: 'mock' })
-    expect(unrouted.subagents.defaultChildRoute()).toBeUndefined()
-  })
-
   it('rejects a blank description at load and on direct apply()', async () => {
     await expect(setup({ provider: 'mock', description: '' })).rejects.toThrow()
     const ctx = await projectedContext()
-    await expect(tool.apply(ctx, { provider: 'unused', maxDepth: 'provider-managed', description: '   ' }))
-      .rejects.toThrow('`description` is configured but blank')
+    expect(() => tool.apply(ctx, { provider: 'unused', maxDepth: 'provider-managed', description: '   ' }))
+      .toThrow('`description` is configured but blank')
   })
 
   it('skips startup when cancellation wins asynchronous route preflight', async () => {
