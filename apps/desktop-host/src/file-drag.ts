@@ -24,13 +24,14 @@ export interface LocalDragResource {
 export async function localDragResource(ctx: Context, address: string, cancellation?: AbortSignal): Promise<LocalDragResource | null> {
   const resource = parseFileAddress(address)
   if (resource?.scope !== 'session') throw new Error('File drag requires a Session resource')
-  const fs = ctx.get('fs')
   const workspaceFiles = ctx.get('workspaceFiles')
-  if (fs === undefined || workspaceFiles === undefined) throw new Error('File access unavailable')
+  if (workspaceFiles === undefined) throw new Error('File access unavailable')
   const signal = cancellation === undefined ? AbortSignal.timeout(10_000) : AbortSignal.any([cancellation, AbortSignal.timeout(10_000)])
   signal.throwIfAborted()
   const scope = await workspaceFiles.scopeOf(resource.sessionId as SessionId, signal)
   if (scope === undefined) throw new Error('File drag Session unavailable')
+  const fs = scope.fs ?? ctx.get('fs')
+  if (fs === undefined) throw new Error('File access unavailable')
   const cwd = scope.workspaceRoot
   const entry = await fs.lstat(resource.path, { cwd }, signal)
   if (entry?.type !== 'file') return null
