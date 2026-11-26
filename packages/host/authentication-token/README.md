@@ -33,7 +33,7 @@ Mount this function plugin beside Connection and Credentials. It also injects `c
 
 Configure `printUrl` and `openBrowser` on the WebApp runtime, not this plugin. Authentication remains available without startup publication.
 
-A root request carrying the launch-token query is handled by the original token exchange: successful `GET /` returns 303 with a Cookie and redirects to `./`; invalid credentials return 401. Requests on other paths continue to their route owner. When WebApp collects entries after readiness, this plugin appends its process token to the supplied base URL while preserving its authority, path, and other query fields. The contributed entry is eligible for automatic opening. Token neither reads WebApp services nor owns printing, readiness, or the native browser opener.
+A root request carrying the launch-token query is handled by the original token exchange: successful `GET /` returns 303 with a Cookie and redirects to `./`; invalid credentials return 401. A path registered through Client Modules' [`ctx.clientSurfaces`](../../client/modules/README.md) exchanges the token the same way on that exact path and redirects to the same clean path relative to its directory (`./companion` for `/companion`); the plugin looks the service up when the request arrives and does not depend on Client Modules. Requests on other paths continue to their route owner. When WebApp collects entries after readiness, this plugin appends its process token to the supplied base URL while preserving its authority, path, and other query fields. The contributed entry is eligible for automatic opening. Token neither reads WebApp services nor owns printing, readiness, or the native browser opener.
 
 Browsers send one hostname's Cookies to every port, so the Cookies of all signed-in authorities on that hostname travel in one `Cookie` request header. A successful root exchange therefore also expires the other authorities' Cookies its request carries, except the 16 with the latest claimed issue time. It selects only names of the generated form and reads the issue time without verifying the signature, because another Harness home signs with a different secret. `/connect` exchanges expire nothing.
 
@@ -49,7 +49,7 @@ The signing secret remains the `client-connection/browser-session` grant record 
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The plugin prepares its signer, creates a shared Peer through Connection, and registers through `ctx.connection.authentication` a verifier returning that Peer for v1 Cookies or resolving a verified v2 ID through its own API Peer map. It uses the same verification for pages and API calls. Its WebServer request listener owns root token exchange, while an anonymous exact route owns `/connect`.
+The plugin prepares its signer, creates a shared Peer through Connection, and registers through `ctx.connection.authentication` a verifier returning that Peer for v1 Cookies or resolving a verified v2 ID through its own API Peer map. It uses the same verification for pages and API calls. Its WebServer request listener owns the root and client surface token exchanges, while an anonymous exact route owns `/connect`.
 
 Beside that route, a `webserver/upgrade` listener delegates non-mux paths and recognizes owned API Peers on `/api/remote.mux` by `apiPeers.get(peer.id) === peer`; shared browser Peers and other Providers delegate with `next()`. This listener runs after route admission and before protocol handling. Socket close, error, and upgrade failure revoke the API credential before asynchronous disposal. Peer disposal also closes its Socket. Cleanup is idempotent; the Web integration scope removes its listeners, revokes its API credentials, destroys only its owned API Sockets, and awaits Socket closure and Peer cleanup. Late middleware cannot restore a revoked Peer. A synchronous `webserver/entry-url` listener contributes the signed URL; its event and entry type are declared by WebServer, without a dependency on the WebApp bundle.
 
@@ -83,7 +83,7 @@ None; authentication does not modify model requests.
 - One browser stays signed in to at most 17 authorities of one hostname: the latest sign-in and the 16 most recently issued others. The root exchange ranks by issue time, not by last use; an authority whose Cookie it expires answers 401 on the next page load until its launch URL is opened again.
 - A browser whose `Cookie` header already exceeds the 16,384-byte request-header limit of Node.js receives 431 before the exchange runs, so nothing expires until the user clears that hostname's site data. Sign-ins on Hosts that expire nothing still add Cookies.
 - Plain HTTP transports bearer Cookies without encryption. Listener TLS determines the Cookie's `Secure` attribute.
-- The token middleware owns only the root token exchange. Other HTML or product paths keep their route owner's handling, including any token query on those paths.
+- The token middleware owns only the root and registered client surface token exchanges. Other HTML or product paths keep their route owner's handling, including any token query on those paths.
 
 <a id="dev-note"></a>
 ### Dev Note

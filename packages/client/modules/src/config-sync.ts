@@ -75,6 +75,18 @@ export class SyncedConfigPublisher {
     for (const id of this.values.keys()) if (!this.rows.has(id)) this.values.delete(id)
     for (const id of this.defaults.keys()) if (!this.rows.has(id)) this.defaults.delete(id)
     for (const [id, loaderName] of this.rows) this.refresh(id, loaderName)
+    return this.attach(entries)
+  }
+
+  /**
+   * Attach the last values {@link apply} computed, without recomputing them, to rows of a graph composed beside the
+   * ordinary one, such as a client surface graph. Every registry row has values once the ordinary graph is composed,
+   * including rows only a surface loads; a change of them republishes the ordinary graph, which invalidates the
+   * surface graphs composed beside it.
+   * @param entries - composed rows whose ids are rows of the registry table {@link apply} last saw.
+   * @returns the rows, each with its values when it has any.
+   */
+  attach(entries: readonly WebBootEntry[]): WebBootEntry[] {
     return entries.map(({ config: _published, ...row }) => {
       const config = this.values.get(row.id)
       return config === undefined ? row : { ...row, config }

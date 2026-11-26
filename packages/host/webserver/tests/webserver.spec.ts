@@ -1146,6 +1146,19 @@ describe('real Loader composition', () => {
     // Every collection is dispatched with the Peer the render speaks for.
     expect(renderedFor).toEqual([peer, peer, peer])
 
+    // An index owner's variant reaches every listener; an omitted context selects the ordinary index.
+    const variants: (string | undefined)[] = []
+    const offVariant = loaded.on('webserver/index-inject', (table, _peer, context) => {
+      variants.push(context?.variant)
+      table.push({ kind: 'global', name: '__VARIANT__', value: context?.variant ?? 'ordinary' })
+    })
+    expect(server.renderIndex('<head></head><body></body>', peer, { variant: 'companion' }))
+      .toContain('globalThis["__VARIANT__"] = "companion"')
+    expect(server.renderIndex('<head></head><body></body>', peer)).toContain('globalThis["__VARIANT__"] = "ordinary"')
+    expect(server.collectIndexInjections(peer, { variant: 'companion' })).toContainEqual({ kind: 'global', name: '__VARIANT__', value: 'companion' })
+    expect(variants).toEqual(['companion', undefined, 'companion'])
+    offVariant()
+
     // Tag-less fragments: head rows prepend, body rows append, and the
     // boot-readiness tail lands after the last body row.
     expect(renderIndexInjections('<main>x</main>', [

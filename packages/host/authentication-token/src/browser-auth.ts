@@ -303,28 +303,32 @@ export class BrowserAuth {
   }
 
   /**
-   * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to the directory-relative clean `./`; a valid cookie lets
-   * the caller serve the index; every other request receives the same minimal
-   * 401 response. The minting response also expires the other authorities'
-   * generated-name cookies its request carries, except the
-   * `RETAINED_OTHER_COOKIES` with the latest claimed issue time, so one
-   * browser's `Cookie` header stays bounded.
-   * @param req - incoming root or configured-index request.
+   * Authenticate an index request. A valid query token on the exchange path
+   * mints the cookie and redirects to the same clean path, written relative to
+   * its directory (`./` for the root); a valid cookie lets the caller serve
+   * the index; every other request receives the same minimal 401 response.
+   * The minting response also expires the other authorities' generated-name
+   * cookies its request carries, except the `RETAINED_OTHER_COOKIES` with the
+   * latest claimed issue time, so one browser's `Cookie` header stays bounded.
+   * @param req - incoming root, configured-index, or client surface request.
    * @param res - response owned when this method returns false.
    * @param secure - whether the listener receiving this request serves TLS; the
    * minted cookie carries `Secure` when it does. Only that listener's own
    * protocol decides, never a `publicUrl` announcement or a forwarded header:
    * those describe a hop this process does not terminate.
+   * @param exchangePath - exact pathname that accepts the token, such as a
+   * registered client surface path; defaults to the root.
    * @returns true only when the caller may serve index.html.
    */
-  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure = false): boolean {
+  authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure = false, exchangePath = '/'): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
+    // The clean redirect stays relative to the exchange path's directory, so a prefix-stripping proxy's mount survives.
+    const location = `./${exchangePath.slice(exchangePath.lastIndexOf('/') + 1)}`
     if (tokens.length > 0) {
       const authority = requestAudience(req.headers, secure)
-      if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
+      if (req.method === 'GET' && url.pathname === exchangePath && tokens.length === 1
         && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
         const issuedAt = Date.now()
         const expiresAt = issuedAt + this.maxAgeMilliseconds
@@ -340,7 +344,7 @@ export class BrowserAuth {
           .map(other => sessionCookie(other, '', 0, 0, secure))
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': './',
+          'location': location,
           'referrer-policy': 'no-referrer',
           // A lone cookie stays one string for callers that read a single Set-Cookie value.
           'set-cookie': superseded.length === 0 ? minted : [minted, ...superseded],
@@ -348,10 +352,10 @@ export class BrowserAuth {
         res.end()
         return false
       }
-      if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req, secure)) {
+      if (req.method === 'GET' && url.pathname === exchangePath && this.isAuthenticated(req, secure)) {
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': './',
+          'location': location,
           'referrer-policy': 'no-referrer',
         })
         res.end()

@@ -29,6 +29,12 @@ import { renderIndexInjections, type IndexInjection } from './injections.ts'
 export { renderIndexInjections } from './injections.ts'
 export type { IndexInjection, IndexInjectionPlacement } from './injections.ts'
 
+/** Index-render selection passed to every `webserver/index-inject` listener. */
+export interface IndexRenderContext {
+  /** Registered alternative index (for example a client surface id); absent selects the ordinary application index. */
+  readonly variant?: string
+}
+
 /** One application entry URL contributed for startup printing or browser handoff. */
 export interface WebEntryUrl {
   /** Output prefix, such as `dsh web`. */
@@ -85,9 +91,10 @@ declare module '@deepseek-ai/cordis' {
      * fresh at emit time.
      * @param table - Mutable row table; listeners append in activation order.
      * @param peer - The Peer the rendered page speaks for.
+     * @param context - Index selected by the rendering owner; absent selects the ordinary index.
      * @mode emit
      */
-    'webserver/index-inject'(table: IndexInjection[], peer: PeerScope): void
+    'webserver/index-inject'(table: IndexInjection[], peer: PeerScope, context?: IndexRenderContext): void
   }
 }
 
@@ -849,11 +856,12 @@ export class WebServer extends Service {
    * Fresh per call, so subscribers read live state (module graph, theme
    * preference, the Peer's access) at emit time.
    * @param peer - the Peer the page speaks for.
+   * @param context - index selection passed to every listener; omitted selects the ordinary index.
    * @returns rows in subscriber activation order.
    */
-  collectIndexInjections(peer: PeerScope): IndexInjection[] {
+  collectIndexInjections(peer: PeerScope, context: IndexRenderContext = {}): IndexInjection[] {
     const table: IndexInjection[] = []
-    this.ctx.emit(this, 'webserver/index-inject', table, peer)
+    this.ctx.emit(this, 'webserver/index-inject', table, peer, context)
     return table
   }
 
@@ -862,10 +870,11 @@ export class WebServer extends Service {
    * first, then the raw `tapIndex` transforms over the result.
    * @param html - the raw index.html body.
    * @param peer - the Peer the page speaks for.
+   * @param context - index selection passed to injection listeners; omitted selects the ordinary index.
    * @returns the transformed body.
    */
-  renderIndex(html: string, peer: PeerScope): string {
-    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections(peer)))
+  renderIndex(html: string, peer: PeerScope, context: IndexRenderContext = {}): string {
+    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections(peer, context)))
   }
 }
 

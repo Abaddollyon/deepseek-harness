@@ -47,7 +47,7 @@ The fallback's synchronous `auth` selector requires `required` for root and conf
 
 Browsers revalidate every served file except the index. Such a response carries `cache-control: no-cache` and a weak ETag built from a SHA-1 of the file's bytes, so a file whose content changes gets a new ETag even when its name stays the same; a request whose `If-None-Match` equals the current ETag receives an empty 304. The rendered index carries no cache headers.
 
-A path registered through [`ctx.clientSurfaces`](../../client/modules/README.md) is an index entry too: it renders the same `index.html` with the surface id as the `renderIndex` variant, and its `authorizeIndex` call accepts the launch token on that exact path and redirects to its clean URL.
+A path registered through [`ctx.clientSurfaces`](../../client/modules/README.md) is an index entry too: the `auth` selector requires a Peer for it, and it renders the same `index.html` with the surface id as the `renderIndex` variant. The [token plugin](../authentication-token/README.md) accepts the launch token on that exact path and redirects to its clean URL. Matching the path reads only the registered paths; the surface graph is composed after admission.
 
 ### Observable failures
 

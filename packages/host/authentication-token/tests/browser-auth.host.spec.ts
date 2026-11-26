@@ -282,6 +282,37 @@ describe('BrowserAuth', () => {
     ))).toBe(true)
   })
 
+  it('exchanges the token only on the given exchange path and redirects to that clean path', async () => {
+    const auth = await createAuth(new RecordCredentials())
+    const token = new URL(auth.authenticatedUrl('http://127.0.0.1:3080/')).searchParams.get('token')
+    const exchanged = response()
+    expect(auth.authorizeIndex(request(`/companion?token=${String(token)}`), exchanged.value, false, '/companion')).toBe(false)
+    expect(exchanged.state.status).toBe(303)
+    expect(exchanged.state.headers).toMatchObject({ 'location': './companion', 'cache-control': 'no-store' })
+    const setCookie = setCookies(exchanged.state)[0]
+    if (setCookie === undefined) throw new Error('surface exchange did not set a cookie')
+    const cookie = setCookie.split(';', 1)[0]!
+    // The surface Cookie is the ordinary browser Cookie: it admits every index.
+    expect(auth.authorizeIndex(request('/companion', '127.0.0.1:3080', { cookie }), response().value, false, '/companion')).toBe(true)
+    expect(auth.authorizeIndex(request('/', '127.0.0.1:3080', { cookie }), response().value)).toBe(true)
+
+    // A signed-in browser opening the launch URL again is sent to the clean surface path.
+    const again = response()
+    expect(auth.authorizeIndex(request(`/companion?token=${String(token)}`, '127.0.0.1:3080', { cookie }), again.value, false, '/companion')).toBe(false)
+    expect(again.state).toMatchObject({ status: 303, headers: { location: './companion' } })
+
+    // The root and any other path refuse the token when the exchange path is the surface, and vice versa.
+    for (const [path, exchangePath] of [['/', '/companion'], ['/other', '/companion'], ['/companion', '/']] as const) {
+      const denied = response()
+      expect(auth.authorizeIndex(request(`${path}?token=${String(token)}`), denied.value, false, exchangePath)).toBe(false)
+      expect(denied.state.status).toBe(401)
+    }
+    // A nested surface path redirects relative to its own directory.
+    const nested = response()
+    expect(auth.authorizeIndex(request(`/desk/companion?token=${String(token)}`), nested.value, false, '/desk/companion')).toBe(false)
+    expect(nested.state).toMatchObject({ status: 303, headers: { location: './companion' } })
+  })
+
   it('accepts the cookie for index serving and gives every unauthenticated request one response', async () => {
     const auth = await createAuth(new RecordCredentials())
     const { cookie } = exchange(auth)

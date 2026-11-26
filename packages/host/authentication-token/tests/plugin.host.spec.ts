@@ -115,6 +115,30 @@ it('exchanges a root token, passes other routes on, and keeps browser authentica
   expect(dropped.state.status).toBeUndefined()
 })
 
+it('exchanges the launch token on a registered client surface path and nowhere else', async () => {
+  const surfaces = new Map([['/companion', { id: 'companion', path: '/companion' }]])
+  const { ctx, providers, auth } = await mounted(false, (owner) => {
+    owner.provide('clientSurfaces', { findByPath: (path: string) => surfaces.get(path) })
+  })
+  const url = new URL(auth.authenticatedUrl('http://localhost:3080/companion'))
+  const reply = response(); const next = vi.fn(async () => {})
+  await ctx.waterfall('webserver/request', request(url.pathname + url.search), reply.res, next)
+  expect(reply.state.status).toBe(303)
+  expect(reply.state.headers?.location).toBe('./companion')
+  expect(next).not.toHaveBeenCalled()
+  const cookie = reply.state.headers?.['set-cookie']?.split(';', 1)[0]
+  expect(providers[0]!.authenticate({ headers: { host: 'localhost:3080', cookie } })).toBeDefined()
+
+  // An unregistered path, a surface path without a token, and a path whose surface left all reach their route owner.
+  await ctx.waterfall('webserver/request', request(`/other${url.search}`), response().res, next)
+  await ctx.waterfall('webserver/request', request('/companion'), response().res, next)
+  surfaces.clear()
+  const withdrawn = response()
+  await ctx.waterfall('webserver/request', request(url.pathname + url.search), withdrawn.res, next)
+  expect(next).toHaveBeenCalledTimes(3)
+  expect(withdrawn.state.status).toBeUndefined()
+})
+
 it('delegates synthetic Worker requests without a native socket', async () => {
   const { ctx, routes, auth } = await mounted()
   const synthetic = request('/plugins/??modules/client.js')

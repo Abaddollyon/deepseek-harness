@@ -10,7 +10,9 @@
  * index render (structured injection rows, then raw taps). Non-index assets
  * stay public; every file other than the index carries a weak ETag with
  * `cache-control: no-cache` and answers a matching `If-None-Match` with 304,
- * while the index carries no cache headers. The dist location is workspace
+ * while the index carries no cache headers. A path registered through Client
+ * Modules' `clientSurfaces` is an index entry too, rendered with the surface
+ * id as the index variant. The dist location is workspace
  * knowledge of the composing application, so `distIndex` is typically
  * supplied through a `!!js` expression, never hardcoded by a deployment.
  * @module @deepseek-ai/dsh-host-frontend-static
@@ -22,6 +24,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { PeerScope } from '@deepseek-ai/dsh-client-connection'
+import type { ClientSurfaceDefinition } from '@deepseek-ai/dsh-client-modules'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 /** Stable Cordis plugin name. */
@@ -76,9 +79,10 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
 
 /**
  * Answer one GET or HEAD dist request; the webserver answers any other method
- * with 405 before a resource runs. A malformed percent-escape or a filesystem
- * failure other than a missing or non-file target rejects.
- * @param request - the request; only its method and URL path are read.
+ * with 405 before a resource runs. A filesystem failure other than a missing
+ * or non-file target rejects.
+ * @param request - the request; only its method, signal, and conditional headers are read.
+ * @param pathname - decoded dist path to serve.
  * @param distRoot - absolute dist root directory (resolved by the caller).
  * @param distIndex - absolute path of index.html inside distRoot.
  * @param renderIndex - present for index requests to turn the raw index.html
@@ -89,10 +93,10 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * request whose `If-None-Match` equals that ETag receives an empty 304.
  */
 async function serveStatic(
-  request: Request, distRoot: string, distIndex: string,
+  request: Request, pathname: string, distRoot: string, distIndex: string,
   renderIndex?: (html: string) => string,
 ): Promise<Response> {
-  const target = resolve(normalize(join(distRoot, decodeURIComponent(new URL(request.url).pathname))))
+  const target = resolve(normalize(join(distRoot, pathname)))
   // Traversal rejection: the target must be distRoot itself (`/`) or stay under
   // it. `sep`, not '/': resolve() emits backslash paths on Windows, where a '/'
   // suffix would reject every legitimate subpath as traversal.
@@ -130,24 +134,32 @@ async function serveStatic(
 export function apply(ctx: Context, config: Config): void {
   const distIndex = config.distIndex
   const distRoot = dirname(distIndex)
+  // Matching a surface path composes nothing; Client Modules composes its graph only for an admitted render.
+  const surfaceAt = (pathname: string): ClientSurfaceDefinition | undefined => ctx.get('clientSurfaces')?.findByPath(pathname)
+  const isIndex = (pathname: string): boolean => {
+    const target = resolve(normalize(join(distRoot, pathname)))
+    return target === distRoot || target === distIndex
+  }
   ctx.effect(() => ctx.webServer.registerFallback({
     auth: (request) => {
-      const target = resolve(normalize(join(distRoot, decodeURIComponent(request.url.pathname))))
-      return target === distRoot || target === distIndex ? 'required' : 'anonymous'
+      const pathname = decodeURIComponent(request.url.pathname)
+      return isIndex(pathname) || surfaceAt(pathname) !== undefined ? 'required' : 'anonymous'
     },
     resource: (request, peer) => {
       request.signal.throwIfAborted()
-      const target = resolve(normalize(join(distRoot, decodeURIComponent(new URL(request.url).pathname))))
-      if (target !== distRoot && target !== distIndex) return serveStatic(request, distRoot, distIndex)
+      const pathname = decodeURIComponent(new URL(request.url).pathname)
+      // A registered client surface path renders the same index with that surface's boot graph.
+      const surface = surfaceAt(pathname)
+      if (surface === undefined && !isIndex(pathname)) return serveStatic(request, pathname, distRoot, distIndex)
       // WebServer admits every index request before invoking this resource.
       const pagePeer = peer as PeerScope
       const render = (html: string): string => {
         request.signal.throwIfAborted()
         pagePeer.signal.throwIfAborted()
-        return ctx.webServer.renderIndex(html, pagePeer)
+        return ctx.webServer.renderIndex(html, pagePeer, surface === undefined ? {} : { variant: surface.id })
           .replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="./">`)
       }
-      return serveStatic(request, distRoot, distIndex, render)
+      return serveStatic(request, surface === undefined ? pathname : '/', distRoot, distIndex, render)
     },
   }), 'frontend-static: fallback seat')
 }

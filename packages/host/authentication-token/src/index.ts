@@ -18,6 +18,14 @@ export interface Config {
   cookieMaxAgeDays: number
 }
 
+/**
+ * The part of Client Modules' `clientSurfaces` service the token exchange reads. The lookup is soft, so compositions
+ * without Client Modules exchange the token on the root only.
+ */
+interface ClientSurfacePaths {
+  findByPath(path: string): { readonly path: string } | undefined
+}
+
 /** Validate cookie lifetime before preparing the token implementation. */
 export const Config: z<Config> = z.object({
   cookieMaxAgeDays: z.natural().min(1).default(30),
@@ -53,11 +61,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       if (facts.socket?.destroyed || response.destroyed || facts.signal?.aborted) return
       if (!active) { await next(); return }
       const url = new URL(request.url ?? '/', 'http://dsh.invalid')
-      if (url.pathname !== '/' || !url.searchParams.has('token')) {
+      if (!url.searchParams.has('token')) {
         await next()
         return
       }
-      auth.authorizeIndex(request, response, webCtx.webServer.protocol === 'https:')
+      // The root and each registered client surface path exchange the token; the surface's own exact path is the only
+      // non-root exchange path, so no caller-supplied return path widens the redirect.
+      const exchangePath = url.pathname === '/'
+        ? '/'
+        : (webCtx.get('clientSurfaces') as ClientSurfacePaths | undefined)?.findByPath(url.pathname)?.path
+      if (exchangePath === undefined) {
+        await next()
+        return
+      }
+      auth.authorizeIndex(request, response, webCtx.webServer.protocol === 'https:', exchangePath)
     })
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact', path: CONNECT_PATH, auth: 'anonymous',

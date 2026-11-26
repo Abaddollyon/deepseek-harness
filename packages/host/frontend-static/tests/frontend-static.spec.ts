@@ -136,24 +136,42 @@ async function request(
 describe('real Loader composition', () => {
   it('serves a registered client surface path as an index with its own token exchange and variant', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition({ id: 'companion', path: '/companion', rootPlugin: '@fixture/companion' })
-    loaded.on('webserver/index-inject', (rows, _peer, renderContext) => {
+    const renderedFor: Connection.PeerScope[] = []
+    loaded.on('webserver/index-inject', (rows, peer, renderContext) => {
+      renderedFor.push(peer)
       rows.push({ kind: 'global', name: '__VARIANT__', value: renderContext?.variant ?? 'ordinary' })
     })
     const port = loaded.webServer.port
-    const launch = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}/companion`)
-    const exchange = await fetch(launch, { redirect: 'manual' })
+    const auth = await BrowserAuth.create(loaded[Context.root], loaded.credentials, 30)
+    const origin = `http://127.0.0.1:${String(port)}`
+    const exchange = await fetch(auth.authenticatedUrl(`${origin}/companion`), { redirect: 'manual' })
     expect(exchange.status).toBe(303)
     expect(exchange.headers.get('location')).toBe('./companion')
     const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
     if (cookie === undefined) throw new Error('surface exchange did not set a cookie')
+    // An unregistered path keeps its route owner's handling of a token query: no exchange, no cookie.
+    const unregistered = await fetch(auth.authenticatedUrl(`${origin}/other`), { redirect: 'manual' })
+    expect(unregistered.status).toBe(404)
+    expect(unregistered.headers.get('set-cookie')).toBeNull()
 
+    // The surface path requires a Peer and renders nothing for an unauthenticated request.
     expect((await request(port, '/companion')).status).toBe(401)
+    expect(renderedFor).toEqual([])
     const page = await request(port, '/companion', { headers: { cookie } })
     expect(page).toMatchObject({ status: 200, type: 'text/html; charset=utf-8' })
     expect(page.body).toContain('globalThis["__VARIANT__"] = "companion"')
-    expect(page.body).toContain('<base href="./">')
+    expect(page.body).toContain('shell')
+    expect(page.body.indexOf('<base href="./">')).toBeLessThan(page.body.indexOf('__VARIANT__'))
+    const admission = loaded.connection.authentication.authenticate({ headers: { host: `127.0.0.1:${String(port)}`, cookie } })
+    if ('rejection' in admission) throw new Error('token provider refused the surface Cookie')
+    expect(renderedFor).toEqual([admission.peer])
     expect((await request(port, '/', { headers: { cookie } })).body).toContain('globalThis["__VARIANT__"] = "ordinary"')
     expect((await request(port, '/other', { headers: { cookie } })).status).toBe(404)
+
+    // An in-process read of the surface path renders the surface for the caller's Peer.
+    const reader = loaded.connection.createPeer({ principal: { kind: 'owner' } })
+    const read = await loaded.webServer.readResource(new Request('http://reader.invalid/companion'), reader)
+    expect(await read.text()).toContain('globalThis["__VARIANT__"] = "companion"')
   })
 
   it('serves explicit index entries and files while preserving HTTP error semantics', { timeout: 60_000 }, async () => {
