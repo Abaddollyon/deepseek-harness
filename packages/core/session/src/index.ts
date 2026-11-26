@@ -19,7 +19,7 @@ import { SurfaceManager, validateSessionEventData, validateSurfaceMetadata } fro
 import type { SessionSurface, SessionMessageProjection } from './surface.ts'
 import { foldRequestHeader } from './request-header.ts'
 import { ToolHistoryProjection } from './tool-history.ts'
-import { assertMessageEventShape, checkSessionLog, needsInheritedSeedMarker } from './validation.ts'
+import { assertMessageEventShape, checkSessionLog, needsInheritedSeedMarker, workspaceRootsOf } from './validation.ts'
 import type { SessionSeedMode } from './validation.ts'
 import type { ToolHistory } from '@deepseek-ai/dsh-llm'
 
@@ -273,6 +273,8 @@ function snapshotAppend(
   opts: SurfaceIntent | undefined,
   subject: string,
 ) {
+  // The constructor records the roots once; no later write may add or replace them.
+  if (type === 'workspace/roots') throw new Error(`${subject}: workspace/roots is recorded only when a Session is created`)
   const surfaceOp = opts?.surfaceOp
   const sourceEventSeqs = opts?.sourceEventSeqs
   const dataSnapshot = snapshotJsonValue(data)
@@ -283,6 +285,11 @@ function snapshotAppend(
   })
   if (surface === undefined) throw new Error(`${subject} carries non-JSON-serializable surface metadata`)
   return { type, data: dataSnapshot, surface }
+}
+
+/** Whether two root lists hold the same paths in the same order. */
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index])
 }
 
 /** Construct and validate one live event from detached inputs. */
@@ -325,6 +332,13 @@ export class Session {
   /** Number of leading events inherited from this Session's fork parent. */
   readonly inheritedEventCount: SessionLogOffset
 
+  /**
+   * Absolute directories this Session may use beside `header.cwd`, read from
+   * its seq-0 `workspace/roots` event; empty without one. Fixed for the
+   * Session's lifetime: a seeded or restored Session reads its seed's roots.
+   */
+  readonly additionalPaths: readonly string[]
+
   /** The session identity, derived from its durable header's single copy. */
   get id(): SessionId {
     return this.header.id
@@ -360,8 +374,11 @@ export class Session {
    * @param header - optional borrowed storage metadata.
    * @param inheritedEventCount - exact fork-inherited prefix length for a seeded header.
    * @param projections - pure interpreters for plugin-owned message changes.
+   * @param additionalPaths - absolute directories beside `cwd`; without a seed a nonempty
+   *   list becomes the seq-0 `workspace/roots` event, with a seed it must equal the seed's.
    * @returns a detached session.
-   * @throws when a seed event requires a missing message interpreter or fails validation.
+   * @throws when a seed event requires a missing message interpreter or fails validation,
+   *   or `additionalPaths` is invalid or differs from the seed's roots.
    */
   static create(
     id: SessionId,
@@ -369,8 +386,9 @@ export class Session {
     header?: SessionHeader,
     inheritedEventCount?: SessionLogOffset,
     projections?: readonly SessionMessageProjection[],
+    additionalPaths?: readonly string[],
   ): Session {
-    return new Session(id, seed, header, 'snapshot', inheritedEventCount, projections)
+    return new Session(id, seed, header, 'snapshot', inheritedEventCount, projections, additionalPaths)
   }
 
   /**
@@ -413,10 +431,17 @@ export class Session {
     mode: SessionSeedMode = 'snapshot',
     suppliedInheritedEventCount?: SessionLogOffset,
     projections: readonly SessionMessageProjection[] = [],
+    suppliedAdditionalPaths?: readonly string[],
   ) {
     this.surfaceManager = new SurfaceManager(this.log, SessionLogOffset(0), projections)
     const checked = checkSessionLog(id, header, seed, suppliedInheritedEventCount, mode, this.log, this.surfaceManager)
+    if (seed !== undefined && suppliedAdditionalPaths !== undefined && !samePaths(suppliedAdditionalPaths, checked.additionalPaths)) {
+      throw new Error('seeded session additional paths must equal its seed workspace/roots event')
+    }
     this.firstLiveSeq = SessionLogOffset(this.log.length)
+    this.additionalPaths = seed === undefined && suppliedAdditionalPaths !== undefined && suppliedAdditionalPaths.length > 0
+      ? this.recordWorkspaceRoots(suppliedAdditionalPaths)
+      : checked.additionalPaths
     this.header = checked.header
     const inheritedEventCount = checked.inheritedEventCount
     this.inheritedEventCount = inheritedEventCount
@@ -429,6 +454,29 @@ export class Session {
     } else if (seed !== undefined && !(mode === 'snapshot' && this.header.isSeeded) && this.log.at(-1)?.type !== 'session/end-seed') {
       this.append('session/end-seed', {})
     }
+  }
+
+  /**
+   * Record a new Session's roots as its seq-0 `workspace/roots` event. Like a
+   * seed marker, this constructor event is stored at publication without a
+   * `session/event` notification.
+   * @param additionalPaths - caller-supplied roots for an unseeded Session.
+   * @returns the frozen recorded roots.
+   * @throws when the roots are not nonempty unique absolute paths or not losslessly JSON-serializable.
+   */
+  private recordWorkspaceRoots(additionalPaths: readonly string[]): readonly string[] {
+    const event = snapshotJsonValue({
+      type: 'workspace/roots',
+      seq: SessionSeq(0),
+      time: Date.now(),
+      data: { additionalPaths },
+      ignorable: true,
+    } satisfies SessionEvent<'workspace/roots'>)
+    if (event === undefined) throw new Error('session additional paths are not losslessly JSON-serializable')
+    const roots = workspaceRootsOf(event, 'session creation')
+    this.surfaceManager.validateNext(event)
+    this.log.push(deepFreeze(event))
+    return roots
   }
 
   /** Cached immutable full snapshot of the private append-only log. */
@@ -504,6 +552,7 @@ export class Session {
    * @param inputs - event payloads and surface intents in commit order. An empty array records no events.
    * @returns immutable committed events in the same order.
    * @throws if the Session cannot accept writes, including an empty append, or any candidate or synchronous dispatch validation fails.
+   *   A `workspace/roots` member is creation-only and always rejects the whole batch.
    */
   append(inputs: readonly SessionEventInput[]): readonly SessionEvent[]
 
@@ -547,7 +596,7 @@ export class Session {
    *   of truth, so a bad event fails at the append site rather than later during
    *   a backend flush. A synchronous internal dispatch validation failure or an
    *   append reentered while this acceptance/publication boundary is open also
-   *   rejects before the log changes.
+   *   rejects before the log changes. `workspace/roots` is creation-only and always rejects.
    */
   append<T extends SessionEventType>(
     type: T,
@@ -573,7 +622,8 @@ export class Session {
    * Validate and publish consecutive events together. Observers see the complete log.
    * @param inputs - event payloads and surface intents in commit order.
    * @returns immutable committed events in the same order.
-   * @throws before changing the log if any candidate or synchronous dispatch validation fails.
+   * @throws before changing the log if any candidate or synchronous dispatch validation fails,
+   *   including a creation-only `workspace/roots` member.
    */
   #appendEvents(inputs: readonly SessionEventInput[]): readonly SessionEvent[] {
     this.publicationEntry()
@@ -946,7 +996,7 @@ export class SessionStore extends Service {
       }
     }
     const header = buildSessionHeader(sessionId, options?.meta)
-    const session = Session.create(sessionId, options?.seed, header, options?.inheritedEventCount, this.projections)
+    const session = Session.create(sessionId, options?.seed, header, options?.inheritedEventCount, this.projections, options?.meta?.additionalPaths)
     attachments.set(session, null)
     return session
   }

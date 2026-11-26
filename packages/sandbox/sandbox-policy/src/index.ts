@@ -2,7 +2,9 @@
  * The sandbox POLICY home (`ctx.sandboxPolicy`): the single owner of the
  * deployment's sandbox fallbacks plus per-session resolution: the file-effect
  * {@link SandboxMode}, the `workspace-write` root, the explicit extra writable
- * directories from configuration and live Session registrations, and the override
+ * directories from configuration and live Session registrations (including each
+ * Session's recorded `workspace/roots`, granted again whenever an Agent starts
+ * on it), and the override
  * kit (the `sandbox/mode` event, its fold, and its write path; the fold is the
  * `sandboxMode` session-projection unit
  * registered here, while the event and write path come from
@@ -26,7 +28,7 @@ import { isAbsolute } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { z as zod } from 'zod'
 import z from '@deepseek-ai/schemastery'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SandboxInvalidRootError } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -173,6 +175,12 @@ export class SandboxPolicyService extends Service {
 
   protected async [Service.init](): Promise<void> {
     const ctx = this.ctx
+    // Registered before any await, so no Agent announced during init misses its recorded roots.
+    // Prepended so later creation listeners that start sandboxed work already see the grants.
+    ctx.on('agent/created', async ({ agent, signal }) => {
+      await this.registerSessionRoots(agent, signal)
+      return undefined
+    }, { prepend: true })
     this.sandboxModeProjectionHandle = await ctx.sessionProjections.register({
       key: 'sandboxMode',
       stateVersion: 1,
@@ -250,8 +258,20 @@ export class SandboxPolicyService extends Service {
    * @throws when the directory is relative or contains a NUL byte.
    */
   registerWritableRoot(session: Session, directory: string): () => void {
+    return this.grantWritableRoot(this.ctx, session, directory)
+  }
+
+  /**
+   * Install one registration as an effect of `owner`.
+   * @param owner - context whose effect owns the registration.
+   * @param session - exact live Session receiving the grant.
+   * @param directory - absolute execution-world path.
+   * @returns the exact Cordis effect disposer for this registration.
+   * @throws when the directory is relative or contains a NUL byte.
+   */
+  private grantWritableRoot(owner: Context, session: Session, directory: string): () => void {
     resolveAdditionalWritableRoots([directory])
-    const dispose = this.ctx.effect(() => {
+    const dispose = owner.effect(() => {
       let registrations = this.writableRootRegistrations.get(session)
       if (registrations === undefined) {
         registrations = new Map()
@@ -266,6 +286,44 @@ export class SandboxPolicyService extends Service {
     }, 'sandboxPolicy.registerWritableRoot()')
     // oxlint-disable-next-line typescript/no-misused-promises -- synchronous cleanup preserves the exact Cordis effect disposer
     return dispose
+  }
+
+  /**
+   * Grant the Agent's Session its recorded `workspace/roots` for the Agent's lifetime. Runs for
+   * every start source (startup, resume, clear, compact), because grants are never restored from
+   * the log by themselves. The Agent's scope owns each registration, so disposing the Agent ends it.
+   * A root that is no longer a directory (missing, a file, or a symlink) in the Agent's execution
+   * world, or that cannot be inspected, is skipped with a warning: registering it would make every
+   * workspace-write operation fail with `SandboxInvalidRootError`. The check uses the
+   * working-directory service's filesystem for the Agent; without that service each root is
+   * registered unchecked and enforcement validates it.
+   * @param agent - newly announced Agent.
+   * @param signal - creation cancellation; an abort rejects instead of skipping.
+   */
+  private async registerSessionRoots(agent: Agent, signal: AbortSignal | undefined): Promise<void> {
+    const session = agent.session
+    // Structural Session doubles that predate multi-root workspaces carry no additionalPaths.
+    const roots: readonly string[] = session.additionalPaths ?? []
+    if (roots.length === 0) return
+    const directories = this.ctx.get('workingDirectory')
+    for (const root of roots) {
+      if (directories !== undefined) {
+        let problem: string | undefined
+        try {
+          const info = await directories.filesystem(agent).lstat(root, undefined, signal)
+          if (info?.type !== 'directory') problem = info === undefined ? 'it no longer exists' : `it is a ${info.type}, not a directory`
+        } catch (error: unknown) {
+          signal?.throwIfAborted()
+          problem = `it cannot be inspected: ${error instanceof Error ? error.message : String(error)}`
+        }
+        signal?.throwIfAborted()
+        if (problem !== undefined) {
+          this.ctx.logger.warn(`sandbox-policy: Session "${session.id}" does not receive its recorded workspace root ${JSON.stringify(root)} because ${problem}`)
+          continue
+        }
+      }
+      this.grantWritableRoot(agent.ctx, session, root)
+    }
   }
 
   /**

@@ -24,7 +24,7 @@ import type { SandboxMode } from './index.ts'
 /**
  * Every {@link SandboxEscalationError} code:
  * - `SANDBOX_ESCALATION_INVALID_ARGUMENT` — the escalation fields are unpaired, the justification is blank, or the
- *   target is not strictly wider than the call's effective mode; the model corrects the request.
+ *   target is not a supported mode for the call's effective mode; the model corrects the request.
  * - `SANDBOX_ESCALATION_UNAVAILABLE` — the composition cannot ask for approval: no approval service, no calling Agent,
  *   or no approval channel.
  * - `SANDBOX_ESCALATION_REJECTED` — the user declined the escalation; the operation stays denied.
@@ -197,10 +197,11 @@ export interface EscalationRequest {
 
 /**
  * Resolve a sandbox permission request before execution. Repeating the call's
- * effective mode returns it without approval. A strictly wider mode requires
- * approval and applies only to this call. Narrower or unsupported targets,
- * missing approval services or agents for widening, and non-grant outcomes
- * throw {@link SandboxEscalationError} before execution; a `cancelled`
+ * effective mode returns it without approval. A strictly narrower mode is
+ * returned without approval, so the call runs confined at that mode. A
+ * strictly wider mode requires approval and applies only to this call.
+ * Unsupported targets, missing approval services or agents for widening, and
+ * non-grant outcomes throw {@link SandboxEscalationError} before execution; a `cancelled`
  * outcome while `approval.signal` is aborted rethrows the signal's reason.
  * @param request - the escalation to judge (see {@link EscalationRequest}).
  * @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
@@ -209,12 +210,14 @@ export interface EscalationRequest {
 export async function approveEscalation<A, C>(request: EscalationRequest, approval: EscalationApproval<A, C>): Promise<SandboxMode> {
   const { requestedMode: mode, effectiveMode, justification, subject } = request
   if (mode === effectiveMode) return effectiveMode
-  // Strict widening is an EXECUTION check against the call's effective mode —
-  // deliberately not a schema constraint (the enum is the closed target
-  // vocabulary; the effective mode is per-call truth).
+  // Both directions are EXECUTION checks against the call's effective mode —
+  // deliberately not schema constraints (the enum is the closed target
+  // vocabulary; the effective mode is per-call truth). Asking for less access
+  // only confines the call further.
+  if (Object.hasOwn(WIDER_MODES, mode) && WIDER_MODES[mode]?.includes(effectiveMode) === true) return mode as SandboxMode
   if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode)) {
     throw new SandboxEscalationError(
-      `sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`,
+      `sandbox_permissions "${mode}" is not a supported mode for this call's current "${effectiveMode}" mode`,
       'SANDBOX_ESCALATION_INVALID_ARGUMENT',
     )
   }

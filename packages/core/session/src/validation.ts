@@ -355,7 +355,8 @@ export type SessionSeedMode = 'snapshot' | SessionSeedEventState
  * @param index - position in the seed.
  * @param mode - whether the event is copied before validation.
  * @returns the detached copy in `snapshot` mode, otherwise `source`.
- * @throws when the event is not losslessly JSON-serializable, has an invalid envelope, or its seq is not `index`.
+ * @throws when the event is not losslessly JSON-serializable, has an invalid envelope, its seq is not `index`,
+ *   or it is a `workspace/roots` event outside the ignorable seq-0 position or with invalid paths.
  */
 export function validateSeedEvent(source: SessionEvent, index: number, mode: SessionSeedMode): SessionEvent {
   // The seed is a persistence/replay boundary: validate and detach the
@@ -368,7 +369,40 @@ export function validateSeedEvent(source: SessionEvent, index: number, mode: Ses
   if (snapshot.seq !== index) {
     throw new Error(`seed event at index ${index} has seq ${snapshot.seq} (expected ${index}); seed must be contiguous from 0`)
   }
+  if (snapshot.type === 'workspace/roots') workspaceRootsOf(snapshot, `seed event at index ${index}`)
   return snapshot
+}
+
+const NO_ADDITIONAL_PATHS: readonly string[] = Object.freeze([])
+
+/**
+ * Validate one `workspace/roots` event at its only legal position: the ignorable event at seq 0.
+ * @param event - candidate seed or creation event.
+ * @param subject - event location to include in validation errors.
+ * @returns a frozen copy of its nonempty, unique, absolute paths.
+ * @throws when the event is not the ignorable seq-0 event or its paths are empty, relative, duplicated, or not strings.
+ */
+export function workspaceRootsOf(event: SessionEvent<'workspace/roots'>, subject: string): readonly string[] {
+  if (event.seq !== 0 || event.ignorable !== true) {
+    throw new Error(`${subject} workspace/roots must be the ignorable event at seq 0`)
+  }
+  const paths: unknown = (event.data as { readonly additionalPaths?: unknown } | null)?.additionalPaths
+  if (!Array.isArray(paths) || paths.length === 0
+    || paths.some(path => typeof path !== 'string' || !isAbsolute(path) || path.includes('\0'))
+    || new Set(paths).size !== paths.length) {
+    throw new Error(`${subject} workspace/roots additionalPaths must be nonempty unique absolute paths`)
+  }
+  return Object.freeze(paths.map(String))
+}
+
+/**
+ * The additional workspace roots recorded by a log's seq-0 `workspace/roots` event.
+ * @param events - validated events, contiguous from seq 0.
+ * @returns the frozen recorded roots, or an empty list without the event.
+ */
+export function recordedWorkspaceRoots(events: readonly SessionEvent[]): readonly string[] {
+  const first = events[0]
+  return first?.type === 'workspace/roots' ? workspaceRootsOf(first, 'session event at seq 0') : NO_ADDITIONAL_PATHS
 }
 
 /**
@@ -481,6 +515,8 @@ export interface CheckSessionLogResult {
   readonly header: SessionHeader
   /** Inherited event count validated against `header` and `events`. */
   readonly inheritedEventCount: SessionLogOffset
+  /** Frozen roots of the seed's seq-0 `workspace/roots` event; empty without one. */
+  readonly additionalPaths: readonly string[]
 }
 
 /**
@@ -494,8 +530,9 @@ export interface CheckSessionLogResult {
  * @param mode - construction mode.
  * @param events - empty log that `surface` was constructed over; receives the accepted events.
  * @param surface - incremental surface validator carrying the message interpreters.
- * @returns the validated header and inherited cut.
- * @throws on the first invalid header field, event envelope, sequence, surface transition, or inherited cut.
+ * @returns the validated header, inherited cut, and recorded additional workspace roots.
+ * @throws on the first invalid header field, event envelope, sequence, `workspace/roots` position or
+ *   payload, surface transition, or inherited cut.
  */
 export function checkSessionLog(
   id: SessionId,
@@ -519,6 +556,7 @@ export function checkSessionLog(
   return {
     header: checkedHeader,
     inheritedEventCount: validateInheritedCut(checkedHeader, seed !== undefined, inheritedEventCount, events, mode),
+    additionalPaths: recordedWorkspaceRoots(events),
   }
 }
 

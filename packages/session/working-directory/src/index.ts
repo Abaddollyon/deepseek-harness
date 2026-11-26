@@ -34,6 +34,15 @@ declare module '@deepseek-ai/cordis' {
       request: { agent: Agent; path: string | null; signal: AbortSignal },
       next: () => Promise<string>,
     ): Promise<string>
+    /**
+     * Select the filesystem that holds one Agent's working directory. A listener that owns the
+     * Agent's execution world, such as an agent preset over SSH, returns that world's filesystem or
+     * throws while it is unavailable; other listeners call `next()`, which ends at the Host filesystem.
+     * @param agent - Agent whose directory is validated or changed.
+     * @param next - delegate to the next listener or the Host filesystem.
+     * @mode waterfall
+     */
+    'working-directory/fs'(agent: Agent, next: () => Context['fs']): Context['fs']
   }
   interface Context {
     workingDirectory: WorkingDirectoryService
@@ -167,9 +176,10 @@ export class WorkingDirectoryService extends Service {
    */
   ensure(agent: Agent, signal?: AbortSignal): Promise<string> {
     return this.serialize(agent, signal, control => this.ctx.waterfall('working-directory/access', { agent, path: null, signal: control }, async () => {
+      const fs = this.filesystem(agent)
       const current = this.get(agent.session)
-      const target = await this.ctx.fs.resolve(current, { signal: control })
-      const info = await this.ctx.fs.stat(target, control)
+      const target = await fs.resolve(current, { signal: control })
+      const info = await fs.stat(target, control)
       control.throwIfAborted()
       agent.ctx.fiber.assertActive()
       if (info?.type === 'directory') {
@@ -179,7 +189,7 @@ export class WorkingDirectoryService extends Service {
         return current
       }
       const original = agent.session.header.cwd ?? this.defaultDirectory
-      const restored = await this.directory(original, original, control, () => new WorkingDirectoryError(
+      const restored = await this.directory(fs, original, original, control, () => new WorkingDirectoryError(
         `working-directory: directory does not exist: ${JSON.stringify(original)}; the current working directory ${JSON.stringify(current)} is also unavailable`,
         'WORKING_DIRECTORY_UNAVAILABLE',
       ))
@@ -204,10 +214,21 @@ export class WorkingDirectoryService extends Service {
   set(agent: Agent, path: string, signal?: AbortSignal): Promise<string> {
     return this.serialize(agent, signal, control => this.ctx.waterfall('working-directory/access', { agent, path, signal: control }, async () => {
       if (path.length === 0) throw new WorkingDirectoryError('working-directory: path must not be empty', 'WORKING_DIRECTORY_INVALID')
-      const directory = await this.directory(path, this.get(agent.session), control)
+      const directory = await this.directory(this.filesystem(agent), path, this.get(agent.session), control)
       this.commit(agent, directory, false, control)
       return directory
     }))
+  }
+
+  /**
+   * Select the filesystem that holds one Agent's working directory through the `working-directory/fs`
+   * waterfall: the Host filesystem unless a listener that owns the Agent's execution world supplies another.
+   * @param agent - Agent whose execution world is inspected.
+   * @returns the filesystem that validates the Agent's directories.
+   * @throws the error of a listener whose execution world is unavailable.
+   */
+  filesystem(agent: Agent): Context['fs'] {
+    return this.ctx.waterfall('working-directory/fs', agent, () => this.ctx.fs)
   }
 
   private contextText(session: Session): string {
@@ -215,6 +236,7 @@ export class WorkingDirectoryService extends Service {
   }
 
   private async directory(
+    fs: Context['fs'],
     path: string,
     cwd: string,
     signal: AbortSignal,
@@ -223,11 +245,11 @@ export class WorkingDirectoryService extends Service {
       'WORKING_DIRECTORY_NOT_FOUND',
     ),
   ): Promise<string> {
-    const target = await this.ctx.fs.resolve(path, { cwd, signal })
-    const info = await this.ctx.fs.stat(target, signal)
+    const target = await fs.resolve(path, { cwd, signal })
+    const info = await fs.stat(target, signal)
     signal.throwIfAborted()
     if (info?.type !== 'directory') throw missing()
-    return this.ctx.fs.processPath(target)
+    return fs.processPath(target)
   }
 
   private commit(agent: Agent, directory: string, recovered: boolean, signal: AbortSignal): void {

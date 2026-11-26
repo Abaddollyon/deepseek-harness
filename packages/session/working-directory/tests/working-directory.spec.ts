@@ -55,6 +55,40 @@ describe('Session working directories', () => {
     })])
   })
 
+  it('validates through the filesystem the working-directory/fs waterfall selects for an Agent', async () => {
+    await using f = await fixture()
+    const child = join(f.root, 'world')
+    await mkdir(child)
+    const host = f.ctx.fs
+    const stats: string[] = []
+    // A stand-in execution-world filesystem: the Host provider with its metadata reads recorded.
+    const world = new Proxy(host, {
+      get(target, key) {
+        if (key === 'stat') {
+          return (fsTarget: Parameters<typeof host.stat>[0], signal?: AbortSignal) => {
+            stats.push(target.processPath(fsTarget))
+            return target.stat(fsTarget, signal)
+          }
+        }
+        const value: unknown = Reflect.get(target, key)
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+      },
+    })
+    const sibling = await f.harness.create(brandString<SessionId>('host-sibling'), {}, { cwd: f.root })
+    f.ctx.on('working-directory/fs', (agent, next) => agent === f.agent ? world : next())
+
+    expect(f.ctx.workingDirectory.filesystem(f.agent)).toBe(world)
+    await expect(f.ctx.workingDirectory.set(f.agent, child)).resolves.toBe(child)
+    expect(stats).toContain(child)
+    stats.length = 0
+    await expect(f.ctx.workingDirectory.set(sibling, child)).resolves.toBe(child)
+    expect(stats).toEqual([])
+
+    f.ctx.on('working-directory/fs', () => { throw new Error('execution world offline') }, { prepend: true })
+    await expect(f.ctx.workingDirectory.set(f.agent, f.root)).rejects.toThrow('execution world offline')
+    expect(f.ctx.workingDirectory.get(f.agent.session)).toBe(child)
+  })
+
   it('restores directory state from the log', async () => {
     await using f = await fixture()
     const child = join(f.root, 'child')

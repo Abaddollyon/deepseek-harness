@@ -41,6 +41,8 @@ ctx.sessions.get(sessionId)      // the live session
 ctx.sessions.list()              // every live session, in creation order
 ```
 
+`meta.additionalPaths` (`SessionCreationMeta`) gives a new session absolute directories beside `cwd`. The session records a nonempty list as its ignorable `workspace/roots` event at seq 0 and exposes it as `session.additionalPaths`; `append()` refuses that event type, alone or in a batch, and a seeded or restored session reads it from its seed. Construction and `validateSessionLog()` reject a `workspace/roots` event anywhere but the ignorable seq-0 position. A reader that does not know the event skips it and confines the session to `cwd`. The roots are not a header field and grant nothing on their own: `dsh-sandbox-policy` registers them as the Session's writable directories each time an Agent starts on it.
+
 ### Validate a log and build a header
 
 `validateSessionLog(header, events?, inheritedEventCount?, eventState?, projections?)` runs every check that constructing a Session performs, in the same order and with the same errors, without constructing one. Without `eventState` it matches `Session.create()`, which copies the borrowed events and header before validating them; with `detached` or `shared-frozen` it matches `Session.fromRestore()`, which validates and deeply freezes the header in place and leaves the events uncopied. The Session identity comes from `header.id`, and no in-memory inherited marker is appended.

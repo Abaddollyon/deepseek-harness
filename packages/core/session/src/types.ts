@@ -154,9 +154,24 @@ export interface SessionHeaderMeta {
 }
 
 /**
+ * Creation fields accepted by `ctx.sessions.create()`: the {@link SessionHeaderMeta}
+ * header fields plus the Session's additional workspace roots, which are not a header field.
+ */
+export interface SessionCreationMeta extends SessionHeaderMeta {
+  /**
+   * Absolute directories the Session may use beside `cwd`. A nonempty list
+   * becomes the Session's `workspace/roots` event at seq 0; a seeded
+   * Session inherits that event from its seed, and a supplied list must
+   * then equal the inherited one. Not a header field.
+   */
+  readonly additionalPaths?: readonly string[]
+}
+
+/**
  * Options for creating a {@link Session} via the store. `seed` replays/forks
  * an existing event log; `meta` carries the caller-supplied storage fields the
- * store folds into a {@link SessionHeader}.
+ * store folds into a {@link SessionHeader}, plus the additional workspace roots
+ * recorded as the `workspace/roots` event.
  */
 export interface CreateSessionOptions {
   /** Initial replay or fork history supplied at construction. */
@@ -171,7 +186,7 @@ export interface CreateSessionOptions {
    * Storage metadata read once before publication. `isSeeded` marks fork
    * lineage; supplying replay history alone does not make it inherited.
    */
-  readonly meta?: SessionHeaderMeta
+  readonly meta?: SessionCreationMeta
 }
 
 /**
@@ -295,6 +310,15 @@ export type RequestHeaderReason = 'initial' | 'resume' | 'change' | 'series'
  * compact raw streams so persistence stores one durable settlement per attempt.
  */
 export interface SessionEventMap {
+  /**
+   * Absolute directories the Session may use beside its header `cwd`, fixed
+   * when the Session is created. Valid only as seq 0 with `ignorable: true`;
+   * `Session.append()` refuses it, alone or in a batch. A reader that skips it
+   * confines the Session to `cwd`. The sandbox policy grants these roots again
+   * each time an Agent starts on the Session; the model-visible policy text is
+   * logged separately.
+   */
+  'workspace/roots': { readonly additionalPaths: readonly string[] }
   /**
    * Opens turn `turn` before the loop claims queued input or runs pre-step.
    * Rejection, empty input, cancellation, or failure may close it with no

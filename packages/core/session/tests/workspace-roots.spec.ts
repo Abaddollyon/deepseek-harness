@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SessionStore, { buildForkSeed, Session, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
+import SessionStore, { buildForkSeed, Session, SessionId, SessionLogOffset, SessionSeq, validateSessionLog } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 describe('Session additional roots', () => {
@@ -18,6 +18,11 @@ describe('Session additional roots', () => {
     expect(session.header).not.toHaveProperty('additionalPaths')
     expect(session.additionalPaths).toEqual(['/work/lib', '/work/docs'])
     expect(() => session.append('workspace/roots', { additionalPaths: ['/elsewhere'] })).toThrow(/only when a Session is created/)
+    expect(() => session.append([
+      ['turn/end', { turn: 1, reason: { kind: 'completed' } }],
+      ['workspace/roots', { additionalPaths: ['/elsewhere'] }],
+    ])).toThrow(/batch member 1 .*only when a Session is created/)
+    expect(session.seq).toBe(2)
 
     const restored = Session.fromRestore(session.id, structuredClone([...events]), structuredClone(session.header), SessionLogOffset(0), 'detached')
     expect(restored.additionalPaths).toEqual(['/work/lib', '/work/docs'])
@@ -55,5 +60,19 @@ describe('Session additional roots', () => {
     expect(() => Session.create(SessionId('required'), [required])).toThrow(/ignorable event at seq 0/)
     expect(() => Session.create(SessionId('relative'), [roots(0, ['lib'])])).toThrow(/unique absolute paths/)
     expect(() => Session.create(SessionId('fresh'), undefined, undefined, undefined, undefined, ['relative'])).toThrow(/unique absolute paths/)
+    expect(() => Session.create(SessionId('duplicate'), undefined, undefined, undefined, undefined, ['/work/lib', '/work/lib'])).toThrow(/unique absolute paths/)
+    expect(() => Session.create(SessionId('empty-seed'), [], undefined, undefined, undefined, ['/work/lib'])).toThrow(/must equal its seed/)
+    expect(Session.create(SessionId('none'), undefined, undefined, undefined, undefined, []).snapshotEvents()).toEqual([])
+  })
+
+  it('validates a stored log\'s roots event like construction does', () => {
+    const header = Session.create(SessionId('stored')).header
+    const roots = (seq: number): SessionEvent<'workspace/roots'> => ({
+      type: 'workspace/roots', seq: SessionSeq(seq), time: 1, data: { additionalPaths: ['/work/lib'] }, ignorable: true,
+    })
+    const turn: SessionEvent = { type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } }
+    expect(() => validateSessionLog(header, [roots(0)])).not.toThrow()
+    expect(() => validateSessionLog(header, [turn, roots(1)])).toThrow(/ignorable event at seq 0/)
+    expect(() => validateSessionLog(header, [turn, roots(1)], undefined, 'detached')).toThrow(/ignorable event at seq 0/)
   })
 })

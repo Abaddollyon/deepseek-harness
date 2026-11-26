@@ -170,24 +170,20 @@ describe('SandboxPolicyService', () => {
     })
   })
 
-  it('grants the session additional roots beside its cwd and lists them in the policy text', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SystemPrompt)
-    await ctx.plugin(SessionProjectionRegistry)
-    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: '/fallback' })
-    const sessionId = SessionId('sess-roots')
+  it('does not grant a Session\'s recorded roots from its log alone', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/fallback', additionalWritableRoots: ['/shared'] })
+    const sessionId = brandString<SessionId>('sess-roots')
     const active = Session.create(sessionId, undefined, {
       version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 0, isSeeded: false, cwd: '/projects/app',
     }, undefined, undefined, ['/projects/lib', '/shared/docs'])
+    expect(active.additionalPaths).toEqual(['/projects/lib', '/shared/docs'])
+    // Only an Agent start registers them (see session-roots.spec.ts).
     expect(ctx.sandboxPolicy.resolve({ session: active })).toEqual({
       mode: 'workspace-write',
       workspaceRoot: '/projects/app',
-      additionalWritableRoots: ['/projects/lib', '/shared/docs'],
+      additionalWritableRoots: ['/shared'],
       sessionId: 'sess-roots',
     })
-    expect(await policyContext(ctx, active)).toContain(
-      'may modify files under these session workspace roots: ["/projects/app","/projects/lib","/shared/docs"]',
-    )
   })
 
   it('uses the configured root when a session has no cwd', async () => {
