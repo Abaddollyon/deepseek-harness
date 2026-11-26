@@ -39,9 +39,6 @@
       "path": "../../subagent/tool-subagent"
     },
     {
-      "path": "../../session/session-projection"
-    },
-    {
       "path": "../workflow"
     },
     {

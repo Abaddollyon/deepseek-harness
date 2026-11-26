@@ -348,7 +348,7 @@ describe('workflow child capacity', () => {
       const result = Promise.withResolvers<SubagentResult>()
       finishers.push(() => { result.resolve({ output: [], stopReason: 'completed' }) })
       return Promise.resolve({
-        id: SessionId(`held-${finishers.length}`),
+        id: brandString<SessionId>(`held-${finishers.length}`),
         result: result.promise,
         dispose: () => {
           result.resolve({ output: [], stopReason: 'aborted' })
@@ -392,7 +392,7 @@ describe('workflow child capacity', () => {
     const finishers = heldChildren(ctx)
     const sibling = await ctx.subagents.startActivation({
       provider: 'stub', label: 'sibling', delivery: 'caller', signal: new AbortController().signal,
-      request: { cwd: ctx.workingDirectory.get(parent.session), prompt: [{ type: 'text', text: 'occupy' }], parent },
+      cwd: ctx.workingDirectory.get(parent.session), prompt: [{ type: 'text', text: 'occupy' }], parent,
     })
     const run = start()
     try {
@@ -418,7 +418,7 @@ describe('workflow child capacity', () => {
     })
     // Another tree member takes every freed slot, so each retry is refused.
     const activation = vi.spyOn(ctx.subagents, 'startActivation')
-      .mockResolvedValueOnce({ childId: SessionId('only-child'), result: finished.promise, dispose: () => Promise.resolve() })
+      .mockResolvedValueOnce({ childId: brandString<SessionId>('only-child'), name: 'only-child', result: finished.promise, dispose: () => Promise.resolve() })
       .mockRejectedValue(new SubagentError('subagent limit reached', 'ACTIVATION_LIMIT_REACHED'))
     const run = start()
     try {
@@ -450,10 +450,10 @@ describe('workflow child capacity', () => {
     })
     const activation = vi.spyOn(ctx.subagents, 'startActivation')
     for (const [index, result] of held.entries()) {
-      activation.mockResolvedValueOnce({ childId: SessionId(`held-${index}`), result: result.promise, dispose: () => Promise.resolve() })
+      activation.mockResolvedValueOnce({ childId: brandString<SessionId>(`held-${index}`), name: `held-${index}`, result: result.promise, dispose: () => Promise.resolve() })
     }
     activation.mockReturnValueOnce(refused.promise)
-      .mockResolvedValueOnce({ childId: SessionId('admitted'), result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: () => Promise.resolve() })
+      .mockResolvedValueOnce({ childId: brandString<SessionId>('admitted'), name: 'admitted', result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: () => Promise.resolve() })
     const run = start()
     try {
       expect((await run.result).stopReason).toBe('completed')

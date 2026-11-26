@@ -98,7 +98,7 @@ class StubProvider implements SubagentProvider {
     }
     if (request.signal.aborted) throw new Error('child start aborted before publication')
     return {
-      id: brandString<SessionId>(`stub-child-${index}`),
+      id: brandString<SessionId>(`${this.name}-child-${index}`),
       result: terminal.promise,
       dispose: () => {
         controlled.disposeCalls += 1
@@ -249,12 +249,44 @@ describe('dsh-workflow-ptc', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.parent).toBeDefined()
     })
 
+    it('agent({label}) replaces the run-numbered child label; an unlabelled call keeps it', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted("await agent('named child', { label: 'scout' }); return await agent('anonymous child')"))
+
+      expect(result.stopReason).toBe('completed')
+      expect(provider.runs.map(child => child.request.label)).toEqual(['scout', 'test-flow child 2'])
+    })
+
     it('agent({provider}) forwards provider-only agentOptions through PTC bindings', async () => {
       const { ctx, parent, provider } = await setup()
       const result = await run(ctx, parent, scripted("return await agent('route me', { provider: 'openai' })"))
 
       expect(result.value).toBe('stub reply')
       expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai' })
+    })
+
+    it('agent({subagentProvider}) starts only that child through the named provider', async () => {
+      const { ctx, parent, provider } = await setup()
+      const remote = new StubProvider('remote-host', () => text('remote reply'))
+      ctx.subagents.registerProvider(remote)
+
+      const result = await run(ctx, parent, scripted("return await parallel([() => agent('here'), () => agent('there', { subagentProvider: 'remote-host' })])"))
+
+      expect(result.value).toEqual(['stub reply', 'remote reply'])
+      expect(remote.runs).toHaveLength(1)
+      expect(provider.runs).toHaveLength(1)
+    })
+
+    it.each([
+      ["{ reasoningEffort: 'high' }", 'requires an effective child provider and model'],
+      ["{ provider: 'openai', model: 'small', reasoningEffort: 'high' }", '`llm` service is unavailable'],
+    ])('agent(%s) fails before start when the effort cannot be validated', async (options, message) => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`return await agent('route me', ${options})`))
+
+      expect(result.stopReason).toBe('error')
+      expect(result.error).toContain(message)
+      expect(provider.runs).toHaveLength(0)
     })
 
     it('a start-request provider override selects every child without changing the engine default', async () => {

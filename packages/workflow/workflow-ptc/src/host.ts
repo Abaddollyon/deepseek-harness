@@ -1,14 +1,19 @@
 /** Workflow child ownership and progress over the shared sandboxed PTC executor. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-llm'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/types'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import type { PtcBindingFunction, PtcJsonValue, PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { parentAgentOptionsForDelegation, SubagentError } from '@deepseek-ai/dsh-subagent'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { SubagentActivation } from '@deepseek-ai/dsh-subagent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
+import { assertAllowedModelSelection } from '@deepseek-ai/dsh-tool-subagent/route-selection'
+import type {} from '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { assertNever, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
@@ -47,8 +52,11 @@ function json(value: unknown): PtcJsonValue {
 function childRequest(value: unknown): ChildStartRequest {
   const request = object(value)
   const prompt = text(request.prompt, 'prompt')
+  const label = request.label === undefined ? undefined : text(request.label, 'label')
   const provider = request.provider === undefined ? undefined : text(request.provider, 'provider')
   const model = request.model === undefined ? undefined : text(request.model, 'model')
+  const reasoningEffort = request.reasoningEffort === undefined ? undefined : text(request.reasoningEffort, 'reasoning effort')
+  const subagentProvider = request.subagentProvider === undefined ? undefined : text(request.subagentProvider, 'subagentProvider')
   let schema: ObjectJsonSchema | undefined
   if (request.schema !== undefined) {
     const candidate = object(request.schema)
@@ -57,10 +65,38 @@ function childRequest(value: unknown): ChildStartRequest {
   }
   return {
     prompt,
+    ...label === undefined ? {} : { label },
     ...provider === undefined ? {} : { provider },
     ...model === undefined ? {} : { model },
+    ...reasoningEffort === undefined ? {} : { reasoningEffort },
+    ...subagentProvider === undefined ? {} : { subagentProvider },
     ...schema === undefined ? {} : { schema },
   }
+}
+
+/**
+ * The child's route: the call's own provider, model and effort over the
+ * configured defaults. A call that changes the configured route without naming
+ * an effort drops the configured effort, which belongs to that route. The
+ * configured route is the defaults' provider and model, each falling back to
+ * the parent's, so naming that route keeps the effort. An effort-only call
+ * keeps the configured or parent route.
+ * @param defaults - configured child defaults, if any.
+ * @param request - the `agent()` call.
+ * @param parent - the parent's current route.
+ * @returns the child's Agent options, or `undefined` when it inherits the parent's route unchanged.
+ */
+function childAgentOptions(defaults: AgentOptions | undefined, request: ChildStartRequest, parent: AgentOptions): AgentOptions | undefined {
+  const perCall: AgentOptions = {
+    ...request.provider === undefined ? {} : { provider: request.provider },
+    ...request.model === undefined ? {} : { model: request.model },
+    ...request.reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(request.reasoningEffort) },
+  }
+  if (defaults === undefined) return Object.keys(perCall).length === 0 ? undefined : perCall
+  const routeChanged = (request.provider !== undefined && request.provider !== (defaults.provider ?? parent.provider))
+    || (request.model !== undefined && request.model !== (defaults.model ?? parent.model))
+  const { reasoningEffort: _configuredEffort, ...route } = defaults
+  return { ...routeChanged && request.reasoningEffort === undefined ? route : defaults, ...perCall }
 }
 
 function agentInfo(value: unknown): WorkflowAgentInfo {
@@ -131,6 +167,12 @@ export class PtcWorkflowRun implements WorkflowRun {
   private readonly children = new Map<number, ChildRecord>()
   private readonly pending = new Set<Promise<unknown>>()
   private readonly liveAgents = new Map<number, WorkflowAgentInfo>()
+  /** Published children whose result has not settled; each holds one subagent capacity slot. */
+  private runningChildren = 0
+  /** Settled children so far; a change across a refused start means a slot may have been freed during that start. */
+  private childSettlements = 0
+  /** Child starts waiting for one of this run's running children to settle. */
+  private readonly capacityWaiters = new Set<() => void>()
   private started = 0
   private terminal = false
   private cancelReason: string | undefined
@@ -147,6 +189,7 @@ export class PtcWorkflowRun implements WorkflowRun {
     private readonly parent: Agent,
     private readonly init: WorkerInit,
     private readonly provider: string,
+    private readonly childDefaults: AgentOptions | undefined,
     private readonly policy: SandboxExecutionPolicy,
     private readonly observer: ExecutionObserver,
     private readonly signal?: AbortSignal,
@@ -212,33 +255,140 @@ export class PtcWorkflowRun implements WorkflowRun {
     return record
   }
 
+  /**
+   * Reject a requested reasoning effort before the child exists. The route resolves as the
+   * subagent seam resolves it: per-call provider and model over the parent's delegation route.
+   * `LlmRuntime.resolveCallConfig` rejects an effort that exact model does not offer and never
+   * substitutes another effort or route.
+   * @param provider - The per-call provider override, if any.
+   * @param model - The per-call model override, if any.
+   * @param reasoningEffort - The requested effort.
+   */
+  private async assertReasoningEffort(
+    provider: string | undefined,
+    model: string | undefined,
+    reasoningEffort: ReasoningEffortId,
+  ): Promise<void> {
+    const parentOptions = parentAgentOptionsForDelegation(this.parent)
+    const effectiveProvider = provider ?? parentOptions.provider
+    const effectiveModel = model ?? parentOptions.model
+    if (effectiveProvider === undefined || effectiveModel === undefined) {
+      throw new Error(`reasoning effort "${reasoningEffort}" requires an effective child provider and model`)
+    }
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) throw new Error('cannot validate the child reasoning effort because the `llm` service is unavailable')
+    await llm.resolveCallConfig({ provider: effectiveProvider, model: effectiveModel, reasoningEffort }, this.controller.signal)
+  }
+
+  /**
+   * Limit a call's explicit route to the routes the Host's subagent model
+   * selection setting allows, with the subagent tool's own assertion. The
+   * setting is read on every call, so an edit applies to the next `agent()`.
+   * A call that names no provider, model or effort is not checked: configured
+   * defaults are not a choice the script made. While the setting is off, or
+   * its service is not loaded, any route is accepted (the subagent tool would
+   * allow only the parent's route), so `agent()` keeps its independent route
+   * overrides.
+   * @param request - the `agent()` call.
+   * @param parentOptions - the parent's current route.
+   * @param agentOptions - the child's merged route.
+   * @throws {SubagentError} `MODEL_ROUTE_NOT_ALLOWED` when the setting excludes the effective route,
+   *   or `INVALID_MODEL_SELECTION_SETTINGS` when the enabled setting is malformed.
+   */
+  private assertAllowedRoute(request: ChildStartRequest, parentOptions: AgentOptions, agentOptions: AgentOptions | undefined): void {
+    if (request.provider === undefined && request.model === undefined && request.reasoningEffort === undefined) return
+    const routes = this.ctx.get('subagentModelSelection')?.allowedRoutes()
+    if (routes === undefined) return
+    const provider = agentOptions?.provider ?? parentOptions.provider
+    const model = agentOptions?.model ?? parentOptions.model
+    if (provider === undefined || model === undefined) {
+      throw new Error('cannot select a child LLM route without an effective provider and model')
+    }
+    assertAllowedModelSelection({ routes }, parentOptions, { provider, model }, false)
+  }
+
   private async startChild(request: ChildStartRequest): Promise<PtcJsonValue> {
     this.requireActive()
+    const providerName = request.subagentProvider ?? this.provider
+    // Configured defaults reach only a provider that can apply a route; an
+    // explicit per-call route still reaches the provider, which rejects it.
+    const defaults = this.subagents.getProvider(providerName)?.capabilities.agentOptions === true ? this.childDefaults : undefined
+    const parentOptions = parentAgentOptionsForDelegation(this.parent)
+    const agentOptions = childAgentOptions(defaults, request, parentOptions)
+    this.assertAllowedRoute(request, parentOptions, agentOptions)
+    if (agentOptions?.reasoningEffort !== undefined) {
+      await this.assertReasoningEffort(agentOptions.provider, agentOptions.model, agentOptions.reasoningEffort)
+      this.requireActive()
+    }
     const callId = ++this.started
-    const run = await this.subagents.startActivation({
-      provider: this.provider,
-      label: `${this.meta.name} child ${callId}`,
+    const cwd = await this.cwd
+    const run = await this.admitted(() => this.subagents.startActivation({
+      provider: providerName,
+      label: request.label ?? `${this.meta.name} child ${callId}`,
       delivery: 'caller',
       signal: this.controller.signal,
-      cwd: await this.cwd,
+      cwd,
       prompt: [{ type: 'text', text: request.prompt }],
       parent: this.parent,
       ...request.schema === undefined ? {} : { outputSchema: request.schema },
-      ...request.provider === undefined && request.model === undefined ? {} : {
-        agentOptions: {
-          ...request.provider === undefined ? {} : { provider: request.provider },
-          ...request.model === undefined ? {} : { model: request.model },
-        },
-      },
-    })
+      ...agentOptions === undefined ? {} : { agentOptions },
+    }))
     const record: ChildRecord = { callId, run }
     this.children.set(callId, record)
+    this.runningChildren += 1
+    const settled = (): void => { this.childSettled() }
+    void run.result.then(settled, settled)
     // A provider can publish after the signal fired while startup was pending.
     if (this.controller.signal.aborted) {
       await this.disposeChild(record)
       throw new Error('workflow child started after cancellation')
     }
     return { callId, childId: run.childId }
+  }
+
+  /**
+   * Start one child, waiting while the parent's subagent capacity is full and this run still has a running child.
+   * A running child holds a slot, never waits for this run, and releases the slot before its result settles; without
+   * one the capacity failure propagates unchanged, because nothing this run owns would free a slot. A child that
+   * settled while the refused attempt was in progress may have freed a slot that attempt missed, so the start retries
+   * at once instead of waiting or failing.
+   * @param start - one admission attempt.
+   * @returns the published activation.
+   */
+  private async admitted(start: () => Promise<SubagentActivation>): Promise<SubagentActivation> {
+    for (;;) {
+      const settlements = this.childSettlements
+      try {
+        return await start()
+      } catch (error: unknown) {
+        if (!(error instanceof SubagentError) || error.code !== 'ACTIVATION_LIMIT_REACHED') throw error
+        if (this.childSettlements === settlements && this.runningChildren === 0) throw error
+      }
+      if (this.childSettlements === settlements) await this.nextChildSettlement()
+      this.requireActive()
+    }
+  }
+
+  /** Resolve after the next of this run's running children settles, or when the run stops. */
+  private nextChildSettlement(): Promise<void> {
+    const signal = this.controller.signal
+    return new Promise((resolve) => {
+      const wake = (): void => {
+        signal.removeEventListener('abort', wake)
+        this.capacityWaiters.delete(wake)
+        resolve()
+      }
+      signal.addEventListener('abort', wake, { once: true })
+      this.capacityWaiters.add(wake)
+    })
+  }
+
+  /** One settlement frees at most one slot; once no running child remains, every waiter retries and starts or fails. */
+  private childSettled(): void {
+    this.runningChildren -= 1
+    this.childSettlements += 1
+    if (this.runningChildren === 0) for (const wake of [...this.capacityWaiters]) wake()
+    else [...this.capacityWaiters][0]?.()
   }
 
   private async childResult(record: ChildRecord): Promise<PtcJsonValue> {
