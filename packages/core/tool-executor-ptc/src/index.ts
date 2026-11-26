@@ -3,15 +3,29 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { RUN_CODE_NAME, ToolNotFoundError, projectToolSchema } from '@deepseek-ai/dsh-tools'
-import type { ToolDefinition, ToolExecutor, ToolModelInput, ToolPromptSection, ToolBatchInput, ToolBatchResult } from '@deepseek-ai/dsh-tools'
+import type {
+  ToolDefinition, ToolDeferral, ToolExecutor, ToolModelInput, ToolPromptSection, ToolBatchInput, ToolBatchResult,
+} from '@deepseek-ai/dsh-tools'
 import { ToolExecutionPipeline, executeToolBatch, toolErrorMessage } from '@deepseek-ai/dsh-tools/pipeline'
 import { createRunCodeTransport, requirePtcRuntime } from './ptc.ts'
-import { renderToolsSdk } from './ts-types.ts'
+import { renderToolDeclarations, renderToolsSdk, type ToolSdkSchema } from './ts-types.ts'
 import { Config } from './config.ts'
 import { PtcCalls } from './ptc-calls.ts'
 import { CodeResetFailedError } from './errors.ts'
 
 const PTC_ONLY_INSTRUCTION = `\`${RUN_CODE_NAME}\` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.`
+
+/**
+ * Project definitions onto the SDK contract: the model-facing schema plus the canonical output schema.
+ * @param tools - the definitions to declare.
+ * @returns one SDK schema per definition.
+ */
+function sdkSchemas(tools: readonly ToolDefinition[]): ToolSdkSchema[] {
+  return tools.map(definition => ({
+    ...projectToolSchema(definition, false),
+    output: definition.output.schema,
+  }))
+}
 
 /** Runs programs whose nested tool calls use the shared guarded invocation pipeline. */
 export class PtcExecutor implements ToolExecutor {
@@ -27,7 +41,7 @@ export class PtcExecutor implements ToolExecutor {
     const tools = ctx.tools
     this.sections = [
       { name: 'tools:ptc-only', order: ctx.systemPrompt.getSectionOrder('PTC_ONLY'), text: PTC_ONLY_INSTRUCTION, interpolate: false },
-      { name: 'tools:sdk', order: ctx.systemPrompt.getSectionOrder('TOOLS_SDK'), text: tools => this.renderSdk(tools), interpolate: false },
+      { name: 'tools:sdk', order: ctx.systemPrompt.getSectionOrder('TOOLS_SDK'), text: (tools, deferral) => this.renderSdk(tools, deferral), interpolate: false },
     ]
     this.pipeline = new ToolExecutionPipeline(ctx, {
       get: (name, scope, toolSet) => name === RUN_CODE_NAME ? this.requirePtcTransport() : tools.executable(name, scope, toolSet),
@@ -41,12 +55,27 @@ export class PtcExecutor implements ToolExecutor {
     return { schemas: [projectToolSchema(this.requirePtcTransport(), false)], knownNames: [RUN_CODE_NAME] }
   }
 
-  private renderSdk(tools: readonly ToolDefinition[]): string {
+  /**
+   * Render the SDK: declarations for every tool the scope does not defer, and
+   * a name-only index of the deferrable ones. It reads the activation-independent
+   * deferrable set, so a direct `tool_search` activation while the scope
+   * presented natively leaves this section unchanged.
+   */
+  private renderSdk(tools: readonly ToolDefinition[], deferral: ToolDeferral): string {
     const runtime = requirePtcRuntime(this.ctx)
-    return renderToolsSdk(tools.map(definition => ({
-      ...projectToolSchema(definition, false),
-      output: definition.output.schema,
-    })), runtime.programFormat)
+    const declared = tools.filter(definition => !deferral.deferrable.has(definition.name))
+    const deferred = tools.filter(definition => deferral.deferrable.has(definition.name))
+    return renderToolsSdk(sdkSchemas(declared), runtime.programFormat, deferred)
+  }
+
+  /**
+   * Render declarations as the TypeScript fragment a program reads from `tool_search`.
+   * Only a running program reads it, so its runtime already passed the TypeScript check.
+   * @param tools - the tools to declare.
+   * @returns the fenced fragment that merges into the SDK's tool maps.
+   */
+  programDeclarations(tools: readonly ToolDefinition[]): string {
+    return renderToolDeclarations(sdkSchemas(tools))
   }
 
   execute(input: ToolBatchInput): Promise<ToolBatchResult> {

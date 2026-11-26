@@ -10,22 +10,26 @@ A preset that composes many tools sends every declaration on every request. In a
 
 ## Decision
 
-`dsh-tools` lists deferred tools by name only. The `defer` config field (`include` and `exclude` whole-name patterns with `*`) sets the deployment policy, `ToolRuntime.deferAs()` shadows it for one scope chain, and the `tool-presentation` preset row exposes it as `defer`. A tool that sets `deferLoading` is deferred unless excluded. Without a policy nothing else changes.
+`dsh-tools` lists deferred tools by name only. The `defer` config field (`include` and `exclude` whole-name patterns with `*`) sets the deployment policy, `ToolRuntime.deferAs()` shadows it for one scope chain, and the `tool-presentation` preset row exposes it as `defer`. A tool that sets `deferLoading` is deferred unless excluded. Without a policy nothing else changes. An on-demand MCP server's loader (`mcp__<server>__load_tools`) is never deferred, whatever the patterns say.
 
 While a scope defers a visible tool, the registry inserts the reserved `tool_search` lookup next to `run_code`. Deferred tools stay registered and callable:
 
-- In PTC mode they leave `ToolArgsMap` and `ToolOutputMap`. A `## More tools` index follows the SDK block with one line per tool, or one line of member names for a namespaced family of more than eight. `tool_search` inside a program returns declarations in the SDK's own language, which stay in the history.
+- In PTC mode they leave `ToolArgsMap` and `ToolOutputMap`. A `## More tools` index follows the SDK block with one line per tool, or one line of member names for a namespaced family of more than eight. The index's example prints a lookup with `inspect(...)`, and `tool_search` inside a program returns a TypeScript fragment that merges into those maps and stays in the history. PTC is TypeScript-only since the [TypeScript-only PTC decision](../simplification/2026-11-12-typescript-only-ptc.md); the Python SDK index and fragments went with it.
 - In native mode they leave the declared tool list, and a `tools:deferred` section carries the same name-only index, listing every deferrable tool so activations leave it unchanged. A direct `tool_search` call returns their JSON schemas and activates them for that agent. The agent loop already logs a newly declared tool as a `tool-addition`, so routes with tool updates add it after the cached history and other routes re-declare the list.
 - Under `both`, a direct `tool_search` activates tools for the native list only. The SDK keeps listing every deferrable tool by name, so an activation never rewrites the cached SDK section.
 - An argument error from a deferred tool carries that tool's declaration.
 
 Activations live in the registry per agent. On `agent/created` the registry seeds an agent's activations from the tools its last logged request header declared, because that header already records what the model was offered.
 
+Upstream's [on-demand MCP tool loading](2026-10-08-mcp-on-demand-tool-loading.md) is a separate, per-server mechanism and stays beside this one. Its loader is how an agent reaches that server's catalog, which renders only for agents that see the loader, so deferring the loader would hide the server's tools behind two lookups. Its loaded tools register in the agent's own scope and pass through this policy like any other tool.
+
 ## Alternatives considered
 
 **A new Session event for activations.** It would also survive an activation lost between the tool result and the next request header, but it adds a persisted type, a projection, and its compatibility record for a case the model recovers from by searching again.
 
 **Re-render the SDK with looked-up tools.** Adding declarations to the system prompt after a lookup invalidates the cached prefix on every lookup; leaving them in the tool result keeps the prompt stable.
+
+**Replace this mechanism with on-demand MCP loading.** That mechanism covers one MCP server at a time and only servers configured for it; this policy also defers memory, computer-use, job, and team-task tools that are not MCP tools, and keeps them callable without a load step.
 
 **Defer by default.** Changing what every deployment sends would surprise existing presets; the default policy defers only tools that already ask for it with `deferLoading`.
 

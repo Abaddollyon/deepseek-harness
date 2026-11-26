@@ -1,4 +1,4 @@
-import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import { executeModelToolFixture, executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { describe, expect, expectTypeOf, it } from 'vitest'
@@ -12,7 +12,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
-import ToolRuntime, { ToolContextUnavailableError, defineTool, JsonSchemaError, parameterSchemaSpecToJsonSchema, validateArgs, ToolArgsError, ToolNotFoundError, TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, type InferArgs, type ParameterSchemaSpec, type PreToolDecision, type PostToolDecision, type JsonSchemaNode, type ToolDefinition, type ToolDispatchExecution, type ToolExecutionResult, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { ToolContextUnavailableError, defineTool, JsonSchemaError, parameterSchemaSpecToJsonSchema, validateArgs, ToolArgsError, ToolNotFoundError, TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, TOOL_SEARCH_NAME, type InferArgs, type ParameterSchemaSpec, type PreToolDecision, type PostToolDecision, type JsonSchemaNode, type ToolDefinition, type ToolDispatchExecution, type ToolExecutionResult, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
@@ -98,12 +98,16 @@ describe('ToolRuntime', () => {
     }
   })
 
-  it('preserves deferred loading through registry and prompt schema projection', async () => {
+  it('lists a deferLoading tool by name only until tool_search activates it, then declares it with the flag', async () => {
     const ctx = await setup()
     try {
       ctx.tools.register(defineContentToolFixture({ name: 'deferred', description: '', parameters: {}, deferLoading: true, async execute() { return [] } }))
       expect(ctx.tools.schemas()[0]?.deferLoading).toBe(true)
-      expect((await ctx.systemPrompt.assemble()).tools[0]?.deferLoading).toBe(true)
+      expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toEqual([TOOL_SEARCH_NAME])
+      const agent = { id: brandString<SessionId>('deferred-agent'), session: {} as Agent['session'] } as Agent
+      await executeModelToolFixture(ctx, { signal: testToolSignal, callId: brandString<ToolCallId>('search'), name: TOOL_SEARCH_NAME, arguments: { names: ['deferred'] }, agent })
+      const activated = (await ctx.systemPrompt.assemble({ scope: agent })).tools
+      expect(activated.map(tool => [tool.name, tool.deferLoading])).toEqual([['deferred', true], [TOOL_SEARCH_NAME, undefined]])
     } finally {
       await ctx.fiber.dispose()
     }
@@ -905,7 +909,6 @@ describe('ToolRuntime', () => {
     it('dispatches the tool when the answerer grants allowed-once, forwarding the ask fields', async () => {
       const ctx = await approvalSetup()
       const agent = fakeAgent()
-      const controller = new AbortController()
       const seen: ApprovalRequest[] = []
       ctx.on('approval/request', (req) => {
         seen.push(req)
@@ -915,7 +918,7 @@ describe('ToolRuntime', () => {
         ({ kind: 'ask', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' } }))
 
       const result = await executeToolFixture(ctx, {
-        callId: brandString<ToolCallId>('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: controller.signal,
+        callId: brandString<ToolCallId>('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
       })
 
       expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
@@ -923,7 +926,6 @@ describe('ToolRuntime', () => {
       expect(seen[0]).toMatchObject({
         agent, toolName: 'echo', callId: 'c1', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' },
       })
-      expect(seen[0]?.signal).toBe(controller.signal)
     })
 
     it('denies with the user-rejection reason on rejected', async () => {
@@ -958,7 +960,9 @@ describe('ToolRuntime', () => {
         name: 'approval-probe',
         async execute() { dispatched += 1; return [] },
       })
-      ctx.on('approval/request', () => {
+      let asked: AbortSignal | undefined
+      ctx.on('approval/request', (req) => {
+        asked = req.signal
         entered.resolve(undefined)
         return release.promise
       })
@@ -974,6 +978,8 @@ describe('ToolRuntime', () => {
 
       await entered.promise
       controller.abort('caller cancelled approval')
+      // The answerer's signal follows the execution signal.
+      expect(asked?.reason).toBe('caller cancelled approval')
       release.resolve('allowed-once')
 
       await expect(pending).resolves.toMatchObject({

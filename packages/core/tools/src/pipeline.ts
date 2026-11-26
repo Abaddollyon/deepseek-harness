@@ -10,6 +10,7 @@ import { assertNever, deepFreeze, snapshotJsonValue, type JsonValue } from '@dee
 import { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, ToolNotFoundError, ToolOutputError } from './contracts.ts'
 import { APPROVAL_CANCELLED, APPROVAL_ERROR_NAME, APPROVAL_REJECTED, APPROVAL_UNAVAILABLE, type ApprovalErrorCode } from './error-codes.ts'
 import { validateJsonSchemaValue } from './json-schema.ts'
+import { ToolArgsError } from './schema.ts'
 import type { ToolsService } from './index.ts'
 import type { ResolvedToolSet, ToolDefinition, ToolExecutionInput, ToolExecutionMode, ToolExecution, ToolRunContext, ToolExecutionResult, ToolExecutionSuccess, ToolErrorInfo, ToolExecutionToken, PreToolDecision, PostToolDecision } from './contracts.ts'
 
@@ -283,9 +284,10 @@ export class ToolExecutionPipeline {
         ? toolAbortedResult(result)
         : result
     } catch (error: unknown) {
+      const reported = isToolArgsError(error) ? this.tools.explainArgsError(error, exec) : error
       return isAborted(signal) && isUnclassifiedCancellation(error, signal)
-        ? toolErrorResult(error, { name: 'AbortError', code: TOOL_ABORTED })
-        : toolErrorResult(error)
+        ? toolErrorResult(reported, { name: 'AbortError', code: TOOL_ABORTED })
+        : toolErrorResult(reported)
     } finally {
       fused.dispose()
       exec.signal = wrapperSignal
@@ -727,6 +729,16 @@ function isUnclassifiedCancellation(error: unknown, signal: AbortSignal): boolea
 /** Mint a same-process correlation token whose identity is its value. */
 function createExecutionToken(): ToolExecutionToken {
   return Symbol('dsh.tool.execution') as ToolExecutionToken
+}
+
+/** Whether a thrown value is an argument validation failure; a hostile value that cannot be inspected is not. */
+function isToolArgsError(error: unknown): error is ToolArgsError {
+  try {
+    return error instanceof ToolArgsError
+  } catch (_uninspectable) {
+    // A proxy whose prototype trap throws is reported through toolErrorResult's own normalization.
+    return false
+  }
 }
 
 function toolErrorResult(error: unknown, info = errorInfo(error)): ToolExecutionResult {

@@ -21,7 +21,8 @@ const INDEX_GROUP_LINE_THRESHOLD = 8
  * Which visible tools a scope defers. A tool is deferred when its definition
  * sets `deferLoading` or its name matches `include`, and its name matches no
  * `exclude` pattern. Patterns match whole tool names; `*` matches any run of
- * characters, including none.
+ * characters, including none. An on-demand MCP server's loader
+ * (`mcp__<server>__load_tools`) is never deferred, whatever the patterns say.
  */
 export interface ToolDeferPolicy {
   /** Name patterns of tools listed by name only. */
@@ -76,6 +77,14 @@ export function byToolName(a: { readonly name: string }, b: { readonly name: str
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
 }
 
+/**
+ * The loader an mcp-client entry with `toolLoading: on-demand` registers per
+ * server. It is that server's own on-demand mechanism: its catalog section
+ * renders only for agents that see the loader, so listing it by name only
+ * would hide the server's tools behind two lookups.
+ */
+const MCP_ON_DEMAND_LOADER = /^mcp__.+__load_tools$/u
+
 /** Compile one `*` pattern into an anchored expression. */
 function patternExpression(pattern: string): RegExp {
   if (pattern.length === 0) throw new Error('tool defer pattern must be a non-empty string')
@@ -84,7 +93,9 @@ function patternExpression(pattern: string): RegExp {
 }
 
 /**
- * Compile a defer policy.
+ * Compile a defer policy. The compiled policy never defers an on-demand MCP
+ * loader (`mcp__<server>__load_tools`), even when `include` matches it or its
+ * definition sets `deferLoading`.
  * @param policy - the include and exclude name patterns.
  * @returns the compiled policy.
  * @throws when a pattern is empty.
@@ -94,6 +105,7 @@ export function compileToolDeferPolicy(policy: ToolDeferPolicy): CompiledToolDef
   const exclude = (policy.exclude ?? []).map(patternExpression)
   return {
     defers(name, deferLoading) {
+      if (MCP_ON_DEMAND_LOADER.test(name)) return false
       if (!deferLoading && !include.some(pattern => pattern.test(name))) return false
       return !exclude.some(pattern => pattern.test(name))
     },

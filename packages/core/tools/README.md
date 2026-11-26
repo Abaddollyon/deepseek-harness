@@ -81,7 +81,24 @@ Mount one executor in the deployment, preset, or Agent scope. The nearest scope 
 - name: '@deepseek-ai/dsh-tool-executor-native'
 ```
 
-Agent-step concurrency uses the [agent-loop configuration](../agent-loop/README.md). See the [native](../tool-executor-native/README.md) or [PTC](../tool-executor-ptc/README.md) package for executor settings. Custom providers implement only `describe(definitions)` and `execute(batch)`; the shared pipeline is optional. The registry selects the current scoped executor separately for prompt descriptions and each `ctx.tools.execute()` batch. An accepted batch settles through its selected provider even if that provider unloads; settlement may include cancellation errors according to the provider’s disposal policy. New batches reject until a replacement is registered. Executor prompt sections follow ordinary [section lifecycle rules](../system-prompt/README.md): teardown removes registrations, and the next assembly compares any replacement registrations or prepares retirement notices.
+Agent-step concurrency uses the [agent-loop configuration](../agent-loop/README.md). See the [native](../tool-executor-native/README.md) or [PTC](../tool-executor-ptc/README.md) package for executor settings. Custom providers implement only `describe(definitions)` and `execute(batch)`; the shared pipeline is optional, and so are the [deferral hooks](#defer-tool-declarations). The registry selects the current scoped executor separately for prompt descriptions and each `ctx.tools.execute()` batch. An accepted batch settles through its selected provider even if that provider unloads; settlement may include cancellation errors according to the provider’s disposal policy. New batches reject until a replacement is registered. Executor prompt sections follow ordinary [section lifecycle rules](../system-prompt/README.md): teardown removes registrations, and the next assembly compares any replacement registrations or prepares retirement notices.
+
+`dsh-tools` accepts one configuration field, `defer`: the deployment's default defer policy (see [Defer tool declarations](#defer-tool-declarations)). The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tools) lists every accepted field.
+
+<a id="defer-tool-declarations"></a>
+### Defer tool declarations
+
+A large tool set can list most tools by name only and keep their full declarations out of the prompt. `defer.include` names the deferred tools and `defer.exclude` keeps matching tools declared; patterns match whole names and `*` matches any run of characters. A tool whose definition sets `deferLoading` is deferred too unless `exclude` names it. An on-demand MCP server's loader, `mcp__<server>__load_tools`, is never deferred: it is that server's own way to add its tools ([on-demand MCP tool loading](../../../.agents/notes/implemented/feature/2026-10-08-mcp-on-demand-tool-loading.md)), and its catalog section renders only for agents that see it. One agent or preset can shadow the deployment policy with `ctx.tools.deferAs(policy)`, which [`dsh-agent-tool-presentation`](../agent-tool-presentation/README.md) exposes as its `defer` field.
+
+```yaml
+- name: '@deepseek-ai/dsh-tools'
+  config:
+    defer:
+      include: ['mcp__*', 'gbrain_*']
+      exclude: ['gbrain_query']
+```
+
+While a scope defers at least one visible tool, the registry appends the reserved `tool_search` tool to that scope's definitions; it takes exact `names` or a keyword `query` and returns at most ten declarations. Deferred tools stay registered and callable. The registry hands the selected executor the scope's deferral with each description and section render. Under the [PTC executor](../tool-executor-ptc/README.md) deferred tools leave the SDK's `ToolArgsMap` and `ToolOutputMap`; a "More tools" index after the SDK block lists them by name, and `tool_search` inside a program returns their declarations as a TypeScript fragment. Under the [native executor](../tool-executor-native/README.md) they leave the declared tool list and the registry's `tools:deferred` section lists them; a direct `tool_search` call returns their JSON schemas and adds them to that agent's declared tools from its next request. A resumed agent keeps the deferred tools its last logged request header declared. An argument error from a deferred tool carries that tool's declaration. A custom executor opts in through `describe(definitions, deferral)`, `deferredIndex(tools)`, and `programDeclarations(tools)`; one that ignores them declares every tool. The [deferred declarations decision](../../../.agents/notes/implemented/feature/2026-10-02-deferred-tool-declarations.md) records why activations resume from the request header.
 
 ### Restrict tools per agent
 
@@ -122,6 +139,8 @@ The registry holds typed `ToolDefinition`s in scoped layers and projects them on
 - [`src/schema.ts`](src/schema.ts) — Typed tool definitions and model-facing schema projection.
 - [`src/json-schema.ts`](src/json-schema.ts) — Supported JSON Schema validation.
 - [`src/presentation.ts`](src/presentation.ts) — Tool-card render intents.
+- [`src/defer.ts`](src/defer.ts) — Defer policy, the deferred-tool index, and `tool_search` matching.
+- [`src/tool-search.ts`](src/tool-search.ts) — The reserved `tool_search` definition.
 
 ### Execution and cancellation
 
@@ -172,6 +191,20 @@ Fixed per-request cost proportional to the visible definitions. Restrictions tha
 
 Prefix-stable while visible definitions and their order are unchanged. Registration, disposal, or scoped restriction may invalidate reuse from the first changed schema token.
 
+### Name-only tool index and `tool_search`
+
+#### What the model sees
+
+With a defer policy, the PTC executor's SDK ends with a `## More tools` section: one instruction to look up a declaration with `tool_search` before calling a listed tool, then one line per deferred tool with its first sentence (at most 100 characters). A namespaced family of more than eight tools (`<prefix>__*`, or `mcp__<server>__*`) becomes one line of member names. Under the native executor the deferred tools are absent from the declared list until `tool_search` returns them, and `tool_search` itself is declared. The registry's `tools:deferred` section then carries the same `## More tools` index, whose instruction says to call `tool_search` with exact `names` and that found tools are callable from the next step. It lists every deferred tool, activated or not.
+
+#### Token effect
+
+Each deferred tool costs one index line instead of its full declaration. A `tool_search` result adds the returned declarations to the history once.
+
+#### KV Cache effect
+
+The index is prefix-stable while the visible and deferred sets are unchanged. Under the PTC executor, looked-up declarations stay in the history and the prompt does not change. The SDK and both indexes ignore activations. Under the native executor an activated tool changes the declared list from the next request: routes with tool updates add it through a recorded addition after the cached history, and other routes re-declare the list once.
+
 ### Tool-call history and results
 
 #### What the model sees
@@ -197,8 +230,9 @@ These limits define when the registry needs special care. They are current packa
 - **`tools/pre-execute` deliberately cannot rewrite `exec.arguments`** — logged and rendered args would desync from what ran; the rewrite design is [a proposed Agent Note](../../../.agents/notes/proposed/feature/2026-06-30-pre-tool-input-rewrite.md).
 - **Caller-defined subagent and workflow structured outputs remain object-rooted** — this is a consumer-level guard; the shared schema vocabulary and tool outputs support every JSON root.
 - **`timeoutMs` on a definition is declarative only** — the registry never enforces deadlines; enforcement requires the `@deepseek-ai/dsh-tool-call-timeout-policy` wrapper.
+- **Native `tool_search` activations are restored from the last logged request header** — an activation made after that header and lost to a crash before the next request is gone; the model can look the tool up again.
 
-`defineTool()`, registry schema projection, and system-prompt assembly preserve `deferLoading: true`. The marker requests deferred definition loading and does not imply a `tool-addition` record; the [LLM package](../../../packages/llm/llm/README.md#known-limitations-and-deferred-work) documents provider enforcement limits.
+`defineTool()` and registry schema projection preserve `deferLoading: true`. The default defer policy lists such a tool by name only until `tool_search` activates it; its declaration then keeps the marker. The marker requests deferred definition loading and does not imply a `tool-addition` record; the [LLM package](../../../packages/llm/llm/README.md#known-limitations-and-deferred-work) documents provider enforcement limits.
 
 <a id="dev-note"></a>
 ### Dev Note
