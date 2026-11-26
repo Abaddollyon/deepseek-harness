@@ -592,6 +592,11 @@
     },
     {
       "doc": "docs/subsystems/persistence.md",
+      "symbol": "SessionCreationMeta",
+      "source": "packages/core/session/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/persistence.md",
       "symbol": "SessionSeedEventState",
       "source": "packages/core/session/src/types.ts"
     },

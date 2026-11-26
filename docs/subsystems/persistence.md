@@ -204,7 +204,8 @@ Creating a `Session` through the store takes a `seed` (initial replay or fork hi
 /**
  * Options for creating a {@link Session} via the store. `seed` replays/forks
  * an existing event log; `meta` carries the caller-supplied storage fields the
- * store folds into a {@link SessionHeader}.
+ * store folds into a {@link SessionHeader}, plus the additional workspace roots
+ * recorded as the `workspace/roots` event.
  */
 interface CreateSessionOptions {
   /** Initial replay or fork history supplied at construction. */
@@ -219,11 +220,11 @@ interface CreateSessionOptions {
    * Storage metadata read once before publication. `isSeeded` marks fork
    * lineage; supplying replay history alone does not make it inherited.
    */
-  readonly meta?: SessionHeaderMeta
+  readonly meta?: SessionCreationMeta
 }
 ```
 
-`SessionHeaderMeta` names these caller-supplied fields; `buildSessionHeader` folds the same fields into the header of a new Session.
+`SessionHeaderMeta` names the header fields; `buildSessionHeader` folds the same fields into the header of a new Session. `SessionCreationMeta` adds `additionalPaths`, which the store records as the seq-0 `workspace/roots` event instead of a header field.
 
 ```ts type-equiv
 /**
@@ -238,6 +239,22 @@ interface SessionHeaderMeta {
   readonly origin?: 'subagent'
   readonly delegationDepth?: number
   readonly agentPreset?: string
+}
+```
+
+```ts type-equiv
+/**
+ * Creation fields accepted by `ctx.sessions.create()`: the {@link SessionHeaderMeta}
+ * header fields plus the Session's additional workspace roots, which are not a header field.
+ */
+interface SessionCreationMeta extends SessionHeaderMeta {
+  /**
+   * Absolute directories the Session may use beside `cwd`. A nonempty list
+   * becomes the Session's `workspace/roots` event at seq 0; a seeded
+   * Session inherits that event from its seed, and a supplied list must
+   * then equal the inherited one. Not a header field.
+   */
+  readonly additionalPaths?: readonly string[]
 }
 ```
 
