@@ -156,8 +156,19 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
 }
 
 /**
- * Run the packaged ripgrep binary with a plain argv vector and return its
- * complete raw stdout. The working directory is the calling agent's session
+ * An optional model-supplied string, with a blank value read as omitted:
+ * strict structured-output providers fill every optional field, often with "".
+ * @param value - the raw optional argument.
+ * @returns the value, or undefined when it is absent or blank.
+ */
+export function presentText(value: string | undefined): string | undefined {
+  return value === undefined || value.trim().length === 0 ? undefined : value
+}
+
+/**
+ * Run ripgrep (the packaged binary, or the configured executable of the
+ * execution world) with a plain argv vector and return its complete raw
+ * stdout. The working directory is the calling agent's session
  * current directory when available, else
  * `process.cwd()`. `exec.signal` is forwarded so the cooperative tool timeout
  * (`@deepseek-ai/dsh-tool-call-timeout-policy`) and caller cancellation terminate the
@@ -189,6 +200,7 @@ function completeStdout(toolName: string, stdout: SubprocessOutputRead, rawOutpu
  * @param rawOutputMaxBytes - cap on the complete raw stdout the tool will parse.
  * @param graceMs - the seam's terminate-escalation grace period.
  * @param stderrMaxBytes - cap on the retained stderr diagnostic tail.
+ * @param rgPath - configured executable in the execution world; omitted selects the packaged binary.
  * @returns the complete stdout, the zero-result flag, and the resolved workdir.
  */
 export async function runRipgrep(
@@ -199,6 +211,7 @@ export async function runRipgrep(
   rawOutputMaxBytes: number,
   graceMs: number,
   stderrMaxBytes: number,
+  rgPath?: string,
 ): Promise<RipgrepRun> {
   if (exec.signal.aborted) {
     throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, 'SEARCH_ABORTED')
@@ -218,7 +231,7 @@ export async function runRipgrep(
       },
       graceMs,
       signal: exec.signal,
-    } satisfies SubprocessSpawnSpec)
+    } satisfies SubprocessSpawnSpec, rgPath === undefined ? {} : { executable: rgPath })
   } catch (error: unknown) {
     // Node's spawn() throws synchronously for a NUL in argv, and the local
     // impl can throw synchronously when the signal aborts between the check

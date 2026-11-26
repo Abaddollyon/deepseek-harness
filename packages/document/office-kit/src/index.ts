@@ -286,7 +286,8 @@ export class OfficeKit extends TypertRemoteService {
         throw new OfficeKitError('unsupported-format', 'The path must end in doc, docx, xls, xlsx, ppt, or pptx.')
       }
       const files = this.ctx.get('workspaceFiles')
-      const fs = this.ctx.get('fs')
+      // The scope names the Session's execution world; the Host filesystem serves a scope without one.
+      const fs = scope.fs ?? this.ctx.get('fs')
       if (files === undefined || fs === undefined) throw new OfficeKitError('unavailable', 'Office file rendering requires workspaceFiles and fs.')
       const authorized = await files.readBytes(scope, path, { range: { offset: 0, length: 1 } }, signal)
       const source = await files.stat(scope, path, signal)

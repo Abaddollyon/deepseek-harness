@@ -125,4 +125,82 @@ describe('Workspace Files Session scope lookup', () => {
       await typert.dispose()
     }
   })
+
+  it('selects the filesystem of the execution world the Session projection\'s Agent preset owns', async () => {
+    const switched = brandString<SessionId>('switched-blank')
+    const local = brandString<SessionId>('local')
+    const offline = brandString<SessionId>('offline')
+    const plain = brandString<SessionId>('plain')
+    const cold = brandString<SessionId>('cold-remote')
+    const remoteFs = {}
+    const ctx = new Context()
+    ctx.provide('fs', {} as never)
+    const root = resolve('cwd')
+    ctx.provide('sandboxPolicy', { workspaceRoot: resolve('fallback'), resolve: () => ({ mode: 'workspace-write', workspaceRoot: root }) } as never)
+    ctx.provide('sessionPersistence', {
+      stat: async (id: SessionId) => id === cold ? { header: { ...header(cold, root), agentPreset: 'remote' } } : undefined,
+    } as never)
+    ctx.provide('agentPresets', {
+      serviceForPreset: (id: string, name: string) => id === 'remote' && name === 'fs' ? remoteFs : undefined,
+      ownsWorld: (id: string) => id !== 'standard',
+    } as never)
+    // The projection names the preset a blank Session switched to after its header was written.
+    const presetOf: Record<string, string> = { [switched]: 'remote', [local]: 'standard', [offline]: 'host-offline' }
+    ctx.provide('sessionQuery', {
+      observeSession: (id: SessionId) => Promise.resolve({
+        projections: { values: { agentPreset: presetOf[id] } },
+        [Symbol.dispose]: () => {},
+      }),
+    } as never)
+    const sessions = await ctx.plugin(SessionStore)
+    const typert = await ctx.plugin(TypertRegistry)
+    const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
+    try {
+      for (const id of [switched, local, offline]) ctx.sessions.create(id, { meta: { cwd: root, agentPreset: 'standard' } })
+      ctx.sessions.create(plain, { meta: { cwd: root } })
+      const lookup = ctx.typert.lookups.get('workspaceFileScope')
+      if (lookup === undefined) throw new Error('workspaceFileScope lookup did not register')
+      await expect(lookup.resolve(switched)).resolves.toEqual({ sessionId: switched, workspaceRoot: root, fs: remoteFs })
+      // A Session in the Host's world carries no filesystem; the Host's serves it.
+      await expect(lookup.resolve(local)).resolves.toEqual({ sessionId: local, workspaceRoot: root })
+      await expect(lookup.resolve(plain)).resolves.toEqual({ sessionId: plain, workspaceRoot: root })
+      // A stored Session falls back to its header's preset when no projection names one.
+      await expect(ctx.workspaceFiles.scopeOf(cold)).resolves.toEqual({ sessionId: cold, workspaceRoot: root, fs: remoteFs })
+      // An owned world without its filesystem never falls back to the Host files.
+      await expect(lookup.resolve(offline)).rejects.toThrow('agent preset "host-offline" is not available')
+    } finally {
+      await workspaceFiles.dispose()
+      await sessions.dispose()
+      await typert.dispose()
+    }
+  })
+
+  it('reads through the scope\'s execution-world filesystem and keeps search in the Host world', async () => {
+    const target = { targetKey: 'remote-file', displayPath: '/remote/a.txt' }
+    const remote = {
+      resolve: vi.fn(async () => target),
+      lstat: vi.fn(async () => ({ type: 'file' })),
+      stat: vi.fn(async () => ({ type: 'file', version: 'v1', size: 3 })),
+      processPath: vi.fn(() => '/remote/a.txt'),
+    }
+    const ctx = new Context()
+    // The Host filesystem has no methods: any use of it fails the test.
+    ctx.provide('fs', {} as never)
+    ctx.provide('sandboxPolicy', { workspaceRoot: resolve('fallback') } as never)
+    const sessions = await ctx.plugin(SessionStore)
+    const typert = await ctx.plugin(TypertRegistry)
+    const workspaceFiles = await ctx.plugin(WorkspaceFiles, CAPS)
+    try {
+      const scope = { sessionId: brandString<SessionId>('remote'), workspaceRoot: '/remote', fs: remote as never }
+      const signal = new AbortController().signal
+      await expect(ctx.workspaceFiles.stat(scope, 'a.txt', signal)).resolves.toEqual({ absolutePath: '/remote/a.txt', version: 'v1', bytes: 3 })
+      expect(remote.lstat).toHaveBeenCalledWith('a.txt', { cwd: '/remote' }, signal)
+      await expect(ctx.workspaceFiles.search(scope, { query: 'a', excludedPaths: [], includeHidden: false, respectGitignore: true }, signal))
+        .rejects.toMatchObject({ code: 'workspace-file/search-failed' })
+    } finally {
+      await workspaceFiles.dispose()
+      await sessions.dispose()
+      await typert.dispose()
+    }
+  })
 })

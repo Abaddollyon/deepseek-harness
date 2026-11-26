@@ -218,7 +218,7 @@ it.each([{ absolutePath: '/workspace/replaced.docx' }, { version: 'v2' }])('refu
 it('reads source bytes through the filesystem the Session scope names', async () => {
   const remoteRead = vi.fn<FileSystem['readBytes']>().mockResolvedValue(rawSource.data)
   const remote = { resolve: vi.fn().mockResolvedValue(target), stat: fileInfo, processPath, readBytes: remoteRead }
-  await ctx.officeToPdf.render({ ...scope, fs: remote as never }, 'report.docx', 'foreground', new AbortController().signal)
+  await ctx.officeKit.render({ ...scope, fs: remote as never }, 'report.docx', 'foreground', new AbortController().signal)
   expect(remoteRead).toHaveBeenCalledOnce()
   expect(read).not.toHaveBeenCalled()
 })

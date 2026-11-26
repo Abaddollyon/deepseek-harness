@@ -768,16 +768,14 @@ describe('glob results', () => {
     expect(text(result)).toBe(`${join('src', 'a.ts')}\n/elsewhere/b.ts\nrel/c.ts`)
   })
 
-  it('validates arguments (blank pattern, blank path)', async () => {
-    const { ctx } = await setup()
-    for (const [args, message] of [
-      [{ pattern: '  ' }, 'pattern must be a non-empty string'],
-      [{ pattern: '*', path: ' ' }, 'path must be a non-empty string'],
-    ] as const) {
-      const result = await call(ctx, 'glob', args)
-      expect(text(result)).toContain(message)
-      expect(result.error?.info).toEqual({ name: 'ToolArgsError', code: 'INVALID_ARGS' })
-    }
+  it('rejects a blank pattern and reads a blank path as omitted', async () => {
+    const { ctx, subprocess } = await setup()
+    const result = await call(ctx, 'glob', { pattern: '  ' })
+    expect(text(result)).toContain('pattern must be a non-empty string')
+    expect(result.error?.info).toEqual({ name: 'ToolArgsError', code: 'INVALID_ARGS' })
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'glob', { pattern: '*', path: ' ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv).not.toContain('--')
   })
 
   it('threads a valid path through to the spawn as the plain search root element', async () => {
@@ -1110,8 +1108,6 @@ describe('grep results', () => {
     [{ include: '' }, 'pattern'],
     [{ pattern: '', include: '' }, 'pattern must be a non-empty string'],
     [{ pattern: 1, include: '' }, 'pattern'],
-    [{ pattern: 'x', path: '', include: '' }, 'path must be a non-empty string'],
-    [{ pattern: 'x', path: '  ', include: '' }, 'path must be a non-empty string'],
     [{ pattern: 'x', path: 1, include: '' }, 'path'],
     [{ pattern: 'x', include: null }, 'include'],
     [{ pattern: 'x', include: false }, 'include'],
@@ -1126,12 +1122,13 @@ describe('grep results', () => {
     expect(subprocess.spawns).toHaveLength(0)
   })
 
-  it('validates arguments (empty pattern, blank path, bad include)', async () => {
-    const { ctx } = await setup()
+  it('validates arguments (empty pattern, bad include) and reads blank optional fields as omitted', async () => {
+    const { ctx, subprocess } = await setup()
+    subprocess.handler = () => runResult('', { exitCode: 1 })
+    expect((await call(ctx, 'grep', { pattern: 'x', path: '', include: '  ' })).isError).toBe(false)
+    expect(subprocess.spawns[0]?.argv.some(arg => arg === '--' || arg.startsWith('--glob='))).toBe(false)
     for (const [args, message] of [
       [{ pattern: '' }, 'pattern must be a non-empty string'],
-      [{ pattern: 'x', path: '  ' }, 'path must be a non-empty string'],
-      [{ pattern: 'x', include: '  ' }, 'include must be a non-empty glob'],
       [{ pattern: 'x', include: '!*.ts' }, 'negated patterns'],
       [{ pattern: 'x', include: '*.ts,*.js' }, 'comma-separated list'],
     ] as const) {

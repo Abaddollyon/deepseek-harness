@@ -25,7 +25,7 @@ Use this library to start packaged ripgrep without a shell or a system `rg` inst
 <a id="use-this-package"></a>
 ## Use this package
 
-Import `spawnRipgrep` from this package and pass the composed subprocess service plus an explicit `SubprocessSpawnSpec`; its `argv` contains only rg arguments. The returned handle exposes collected output or piped streams as requested. With piped stdout, `readRipgrepLines` delivers newline- or NUL-separated UTF-8 records; returning false from the callback terminates rg and suppresses remaining records. It awaits stdout, the process outcome and managed-range quiescence before returning. Callback, stream and provider failures reject after cleanup. Callers classify exit codes and cancellation using their own signal.
+Import `spawnRipgrep` from this package and pass the composed subprocess service plus an explicit `SubprocessSpawnSpec`; its `argv` contains only rg arguments. When the subprocess provider runs in another execution world, such as an SSH host, pass `{ executable }` as the third argument: an absolute path or a name on that world's PATH. Without it the packaged Host binary starts; a blank override is refused. The returned handle exposes collected output or piped streams as requested. With piped stdout, `readRipgrepLines` delivers newline- or NUL-separated UTF-8 records; returning false from the callback terminates rg and suppresses remaining records. It awaits stdout, the process outcome and managed-range quiescence before returning. Callback, stream and provider failures reject after cleanup. Callers classify exit codes and cancellation using their own signal.
 
 `resolveRgPath` is available independently for consumers that only need the executable path. Resolution and spawn failures reject the call; they do not prevent importing the package. This library is a dependency, not a profile plugin.
 
@@ -65,7 +65,7 @@ None directly; consumers own model-visible results and request assembly.
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **Co-located executable required** — resolution uses the Host's packaged binary path. A remote subprocess provider without that binary fails; there is no system-rg lookup or filesystem-traversal fallback.
+- **Co-located executable required** — resolution uses the Host's packaged binary path. A remote subprocess provider without that binary fails unless the caller names the world's own executable through `executable`; there is no automatic system-rg lookup or filesystem-traversal fallback.
 - **Record buffering** — streaming retains one incomplete record plus the current stream chunk; callers whose filenames may contain newlines use NUL separators rather than newlines. Records decode as UTF-8, so a filename that is not valid UTF-8 arrives with U+FFFD replacements and cannot be opened by that string.
 
 <a id="dev-note"></a>

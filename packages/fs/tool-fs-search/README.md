@@ -47,8 +47,8 @@ A subprocess backend, then the tools; the spill backend is optional and makes ca
 
 | Tool | Arguments | Behavior |
 |---|---|---|
-| `glob` | `pattern`, `path?` | Finds files whose paths match a glob pattern, including hidden and ignored files but excluding VCS metadata; a pattern with no `/` matches basenames at any depth, so `*` matches the whole tree; complete results stay modification-time ordered |
-| `grep` | `pattern`, `path?`, `include?` | Searches file contents with a ripgrep regex and returns matches grouped by file as `Line N: <preview>`; omitted or exact empty `include` applies no file filter; otherwise `include` is one positive glob, with whitespace-only values, comma-separated lists, and negated values rejected up front |
+| `glob` | `pattern`, `path?` | Finds files whose paths match a glob pattern, including hidden and ignored files but excluding VCS metadata; a pattern with no `/` matches basenames at any depth, so `*` matches the whole tree; complete results stay modification-time ordered; a blank `path` counts as omitted |
+| `grep` | `pattern`, `path?`, `include?` | Searches file contents with a ripgrep regex and returns matches grouped by file as `Line N: <preview>`; an omitted or blank `path` or `include` counts as omitted, because strict structured-output models fill every optional field; otherwise `include` is one positive glob, with comma-separated lists and negated values rejected up front |
 
 Routine budgets stay out of the model-facing schema: a model that needs surrounding context reads the matched file with `read`, and one that needs later results follows the returned spill locator's retrieval hint.
 
@@ -110,7 +110,7 @@ Local workspace discovery is naturally a process-backed `rg` workflow, and putti
 
 Without an explicit `path`, `glob` prunes unrelated subtrees for patterns such as `packages/core/src/*.ts` when every directory component is a plain relative name outside VCS metadata. Ordered ripgrep globs exclude the tree, admit directories with the prefix's distinct names, then apply the original file pattern. Same-named directories elsewhere may also be traversed, but only the original pattern admits files. The added arguments are capped at 8 KiB; larger sets use the original traversal. The search root, path separators, symlink handling, matching, and modification-time ordering stay unchanged; other patterns retain the original traversal.
 
-Each call resolves and starts the packaged binary through the shared [ripgrep library](../../util/ripgrep/README.md), which prepends `--no-config` to prevent configuration-driven preprocessors. Model-controlled values remain plain argv elements without shell quoting. Collect-mode budgets bound complete stdout and a stderr tail; a lossy stdout read fails as `SEARCH_RAW_OUTPUT_OVERFLOW` rather than parsing a silently-partial stream. The tools never read a raw spill path.
+Each call starts the configured `rgPath`, or else resolves the packaged binary, through the shared [ripgrep library](../../util/ripgrep/README.md), which prepends `--no-config` to prevent configuration-driven preprocessors. Model-controlled values remain plain argv elements without shell quoting. Collect-mode budgets bound complete stdout and a stderr tail; a lossy stdout read fails as `SEARCH_RAW_OUTPUT_OVERFLOW` rather than parsing a silently-partial stream. The tools never read a raw spill path.
 
 ### Native-mode benchmark
 

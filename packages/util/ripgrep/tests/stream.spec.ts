@@ -22,6 +22,22 @@ describe('packaged rg spawning', () => {
     expect(spawn).toHaveBeenCalledWith({ ...spec, argv: [await resolveRgPath(), '--no-config', '--files'] })
   })
 
+  it('spawns a configured executable without resolving the packaged binary', async () => {
+    const child = handle(undefined)
+    const spawn = vi.fn(() => child)
+    const spec: SubprocessSpawnSpec = { argv: ['--files'], cwd: '/remote/workspace', graceMs: 5,
+      stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' } }
+    await expect(spawnRipgrep({ spawn }, spec, { executable: '/opt/remote/rg' })).resolves.toBe(child)
+    expect(spawn).toHaveBeenCalledWith({ ...spec, argv: ['/opt/remote/rg', '--no-config', '--files'] })
+  })
+
+  it('refuses a blank executable override before spawning', async () => {
+    const spawn = vi.fn()
+    await expect(spawnRipgrep({ spawn }, { argv: [], cwd: '/', graceMs: 1,
+      stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' } }, { executable: ' ' })).rejects.toThrow('non-empty')
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('preserves synchronous provider failures', async () => {
     const failure = new Error('cannot spawn')
     await expect(spawnRipgrep({ spawn() { throw failure } }, { argv: [], cwd: '/', graceMs: 1,

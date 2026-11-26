@@ -205,7 +205,7 @@ export type WorkspaceFileWatchFrame =
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
-    /** Search cannot run: missing subprocess, launch/execution failure, or configured timeout. */
+    /** Search cannot run: a Session in an Agent preset's own execution world, missing subprocess, launch/execution failure, or configured timeout. */
     'workspace-file/search-failed': Record<string, never>
     /** The filesystem provider cannot initialize a watch for this target. */
     'workspace-file/watch-unsupported': { readonly path: string }

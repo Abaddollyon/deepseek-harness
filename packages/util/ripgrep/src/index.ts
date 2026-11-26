@@ -1,4 +1,4 @@
-/** Packaged ripgrep resolution and subprocess execution, independent of tool or Remote consumers. */
+/** Packaged ripgrep resolution and subprocess execution, independent of tool or Remote consumers; an execution world may name its own executable. */
 import { existsSync } from 'node:fs'
 import { join, parse } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessRuntime, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
@@ -26,17 +26,39 @@ export function resolveRgPath(): Promise<string> {
   return rgPathPromise
 }
 
+/** Optional choices for one ripgrep start. */
+export interface RipgrepSpawnOptions {
+  /**
+   * Ripgrep executable in the subprocess provider's execution world: an
+   * absolute path or a name that world's PATH resolves. Omitted selects the
+   * packaged Host binary from {@link resolveRgPath}, which a remote execution
+   * world (for example one reached over SSH) cannot run. A blank value is
+   * refused.
+   */
+  readonly executable?: string
+}
+
 /**
- * Start packaged ripgrep with explicit subprocess settings. `spec.argv` contains
- * only rg arguments, without an executable. This function prepends the resolved
- * rg executable path and `--no-config`, so ambient configuration cannot enable a
- * preprocessor. The caller owns exit classification and process cleanup.
+ * Start ripgrep with explicit subprocess settings. `spec.argv` contains only
+ * rg arguments, without an executable. This function prepends the executable
+ * (the configured override, else the resolved packaged binary) and
+ * `--no-config`, so ambient configuration cannot enable a preprocessor. The
+ * caller owns exit classification and process cleanup.
  * @param subprocess - the composed subprocess service.
  * @param spec - cwd, rg arguments (without the executable), stdio, signal and termination grace.
+ * @param options - an optional executable override for a subprocess provider that runs elsewhere.
  * @returns the live subprocess handle; resolution and synchronous spawn failures reject.
+ * @throws Error when `options.executable` is blank.
  */
-export async function spawnRipgrep(subprocess: Pick<SubprocessRuntime, 'spawn'>, spec: SubprocessSpawnSpec): Promise<SubprocessHandle> {
-  const executable = await resolveRgPath()
+export async function spawnRipgrep(
+  subprocess: Pick<SubprocessRuntime, 'spawn'>,
+  spec: SubprocessSpawnSpec,
+  options: RipgrepSpawnOptions = {},
+): Promise<SubprocessHandle> {
+  if (options.executable !== undefined && options.executable.trim().length === 0) {
+    throw new Error('ripgrep executable must be non-empty when given')
+  }
+  const executable = options.executable ?? await resolveRgPath()
   return subprocess.spawn({ ...spec, argv: [executable, '--no-config', ...spec.argv] })
 }
 
