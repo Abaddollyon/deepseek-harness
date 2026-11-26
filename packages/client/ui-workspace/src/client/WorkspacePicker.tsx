@@ -7,15 +7,17 @@
  * slot occupant (see the contract module doc): this core only opens the flow,
  * adopts the picked path, and owns the error surface. Adding a workspace has
  * exactly one route — pick a host directory, new or existing — because the
- * occupant's own create-folder affordance already covers creating one.
+ * occupant's own create-folder affordance already covers creating one. A
+ * Workspace on another execution host (an Agent preset with its own
+ * filesystem) is added by typing its path on that host.
  */
 import type { ReactElement, ReactNode, RefObject } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Button, IconFolderCloseRegular, IconPlusOutlineRegular, Menu, Modal, type MenuEntry,
+  Button, IconFolderCloseRegular, IconPlusOutlineRegular, Input, Menu, Modal, type MenuEntry,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
-  WorkspaceId, WorkspaceSnapshot, WorkspaceView,
+  WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceWorld,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { workspaceDisplayTitle } from '@deepseek-ai/dsh-api-workspace-controller/default-workspace'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
@@ -25,6 +27,8 @@ import { distinguishingPathSuffixes } from './path-suffix.ts'
 import css from './WorkspacePicker.module.css'
 
 const ADD_WORKSPACE = '::add-workspace'
+const NO_WORKSPACE = '::no-workspace'
+const ADD_REMOTE_WORKSPACE = '::add-remote-workspace:'
 const VISIBLE_WORKSPACE_ROWS = 6
 
 /** Core flow props: the owner supplies popover control and pick semantics. */
@@ -37,14 +41,18 @@ export interface WorkspacePickFlowProps {
   anchorRef?: RefObject<HTMLElement | null> | undefined
   /** Selector hook over the workspace list (framework standard hook). */
   useWorkspaces: <S>(selector: (state: WorkspaceSnapshot) => S) => S
-  /** Adopt a picked host directory as a real Workspace. */
-  createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
+  /** Adopt a picked host directory, or a path on another execution host named by `host`, as a real Workspace. */
+  createWorkspace: (input: { path: string; agentPreset?: string; host?: string }) => Promise<WorkspaceView>
+  /** List the other execution hosts that can hold a Workspace; omitted offers only Host directories. */
+  listWorlds?: (() => Promise<readonly WorkspaceWorld[]>) | undefined
   /** Bound occupancy selector hook for this surface's directory-flow hole (empty leaves the surface with no add action). */
   useDirectoryFlow: SnapshotSelectorHook<boolean>
   /** Render this surface's directory-flow hole with the owner conversation (the entry's narrowed renderSlot). */
   renderDirectoryFlow: (owner: DirectoryFlowOwnerProps) => ReactNode
   /** A real Workspace was picked or created. */
   onPick: (workspaceId: WorkspaceId) => void
+  /** Offer a new Session without a Workspace and handle that choice; omitted hides the entry. */
+  onChooseNoWorkspace?: (() => void) | undefined
   /** Close the popover (outside click / Escape / post-pick). */
   onClose: () => void
   /** Report the picking interaction and adoption occupancy. */
@@ -68,9 +76,11 @@ export function WorkspacePickFlow({
   anchorRef,
   useWorkspaces,
   createWorkspace,
+  listWorlds,
   useDirectoryFlow,
   renderDirectoryFlow,
   onPick,
+  onChooseNoWorkspace,
   onClose,
   addOnly = false,
   onBusyChange,
@@ -88,6 +98,28 @@ export function WorkspacePickFlow({
   const [modalError, setModalError] = useState<string | null>(null)
   const [flowOpen, setFlowOpen] = useState(false)
   const [pickingFolder, setPickingFolder] = useState(false)
+  const [worlds, setWorlds] = useState<readonly WorkspaceWorld[] | undefined>(listWorlds === undefined ? [] : undefined)
+  const [remoteWorld, setRemoteWorld] = useState<WorkspaceWorld | undefined>(undefined)
+  const [remotePath, setRemotePath] = useState('')
+  const [remoteBusy, setRemoteBusy] = useState(false)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+  // Hosts are read each time the menu opens; a failed read offers Host directories only.
+  useEffect(() => {
+    if (!open || listWorlds === undefined) return
+    let live = true
+    listWorlds().then(
+      (next) => { if (live) setWorlds(next) },
+      () => { if (live) setWorlds([]) },
+    )
+    return () => { live = false }
+  }, [open, listWorlds])
+  // A closed menu forgets its hosts, so the next opening waits for its own
+  // read: deciding on the last one would hide a host provisioned since (the
+  // add-only menu would raise the directory flow straight away) or offer one
+  // removed since.
+  useEffect(() => {
+    if (!open) setWorlds(listWorlds === undefined ? [] : undefined)
+  }, [open, listWorlds])
   // One picking interaction at a time: while the flow is open (native chooser
   // pending, browse dialog up) or its pick is being adopted, every other
   // menu action stays disabled — a late outcome must not race a concurrent
@@ -108,11 +140,23 @@ export function WorkspacePickFlow({
   useEffect(() => {
     if (flowOpen && !flowAvailable) setFlowOpen(false)
   }, [flowOpen, flowAvailable])
-  const addEntries: MenuEntry[] = flowAvailable
-    ? [{ id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy }]
+  const addEntries: MenuEntry[] = [
+    ...flowAvailable
+      ? [{ id: ADD_WORKSPACE, label: t('menu.addWorkspace'), icon: <IconPlusOutlineRegular size={16} />, disabled: flowBusy }]
+      : [],
+    ...(worlds ?? []).map(world => ({
+      id: `${ADD_REMOTE_WORKSPACE}${world.agentPreset}`,
+      label: t('menu.addRemoteWorkspace', { host: world.name ?? world.agentPreset }),
+      icon: <IconPlusOutlineRegular size={16} />,
+      disabled: flowBusy,
+    })),
+  ]
+  const noWorkspaceEntries: MenuEntry[] = !addOnly && onChooseNoWorkspace !== undefined
+    ? [{ id: NO_WORKSPACE, label: t('menu.noWorkspace'), disabled: flowBusy }]
     : []
   // With workspaces listed, the add action pins below the scroll region
-  // (divider + always visible); otherwise it IS the menu.
+  // (divider + always visible); otherwise it IS the menu. The no-Workspace
+  // choice leads either list.
   const pinAdd = !addOnly && workspaces.length > 0
   // The resolved name, not `t`, is the memo dependency: the bound seat keeps
   // its identity across a language switch.
@@ -131,7 +175,8 @@ export function WorkspacePickFlow({
     ? new TextSearchIndex(listed, ({ title, path }) => ({ fuzzy: [title], substring: [path] }))
     : undefined, [open, showSearch, listed])
   const matching = searchIndex?.search(query) ?? listed
-  const items: MenuEntry[] = pinAdd
+  // A search narrows Workspaces only; the no-Workspace choice is not a match and leaves while a query is typed.
+  const items: MenuEntry[] = [...query === '' ? noWorkspaceEntries : [], ...pinAdd
     ? matching.map(({ id, title, path, suffix }) => ({
       id,
       // The title gives way first, so the suffix that tells the rows apart
@@ -148,11 +193,11 @@ export function WorkspacePickFlow({
       icon: <IconFolderCloseRegular size={16} />,
       disabled: flowBusy,
     }))
-    : addEntries
+    : addEntries]
   // Nothing listed and nothing to add with (a composition that mounts this
   // package without any directory-picker): an empty popover would claim a
   // choice that does not exist, so the anchor gesture shows nothing at all.
-  const menuIsEmpty = !pinAdd && addEntries.length === 0
+  const menuIsEmpty = !pinAdd && addEntries.length === 0 && noWorkspaceEntries.length === 0
 
   const closeModal = (): void => {
     setErrorOpen(false)
@@ -185,8 +230,9 @@ export function WorkspacePickFlow({
   // only final once the baseline lands — until then the menu stays up with its
   // loading status instead of jumping into a flow the arriving list would have
   // made unnecessary; the add-only surface lists nothing and never waits.
-  const listSettled = addOnly || workspaceSnapshot.phase === 'ready'
-  const addIsTheOnlyEntry = !pinAdd && listSettled && addEntries.length === 1
+  const listSettled = (addOnly || workspaceSnapshot.phase === 'ready') && worlds !== undefined
+  const addIsTheOnlyEntry = noWorkspaceEntries.length === 0 && !pinAdd && listSettled
+    && addEntries.length === 1 && addEntries[0]?.id === ADD_WORKSPACE
   // `flowBusy` gates this exactly as it disables the equivalent menu entry: a
   // pick still being adopted owns the surface until it settles.
   useEffect(() => {
@@ -209,9 +255,40 @@ export function WorkspacePickFlow({
     },
   }
 
+  const closeRemote = (): void => {
+    if (remoteBusy) return
+    setRemoteWorld(undefined)
+  }
+
+  /** Adopt a typed path on the chosen host; failures stay in the dialog for correction. */
+  const adoptRemote = (): void => {
+    if (remoteWorld === undefined || remoteBusy) return
+    setRemoteBusy(true)
+    setRemoteError(null)
+    const { agentPreset, name } = remoteWorld
+    createWorkspace({ path: remotePath.trim(), agentPreset, host: name ?? agentPreset }).then((workspace) => {
+      setRemoteWorld(undefined)
+      onPick(workspace.workspaceId)
+    }).catch((reason: unknown) => {
+      setRemoteError(reason instanceof Error ? reason.message : String(reason))
+    }).finally(() => { setRemoteBusy(false) })
+  }
+
   const handleSelect = (id: string): void => {
+    if (id === NO_WORKSPACE) {
+      onClose()
+      onChooseNoWorkspace?.()
+      return
+    }
     if (id === ADD_WORKSPACE) {
       openDirectoryFlow()
+      return
+    }
+    if (id.startsWith(ADD_REMOTE_WORKSPACE)) {
+      onClose()
+      setRemoteWorld(worlds?.find(world => `${ADD_REMOTE_WORKSPACE}${world.agentPreset}` === id))
+      setRemotePath('')
+      setRemoteError(null)
       return
     }
     onPick(id as WorkspaceId)
@@ -242,6 +319,30 @@ export function WorkspacePickFlow({
       {open && !addIsTheOnlyEntry && !menuIsEmpty && workspaceSnapshot.phase === 'pending' && <div className={css.menuStatus} role="status">{t('picker.loading')}</div>}
       {renderDirectoryFlow(flowOwner)}
       <Modal
+        open={remoteWorld !== undefined}
+        onClose={closeRemote}
+        closeLabel={t('close')}
+        title={t('remoteWorkspace.title', { host: remoteWorld?.name ?? remoteWorld?.agentPreset ?? '' })}
+        footer={(
+          <>
+            <Button variant="outline" className={css.modalAction} onClick={closeRemote}>{t('cancel')}</Button>
+            <Button variant="primary" className={css.modalAction} disabled={remoteBusy || remotePath.trim() === ''} onClick={adoptRemote}>
+              {t('remoteWorkspace.add')}
+            </Button>
+          </>
+        )}
+      >
+        <Input
+          aria-label={t('remoteWorkspace.path')}
+          placeholder={t('remoteWorkspace.placeholder')}
+          value={remotePath}
+          disabled={remoteBusy}
+          onChange={(event) => { setRemotePath(event.target.value) }}
+          onKeyDown={(event) => { if (event.key === 'Enter' && remotePath.trim() !== '') adoptRemote() }}
+        />
+        {remoteError !== null && <div className={css.modalError} role="alert">{remoteError}</div>}
+      </Modal>
+      <Modal
         open={errorOpen}
         onClose={closeModal}
         closeLabel={t('close')}
@@ -267,11 +368,14 @@ export function WorkspacePickFlow({
  */
 type PickerSurfaceProps = Pick<
   WorkspacePickFlowProps,
-  't' | 'open' | 'anchorRef' | 'useWorkspaces' | 'createWorkspace' | 'useDirectoryFlow' | 'selectedId' | 'onPick' | 'onClose'
->
+  't' | 'open' | 'anchorRef' | 'useWorkspaces' | 'createWorkspace' | 'listWorlds' | 'useDirectoryFlow' | 'selectedId' | 'onPick' | 'onClose'
+> & Pick<WorkspacePickerProps, 'allowNoWorkspace' | 'onChooseNoWorkspace' | 'createLooseSession'>
 
 function surfaceFlow(
-  { t, open, anchorRef, useWorkspaces, createWorkspace, useDirectoryFlow, selectedId, onPick, onClose }: PickerSurfaceProps,
+  {
+    t, open, anchorRef, useWorkspaces, createWorkspace, listWorlds, useDirectoryFlow, selectedId, onPick,
+    allowNoWorkspace = false, onChooseNoWorkspace, onClose, createLooseSession,
+  }: PickerSurfaceProps,
   renderDirectoryFlow: WorkspacePickFlowProps['renderDirectoryFlow'],
 ): ReactElement {
   return (
@@ -281,10 +385,17 @@ function surfaceFlow(
       anchorRef={anchorRef}
       useWorkspaces={useWorkspaces}
       createWorkspace={createWorkspace}
+      listWorlds={listWorlds}
       useDirectoryFlow={useDirectoryFlow}
       renderDirectoryFlow={renderDirectoryFlow}
       selectedId={selectedId}
       onPick={onPick}
+      onChooseNoWorkspace={allowNoWorkspace
+        ? () => {
+          onChooseNoWorkspace?.()
+          createLooseSession()
+        }
+        : undefined}
       onClose={onClose}
     />
   )

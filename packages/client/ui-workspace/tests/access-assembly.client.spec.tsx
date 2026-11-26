@@ -135,17 +135,17 @@ describe('Workspace header actions under the page access snapshot', () => {
     }
   })
 
-  it('never offers New Session on the Ungrouped header, even under a global grant', async () => {
+  it('offers New Session on the Chats header only under the global session/create grant', async () => {
     const access = new ClientAccessState({ type: 'baseline', owner: false, grants: [] })
     const runtime = await bench(access, { ungroupedSession: 'loose' as SessionId })
     try {
       runtime.renderRoot()
-      await screen.findByText('未分组')
-      expect(screen.queryByRole('button', { name: '在“未分组”中新建会话' })).toBeNull()
+      await screen.findByText('聊天')
+      expect(screen.queryByRole('button', { name: '在“聊天”中新建会话' })).toBeNull()
       act(() => {
         access.update({ type: 'upsert', grant: { resource: { kind: 'global' }, actions: ['session/create'] } })
       })
-      expect(screen.queryByRole('button', { name: '在“未分组”中新建会话' })).toBeNull()
+      expect(screen.getByRole('button', { name: '在“聊天”中新建会话' })).toBeTruthy()
     } finally {
       await runtime.dispose()
     }

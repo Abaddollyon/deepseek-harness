@@ -1,17 +1,26 @@
-/** Workspace rename and removal dialogs, keyed by their captured request. */
+/** Workspace rename, Manage folders, and removal dialogs, keyed by their captured request. */
+import type { ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { WorkspaceActionRequest, WorkspaceBrowserProps } from '../contract/slots.ts'
+import type { DirectoryFlowOwnerProps, WorkspaceActionRequest, WorkspaceBrowserProps } from '../contract/slots.ts'
+import { WorkspaceFoldersDialog } from '../WorkspaceFoldersDialog.tsx'
 import css from './WorkspaceBrowser.module.css'
 
-type Props = Pick<WorkspaceBrowserProps, 'renameWorkspace' | 'deleteWorkspace' | 'settleWorkspaceAction' | 't'> & {
+type Props = Pick<WorkspaceBrowserProps, 'renameWorkspace' | 'deleteWorkspace' | 'updateWorkspacePaths' | 'settleWorkspaceAction' | 't'> & {
   request: WorkspaceActionRequest
   workspaces: readonly WorkspaceView[]
+  /** Whether the browser's directory-flow hole is occupied (Manage folders picks Host folders through it). */
+  flowAvailable: boolean
+  /** Render the browser's directory-flow hole with Manage folders as its owner. */
+  renderDirectoryFlow: (owner: DirectoryFlowOwnerProps) => ReactNode
 }
 
 /** @param props - captured request, current Workspace list, and existing mutations. @returns the active dialog. */
-export function WorkspaceDialogs({ request, workspaces, renameWorkspace, deleteWorkspace, settleWorkspaceAction, t }: Props) {
+export function WorkspaceDialogs({
+  request, workspaces, renameWorkspace, deleteWorkspace, updateWorkspacePaths, flowAvailable, renderDirectoryFlow,
+  settleWorkspaceAction, t,
+}: Props) {
   const composingRef = useRef(false)
   const renameTarget = request.action === 'rename' ? request : null
   const [renameDraft, setRenameDraft] = useState(request.displayTitle)
@@ -76,7 +85,28 @@ export function WorkspaceDialogs({ request, workspaces, renameWorkspace, deleteW
     })
   }
 
+  // The Workspace as it is now: a Workspace removed while the request waits has no folders to manage.
+  const foldersTarget = request.action === 'folders'
+    ? workspaces.find(workspace => workspace.workspaceId === request.workspaceId)
+    : undefined
+  const foldersGone = request.action === 'folders' && foldersTarget === undefined
+  useEffect(() => {
+    if (foldersGone) settleWorkspaceAction()
+  }, [foldersGone, settleWorkspaceAction])
+
   return <>
+    {foldersTarget !== undefined && (
+      <WorkspaceFoldersDialog
+        path={foldersTarget.path}
+        additionalPaths={foldersTarget.additionalPaths ?? []}
+        remote={foldersTarget.agentPreset !== undefined}
+        flowAvailable={flowAvailable}
+        renderDirectoryFlow={renderDirectoryFlow}
+        onSave={paths => updateWorkspacePaths(foldersTarget.workspaceId, paths)}
+        onClose={settleWorkspaceAction}
+        t={t}
+      />
+    )}
     <Modal
       open={renameTarget !== null}
       onClose={closeRename}

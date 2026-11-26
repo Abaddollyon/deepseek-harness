@@ -82,10 +82,11 @@ function createdLabel(createdAt: number, t: RowTranslate): string {
   return t('hover.created', { time: `${date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` })
 }
 
-/** Hover-card body: workspace title, display directory path, absolute creation time. */
-function WorkspaceHoverContent({ label, cwd, createdAt, t }: {
+/** Hover-card body: workspace title, display directory paths, absolute creation time. */
+function WorkspaceHoverContent({ label, cwd, additionalPaths, createdAt, t }: {
   label: string
   cwd: string | undefined
+  additionalPaths: readonly string[]
   createdAt: number
   t: RowTranslate
 }) {
@@ -93,7 +94,19 @@ function WorkspaceHoverContent({ label, cwd, createdAt, t }: {
     <div className={css.hoverContent}>
       <div className={css.hoverTitle}>{label}</div>
       <div className={css.hoverPath}>{cwd}</div>
+      <AdditionalFolders paths={additionalPaths} t={t} />
       <div className={css.hoverTime}>{createdLabel(createdAt, t)}</div>
+    </div>
+  )
+}
+
+/** Hover-card section listing additional directories; renders nothing without any. */
+function AdditionalFolders({ paths, t }: { paths: readonly string[]; t: RowTranslate }) {
+  if (paths.length === 0) return null
+  return (
+    <div className={css.hoverPath}>
+      <div>{t('hover.additionalFolders')}</div>
+      {paths.map(path => <div key={path}>{path}</div>)}
     </div>
   )
 }
@@ -138,12 +151,14 @@ type ProjectRowItemProps = {
   containsCurrentDescendant?: boolean
   onToggle: () => void
   onCreate: (workspaceId: WorkspaceId) => void
+  /** Start a Session without a Workspace from the ungrouped (Chats) bucket; absent offers no button there. */
+  onCreateLoose?: (() => void) | undefined
   /** Present only for real Workspace rows in the grouped view. */
   drag?: WorkspaceRowDragProps | undefined
   /** Host account home; POSIX home-rooted hover paths display as `~`. */
   home?: string | undefined
   t: RowTranslate
-} & Pick<WorkspaceBrowserProps, 'useWorkspaceAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>
+} & Pick<WorkspaceBrowserProps, 'useWorkspaceAccess' | 'useRemoteAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>
 
 /** The header actions one row offers; an absent create offers no New Session button. */
 interface ProjectRowActions {
@@ -154,8 +169,10 @@ interface ProjectRowActions {
 /**
  * Project (workspace) header row: folder + title;
  * hover reveals the chevron and, on a real Workspace, the create button;
- * dwelling on a real Workspace shows its hover card. The ungrouped bucket
- * has neither, because it has no backing Workspace to start a Session in.
+ * dwelling on a real Workspace shows its hover card. The ungrouped bucket has
+ * no card; its create button starts a Session without a Workspace and asks
+ * the global `session/create` resource. A Workspace on another execution host
+ * shows that host's name as a badge, which the row actions replace on hover.
  * `containsCurrent` arrives on the node (derivation fact, no renderer scan).
  * Create and drag follow the Workspace access snapshot. Menu providers own
  * their access checks; the ungrouped bucket has no Workspace menu.
@@ -163,6 +180,7 @@ interface ProjectRowActions {
  * @param props.containsCurrentDescendant - highlight an ancestor even when its subtree is collapsed.
  * @param props.onToggle - expand/collapse the group.
  * @param props.onCreate - start a frontend Session inside the given Workspace.
+ * @param props.onCreateLoose - start a Session without a Workspace from the ungrouped bucket.
  * @param props.drag - optional workspace-row drag wiring.
  * @param props.home - host account home for POSIX hover-path abbreviation.
  * @param props.t - the browser root's locale seat.
@@ -175,9 +193,11 @@ export function ProjectRowItem(props: ProjectRowItemProps) {
     : <WorkspaceProjectRow {...props} workspaceId={workspaceId} />
 }
 
-/** The ungrouped bucket's header: no backing Workspace to start a Session in or reorder. */
+/** The ungrouped bucket's header: no Workspace resource, so starting a Session there asks the global resource. */
 function UngroupedProjectRow(props: ProjectRowItemProps) {
-  return <ProjectRow {...props} actions={{ reorder: false }} />
+  const allowed = props.useRemoteAccess('session/create')
+  const createLoose = props.onCreateLoose
+  return <ProjectRow {...props} actions={{ create: allowed && createLoose !== undefined ? createLoose : undefined, reorder: false }} />
 }
 
 /** A real Workspace's header: every action asks that Workspace's resource. */
@@ -194,7 +214,7 @@ function WorkspaceProjectRow({ workspaceId, ...props }: ProjectRowItemProps & { 
 function ProjectRow({
   group, containsCurrentDescendant = false, onToggle, drag: offeredDrag, home, newShortcut, t, actions,
   renderFactorySlot, useContextMenuTarget, useContextMenu,
-}: Omit<ProjectRowItemProps, 'onCreate'> & { actions: ProjectRowActions }) {
+}: Omit<ProjectRowItemProps, 'onCreate' | 'onCreateLoose'> & { actions: ProjectRowActions }) {
   const { getTriggerProps } = useContextMenu()
   const drag = actions.reorder ? offeredDrag : undefined
   const create = actions.create
@@ -234,6 +254,7 @@ function ProjectRow({
       <span className={css.projectText}>
         <span className={css.title}>{label}</span>
       </span>
+      {row.host !== undefined && <span className={css.hostBadge}>{row.host}</span>}
       <span className={css.rowActions}>
         {workspaceMenuTarget !== undefined && (
           renderFactorySlot('contextMenu.button', {
@@ -266,6 +287,7 @@ function ProjectRow({
       content={<WorkspaceHoverContent
         label={row.label}
         cwd={row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home)}
+        additionalPaths={(row.additionalPaths ?? []).map(path => abbreviateHomePath(path, home))}
         createdAt={row.createdAt}
         t={t}
       />}
@@ -396,6 +418,7 @@ function SessionHoverContent({ node, cwd, now, renderSlot, t }: {
       {/* Same placeholder rule as the row's trailing cell: no timestamp
           before the first prompt. */}
       {!node.blank && <div className={css.hoverTime}>{hoverTimeLabel(node.updatedAt, now, t)}</div>}
+      <AdditionalFolders paths={node.additionalPaths ?? []} t={t} />
       {renderSlot('sidebar.session.row.hover', { sessionId: node.id })}
       {statuses.map(status => (
         <div className={css.hoverStatus} key={status.label}>

@@ -1,4 +1,4 @@
-import { IconEditOutlineRegular, IconTrashOutlineRegular, IconPinFillRegular, IconPinOutlineRegular, IconUnarchiveOutlineRegular, IconArchiveOutlineRegular, IconBranchOutlineRegular, IconCopyOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconEditOutlineRegular, IconFolderCloseRegular, IconTrashOutlineRegular, IconPinFillRegular, IconPinOutlineRegular, IconUnarchiveOutlineRegular, IconArchiveOutlineRegular, IconBranchOutlineRegular, IconCopyOutlineRegular, IconMailReadOutlineRegular, IconMailUnreadOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { SessionMenu } from './session-actions/SessionMenu.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-context-menu/client'
 /**
@@ -25,7 +25,7 @@ import type { WorkspaceNavigationConfig } from '../types.ts'
 import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ISessions, SessionForkError } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceId, WorkspaceSnapshot,
+  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceId, WorkspaceSnapshot, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { RemoteEndpoint } from '@deepseek-ai/dsh-api-remote-access/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -321,15 +321,38 @@ export function apply(ctx: Context, config: SyncedConfig<WorkspaceNavigationConf
     hooks: { toast: rowToast },
     dismissToast: () => { rowToast.set(null) },
   })
+  const translate = ctx.locale.bind(NS)
+  /**
+   * Adopt a directory as a Workspace. A new Workspace on another execution
+   * host still titled after its folder takes a title naming that host, so a
+   * Host Workspace with the same folder name stays distinct in the sidebar.
+   */
+  const createWorkspace = async ({ host, ...input }: { path: string; agentPreset?: string; host?: string }): Promise<WorkspaceView> => {
+    const workspace = await workspaces.create(input)
+    if (host === undefined) return workspace
+    const folder = workspace.path.slice(workspace.path.lastIndexOf('/') + 1)
+    if (workspace.title !== folder) return workspace
+    return await workspaces.rename(workspace.workspaceId, translate('remoteWorkspace.defaultTitle', { name: folder, host }))
+      .catch((reason: unknown) => {
+        // A title conflict leaves the folder title: the Workspace itself was created.
+        console.warn('remote workspace keeps its folder title:', reason)
+        return workspace
+      })
+  }
+  const createLooseSession = (): void => {
+    void uiWorkspace.openLooseSession().catch((reason: unknown) => { console.warn('new chat failed:', reason) })
+  }
   const workspaceActionRequest = createSnapshotStore<WorkspaceActionRequest | null>(null)
-  const requestWorkspaceAction = (workspaceId: WorkspaceId, displayTitle: string, action: 'rename' | 'delete'): void => {
+  // Each action is gated by the Host endpoint it ends in: Manage folders by `workspace/updatePaths`.
+  const actionEndpoint = { rename: 'workspace/rename', folders: 'workspace/updatePaths', delete: 'workspace/delete' } as const
+  const requestWorkspaceAction = (workspaceId: WorkspaceId, displayTitle: string, action: WorkspaceActionRequest['action']): void => {
     const workspace = workspaces.list.getSnapshot().items.find(row => row.workspaceId === workspaceId)
-    if (workspace === undefined || !ctx.remoteAccess.source('workspace', workspaceId, `workspace/${action}`).getSnapshot()) return
+    if (workspace === undefined || !ctx.remoteAccess.source('workspace', workspaceId, actionEndpoint[action]).getSnapshot()) return
     workspaceActionRequest.set({ action, workspaceId, displayTitle, storedTitle: workspace.title })
   }
   ctx.slots.inject('contextMenu.icon', function* () {
     for (const [key, Icon] of Object.entries({
-      'workspace.rename': IconEditOutlineRegular, 'workspace.delete': IconTrashOutlineRegular,
+      'workspace.rename': IconEditOutlineRegular, 'workspace.folders': IconFolderCloseRegular, 'workspace.delete': IconTrashOutlineRegular,
       'workspace.pin': IconPinOutlineRegular, 'workspace.unpin': IconPinFillRegular,
       'workspace.archive': IconArchiveOutlineRegular, 'workspace.unarchive': IconUnarchiveOutlineRegular,
       'workspace.fork': IconBranchOutlineRegular, 'workspace.copy': IconCopyOutlineRegular,
@@ -342,6 +365,11 @@ export function apply(ctx: Context, config: SyncedConfig<WorkspaceNavigationConf
       ? [{ id: 'rename', label: ctx.locale.bind(NS)('rename'), icon: { key: 'workspace.rename' }, run: () => { requestWorkspaceAction(workspaceId, displayTitle, 'rename') } }] : [],
   }), 'workspace: rename menu action')
   ctx.effect(() => ctx.contextMenus.register({
+    id: 'workspace.folders', target: 'workspace', order: 200,
+    resolve: ({ workspaceId, displayTitle }) => ctx.remoteAccess.source('workspace', workspaceId, 'workspace/updatePaths').getSnapshot()
+      ? [{ id: 'folders', label: ctx.locale.bind(NS)('folders.menu'), icon: { key: 'workspace.folders' }, run: () => { requestWorkspaceAction(workspaceId, displayTitle, 'folders') } }] : [],
+  }), 'workspace: manage folders menu action')
+  ctx.effect(() => ctx.contextMenus.register({
     id: 'workspace.delete', target: 'workspace', order: 300,
     resolve: ({ workspaceId, displayTitle }) => ctx.remoteAccess.source('workspace', workspaceId, 'workspace/delete').getSnapshot()
       ? [{ id: 'delete', label: ctx.locale.bind(NS)('delete.workspace'), icon: { key: 'workspace.delete' }, danger: true, separatorBefore: true,
@@ -352,18 +380,21 @@ export function apply(ctx: Context, config: SyncedConfig<WorkspaceNavigationConf
     // Explicit group actions keep their target; unscoped New Session inherits
     // the current Session Workspace before the recent-Workspace fallback.
     startSession: (workspaceId, options) => { uiWorkspace.startSession(workspaceId, options) },
+    createLooseSession,
     open: openSession,
     searchSessions,
     searchResultLimit: sessions.searchResultLimit,
     requestSessionRename,
     notifyArchivedNotOpenable: () => { notify({ kind: 'archivedNotOpenable' }) },
     renameWorkspace: async (workspaceId, title) => { await workspaces.rename(workspaceId, title) },
+    updateWorkspacePaths: async (workspaceId, additionalPaths) => { await workspaces.updatePaths(workspaceId, additionalPaths) },
     deleteWorkspace: async (workspaceId) => { await workspaces.delete(workspaceId) },
     insertWorkspaceBefore: async (workspaceId, beforeWorkspaceId) => {
       await workspaces.insertBefore(workspaceId, beforeWorkspaceId)
     },
     unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId) },
-    createWorkspace: input => workspaces.create(input),
+    createWorkspace,
+    listWorlds: () => workspaces.worlds(),
     requestSearch: shortcutControls.search,
     requestAddWorkspace: shortcutControls.add,
     closeAddWorkspace: shortcutControls.closeAdd,
@@ -372,7 +403,9 @@ export function apply(ctx: Context, config: SyncedConfig<WorkspaceNavigationConf
       workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
   })
   const pickerInjected = (directoryFlow: HostObservable<boolean>) => (): WorkspacePickerInjected => ({
-    createWorkspace: input => workspaces.create(input),
+    createLooseSession,
+    createWorkspace,
+    listWorlds: () => workspaces.worlds(),
     hooks: { directoryFlow },
   })
   // Each registration declares its owned children in the same call; slot

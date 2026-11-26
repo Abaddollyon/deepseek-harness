@@ -32,7 +32,7 @@ import { workspaceDisplayTitle } from '@deepseek-ai/dsh-api-workspace-controller
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import type { WorkspaceBrowserProps } from '../contract/slots.ts'
-import type { ArchivedFilter, GroupNode, SessionNode, SessionOrderBy, SessionRowState } from '../tree.ts'
+import type { ArchivedFilter, GroupNode, SessionNode, SessionOrderBy, SessionRowState, WorkspaceGroupSource } from '../tree.ts'
 import {
   deriveFlat, deriveGroups, deriveSearchResults, orderByRecency, sessionSearchIndex, owningGroupKey, owningParentFolder,
   pinCurrentBlank, reconcileManualOrder, sessionMemberIds, UNGROUPED_KEY,
@@ -252,9 +252,9 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
 
 type SessionTreeProps = Pick<
   WorkspaceBrowserProps,
-  'useSessionStatus' | 'startSession' | 'open' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'
+  'useSessionStatus' | 'startSession' | 'createLooseSession' | 'open' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'
   | 'insertWorkspaceBefore' | 't' | 'usePanelInfo'
-  | 'useSessionAccess' | 'useWorkspaceAccess'
+  | 'useRemoteAccess' | 'useSessionAccess' | 'useWorkspaceAccess'
 > & PropsRenderSlots<
   | 'sidebar.workspaces.session.row.action'
   | 'sidebar.session.row.trailing'
@@ -266,8 +266,8 @@ type SessionTreeProps = Pick<
   list: SessionListState
   /** Host account home for POSIX hover-path abbreviation. */
   home?: string | undefined
-  /** Workspaces in Host group order with browser-projected Session order. */
-  workspaces: readonly WorkspaceView[]
+  /** Workspaces in Host group order with browser-projected Session order, each with its execution host's name. */
+  workspaces: readonly WorkspaceGroupSource[]
   /** Browser-projected order for Sessions outside every Workspace. */
   ungroupedSessionIds: readonly SessionId[]
   /** Whether the current Workspace stream has a complete Host baseline. */
@@ -312,9 +312,9 @@ function EmptySessions({ rowState, onLeaveArchivedOnly, t }: Pick<SessionTreePro
 
 /** The scrolling session tree; unmounting drops the sessions subscription and the session watermarks. */
 function SessionTree({
-  list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds,
+  list, useSessionStatus, startSession, createLooseSession, open, workspaces, ungroupedSessionIds,
   rowState, onLeaveArchivedOnly,
-  workspaceReady, animationResetKey, usePanelInfo, useSessionAccess, useWorkspaceAccess,
+  workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess,
   onSessionRenameRequest,
   renderSlot, renderFactorySlot, useContextMenuTarget, useContextMenu,
   insertWorkspaceBefore,
@@ -556,6 +556,7 @@ function SessionTree({
           group={group}
           renderFactorySlot={renderFactorySlot} useContextMenu={useContextMenu} useContextMenuTarget={useContextMenuTarget}
           useWorkspaceAccess={useWorkspaceAccess}
+          useRemoteAccess={useRemoteAccess}
           containsCurrentDescendant={currentAncestors.has(group.key)}
           home={home}
           t={t}
@@ -566,6 +567,10 @@ function SessionTree({
           onCreate={(workspaceId) => {
             setGroupExpanded(group.key, true)
             startSession(workspaceId)
+          }}
+          onCreateLoose={() => {
+            setGroupExpanded(group.key, true)
+            createLooseSession()
           }}
           drag={workspaceDragProps}
         />
@@ -916,14 +921,18 @@ export function WorkspaceBrowser({
   useStore,
   actions,
   startSession,
+  createLooseSession,
   open,
   requestSessionRename,
   notifyArchivedNotOpenable,
   renameWorkspace, useWorkspaceActionRequest, settleWorkspaceAction,
+  updateWorkspacePaths,
   deleteWorkspace,
   insertWorkspaceBefore,
   unarchiveSession,
   createWorkspace,
+  listWorlds,
+  useRemoteAccess,
   searchSessions,
   searchResultLimit,
   useDirectoryFlow,
@@ -948,12 +957,25 @@ export function WorkspaceBrowser({
   // The resolved name, not `t`, is the memo dependency: the bound seat keeps
   // its identity across a language switch.
   const defaultWorkspaceName = t('workspace.defaultName')
+  // Display names of the execution hosts Workspaces live on; an unlisted (offline) host shows its preset id.
+  const [hostNames, setHostNames] = useState<ReadonlyMap<string, string>>(new Map())
+  const hostPresets = storedWorkspaces.flatMap(workspace => workspace.agentPreset ?? []).join('\n')
+  useEffect(() => {
+    if (hostPresets === '' || listWorlds === undefined) return
+    let live = true
+    listWorlds().then(
+      (worlds) => { if (live) setHostNames(new Map(worlds.map(world => [world.agentPreset, world.name ?? world.agentPreset]))) },
+      () => { if (live) setHostNames(new Map()) },
+    )
+    return () => { live = false }
+  }, [hostPresets, listWorlds])
   const workspaces = useMemo(
-    () => storedWorkspaces.map(workspace => ({
+    (): WorkspaceGroupSource[] => storedWorkspaces.map(workspace => ({
       ...workspace,
       title: workspaceDisplayTitle(workspace.title, defaultWorkspaceName),
+      ...workspace.agentPreset === undefined ? {} : { host: hostNames.get(workspace.agentPreset) ?? workspace.agentPreset },
     })),
-    [storedWorkspaces, defaultWorkspaceName],
+    [storedWorkspaces, defaultWorkspaceName, hostNames],
   )
   const workspacePhase = useWorkspaces(state => state.phase)
   const workspaceStreamState = useWorkspaces(state => state.state)
@@ -1124,6 +1146,11 @@ export function WorkspaceBrowser({
   const wsPickerOpen = shortcutState.addRequested
   const wsPlusRef = useRef<HTMLButtonElement>(null)
   const workspaceActionRequest = useWorkspaceActionRequest(value => value)
+  // Manage folders borrows the browser's single directory-flow hole: the add flow closes and unmounts while it is open.
+  const foldersOpen = workspaceActionRequest?.action === 'folders'
+  useEffect(() => {
+    if (foldersOpen) closeAddWorkspace()
+  }, [foldersOpen, closeAddWorkspace])
 
   const openSearchResult = (sessionId: SessionId): void => {
     if (archivedSessionIds.includes(sessionId)) {
@@ -1325,13 +1352,15 @@ export function WorkspaceBrowser({
             </Tooltip>
           )}
         </div>
-        {/* Add flow + its error dialog (same package — direct composition). */}
-        <WorkspacePickFlow
+        {/* Add flow + its error dialog (same package — direct composition). The
+            Manage folders dialog borrows the single directory-flow hole while open. */}
+        {!foldersOpen && <WorkspacePickFlow
           t={t}
           open={wsPickerOpen}
           anchorRef={wsPlusRef}
           useWorkspaces={useWorkspaces}
           createWorkspace={createWorkspace}
+          listWorlds={listWorlds}
           useDirectoryFlow={useDirectoryFlow}
           renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
           addOnly
@@ -1342,7 +1371,7 @@ export function WorkspaceBrowser({
             startSession(workspaceId, { clearPreviousDraft: false })
           }}
           onClose={() => { closeAddWorkspace() }}
-        />
+        />}
       </div>
 
       {/* The collapsed rail keeps search as its own 36px control. */}
@@ -1430,6 +1459,8 @@ export function WorkspaceBrowser({
                 rowState={rowState}
                 onLeaveArchivedOnly={leaveArchivedOnly}
                 startSession={startSession}
+                createLooseSession={createLooseSession}
+                useRemoteAccess={useRemoteAccess}
                 open={guardedOpen}
                 insertWorkspaceBefore={insertWorkspaceBefore}
                 revealSessionId={revealSessionId}
@@ -1442,6 +1473,8 @@ export function WorkspaceBrowser({
 
       {workspaceActionRequest !== null && <WorkspaceDialogs key={`${workspaceActionRequest.action}/${workspaceActionRequest.workspaceId}`}
         request={workspaceActionRequest} workspaces={workspaces} renameWorkspace={renameWorkspace} deleteWorkspace={deleteWorkspace}
+        updateWorkspacePaths={updateWorkspacePaths} flowAvailable={directoryFlowAvailable}
+        renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
         settleWorkspaceAction={settleWorkspaceAction} t={t} />}
     </div>
   )

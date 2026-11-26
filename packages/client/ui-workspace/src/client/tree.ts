@@ -65,6 +65,8 @@ export interface SessionNode {
   updatedAt: number
   /** Workspace root the Session works in; absent when the Host reports none or an empty path. */
   cwd?: string
+  /** Additional directories the Session recorded at creation; absent when none. */
+  additionalPaths?: readonly string[]
 }
 
 /** Session order selected by the Workspace browser. */
@@ -77,6 +79,10 @@ export interface GroupNode {
   /** Backing Workspace id; absent only for the ungrouped bucket. */
   workspaceId: WorkspaceId | undefined
   cwd: string | undefined
+  /** Additional Workspace directories offered to new Sessions; absent when none. */
+  additionalPaths?: readonly string[]
+  /** Display name of the execution host holding a Workspace that is not on this Host; absent otherwise. */
+  host?: string
   /** Workspace creation time (epoch ms); absent only for the ungrouped bucket. */
   createdAt: number | undefined
   label: string
@@ -121,10 +127,15 @@ export interface TreeView {
   ungroupedOrder?: readonly string[]
 }
 
+/** One Workspace as the browser groups it: the Host projection plus the display name of its execution host. */
+export type WorkspaceGroupSource = WorkspaceView & { readonly host?: string }
+
 interface Group {
   key: string
   workspaceId: WorkspaceId | undefined
   cwd: string | undefined
+  additionalPaths?: readonly string[]
+  host?: string
   createdAt: number | undefined
   label: string
   sessions: SessionSummary[]
@@ -330,7 +341,7 @@ function orderedUngrouped(
  */
 function groupByWorkspace(
   list: SessionListState,
-  workspaces: readonly WorkspaceView[],
+  workspaces: readonly WorkspaceGroupSource[],
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
   ungroupedOrder: readonly string[] | undefined,
@@ -350,10 +361,14 @@ function groupByWorkspace(
     // The archived-only view lists archives, not the Workspace inventory, so
     // a Workspace without archived Sessions contributes no group.
     if (archivedFilter === 'only' && members.length === 0) continue
-    groups.push(buildGroup(
-      workspace.workspaceId, workspace.workspaceId, workspace.path,
-      Date.parse(workspace.createdAt), workspace.title, members,
-    ))
+    groups.push({
+      ...buildGroup(
+        workspace.workspaceId, workspace.workspaceId, workspace.path,
+        Date.parse(workspace.createdAt), workspace.title, members,
+      ),
+      ...workspace.additionalPaths === undefined ? {} : { additionalPaths: workspace.additionalPaths },
+      ...workspace.host === undefined ? {} : { host: workspace.host },
+    })
   }
   const stray = list.ids
     .map(id => list.byId[id])
@@ -400,6 +415,7 @@ function sessionNode(
 ): SessionNode {
   const status = statuses.get(s.id)
   const pendingInteraction = visiblePendingKind(status?.pendingInteraction?.kind)
+  const additionalPaths = s.projectionValues?.additionalPaths
   // Rows show the checkout the Session works in; grouping stays with the header's original project.
   const root = selectSessionDirectory(list, s.id)
   return {
@@ -415,6 +431,7 @@ function sessionNode(
     updatedAt: s.updatedAt,
     ...(root === undefined || root === '' ? {} : { cwd: root }),
     ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
+    ...(additionalPaths === undefined || additionalPaths === null ? {} : { additionalPaths }),
   }
 }
 
@@ -436,7 +453,7 @@ function sessionNode(
  */
 export function deriveGroups(
   list: SessionListState,
-  workspaces: readonly WorkspaceView[],
+  workspaces: readonly WorkspaceGroupSource[],
   rowState: SessionRowState,
   statuses: SessionStatuses,
   view: TreeView,
@@ -455,6 +472,8 @@ export function deriveGroups(
       key: g.key,
       workspaceId: g.workspaceId,
       cwd: g.cwd,
+      ...g.additionalPaths === undefined ? {} : { additionalPaths: g.additionalPaths },
+      ...g.host === undefined ? {} : { host: g.host },
       createdAt: g.createdAt,
       label: g.label,
       sessionCount: g.sessions.length,

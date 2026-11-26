@@ -174,9 +174,9 @@ describe('target-neutral Conversation apply wiring', () => {
     const b = await bench()
     expect(b.runtime.slots.spec('conversation.aside')).toEqual({ kind: 'list', scope: 'session-maybe' })
     expect(b.runtime.slots.spec('conversation.landing')).toEqual({ kind: 'keyed', scope: 'session' })
-    const root = b.runtime.slots.entries('main.conversation')[0]!
-    const landings = (root.inject!() as { hooks: { conversationLandings: ObservableSnapshot<readonly string[]> } })
-      .hooks.conversationLandings
+    b.runtime.renderRoot()
+    const shell = b.runtime.slots.spec('main.conversation') as { inject: ConversationShellInjected }
+    const landings = shell.inject.hooks.conversationLandings
     expect(landings.getSnapshot()).toEqual([])
 
     const disposeLanding = b.runtime.slots.register({ name: 'conversation.landing', key: 'life' }, (() => null) as never)

@@ -2,17 +2,18 @@
 import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  WorkspaceId, WorkspaceSnapshot, WorkspaceView,
+  WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceWorld,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { allowAllAccess, bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session-status/client'
 import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from '../src/client/contract/slots.ts'
-import { WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
+import { WorkspacePickFlow, WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
 import { zh } from '../src/client/locales.ts'
 
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
@@ -89,9 +90,11 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
+  extra: Partial<WorkspacePickerProps> = {},
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
+  const createLooseSession = vi.fn()
   const anchorRef = anchor()
   document.body.append(anchorRef.current)
   onTestFinished(() => { anchorRef.current.remove() })
@@ -110,15 +113,17 @@ function mount(
       {...allowAllAccess}
       onPick={onPick}
       onClose={onClose}
+      createLooseSession={createLooseSession}
       createWorkspace={createWorkspace}
       useDirectoryFlow={occupancy.useDirectoryFlow}
       renderSlot={renderSlot}
       t={t}
+      {...extra}
     />
   )
   const view = render(renderPicker())
   return {
-    view, onPick, onClose, createWorkspace, probe, occupancy, anchor: anchorRef.current,
+    view, onPick, onClose, createWorkspace, createLooseSession, probe, occupancy, anchor: anchorRef.current,
     rerenderItems: (nextItems: readonly WorkspaceView[]) => {
       currentItems = nextItems
       view.rerender(renderPicker())
@@ -135,6 +140,19 @@ function chooseAdd(): void {
 }
 
 describe('WorkspacePicker', () => {
+  it('offers a new Session without a Workspace only where the owner allows it', () => {
+    const onChooseNoWorkspace = vi.fn()
+    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), { allowNoWorkspace: true, onChooseNoWorkspace })
+    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
+    expect(b.onClose).toHaveBeenCalled()
+    expect(onChooseNoWorkspace).toHaveBeenCalledOnce()
+    expect(b.createLooseSession).toHaveBeenCalledOnce()
+    expect(b.onPick).not.toHaveBeenCalled()
+    cleanup()
+    mount([workspace('alpha', 'Alpha')])
+    expect(screen.queryByRole('menuitem', { name: '不使用工作区' })).toBeNull()
+  })
+
   it('shows the sole workspace without search and clears a query when the list shrinks', () => {
     const alpha = workspace('alpha', 'Alpha')
     const beta = workspace('beta', 'Beta')
@@ -320,6 +338,78 @@ describe('WorkspacePicker', () => {
     expect(screen.queryByTestId('directory-flow')).toBeNull()
   })
 
+  it('adds a Workspace on another execution host from a typed path', async () => {
+    const created = { ...workspace('remote'), path: '/srv/app', agentPreset: 'host-x' }
+    const createWorkspace = vi.fn(async () => created)
+    const listWorlds = vi.fn(async () => [{ agentPreset: 'host-x', name: 'x (SSH)' }])
+    const b = mount([workspace('alpha', 'Alpha')], createWorkspace, occupancySource(), { listWorlds })
+    fireEvent.click(await screen.findByRole('menuitem', { name: '在 x (SSH) 上添加工作区…' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '主机上的文件夹路径' }), { target: { value: ' /srv/app ' } })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+    expect(createWorkspace).toHaveBeenCalledWith({ path: '/srv/app', agentPreset: 'host-x', host: 'x (SSH)' })
+    await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
+  })
+
+  it('offers a host added since the add-only menu last opened instead of raising the flow from the old list', async () => {
+    let worlds: readonly WorkspaceWorld[] = []
+    const listWorlds = vi.fn(async () => worlds)
+    const onClose = vi.fn()
+    const anchorRef = anchor()
+    document.body.append(anchorRef.current)
+    onTestFinished(() => { anchorRef.current.remove() })
+    const occupancy = occupancySource()
+    const probe: { flow?: DirectoryFlowOwnerProps } = {}
+    const owner: { setOpen?: (open: boolean) => void } = {}
+    // The sidebar owner: its add-only menu closes when the flow takes over.
+    function SidebarAdd() {
+      const [open, setOpen] = useState(true)
+      owner.setOpen = setOpen
+      return (
+        <WorkspacePickFlow
+          t={t} open={open} anchorRef={anchorRef} useWorkspaces={hook(workspaceState([]))}
+          createWorkspace={vi.fn()} listWorlds={listWorlds} useDirectoryFlow={occupancy.useDirectoryFlow}
+          renderDirectoryFlow={(flow) => {
+            probe.flow = flow
+            return flow.open ? <div data-testid="directory-flow" /> : null
+          }}
+          onPick={vi.fn()} onClose={() => { onClose(); setOpen(false) }} addOnly
+        />
+      )
+    }
+    render(<SidebarAdd />)
+    // No other host yet: adding is the only entry, so the opening raises the directory flow.
+    await waitFor(() => { expect(screen.getByTestId('directory-flow')).toBeTruthy() })
+    act(() => { probe.flow!.onCancel() })
+    // A host is provisioned while the menu is closed; the next opening reads it before deciding.
+    worlds = [{ agentPreset: 'host-sigil', name: 'sigil (SSH)' }]
+    onClose.mockClear()
+    act(() => { owner.setOpen!(true) })
+    expect(await screen.findByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(listWorlds).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not offer a host from an earlier opening before the fresh host list arrives', async () => {
+    const reads: PromiseWithResolvers<readonly WorkspaceWorld[]>[] = []
+    const listWorlds = vi.fn(() => {
+      const read = Promise.withResolvers<readonly WorkspaceWorld[]>()
+      reads.push(read)
+      return read.promise
+    })
+    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), { listWorlds })
+    await act(async () => { reads[0]!.resolve([{ agentPreset: 'host-sigil', name: 'sigil (SSH)' }]) })
+    expect(screen.getByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeTruthy()
+    b.setOpen(false)
+    b.setOpen(true)
+    // The host was removed meanwhile: until the new read lands, only the Host directory entry is offered.
+    expect(screen.queryByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeNull()
+    await act(async () => { reads[1]!.resolve([]) })
+    expect(screen.queryByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
+  })
+
   it('raises the flow straight from the anchor gesture when adding is the only entry', () => {
     // Nothing to list and one action left: a one-row menu would offer no
     // choice, so the owner's open request lands in the flow itself.
@@ -398,7 +488,7 @@ describe('WorkspacePicker', () => {
         useSessionRetainInfo={() => undefined}
         usePanelInfo={usePanelInfo} useContextMenu={contextMenuHook()} useResource={useResource}
         {...allowAllAccess}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )
@@ -417,7 +507,7 @@ describe('WorkspacePicker', () => {
         useSessionRetainInfo={() => undefined}
         usePanelInfo={usePanelInfo} useContextMenu={contextMenuHook()} useResource={useResource}
         {...allowAllAccess}
-        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )

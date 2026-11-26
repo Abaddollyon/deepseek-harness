@@ -64,9 +64,10 @@ declare module '@deepseek-ai/dsh-client-ui-context-menu/client' {
   }
 }
 
-/** One request for the existing Workspace rename or delete dialog. */
+/** One request for the existing Workspace rename, Manage folders, or delete dialog. */
 export type WorkspaceActionRequest = {
-  readonly action: 'rename' | 'delete'
+  /** `folders` opens Manage folders: the Workspace's additional directories for new Sessions. */
+  readonly action: 'rename' | 'folders' | 'delete'
   readonly workspaceId: WorkspaceId
   readonly displayTitle: string
   readonly storedTitle: string

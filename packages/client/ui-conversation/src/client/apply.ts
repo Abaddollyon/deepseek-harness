@@ -330,14 +330,30 @@ export function apply(ctx: Context, config: SyncedConfig<ConversationConfig>): v
     },
   })
 
+  // Preset ids with a live landing entry, so the main panel can choose the
+  // landing over the Hero before rendering; a crashed entry drops out.
+  const landings = createSnapshotStore<readonly string[]>([])
+  ctx.effect(() => {
+    const sync = (): void => {
+      const keys = slots.entriesOfSlot('conversation.landing')
+        .flatMap(entry => entry.options.key === undefined ? [] : [entry.options.key])
+      const current = landings.getSnapshot()
+      if (keys.length !== current.length || keys.some((key, index) => key !== current[index])) landings.set(keys)
+    }
+    sync()
+    return slots.subscribe('conversation.landing', sync)
+  }, 'ui-conversation: landing presets')
+
   const shellInjected: ConversationShellInjected = {
     openWorkspace: (workspaceId, adopt) => workspaceNavigation.openWorkspace(workspaceId, adopt),
+    hooks: { conversationLandings: landings },
   }
 
   const registerConversationRoot = () => slots.register({
     name: 'main.conversation',
     children: {
       'conversation.header': { kind: 'single', scope: 'session-maybe' },
+      'conversation.aside': { kind: 'list', scope: 'session-maybe' },
     },
   }, ConversationRoot)
 
@@ -355,6 +371,7 @@ export function apply(ctx: Context, config: SyncedConfig<ConversationConfig>): v
       'conversation.hero.workspace': { kind: 'single', scope: 'root' },
       'conversation.hero.agentPreset': { kind: 'single', scope: 'session-maybe' },
       'conversation.hero.options': { kind: 'list', scope: 'session' },
+      'conversation.landing': { kind: 'keyed', scope: 'session' },
     },
     slots: {
       views: { scope: 'session' },

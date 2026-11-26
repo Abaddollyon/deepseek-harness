@@ -792,7 +792,7 @@ describe('UiWorkspaceService', () => {
     expect(b.sessions.create).toHaveBeenCalledExactlyOnceWith({})
     created.resolve(sid('chat'))
     await Promise.all([first, second])
-    expect(b.sessions.retain).toHaveBeenLastCalledWith(sid('chat'), { source: 'mainView' })
+    expect(b.sessions.retain).toHaveBeenLastCalledWith(sid('chat'), { source: 'mainView', facets: { conversation: true } })
   })
 
   it('returns New Session to the Workspace blank that holds its unsent draft', async () => {

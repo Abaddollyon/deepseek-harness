@@ -21,7 +21,7 @@ function NoConversationWidthControls() {
  */
 export function ConversationContent(props: ConversationContentProps) {
   const {
-    sessionId, phase, hero, useSession, useSessions, useSessionStatus,
+    sessionId, phase, hero, landing, useSession, useSessions, useSessionStatus,
     useWorkspaces, useInput, useComposerBlock, renderSlot, renderSlotChain,
     moveDraft, t, useFactorySlot,
   } = props
@@ -132,6 +132,7 @@ export function ConversationContent(props: ConversationContentProps) {
       {renderSlot('conversation.hero.workspace', {
         open: pickerOpen,
         anchorRef: pickerAnchor,
+        allowNoWorkspace: true,
         selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
         onPick: (workspaceId) => {
           setPickerOpen(false)
@@ -140,6 +141,10 @@ export function ConversationContent(props: ConversationContentProps) {
             setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
           })
         },
+        onChooseNoWorkspace: () => {
+          setPickerOpen(false)
+          setPendingWorkspaceId(undefined)
+        },
         onClose: () => { setPickerOpen(false) },
       })}
       {renderSlot('conversation.hero.agentPreset', {})}
@@ -147,15 +152,15 @@ export function ConversationContent(props: ConversationContentProps) {
     </div>
   )
 
-  // The placeholder chip ("Choose workspace") and the Workspace-trigger input travel
-  // together: no workspace picked yet (cold start, no session at all), or a
-  // blank session whose workspace vanished (deleted from the sidebar). The
-  // bar is ONE session-maybe slot rendered unconditionally — inert is a prop,
-  // not a different tree, so the textarea DOM survives the transition.
-  const inert = sessionId === undefined || (hero && chipTitle === undefined)
+  // Only the no-Session state needs the Workspace-trigger input: an existing
+  // blank Session drafts and sends without an owning Workspace (a chat
+  // created without one, or one whose Workspace was deleted). The bar is ONE
+  // session-maybe slot rendered unconditionally — inert is a prop, not a
+  // different tree, so the textarea DOM survives the transition.
+  const inert = sessionId === undefined
   // A raised block is the same inert posture with the blocker's own reason:
-  // one disabled textarea, never a second tree. The no-workspace state wins
-  // when both hold — picking a workspace is the earlier prerequisite.
+  // one disabled textarea, never a second tree. The no-Session state wins
+  // when both hold — choosing where to start is the earlier prerequisite.
   const blocked = !inert && composerBlock !== undefined
   const inputBar = renderSlot('conversation.composer.bar', {
     variant: hero ? 'hero' : 'composer',
@@ -178,7 +183,10 @@ export function ConversationContent(props: ConversationContentProps) {
   const composerBar = (
     <div className={clsx(css.composerStack, hero && css.composerHero)}>
       {hero && <HeroShell t={t} renderSlot={renderSlot} headline={props.headline} />}
-      {hero && heroWorkspaceRow}
+      {/* A landing replaces the Hero but not the blank Session's choices:
+          the workspace and preset row stays above the docked card, so the
+          user can still switch the preset (and with it the landing). */}
+      {(hero || landing !== undefined) && heroWorkspaceRow}
       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
       {inputBar}
     </div>
@@ -213,6 +221,13 @@ export function ConversationContent(props: ConversationContentProps) {
       {renderSlot('conversation.hero.frame', { hero: hero && props.variant !== 'embedded' }, {
         children: (
           <div className={css.scrollBody} data-conversation-scroll="">
+            {sessionId !== undefined && landing !== undefined && (
+              <div className={css.landingSeat} data-conversation-landing={landing}>
+                {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
+              </div>
+            )}
+            {/* The views stay mounted beside a landing: they render nothing for a
+                blank Session, but own the stored-draft seed and the draft mirror. */}
             {sessionId === undefined ? null : <Views />}
             {composerSeat}
           </div>

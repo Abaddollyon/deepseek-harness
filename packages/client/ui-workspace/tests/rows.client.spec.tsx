@@ -64,11 +64,11 @@ function SessionNodeItem({ renderSlot = renderNoRowEntries, onRenameRequest = ()
 
 // Direct header specs hold every access answer unless the case refuses one.
 function ProjectRowItem({
-  useWorkspaceAccess = allowAllAccess.useWorkspaceAccess,
+  useRemoteAccess = allowAllAccess.useRemoteAccess, useWorkspaceAccess = allowAllAccess.useWorkspaceAccess,
   renderFactorySlot = renderMenuButton, useContextMenuTarget = select => select(null), ...props
-}: Omit<ProjectRowItemProps, 'useWorkspaceAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>
-  & Partial<Pick<ProjectRowItemProps, 'useWorkspaceAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>>) {
-  return <ProjectRowItemComponent {...props} useWorkspaceAccess={useWorkspaceAccess}
+}: Omit<ProjectRowItemProps, 'useRemoteAccess' | 'useWorkspaceAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>
+  & Partial<Pick<ProjectRowItemProps, 'useRemoteAccess' | 'useWorkspaceAccess' | 'renderFactorySlot' | 'useContextMenuTarget' | 'useContextMenu'>>) {
+  return <ProjectRowItemComponent {...props} useRemoteAccess={useRemoteAccess} useWorkspaceAccess={useWorkspaceAccess}
     useContextMenu={props.useContextMenu ?? contextMenuHook()} renderFactorySlot={renderFactorySlot}
     useContextMenuTarget={useContextMenuTarget} />
 }
@@ -659,6 +659,46 @@ describe('workspace browser rows', () => {
     expect(fireEvent.contextMenu(screen.getByRole('treeitem'))).toBe(true)
   })
 
+  it('Chats bucket starts a Session without a Workspace while the global session/create grant allows it', () => {
+    const group: GroupNode = {
+      key: 'ungrouped', workspaceId: undefined, cwd: undefined, createdAt: undefined, label: '',
+      sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+    }
+    const onCreate = vi.fn()
+    const onCreateLoose = vi.fn()
+    let allowed = false
+    const useRemoteAccess = vi.fn(() => allowed)
+    const view = render(<ProjectRowItem group={group} onToggle={vi.fn()} onCreate={onCreate} onCreateLoose={onCreateLoose} t={t}
+      useRemoteAccess={useRemoteAccess} />)
+    expect(useRemoteAccess).toHaveBeenCalledWith('session/create')
+    expect(screen.queryByRole('button', { name: '在“聊天”中新建会话' })).toBeNull()
+    allowed = true
+    view.rerender(<ProjectRowItem group={group} onToggle={vi.fn()} onCreate={onCreate} onCreateLoose={onCreateLoose} t={t}
+      useRemoteAccess={useRemoteAccess} />)
+    fireEvent.click(screen.getByRole('button', { name: '在“聊天”中新建会话' }))
+    expect(onCreateLoose).toHaveBeenCalledOnce()
+    expect(onCreate).not.toHaveBeenCalled()
+  })
+
+  it('a Workspace on another execution host shows the host badge and lists its additional folders on hover', () => {
+    vi.useFakeTimers()
+    try {
+      const group: GroupNode = {
+        key: 'remote', workspaceId: wid('remote'), cwd: '/srv/app', createdAt: 0, label: 'app',
+        additionalPaths: ['/srv/lib'], host: 'x (SSH)',
+        sessionCount: 0, expanded: false, containsCurrent: false, sessions: [],
+      }
+      render(<ProjectRowItem group={group} onToggle={vi.fn()} onCreate={vi.fn()} t={tEn} />)
+      expect(screen.getByText('x (SSH)')).toBeTruthy()
+      fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
+      act(() => { vi.advanceTimersByTime(800) })
+      expect(screen.getByText('Additional folders')).toBeTruthy()
+      expect(screen.getByText('/srv/lib')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('session row drags and renames from its title only while its access snapshot allows each', () => {
     const node: SessionNode = {
       id: sid('s1'), title: 'One', blank: false, running: false,
@@ -1124,6 +1164,24 @@ describe('workspace browser rows', () => {
       act(() => { vi.advanceTimersByTime(800) })
       expect(screen.getByText('空闲').parentElement?.querySelector('[data-state="idle"]')).not.toBeNull()
       expect(screen.getAllByText('刚刚')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('session hover card lists the additional folders the Session recorded', () => {
+    vi.useFakeTimers()
+    try {
+      const node: SessionNode = {
+        id: sid('s1'), title: 'Rooted', blank: false, running: false, runningSubagentCount: 0,
+        completed: false, failed: false, updatedAt: 0, pinned: false, archived: false, additionalPaths: ['/shared/lib', '/shared/docs'],
+      }
+      render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={tEn} />)
+      fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
+      act(() => { vi.advanceTimersByTime(800) })
+      expect(screen.getByText('Additional folders')).toBeTruthy()
+      expect(screen.getByText('/shared/lib')).toBeTruthy()
+      expect(screen.getByText('/shared/docs')).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }

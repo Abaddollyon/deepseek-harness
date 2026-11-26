@@ -288,16 +288,32 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * portal to the document body because the docked composer contains them.
      */
     'conversation.composer': { kind: 'chain'; scope: 'session'; owner: ComposerChainProps }
-    /** Workspace picker shown by the blank-session Hero. */
+    /** Workspace picker shown by the blank-session Hero, or beside a landing. */
     'conversation.hero.workspace': { kind: 'single'; scope: 'root'; owner: EmptyWorkspaceOwnerProps }
     /** Layers wrapping the Conversation scroll body; `hero` reports a blank, standalone home. */
     'conversation.hero.frame': { kind: 'hoc'; scope: 'root'; owner: HeroFrameOwnerProps }
     /** Brand mark shown before the blank-session headline. */
     'conversation.hero.brand.mark': { kind: 'single'; scope: 'root'; owner: HeroBrandMarkOwnerProps }
-    /** Agent-preset control staged for a New Session. */
+    /** Agent-preset control staged for a New Session, shown with the Hero or beside a landing. */
     'conversation.hero.agentPreset': { kind: 'single'; scope: 'session-maybe'; owner: HeroAgentPresetOwnerProps }
     /** Compact options right-aligned in the New Session row after the workspace and preset controls; rendered only with a Session. */
     'conversation.hero.options': { kind: 'list'; scope: 'session' }
+    /**
+     * Columns beside the whole main Conversation (header, transcript, and
+     * composer), in ascending order from the Conversation's right edge. Each
+     * entry decides whether it shows and how wide it is: one that renders
+     * nothing takes no space. Showing, hiding, and remembering that choice
+     * belong to the entry. Embedded Conversations have no asides.
+     */
+    'conversation.aside': { kind: 'list'; scope: 'session-maybe'; owner: ConversationAsideOwnerProps }
+    /**
+     * A blank Session's landing view, keyed by agent preset id. While the
+     * current Session has no turn yet and the preset it records has an entry
+     * here, the main Conversation shows that entry instead of the blank-session
+     * Hero and docks the composer below it; the first turn replaces it with
+     * the transcript.
+     */
+    'conversation.landing': { kind: 'keyed'; scope: 'session'; owner: ConversationLandingOwnerProps }
     /**
      * Full-width entries above the composer card; fixed overlays must portal to the document body
      * because the docked composer contains them.
@@ -387,6 +403,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         'conversation.hero.workspace': { kind: 'single'; scope: 'root' }
         'conversation.hero.agentPreset': { kind: 'single'; scope: 'session-maybe' }
         'conversation.hero.options': { kind: 'list'; scope: 'session' }
+        'conversation.landing': { kind: 'keyed'; scope: 'session' }
       }
       inject: ConversationInjected
       locale: 'conversation'
@@ -419,6 +436,18 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** Input actions are absent without a current Session. */
     inputActions: InputActions | undefined
   }
+}
+
+/** Owner share of the columns beside the main Conversation. */
+export interface ConversationAsideOwnerProps {
+  /** Agent preset recorded by the current Session; undefined without a Session or a recorded preset. */
+  agentPreset: string | undefined
+}
+
+/** Owner share of a blank Session's landing view. */
+export interface ConversationLandingOwnerProps {
+  /** Agent preset recorded by the Session, which is also the entry's key. */
+  agentPreset: string
 }
 
 /** Owner share of the Hero agent-preset control. */
@@ -493,6 +522,8 @@ export type WorkspaceSelectedHandler = (workspaceId: WorkspaceId, adopt: Workspa
 export interface ConversationShellInjected {
   /** Open the Workspace's blank Session as the main Session. */
   openWorkspace: WorkspaceSelectedHandler
+  /** Agent preset ids that currently have a `conversation.landing` entry. */
+  readonly hooks: { readonly conversationLandings: ObservableSnapshot<readonly string[]> }
 }
 
 /** Business callbacks injected into the shared Conversation content. */
@@ -726,7 +757,7 @@ export interface HeroBrandMarkOwnerProps {
 /** Full props of the resident optional-Session Conversation shell. */
 export type ConversationSlotProps =
   PropsRuntime<'main.conversation'>
-  & PropsRenderSlots<'conversation.header'>
+  & PropsRenderSlots<'conversation.header' | 'conversation.aside'>
   & PropsRenderFactories
 
 /** Inputs shared by main and embedded Conversation content occurrences. */
@@ -738,6 +769,8 @@ export interface ConversationContentInputProps {
   onWorkspaceSelected: WorkspaceSelectedHandler
   /** Text the blank-session Hero shows instead of its default headline and preview badge. */
   headline?: string | undefined
+  /** Agent preset whose `conversation.landing` entry replaces the transcript of this blank Session. */
+  landing?: string
 }
 
 /** Values passed from shared content to its occurrence-selected width controls. */
@@ -796,8 +829,12 @@ export type ComposerAttachmentsProps =
 export interface EmptyWorkspaceOwnerProps {
   open: boolean
   anchorRef?: RefObject<HTMLElement>
+  /** Whether the picker may offer a new Session without a Workspace (the New Session hero). */
+  allowNoWorkspace?: boolean
   /** Currently selected Workspace, when available. */
   selectedId?: WorkspaceId | undefined
   onPick: (workspaceId: WorkspaceId) => void
+  /** The user chose a new Session without a Workspace; the picker creates and opens it. */
+  onChooseNoWorkspace?: () => void
   onClose: () => void
 }
