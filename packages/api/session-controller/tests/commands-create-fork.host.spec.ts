@@ -33,6 +33,7 @@ function fakeWorkspace(fields: Partial<Workspace> & Pick<Workspace, 'id'>): Work
     createdAt: '',
     updatedAt: '',
     sessionIds: [],
+    getSessionHeaders: () => [],
     setTitle: () => Promise.resolve(),
     setAdditionalPaths: () => Promise.resolve(),
     attachSession: () => Promise.resolve(),

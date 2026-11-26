@@ -2,17 +2,22 @@
 
 import type {} from '@deepseek-ai/dsh-fs'
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type {
+  Agent, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection,
+} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type { AgentPresetDefaults } from '@deepseek-ai/dsh-agent-preset-registry'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-permission-presets'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
+import { modelAvailable } from './catalog.ts'
 
 /** Cold Session identity absent from persistence. */
 export class ApiSessionNotFound extends Error {}
@@ -62,6 +67,11 @@ export interface ApiSessionCreateRequest {
   /** Preset the Session runs; the configured default when omitted. */
   readonly agentPreset?: string
   /**
+   * Existing directories a new Session records beside `cwd`, fixed at
+   * creation; a named Session that recorded other roots is not reused.
+   */
+  readonly additionalPaths?: readonly string[]
+  /**
    * Placement rule the caller owns, such as Workspace membership and archive state.
    * @param sessionId - existing Session named by the request.
    * @returns whether that Session may be reused.
@@ -81,6 +91,12 @@ export interface ApiSessionCreated {
 interface ApiSessionComposition {
   readonly agentPreset?: string
   readonly setup: AgentSetup
+}
+
+/** Preset defaults that passed validation; an omitted field leaves the Host default in place. */
+interface InitialChoices {
+  readonly model?: AgentModelSelection
+  readonly permission?: string
 }
 
 /** Failures produced while resolving one ordinary Session identity to its live Agent. */
@@ -118,12 +134,15 @@ export class ApiSessionAgentController {
   private readonly resumes = new Map<SessionId, Promise<Agent>>()
   private readonly claims = new Map<SessionId, Promise<void>>()
   private readonly imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /** Preset each Agent composed here was last bound to, so a blank-Session switch knows the replaced defaults. */
+  private readonly boundPresets = new WeakMap<Agent, string>()
 
   /** @param ctx - Host context carrying Agent, model, persistence, and Typert services. */
   constructor(private readonly ctx: Context) {}
 
   /**
-   * Configure Session and Agent lookups for Typert.
+   * Configure Session and Agent lookups for Typert, and move a blank Session's
+   * preset defaults along with each later preset selection.
    */
   initialize(): void {
     const ctx = this.ctx
@@ -141,6 +160,13 @@ export class ApiSessionAgentController {
       const found = await this.resolveAgent(sessionId)
       if ('error' in found) throw found.error
       return found.agent.ctx
+    })
+    ctx.on('agent-preset/selected', (sessionId, agentPreset) => {
+      const agent = ctx.agents.get(sessionId)
+      const previous = agent === undefined ? undefined : this.boundPresets.get(agent)
+      if (agent === undefined || previous === undefined || previous === agentPreset) return
+      this.boundPresets.set(agent, agentPreset)
+      void this.switchPresetDefaults(agent, previous, agentPreset)
     })
   }
 
@@ -219,8 +245,13 @@ export class ApiSessionAgentController {
    * caller's placement rule, or is written by another owner stays unchanged,
    * and a new Session is created instead. Requests naming one identity run in
    * arrival order, including their preset resolution, and check the named
-   * Session's directory and ownership before resolving the preset.
-   * @param request - optional Session to reuse, directory, preset, and placement rule.
+   * Session's directory and ownership before resolving the preset. A named
+   * Session is reused only while it records the requested additional roots
+   * and its preset runs in the same execution world as the requested one; a
+   * reused Session's model and permission follow the new preset's defaults
+   * where they still equal the replaced preset's. A new Session starts with
+   * its preset's validated defaults.
+   * @param request - optional Session to reuse, directory, roots, preset, and placement rule.
    * @returns the reused or created Session and the preset it ran when this request finished.
    * @throws ApiSessionCwdConflict when the named Session belongs to another directory.
    * @throws ApiSessionSubagentOwnership when subagent routing owns the named Session.
@@ -229,7 +260,9 @@ export class ApiSessionAgentController {
    */
   async createSession(request: ApiSessionCreateRequest): Promise<ApiSessionCreated> {
     const named = request.sessionId
-    if (named === undefined) return this.created(await this.createMinted(request.cwd, await this.composeAgent(request.agentPreset)))
+    if (named === undefined) {
+      return this.created(await this.createMinted(request, await this.composeAgent(request.agentPreset)))
+    }
     return this.inOrder(named, async () => this.created(await this.claim(named, request)))
   }
 
@@ -243,7 +276,7 @@ export class ApiSessionAgentController {
   }
 
   /**
-   * Serialize image admission and model selection for one Agent.
+   * Serialize prompt admission, model selection, and preset-default switches for one Agent.
    * @param agent - live Agent that owns the serialization chain.
    * @param operation - asynchronous operation admitted after prior work settles.
    * @returns the operation result or rejection.
@@ -267,9 +300,10 @@ export class ApiSessionAgentController {
     const resolvedId = (await presets.resolve(presetId)).id
     return {
       agentPreset: resolvedId,
-      setup: async (agentCtx) => {
+      setup: async (agentCtx, agent) => {
         installModelSelection(agentCtx)
         await presets.mount(agentCtx, resolvedId)
+        this.boundPresets.set(agent, resolvedId)
       },
     }
   }
@@ -337,47 +371,58 @@ export class ApiSessionAgentController {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
     if (live !== undefined) {
-      if (!await this.namesDirectory(live.session.header.cwd, request.cwd)) {
+      if (!await this.namesDirectory(live.session.header.cwd, request.cwd, this.presetForSession(live.session))) {
         throw new ApiSessionCwdConflict(live.id, request.cwd, live.session.header.cwd)
       }
       const composition = await this.composeAgent(request.agentPreset)
-      return await this.reuseLive(live, request, composition) ?? this.createMinted(request.cwd, composition)
+      return await this.reuseLive(live, request, composition) ?? this.createMinted(request, composition)
     }
     let observation: SessionObservation
     try {
       observation = await this.ctx.sessionQuery.observeSession(sessionId)
     } catch (error: unknown) {
       if (!(error instanceof SessionQueryError) || error.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error
-      return this.createAgent(sessionId, request.cwd, await this.composeAgent(request.agentPreset))
+      return this.createAgent(sessionId, request, await this.composeAgent(request.agentPreset))
     }
     let reusable: boolean
+    let recordedPreset: string | undefined
     {
       using observed = observation
       if (hasApiSessionSubagentOwner({ header: observed.header })) {
         throw new ApiSessionSubagentOwnership(sessionId)
       }
-      if (!await this.namesDirectory(observed.header.cwd, request.cwd)) {
+      recordedPreset = this.ctx.get('agentPresets') !== undefined ? this.presetForObservation(observed) : undefined
+      if (!await this.namesDirectory(observed.header.cwd, request.cwd, recordedPreset)) {
         throw new ApiSessionCwdConflict(sessionId, request.cwd, observed.header.cwd)
       }
-      reusable = request.reusable(sessionId) && !observed.events.some(event => event.type === 'turn/start')
+      reusable = request.reusable(sessionId)
+        && !observed.events.some(event => event.type === 'turn/start')
+        && sameRoots(recordedRoots(observed.events), request.additionalPaths ?? [])
     }
     const composition = await this.composeAgent(request.agentPreset)
-    if (!reusable) return this.createMinted(request.cwd, composition)
+    if (!reusable || !this.sameWorld(recordedPreset, composition.agentPreset)) return this.createMinted(request, composition)
     this.assertPresetApplicable(sessionId, request.agentPreset)
+    const switched: { replaced?: { readonly agentPreset: string | undefined } } = {}
+    let agent: Agent
     try {
-      return (await this.ctx.agents.resume({
+      agent = (await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions: this.agentOptions(),
-        setup: this.reuseSetup(composition),
+        setup: this.reuseSetup(composition, switched),
       })).agent
     } catch (error: unknown) {
-      if (error instanceof ApiSessionStartedSinceObserved) return this.createMinted(request.cwd, composition)
+      if (error instanceof ApiSessionStartedSinceObserved) return this.createMinted(request, composition)
       if (!(error instanceof Error) || error.name !== 'SessionAlreadyOwnedError') throw error
       // Another resume in this process may hold the writer for the Agent it published.
       return this.ctx.agents.get(sessionId) === undefined
-        ? this.createMinted(request.cwd, composition)
+        ? this.createMinted(request, composition)
         : this.claim(sessionId, request)
     }
+    const target = composition.agentPreset
+    if (switched.replaced !== undefined && target !== undefined) {
+      await this.switchPresetDefaults(agent, switched.replaced.agentPreset, target)
+    }
+    return agent
   }
 
   /** @returns the live blank Session under the requested preset, or undefined when it cannot be reused. */
@@ -387,8 +432,10 @@ export class ApiSessionAgentController {
     composition: ApiSessionComposition,
   ): Promise<Agent | undefined> {
     if (!request.reusable(live.id) || !this.isBlank(live.session)) return undefined
-    this.assertPresetApplicable(live.id, request.agentPreset)
+    if (!sameRoots(live.session.additionalPaths, request.additionalPaths ?? [])) return undefined
     const current = this.presetForSession(live.session)
+    if (!this.sameWorld(current, composition.agentPreset)) return undefined
+    this.assertPresetApplicable(live.id, request.agentPreset)
     const presets = this.ctx.get('agentPresets')
     const target = composition.agentPreset
     if (presets === undefined || target === undefined || target === current) return live
@@ -398,20 +445,46 @@ export class ApiSessionAgentController {
       if (remoteErrorOf(error)?.code !== 'agent-preset/locked') throw error
       return undefined
     }
+    // The selection queued the preset-default switch; return once it has applied.
+    await this.serializeImageAdmission(live, () => Promise.resolve())
     return live
   }
 
-  /** Setup that re-checks blankness under the acquired writer, then records a preset change before publication. */
-  private reuseSetup(composition: ApiSessionComposition): AgentSetup {
+  /**
+   * Setup that re-checks blankness under the acquired writer, then records a preset change before publication.
+   * @param composition - preset and setup the reused Session runs.
+   * @param switched - receives the replaced preset when the change is recorded, so the caller can move its defaults after publication.
+   * @returns the reuse setup.
+   */
+  private reuseSetup(
+    composition: ApiSessionComposition,
+    switched: { replaced?: { readonly agentPreset: string | undefined } },
+  ): AgentSetup {
     return async (agentCtx, agent) => {
       if (!this.isBlank(agent.session)) throw new ApiSessionStartedSinceObserved()
       const commit = await composition.setup(agentCtx, agent)
       const target = composition.agentPreset
-      if (target !== undefined && this.presetForSession(agent.session) !== target) {
+      const recorded = this.presetForSession(agent.session)
+      if (target !== undefined && recorded !== target) {
         agent.session.append('agent-preset/selected', { agentPreset: target })
+        switched.replaced = { agentPreset: recorded }
       }
       return commit
     }
+  }
+
+  /**
+   * Whether two presets run in the same execution world: the Host, or the
+   * world a preset's own composition declares (for example an SSH host).
+   * @param left - recorded preset, if any.
+   * @param right - requested preset, if any.
+   * @returns false when a blank Session would move to another world.
+   */
+  private sameWorld(left: string | undefined, right: string | undefined): boolean {
+    const presets = this.ctx.get('agentPresets')
+    const worldOf = (id: string | undefined): string | undefined =>
+      id !== undefined && presets?.ownsWorld(id) === true ? id : undefined
+    return worldOf(left) === worldOf(right)
   }
 
   /** Whether no turn has started, by the predicate the preset registry's `select` enforces. */
@@ -430,39 +503,114 @@ export class ApiSessionAgentController {
     return { agent, agentPreset: this.presetForSession(agent.session) }
   }
 
-  private createMinted(cwd: string, composition: ApiSessionComposition): Promise<Agent> {
-    return this.createAgent(brandString<SessionId>(`session-${randomUUID()}`), cwd, composition)
+  private createMinted(request: ApiSessionCreateRequest, composition: ApiSessionComposition): Promise<Agent> {
+    return this.createAgent(brandString<SessionId>(`session-${randomUUID()}`), request, composition)
   }
 
-  private async createAgent(sessionId: SessionId, cwd: string, composition: ApiSessionComposition): Promise<Agent> {
-    try {
-      await mkdir(cwd, { recursive: true })
-    } catch (error: unknown) {
-      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
-    }
-    return (await this.ctx.agents.create({
+  /**
+   * Create a Session in its preset's execution world, starting from the preset's validated defaults.
+   * @param sessionId - identity of the new Session.
+   * @param request - directory and additional roots the Session records.
+   * @param composition - resolved preset and Agent setup.
+   * @returns the published Agent.
+   */
+  private async createAgent(
+    sessionId: SessionId,
+    request: ApiSessionCreateRequest,
+    composition: ApiSessionComposition,
+  ): Promise<Agent> {
+    const { cwd } = request
+    const additionalPaths = request.additionalPaths ?? []
+    await this.ensureProjectDirectories(cwd, additionalPaths, composition.agentPreset)
+    const initial = await this.initialChoices(composition.agentPreset)
+    const model = initial.model
+    const { agent } = await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
-        cwd: await this.canonical(cwd),
+        cwd: await this.canonical(cwd, composition.agentPreset),
+        ...(additionalPaths.length === 0 ? {} : { additionalPaths }),
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
-      setup: composition.setup,
-    })).agent
+      // The preset's model is recorded before publication, so resume keeps it.
+      setup: model === undefined ? composition.setup : async (agentCtx, created) => {
+        const commit = await composition.setup(agentCtx, created)
+        created.model.select(model)
+        return commit
+      },
+    })
+    if (initial.permission !== undefined) this.applyInitialChoices(agent, { permission: initial.permission }, {})
+    return agent
   }
 
-  /** The canonical spelling of a project directory, which new headers record; see SessionHeader.cwd. */
-  private async canonical(cwd: string): Promise<string> {
-    const fs = this.ctx.get('fs')
+  /**
+   * Ensure a new Session's directories in the execution world its preset
+   * selects. A preset that owns its world (for example over SSH) checks the
+   * cwd through that world's `fs`, refuses while that provider is missing, and
+   * never creates anything on the Host. Otherwise the Host cwd is created when
+   * missing. Additional roots are recorded permanently, so each must already
+   * be a directory in that world.
+   * @param cwd - requested project directory.
+   * @param additionalPaths - additional workspace roots recorded beside `cwd`.
+   * @param agentPreset - resolved preset identity, when presets are configured.
+   */
+  private async ensureProjectDirectories(
+    cwd: string,
+    additionalPaths: readonly string[],
+    agentPreset: string | undefined,
+  ): Promise<void> {
+    const presets = this.ctx.get('agentPresets')
+    const fs = agentPreset === undefined ? undefined : presets?.serviceForPreset(agentPreset, 'fs')
+    if (fs === undefined && agentPreset !== undefined && presets?.ownsWorld(agentPreset) === true) {
+      throw new Error(`failed to ensure project directory "${cwd}": the execution world of agent preset "${agentPreset}" is not available`)
+    }
+    const isDirectory = async (path: string): Promise<boolean> => fs === undefined
+      ? (await stat(path)).isDirectory()
+      : (await fs.stat(await fs.resolve(path)))?.type === 'directory'
+    try {
+      if (fs === undefined) await mkdir(cwd, { recursive: true })
+      else if (!await isDirectory(cwd)) throw new Error(`not a directory in the execution world of agent preset "${agentPreset}"`)
+    } catch (error: unknown) {
+      throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
+    }
+    for (const path of additionalPaths) {
+      let directory: boolean
+      try {
+        directory = await isDirectory(path)
+      } catch (error: unknown) {
+        throw new Error(`additional workspace path "${path}" is unavailable: ${String(error)}`, { cause: error })
+      }
+      if (!directory) throw new Error(`additional workspace path "${path}" is not a directory`)
+    }
+  }
+
+  /**
+   * The canonical spelling of a project directory, which new headers record; see SessionHeader.cwd.
+   * The directory resolves through the `fs` the preset mounts, as {@link ensureProjectDirectories}
+   * checks it, so a directory on an SSH host never gets a Host spelling. A preset that owns its
+   * execution world keeps the requested spelling while that provider is missing; other presets use
+   * the Host `fs`.
+   * @param cwd - requested project directory.
+   * @param agentPreset - preset whose execution world holds the directory, if any.
+   * @returns the directory as the execution world's processes open it.
+   */
+  private async canonical(cwd: string, agentPreset: string | undefined): Promise<string> {
+    const presets = this.ctx.get('agentPresets')
+    const own = agentPreset === undefined ? undefined : presets?.serviceForPreset(agentPreset, 'fs')
+    const fs = own ?? (agentPreset !== undefined && presets?.ownsWorld(agentPreset) === true ? undefined : this.ctx.get('fs'))
     return fs === undefined ? cwd : fs.processPath(await fs.resolve(cwd))
   }
 
   /**
    * Whether a request names the directory a Session header records: by the recorded spelling, or by a
    * spelling such as a symlink whose canonical form the header records.
+   * @param recorded - the cwd the Session header records.
+   * @param requested - the cwd the request names.
+   * @param agentPreset - the Session's recorded preset, whose execution world holds `recorded`.
    */
-  private async namesDirectory(recorded: string | undefined, requested: string): Promise<boolean> {
-    return recorded === requested || (recorded !== undefined && recorded === await this.canonical(requested))
+  private async namesDirectory(recorded: string | undefined, requested: string, agentPreset: string | undefined): Promise<boolean> {
+    return recorded === requested
+      || (recorded !== undefined && recorded === await this.canonical(requested, agentPreset))
   }
 
   private agentOptions(): AgentOptions {
@@ -476,6 +624,91 @@ export class ApiSessionAgentController {
   }
 
   /**
+   * Validate one preset's declared Session defaults against the current catalog
+   * and permission table. A model must pass the checks `/model` applies; its
+   * omitted effort stays automatic. An unusable value is logged without
+   * provider error text and omitted, so the Host default applies and creation
+   * never fails.
+   * @param presetId - preset whose declaration is read; undefined without a roster.
+   * @returns the usable defaults.
+   */
+  private async initialChoices(presetId: string | undefined): Promise<InitialChoices> {
+    const presets = this.ctx.get('agentPresets')
+    if (presets === undefined || presetId === undefined) return {}
+    let defaults: AgentPresetDefaults | undefined
+    try {
+      defaults = (await presets.resolve(presetId)).defaults
+    } catch {
+      // A preset removed since the Session bound it declares nothing any more.
+      return {}
+    }
+    let model: AgentModelSelection | undefined
+    const declared = defaults?.model
+    if (declared !== undefined) {
+      try {
+        const requested: AgentModelSelection = {
+          provider: declared.provider,
+          model: declared.model,
+          ...(declared.reasoningEffort === undefined ? {} : { reasoningEffort: brandString<ReasoningEffortId>(declared.reasoningEffort) }),
+        }
+        if (!await modelAvailable(this.ctx, requested)) throw new Error('not in the model catalog')
+        await this.ctx.llm.resolveCallConfig(requested)
+        model = requested
+      } catch {
+        this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default model "${declared.provider}/${declared.model}" is unavailable or rejects its effort; using the Host default model`)
+      }
+    }
+    const permission = defaults?.permission
+    const known = permission !== undefined && this.ctx.get('permissionPresets')?.names.includes(permission) === true
+    if (permission !== undefined && !known) {
+      this.ctx.logger.warn(`session-controller: agent preset "${presetId}" default permission "${permission}" is not an available permission preset; using the Host default`)
+    }
+    return { ...(model === undefined ? {} : { model }), ...(known ? { permission } : {}) }
+  }
+
+  /**
+   * Move a blank Session's model and permission to `next` wherever each still
+   * equals what `replaced` chose, so an explicit `/model` or permission choice
+   * stays. Changes are recorded through the same events those commands append.
+   * @param agent - live blank Agent.
+   * @param next - defaults now in force; an omitted field means the Host default.
+   * @param replaced - defaults the Session was created or last switched under.
+   */
+  private applyInitialChoices(agent: Agent, next: InitialChoices, replaced: InitialChoices): void {
+    const hostModel = this.ctx.agentDefaultModel.currentSelection()
+    const model = next.model ?? (replaced.model === undefined ? undefined : hostModel)
+    const current = agent.model.current()
+    if (model !== undefined && sameSelection(current, replaced.model ?? hostModel) && !sameSelection(current, model)) {
+      agent.model.select(model)
+    }
+    const permissions = this.ctx.get('permissionPresets')
+    if (permissions === undefined) return
+    const permission = next.permission ?? permissions.defaultPreset
+    const currentPermission = permissions.current(agent.session)
+    if (currentPermission !== permission && currentPermission === (replaced.permission ?? permissions.defaultPreset)) {
+      permissions.set(agent.session, permission)
+    }
+  }
+
+  /**
+   * Queue a blank Session's move from one preset's defaults to another's
+   * behind the Agent's earlier admissions; a failure is logged.
+   * @param agent - live Agent whose preset changed.
+   * @param previous - preset the Session ran before, if any.
+   * @param next - preset the Session runs now.
+   * @returns when the switch has applied or was skipped.
+   */
+  private switchPresetDefaults(agent: Agent, previous: string | undefined, next: string): Promise<void> {
+    return this.serializeImageAdmission(agent, async () => {
+      const [replaced, chosen] = await Promise.all([this.initialChoices(previous), this.initialChoices(next)])
+      if (!this.isBlank(agent.session)) return
+      this.applyInitialChoices(agent, chosen, replaced)
+    }).catch((error: unknown) => {
+      this.ctx.logger.warn(`session-controller: agent preset "${next}" defaults were not applied to session "${agent.id}": ${String(error)}`)
+    })
+  }
+
+  /**
    * Read the current Agent preset from an all-projections observation.
    * @param observation - exact Session observation carrying its projection snapshot.
    * @returns the current preset, or undefined when the capability is absent.
@@ -486,4 +719,24 @@ export class ApiSessionAgentController {
     }
     return observation.projections.values.agentPreset ?? undefined
   }
+}
+
+function sameSelection(
+  left: Readonly<AgentModelSelection> | undefined,
+  right: Readonly<AgentModelSelection> | undefined,
+): boolean {
+  return left === undefined
+    ? right === undefined
+    : left.provider === right?.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort
+}
+
+/** Additional roots a Session recorded at creation, from its seq-0 `workspace/roots` event. */
+function recordedRoots(events: readonly SessionEvent[]): readonly string[] {
+  const first = events[0]
+  return first?.type === 'workspace/roots' ? first.data.additionalPaths : []
+}
+
+function sameRoots(left: readonly string[], right: readonly string[]): boolean {
+  const recorded = new Set(left)
+  return recorded.size === new Set(right).size && right.every(path => recorded.has(path))
 }

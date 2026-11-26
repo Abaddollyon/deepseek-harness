@@ -30,6 +30,7 @@ import { WebController } from './web/controller.ts'
 import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog, hasProviderApiKey } from './catalog.ts'
+import { installAdditionalPathsProjection } from './additional-paths-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
 import { ArchivedSessionGate } from './archived-session-gate.ts'
@@ -183,6 +184,8 @@ export class SessionController extends TypertRemoteService {
     this.webController = new WebController(ctx, this.historyController, (observation) => { this.promote(observation) })
     this.listState = new ApiSessionList(ctx, this.listWorkSliceMs)
     await this.commands.initialize()
+    ctx.fiber.assertActive()
+    await installAdditionalPathsProjection(ctx)
     ctx.fiber.assertActive()
     await this.listState.initialize()
     ctx.fiber.assertActive()

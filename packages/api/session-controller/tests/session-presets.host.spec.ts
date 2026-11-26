@@ -4,16 +4,20 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { AgentModel, modelSelectionProjectionDefinition } from '@deepseek-ai/dsh-agent'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import type { Agent, AgentFactory } from '@deepseek-ai/dsh-agent'
-import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
+import type { ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
+import type { Agent, AgentFactory, AgentOptions, ModelSelectionProjectionState } from '@deepseek-ai/dsh-agent'
+import { agentPresetProjectionDefinition, type AgentPresetDefaults } from '@deepseek-ai/dsh-agent-preset-registry'
+import LlmRuntime, { LlmAdapter, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, type SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SessionRequestId } from '../src/types.ts'
 import { createSessionTestRemote, testSessionPersistence } from './test-remote.ts'
 import { brandString } from '@deepseek-ai/dsh-brand'
 
@@ -25,8 +29,13 @@ afterEach(async () => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function stubAgent(session: Session): Agent {
-  return { id: session.id, session, status: 'idle' } as unknown as Agent
+function stubAgent(
+  session: Session,
+  options: AgentOptions,
+  selection: ProjectionHandle<ModelSelectionProjectionState>,
+): Agent {
+  const model = new AgentModel(() => selection.stateOf(session), session, options)
+  return Object.assign({ id: session.id, session, status: 'idle' } as unknown as Agent, { options, model })
 }
 
 /** A stored Session the persistence double serves until an Agent resumes it. */
@@ -55,7 +64,17 @@ interface HarnessOptions {
   /** Requested presets whose resolution waits for the paired promise. */
   readonly resolving?: ReadonlyMap<string, Promise<void>>
   /** Workspace placement served to `workspaceId` requests. */
-  readonly workspace?: { readonly members: readonly SessionId[]; readonly archived: readonly SessionId[] }
+  readonly workspace?: {
+    readonly members: readonly SessionId[]
+    readonly archived: readonly SessionId[]
+    readonly additionalPaths?: readonly string[]
+  }
+  /** Session defaults each declared preset reads back from `resolve`. */
+  readonly defaults?: Readonly<Record<string, AgentPresetDefaults>>
+  /** Declared presets that own an execution world; every path is a directory there. */
+  readonly worlds?: ReadonlySet<string>
+  /** Services composed before the Session controller boots. */
+  readonly prepare?: (ctx: Context) => Promise<void>
 }
 
 const WORKSPACE = 'workspace-1' as WorkspaceId
@@ -69,6 +88,7 @@ async function harness(options: HarnessOptions = {}) {
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   const preset = await ctx.sessionProjections.register(agentPresetProjectionDefinition)
+  const selection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
   const presets = options.presets
   const selections: { sessionId: SessionId; agentPreset: string }[] = []
   const resumed: SessionId[] = []
@@ -89,11 +109,20 @@ async function harness(options: HarnessOptions = {}) {
       }
       return wanted
     }
+    const declared = (id: string): object => {
+      const defaults = options.defaults?.[id]
+      return { id, ...defaults === undefined ? {} : { defaults } }
+    }
+    const worldFs = {
+      resolve: (path: string) => Promise.resolve(path),
+      processPath: (target: string) => target,
+      stat: () => Promise.resolve({ type: 'directory' }),
+    }
     ctx.provide('agentPresets', {
       defaultId: presets[0],
       presetForSession: (session: Session) => preset.stateOf(session),
       resolve: (id?: string) => Promise.resolve(id === undefined ? undefined : options.resolving?.get(id))
-        .then(() => ({ id: known(id) })),
+        .then(() => declared(known(id))),
       mount: (_ctx: Context, id?: string) => Promise.resolve().then(() => ({ id: usable(id) })),
       select: async (agent: Agent, agentPreset: string) => {
         usable(agentPreset)
@@ -104,8 +133,12 @@ async function harness(options: HarnessOptions = {}) {
         }
         selections.push({ sessionId: agent.id, agentPreset })
         agent.session.append('agent-preset/selected', { agentPreset })
+        // The registry announces each recorded selection.
+        ctx.emit('agent-preset/selected', agent.id, agentPreset)
         return agentPreset
       },
+      ownsWorld: (id: string) => options.worlds?.has(id) === true,
+      serviceForPreset: (id: string, name: string) => options.worlds?.has(id) === true && name === 'fs' ? worldFs : undefined,
     } as never)
   }
   const stored = options.stored ?? new Map<SessionId, StoredSession>()
@@ -116,8 +149,10 @@ async function harness(options: HarnessOptions = {}) {
       return Promise.resolve(record === undefined ? undefined : { meta: record.header, events: [...record.events] })
     },
   }) as never)
-  const { members, archived } = options.workspace ?? { members: [], archived: [] }
-  const workspace = { id: WORKSPACE, path: cwd, sessionIds: members, attachSession: () => Promise.resolve() }
+  const { members, archived, additionalPaths = [] } = options.workspace ?? { members: [], archived: [] }
+  const workspace = {
+    id: WORKSPACE, path: cwd, sessionIds: members, additionalPaths, attachSession: () => Promise.resolve(),
+  }
   ctx.provide('workspaceRegistry', {
     get: (id: WorkspaceId) => id === WORKSPACE ? workspace : undefined,
     list: () => [workspace],
@@ -128,8 +163,9 @@ async function harness(options: HarnessOptions = {}) {
   const publish = async (
     session: Session,
     setup: Parameters<AgentFactory['createAgent']>[1]['setup'],
+    agentOptions: AgentOptions = {},
   ): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
-    const agent = stubAgent(session)
+    const agent = stubAgent(session, agentOptions, selection)
     ;(agent as { ctx?: Context }).ctx = ctx
     const detach = ctx.effect(() => ctx.sessions.enter(session))
     try {
@@ -146,7 +182,7 @@ async function harness(options: HarnessOptions = {}) {
   const factory: AgentFactory = {
     async createAgent(_ownerCtx, create) {
       const session = ctx.sessions.prepare(create.sessionId, create.meta === undefined ? {} : { meta: create.meta })
-      return publish(session, create.setup)
+      return publish(session, create.setup, create.agentOptions)
     },
     async resume(_ownerCtx, resume) {
       const id = resume.resumeSessionId
@@ -166,10 +202,11 @@ async function harness(options: HarnessOptions = {}) {
         meta: record.header,
         seed: [...record.events, ...options.writtenSinceObservation?.get(id) ?? []],
       })
-      return publish(session, resume.setup)
+      return publish(session, resume.setup, resume.agentOptions)
     },
   }
   ctx.agents.setFactory(factory)
+  await options.prepare?.(ctx)
   const remote = await createSessionTestRemote(ctx, {
     defaultModelSelection: () => ({ provider: 'test', model: 'test-model' }),
     cwd,
@@ -184,7 +221,12 @@ async function harness(options: HarnessOptions = {}) {
       .filter(event => event.type === 'agent-preset/selected')
       .map(event => event.data)
   }
-  return { ctx, remote, cwd, selections, resumed, presetOf, selectedEvents }
+  const pending = (id: SessionId) => {
+    const session = ctx.sessions.get(id)
+    if (session === undefined) throw new Error(`missing session ${id}`)
+    return selection.stateOf(session).pending
+  }
+  return { ctx, remote, cwd, workspace, selections, resumed, presetOf, selectedEvents, pending }
 }
 
 function storedHeader(id: SessionId, cwd: string, extra: Partial<SessionHeader> = {}): SessionHeader {
@@ -713,5 +755,278 @@ describe('session.create Workspace placement', () => {
     expect(created.value.sessionId).not.toBe('placed-draft')
     expect(selections).toEqual([])
     expect(presetOf(draft)).toBe('minimal')
+  })
+
+  it('records the Workspace roots and reuses a blank member only while they match', async () => {
+    const draft = brandString<SessionId>('rooted-draft')
+    const [first, second] = [0, 1].map(() => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-session-preset-root-')))
+      tempDirs.push(root)
+      return root
+    }) as [string, string]
+    const { ctx, remote, workspace } = await harness({
+      presets: ['standard'],
+      workspace: { members: [draft], archived: [], additionalPaths: [first] },
+    })
+    await remote.create({ sessionId: draft, workspaceId: WORKSPACE })
+    expect(ctx.sessions.get(draft)?.additionalPaths).toEqual([first])
+
+    const reused = await remote.create({ sessionId: draft, workspaceId: WORKSPACE })
+    expect(reused).toMatchObject({ ok: true, value: { sessionId: 'rooted-draft' } })
+
+    Object.assign(workspace, { additionalPaths: [first, second] })
+    const created = await remote.create({ sessionId: draft, workspaceId: WORKSPACE })
+    if (!created.ok) throw new Error(`create failed: ${created.error.message}`)
+    expect(created.value.sessionId).not.toBe('rooted-draft')
+    expect(ctx.sessions.get(created.value.sessionId)?.additionalPaths).toEqual([first, second])
+    expect(ctx.sessions.get(draft)?.additionalPaths).toEqual([first])
+  })
+
+  it('does not resume a stored blank Session that recorded other roots', async () => {
+    const draft = brandString<SessionId>('stored-rooted-draft')
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-session-preset-stored-')))
+    tempDirs.push(cwd)
+    const roots: SessionEvent = {
+      type: 'workspace/roots', seq: SessionSeq(0), time: 1, ignorable: true, data: { additionalPaths: [tmpdir()] },
+    }
+    const { remote, resumed } = await harness({
+      presets: ['standard'],
+      stored: new Map([[draft, { header: storedHeader(draft, cwd, { agentPreset: 'standard' }), events: [roots] }]]),
+    })
+
+    const created = await remote.create({ sessionId: draft, cwd })
+
+    if (!created.ok) throw new Error(`create failed: ${created.error.message}`)
+    expect(created.value.sessionId).not.toBe('stored-rooted-draft')
+    expect(resumed).toEqual([])
+  })
+})
+
+describe('session.create execution worlds', () => {
+  it('creates a new Session instead of moving a blank Session to another execution world', async () => {
+    const { remote, selections, presetOf } = await harness({ presets: ['standard', 'remote'], worlds: new Set(['remote']) })
+    await remote.create({ sessionId: brandString<SessionId>('draft') })
+
+    const created = await remote.create({ sessionId: brandString<SessionId>('draft'), agentPreset: 'remote' })
+
+    if (!created.ok) throw new Error(`create failed: ${created.error.message}`)
+    expect(created.value).toMatchObject({ agentPreset: 'remote' })
+    expect(created.value.sessionId).not.toBe('draft')
+    expect(selections).toEqual([])
+    expect(presetOf(brandString<SessionId>('draft'))).toBe('standard')
+  })
+
+  it('records the spelling of the preset\'s execution world, not the Host\'s', async () => {
+    const { ctx, remote, cwd } = await harness({ presets: ['standard', 'remote'], worlds: new Set(['remote']) })
+    await ctx.plugin(LocalFileSystem, { cwd })
+    const link = join(cwd, 'link')
+    mkdirSync(join(cwd, 'real'))
+    symlinkSync(join(cwd, 'real'), link)
+
+    await remote.create({ sessionId: brandString<SessionId>('remote-draft'), cwd: link, agentPreset: 'remote' })
+
+    // The world's `fs` keeps the spelling; the Host's would have resolved the symlink.
+    expect(ctx.sessions.get(brandString<SessionId>('remote-draft'))?.header.cwd).toBe(link)
+  })
+
+  it('refuses a world-owning preset in a Host Workspace, requested or the default', async () => {
+    const requested = await harness({ presets: ['standard', 'remote'], worlds: new Set(['remote']) })
+    await expect(requested.remote.create({ workspaceId: WORKSPACE, agentPreset: 'remote' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'gateway/bad-request' } })
+
+    const defaulted = await harness({ presets: ['remote'], worlds: new Set(['remote']) })
+    await expect(defaulted.remote.create({ workspaceId: WORKSPACE }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'gateway/bad-request' } })
+  })
+})
+
+/** One-provider catalog whose models accept only the `low` and `high` efforts. */
+class PoolAdapter extends LlmAdapter {
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: 'Pool' }
+  }
+
+  override listModels(): Promise<readonly LlmModelInfo[]> {
+    return Promise.resolve(['astra', 'luna'].map(id => ({ provider: 'pool', id, name: id })))
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: {
+        efforts: [{ id: brandString<ReasoningEffortId>('low'), name: 'Low' }, { id: brandString<ReasoningEffortId>('high'), name: 'High' }],
+        defaultEffort: brandString<ReasoningEffortId>('low'),
+      },
+    })
+  }
+
+  override async *stream(): AsyncIterable<StreamChunk> {
+    // Session creation never streams.
+  }
+}
+
+/** Session-local permission table: `current` falls back to the Host default until `set`. */
+function permissionTable() {
+  const chosen = new WeakMap<Session, string>()
+  return {
+    names: ['read-only', 'workspace-write', 'danger-full-access'],
+    defaultPreset: 'workspace-write',
+    current: (session: Session) => chosen.get(session) ?? 'workspace-write',
+    set: (session: Session, name: string) => { chosen.set(session, name) },
+  }
+}
+
+describe('agent preset Session defaults', () => {
+  const arro: AgentPresetDefaults = {
+    model: { provider: 'pool', model: 'astra', reasoningEffort: 'high' },
+    permission: 'read-only',
+  }
+  const arroModel = { provider: 'pool', model: 'astra', reasoningEffort: 'high' }
+
+  async function defaultsHarness(defaults: Record<string, AgentPresetDefaults>, options: HarnessOptions = {}) {
+    const permissions = permissionTable()
+    const booted = await harness({
+      presets: ['standard', 'arro'],
+      defaults,
+      ...options,
+      prepare: async (ctx) => {
+        await ctx.plugin(LlmRuntime)
+        ctx.llm.registerAdapter(['pool'], new PoolAdapter())
+        ctx.provide('permissionPresets', permissions as never)
+      },
+    })
+    const { ctx } = booted
+    const sessionOf = (id: string): Session => {
+      const session = ctx.sessions.get(brandString<SessionId>(id))
+      if (session === undefined) throw new Error(`missing session ${id}`)
+      return session
+    }
+    /** Record a selection the way the preset registry does after its own checks. */
+    const switchPreset = (id: string, agentPreset: string): void => {
+      sessionOf(id).append('agent-preset/selected', { agentPreset })
+      ctx.emit('agent-preset/selected', brandString<SessionId>(id), agentPreset)
+    }
+    return { ...booted, permissions, sessionOf, pending: (id: string) => booted.pending(brandString<SessionId>(id)), switchPreset }
+  }
+
+  it('starts a new Session on its preset defaults', async () => {
+    const { remote, permissions, sessionOf, pending } = await defaultsHarness({ arro })
+
+    await remote.create({ sessionId: brandString<SessionId>('d1'), agentPreset: 'arro' })
+    await remote.create({ sessionId: brandString<SessionId>('d2'), agentPreset: 'standard' })
+
+    expect(pending('d1')).toEqual(arroModel)
+    expect(permissions.current(sessionOf('d1'))).toBe('read-only')
+    expect(pending('d2')).toBeNull()
+    expect(permissions.current(sessionOf('d2'))).toBe('workspace-write')
+  })
+
+  it('keeps an omitted default effort automatic', async () => {
+    const { remote, pending } = await defaultsHarness({ arro: { model: { provider: 'pool', model: 'luna' } } })
+
+    await remote.create({ sessionId: brandString<SessionId>('d11'), agentPreset: 'arro' })
+
+    expect(pending('d11')).toEqual({ provider: 'pool', model: 'luna' })
+  })
+
+  it('falls back to the Host defaults when a declared default is unusable', async () => {
+    const { remote, permissions, sessionOf, pending } = await defaultsHarness({
+      arro: { model: { provider: 'pool', model: 'astra', reasoningEffort: 'max' }, permission: 'yolo' },
+      standard: { model: { provider: 'pool', model: 'gone' } },
+    })
+
+    const created = await remote.create({ sessionId: brandString<SessionId>('d3'), agentPreset: 'arro' })
+    await remote.create({ sessionId: brandString<SessionId>('d4'), agentPreset: 'standard' })
+
+    expect(created.ok).toBe(true)
+    expect(pending('d3')).toBeNull()
+    expect(permissions.current(sessionOf('d3'))).toBe('workspace-write')
+    expect(pending('d4')).toBeNull()
+  })
+
+  it('applies the new preset defaults when a blank Session switches preset', async () => {
+    const { remote, permissions, sessionOf, pending, switchPreset } = await defaultsHarness({ arro })
+    await remote.create({ sessionId: brandString<SessionId>('d5'), agentPreset: 'standard' })
+
+    switchPreset('d5', 'arro')
+    await vi.waitFor(() => { expect(permissions.current(sessionOf('d5'))).toBe('read-only') })
+    expect(pending('d5')).toEqual(arroModel)
+
+    switchPreset('d5', 'standard')
+    await vi.waitFor(() => { expect(permissions.current(sessionOf('d5'))).toBe('workspace-write') })
+    expect(pending('d5')).toEqual({ provider: 'test', model: 'test-model' })
+  })
+
+  it('moves a reused live blank Session to the requested preset defaults before responding', async () => {
+    const { remote, permissions, sessionOf, pending } = await defaultsHarness({ arro })
+    await remote.create({ sessionId: brandString<SessionId>('d10'), agentPreset: 'standard' })
+
+    const reused = await remote.create({ sessionId: brandString<SessionId>('d10'), agentPreset: 'arro' })
+
+    expect(reused).toMatchObject({ ok: true, value: { sessionId: 'd10', agentPreset: 'arro' } })
+    expect(permissions.current(sessionOf('d10'))).toBe('read-only')
+    expect(pending('d10')).toEqual(arroModel)
+  })
+
+  it('moves a resumed stored blank Session to the requested preset defaults', async () => {
+    const draft = brandString<SessionId>('d12')
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-session-preset-stored-')))
+    tempDirs.push(cwd)
+    const { remote, resumed, permissions, sessionOf, pending } = await defaultsHarness({ arro }, {
+      stored: new Map([[draft, { header: storedHeader(draft, cwd, { agentPreset: 'standard' }), events: [modelSelection(0)] }]]),
+    })
+
+    const reused = await remote.create({ sessionId: draft, cwd, agentPreset: 'arro' })
+
+    expect(reused).toMatchObject({ ok: true, value: { sessionId: 'd12', agentPreset: 'arro' } })
+    expect(resumed).toEqual(['d12'])
+    expect(permissions.current(sessionOf('d12'))).toBe('read-only')
+    expect(pending('d12')).toEqual(arroModel)
+  })
+
+  it('admits a text prompt sent right after a preset switch under the new defaults', async () => {
+    const { ctx, remote, permissions, sessionOf, pending, switchPreset } = await defaultsHarness({ arro })
+    await remote.create({ sessionId: brandString<SessionId>('d9'), agentPreset: 'standard' })
+    const seen: unknown[] = []
+    Object.assign(ctx.agents.get(brandString<SessionId>('d9')) as Agent, {
+      inbox: { nextTurn: [], nextStep: [] },
+      followup: () => { seen.push([permissions.current(sessionOf('d9')), pending('d9')]) },
+    })
+
+    switchPreset('d9', 'arro')
+    await remote.prompt({ sessionId: brandString<SessionId>('d9'), requestId: 'r1' as SessionRequestId, content: [{ type: 'text', text: 'go' }], mode: 'queue' })
+
+    expect(seen).toEqual([['read-only', arroModel]])
+  })
+
+  it('keeps explicit model and permission choices across a preset switch', async () => {
+    const { remote, permissions, sessionOf, pending, switchPreset } = await defaultsHarness({ arro })
+    await remote.create({ sessionId: brandString<SessionId>('d6'), agentPreset: 'standard' })
+    await remote.create({ sessionId: brandString<SessionId>('d7'), agentPreset: 'standard' })
+    await remote.selectModel({ sessionId: brandString<SessionId>('d6'), provider: 'pool', model: 'luna' })
+    permissions.set(sessionOf('d7'), 'danger-full-access')
+
+    switchPreset('d6', 'arro')
+    switchPreset('d7', 'arro')
+
+    await vi.waitFor(() => { expect(permissions.current(sessionOf('d6'))).toBe('read-only') })
+    expect(pending('d6')).toEqual({ provider: 'pool', model: 'luna' })
+    await vi.waitFor(() => { expect(pending('d7')).toEqual(arroModel) })
+    expect(permissions.current(sessionOf('d7'))).toBe('danger-full-access')
+  })
+
+  it('leaves an existing Session untouched when its preset gains defaults', async () => {
+    const defaults: Record<string, AgentPresetDefaults> = {}
+    const { remote, permissions, sessionOf, pending } = await defaultsHarness(defaults)
+    await remote.create({ sessionId: brandString<SessionId>('d8'), agentPreset: 'arro' })
+    defaults['arro'] = arro
+
+    const reused = await remote.create({ sessionId: brandString<SessionId>('d8'), agentPreset: 'arro' })
+
+    expect(reused).toMatchObject({ ok: true, value: { sessionId: 'd8' } })
+    expect(pending('d8')).toBeNull()
+    expect(permissions.current(sessionOf('d8'))).toBe('workspace-write')
   })
 })

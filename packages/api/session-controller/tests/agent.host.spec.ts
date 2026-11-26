@@ -296,6 +296,7 @@ describe('ApiSession creation', () => {
       presetForSession: () => 'remote',
       serviceForPreset: () => ({
         resolve: (path: string) => Promise.resolve(path),
+        processPath: (target: string) => target,
         stat: (path: string) => Promise.resolve(types[path] === undefined ? undefined : { type: types[path] }),
       }),
     } as never)

@@ -376,8 +376,6 @@ export class SessionCommandController {
     // Encoded images and image upload receipts both make an image prompt.
     const hasImage = admission.content.some(part => part.type === 'image')
     const admit = async (): Promise<SessionPromptValue> => {
-      // A retry queued behind its original is accepted once.
-      if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
       try {
         if (this.hasPromptRequest(agent.session, request.requestId)) return { accepted: true }
         if (hasImage) {

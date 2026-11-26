@@ -44,8 +44,17 @@ Define an Agent’s child plugins in ordinary Cordis YAML. Declare several prese
 | `name` | unset | Display name |
 | `description` | unset | Display description |
 | `order` | unset | Roster order |
+| `defaults` | unset | Initial `model` (`provider`, `model`, optional `reasoningEffort`) and `permission` preset for new Sessions |
 
 The declaration row’s `id` addresses Loader edits; `config.id` is the preset identity saved by sessions. Child entry IDs may be omitted and assigned by Loader.
+
+```yaml
+    defaults:
+      model: { provider: openai-codex, model: gpt-6-astra, reasoningEffort: high }
+      permission: workspace-write
+```
+
+The [Session Controller](../../api/session-controller/README.md) applies `defaults` when it creates a Session under the preset, and when a blank Session switches to it. The model passes the same catalog and effort checks as a `/model` choice, and `permission` must name an available permission preset. An unusable value is logged and the Host default applies; creation never fails. A malformed block fails the declaration at load. Explicit model and permission choices win, existing Sessions keep what they recorded, and subagent and workflow children keep inheriting from their parent. The registry roster and `resolve()` return the declared block.
 
 The package also ships the `skills/` directory that Standard and Creator modes mount through `skill-filesystem`. It holds one skill, `dsh-doc`: a short `SKILL.md` that sets the order for finding DSH facts (runtime inspection when its tools are available, then the installed documentation and package sources) and states that loading the skill authorizes no file or profile change, plus `references/` read on demand and copyable `templates/` bundles. The references cover locating documentation, plugin development, bundle display metadata and detail documents, Web UI plugins, MCP bundles, extension practices, user actions, verification and user experience review, icon and feature-image drawing, agent presets, the Loader patch dialect, tool design, upgrades across DSH releases, and `references/packages.md`, which `scripts/gen-plugin-packages.ts` generates and `doc-sync` checks for freshness. The rendered `SKILL.md` and every reference except `packages.md`, read with line numbers, stay under the 8192-character threshold above which the standard preset's tool-result pruner trims results.
 
