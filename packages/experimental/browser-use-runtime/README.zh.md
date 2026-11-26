@@ -29,6 +29,8 @@ kind: "package-library"
 
 原生提供方从包根入口构造 `SessionResources`，提供资源获取与清理回调。调用向 `run()` 传递确切的实时 Agent；失效的所有者与独占附加的第二个所有者在获取资源前失败。取消资源获取等待不会终止初始化，同一 Session 的其他调用方仍可继续等待；释放 Session 会中止并等待该初始化结束。提供方将注册保留到 `dispose()` 完成。
 
+所有权失败抛出 `BrowserSessionError`，与封闭的 `BROWSER_SESSION_ERROR_CODES` 列表一同导出：`BROWSER_OWNER_NOT_LIVE` 表示所有者失效或提供方正在释放，`BROWSER_LOCKED` 表示独占附加出现第二个所有者，`BROWSER_CLOSED` 表示操作因其 Session 的浏览器关闭而中断，`BROWSER_CLEANUP_FAILED` 表示 `dispose()` 失败，其 `cause` 是汇总各项关闭失败的 `AggregateError`，`BROWSER_FOREIGN_SESSION` 表示没有自己连接的 Session 发起了 MCP 调用。取消等待且中止原因不是 `Error` 时，以带 `ABORTED` 代码的 `AbortError` 拒绝。
+
 MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中的 `mountSessionMcp`，提供固定服务器名称、可执行文件、参数与所有权策略。挂载上下文必须提供 `workingDirectory`。获取连接时通过[工作目录服务](../../session/working-directory/README.zh.md)验证或恢复当前目录，并将其设为 MCP 服务器进程的初始目录。Session 后续选择其他目录时，保留的服务器继续使用该目录。辅助库在每个后续 Agent 的 `agent/created` 事件中等待一次有作用域的客户端启动与发现尝试。Agent 创建或恢复在发现完成后结束，随后才运行排队输入；成功的客户端跨轮次归该 Session 所有。
 
 `serverStart` 决定每个 Session 的服务器进程何时启动。`activation` 在上述等待的启动过程中启动它。使用 `first-use` 时，首个启动服务器的 Session 记录该服务器的启动交换（协商、初始化与工具发现），之后的每个 Session 对相同请求接收已记录的响应，因此其激活无需进程即可声明相同的工具、指导与资源服务器。Session 自己的服务器在其首个其他请求时启动，通常是首次浏览器工具或资源调用，并使用激活时经验证的目录。服务器先接收已应答的请求，并须在该 Session 的工具调用超时内应答；否则该 Session 的连接关闭，该请求失败。若某个响应与记录不同，记录即被丢弃，下一个 Session 重新记录。重放的初始化声明支持工具列表变更通知，因此工具列表变化会让该 Session 的客户端重新列出工具；启动服务器的请求先到达服务器，调用服务器已不再列出的工具会以服务器的错误失败。记录进行期间激活的 Session 会等待记录完成。无法重放的已完成交换不会保留：服务器发送了自己的消息、某个请求未获应答，或没有 `initialize` 结果声明工具。此后每个 Session 在激活期间直接启动自己的服务器而无需等待，提供方记录一条警告。记录归提供方的本次激活所有。
@@ -37,7 +39,7 @@ MCP 提供方使用 `@deepseek-ai/dsh-experimental-browser-use-runtime/mcp` 中�
 
 调用方在等待 Agent 创建或恢复完成后，即可检查提示词组装和作用域工具定义。
 
-指向此服务器的浏览器工具调用与资源请求使用同一队列，且要求调用 Session 自己拥有连接。其他 MCP 服务器仍可使用。没有所有权时会省略继承的服务器指导；共享服务器名称目录保留常规作用域行为。
+指向此服务器的浏览器工具调用与资源请求使用同一队列，且要求调用 Session 自己拥有连接；没有调用方 Agent 的调用以 `ToolContextUnavailableError` 失败。其他 MCP 服务器仍可使用。没有所有权时会省略继承的服务器指导；共享服务器名称目录保留常规作用域行为。
 
 -----
 

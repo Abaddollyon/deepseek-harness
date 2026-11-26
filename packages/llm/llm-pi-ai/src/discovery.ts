@@ -8,43 +8,42 @@
  * not disclose. Only a route the catalog does not describe — a gateway, a
  * self-hosted server — is interrogated over the wire.
  *
- * A configured route whose `modelDiscovery.source` names a listing protocol
- * skips the catalog and lists its own endpoint with that protocol, which is
- * how a pool behind a catalog route key reports models and reasoning efforts
- * the installed catalog does not know.
- *
  * Neither path is a catalog refresh. Nothing here is stored: the request
  * carries a draft the user is still editing, and the reply is candidate
  * metadata the surface offers for adoption. `cordis.patch.yml` remains the only
  * thing that decides what a route serves.
  *
- * OpenAI-compatible and Anthropic Messages protocols are interrogated through
- * their native model-listing endpoints. The parser accepts the standard
- * `data` array and the enriched `models` map some compatible gateways expose.
+ * OpenAI-compatible, Anthropic Messages, and Gemini protocols are interrogated
+ * through their native model-listing endpoints. The OpenAI and Anthropic parser
+ * accepts the standard `data` array and the enriched `models` map some
+ * compatible gateways expose; Gemini replies with its own `models` array.
  * Every other protocol reports that it cannot be interrogated so the surface
  * falls back to hand-entry rather than guessing its response fields.
  *
  * @module dsh-llm-pi-ai/discovery
  */
 
-import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { normalizeApiKey } from '@deepseek-ai/dsh-credentials'
+import { INVALID_CREDENTIAL_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type { LlmDiscoveredModel, LlmModelDiscoveryOperation } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
-import { catalogModels, MODALITIES, THINKING_LEVELS } from './catalog.ts'
-import type { PiAiModality } from './catalog.ts'
-import type { PiAiModelDiscoverySource } from './config.ts'
+import { catalogModels } from './catalog.ts'
 
 /**
  * Protocols whose model listing this module can read. OpenAI protocols use
  * bearer auth at `GET {baseURL}/models`; Anthropic Messages uses `x-api-key`
- * and `anthropic-version` at its native `GET /v1/models`. Azure is absent
+ * and `anthropic-version` at its native `GET /v1/models`; Gemini uses
+ * `x-goog-api-key` at `GET {baseURL}/models`. Azure is absent
  * despite its OpenAI lineage — it authenticates with an `api-key` header and
  * requires an `api-version` query — and Codex authenticates through OAuth;
  * guessing at either would report an authentication failure as a provider
  * with no models. pi-ai's remaining protocols are absent for the same reason.
+ * The route protocol table in `provider.ts` may name a protocol absent here;
+ * discovery reports it as unsupported.
  */
 const LISTABLE_PROTOCOLS: ReadonlySet<string> = new Set([
   'anthropic-messages',
+  'google-generative-ai',
   'openai-completions',
   'openai-responses',
 ])
@@ -54,6 +53,9 @@ const ANTHROPIC_VERSION = '2023-06-01'
 
 /** Largest model-list page accepted by Anthropic's public endpoint; discovery reads one page and does not follow `has_more`. */
 const ANTHROPIC_MODEL_LIMIT = 1000
+
+/** Largest model-list page accepted by the Gemini API; discovery reads one page and does not follow `nextPageToken`. */
+const GEMINI_MODEL_LIMIT = 1000
 
 /**
  * Endpoint replies larger than this are refused. The endpoint is whatever URL
@@ -75,27 +77,6 @@ interface ListingTopProvider {
   max_completion_tokens?: unknown
 }
 
-/** Capability fields an enriched listing (Codex pool, Anthropic) nests under each entry. */
-interface ListingCapabilities {
-  input_modalities?: unknown
-  supports_reasoning?: unknown
-  /** Anthropic: `{ supported }`. */
-  image_input?: { supported?: unknown } | null
-  /** Anthropic: `{ supported, <level>: { supported } }`. */
-  effort?: Record<string, unknown> | null
-  /** Anthropic: `{ supported, types: { adaptive: { supported }, enabled: { supported } } }`. */
-  thinking?: { types?: { adaptive?: { supported?: unknown } | null } | null } | null
-}
-
-/** Model metadata the Codex pool nests under each entry. */
-interface ListingMetadata {
-  display_name?: unknown
-  context_window?: unknown
-  max_output_tokens?: unknown
-  input_modalities?: unknown
-  supported_reasoning_levels?: unknown
-}
-
 /** One entry of a supported `GET /models` reply. */
 interface ListingEntry {
   id?: unknown
@@ -113,11 +94,6 @@ interface ListingEntry {
   maxTokens?: unknown
   limit?: ListingLimit | null
   top_provider?: ListingTopProvider | null
-  input_modalities?: unknown
-  supports_reasoning?: unknown
-  supported_reasoning_levels?: unknown
-  capabilities?: ListingCapabilities | null
-  metadata?: ListingMetadata | null
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -136,56 +112,21 @@ function label(...candidates: readonly unknown[]): string | undefined {
   return undefined
 }
 
-/** The first modality list a listing entry declares, narrowed to the modalities pi-ai models accept. */
-function modalities(...candidates: readonly unknown[]): PiAiModality[] | undefined {
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue
-    const known = MODALITIES.filter(modality => (candidate as readonly unknown[]).includes(modality))
-    if (known.length > 0) return known
-  }
-  return undefined
-}
-
-/**
- * The reasoning efforts a listing entry reports, narrowed to pi-ai's levels:
- * the Codex pool's `supported_reasoning_levels` (`[{ effort }]`, top level
- * first) or Anthropic's `capabilities.effort.<level>.supported`. An effort pi-ai
- * cannot express, such as `ultra`, is dropped rather than mapped. An entry
- * declaring no reasoning support reports none; Anthropic's unsupported
- * `effort` stays unknown because such a model may still think by budget.
- */
-function reasoningEfforts(entry: ListingEntry | null): ReasoningEffortId[] | undefined {
-  if (entry?.supports_reasoning === false || entry?.capabilities?.supports_reasoning === false) return []
-  let reported: readonly unknown[] | undefined
-  for (const levels of [entry?.supported_reasoning_levels, entry?.metadata?.supported_reasoning_levels]) {
-    if (Array.isArray(levels)) {
-      reported = (levels as readonly unknown[]).map(level =>
-        typeof level === 'object' && level !== null ? (level as { effort?: unknown }).effort : level)
-      break
-    }
-  }
-  const effort = entry?.capabilities?.effort
-  if (reported === undefined && typeof effort === 'object' && effort !== null && effort.supported === true) {
-    reported = Object.entries(effort).flatMap(([level, support]) =>
-      (support as { supported?: unknown } | null)?.supported === true ? [level] : [])
-  }
-  if (reported === undefined) return undefined
-  return THINKING_LEVELS.filter(level => level !== 'off' && reported.includes(level)).map(level => ReasoningEffortId(level))
-}
-
 /**
  * Join the endpoint base with the protocol's listing path. The base is
  * treated as a prefix rather than a URL to resolve against, so a deployment
  * path such as `https://gateway.example/openai/v1` keeps its segments instead
  * of losing them to `URL` resolution. OpenAI protocols list at
- * `{baseURL}/models`. Anthropic lists at `{root}/v1/models`, where the root is
- * the base without trailing slashes and without one trailing `/v1` segment:
- * gateway documentation publishes both spellings of the same root. Only this
- * listing URL normalizes that segment; model requests receive the configured
- * `baseURL` unchanged.
+ * `{baseURL}/models`, and Gemini at `{baseURL}/models` with a page size,
+ * because its `baseURL` already carries the API version. Anthropic lists at
+ * `{root}/v1/models`, where the root is the base without trailing slashes and
+ * without one trailing `/v1` segment: gateway documentation publishes both
+ * spellings of the same root. Only this listing URL normalizes that segment;
+ * model requests receive the configured `baseURL` unchanged.
  */
 function listingUrl(baseURL: string, api: string): string {
   const base = baseURL.replace(/\/+$/, '')
+  if (api === 'google-generative-ai') return `${base}/models?pageSize=${String(GEMINI_MODEL_LIMIT)}`
   if (api !== 'anthropic-messages') return `${base}/models`
   const root = base.endsWith('/v1') ? base.slice(0, -3) : base
   return `${root}/v1/models?limit=${String(ANTHROPIC_MODEL_LIMIT)}`
@@ -273,14 +214,13 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
     const entry = raw as ListingEntry | null
     const id = label(key, entry?.id)
     if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name, entry?.displayName, entry?.metadata?.display_name) ?? id
+    const name = label(entry?.name, entry?.display_name, entry?.displayName) ?? id
     const contextWindow = capacity(
       entry?.contextWindow,
       entry?.context_window,
       entry?.context_length,
       entry?.max_input_tokens,
       entry?.limit?.context,
-      entry?.metadata?.context_window,
     )
     const maxTokens = capacity(
       entry?.maxOutputTokens,
@@ -289,29 +229,55 @@ function readListing(body: unknown): LlmDiscoveredModel[] {
       entry?.max_tokens,
       entry?.limit?.output,
       entry?.top_provider?.max_completion_tokens,
-      entry?.metadata?.max_output_tokens,
     )
-    const imageInput = entry?.capabilities?.image_input
-    const inputModalities = modalities(
-      entry?.input_modalities,
-      entry?.capabilities?.input_modalities,
-      entry?.metadata?.input_modalities,
-      typeof imageInput === 'object' && imageInput !== null
-        ? imageInput.supported === true ? ['text', 'image'] : ['text']
-        : undefined,
-    )
-    const efforts = reasoningEfforts(entry)
-    // Anthropic reports adaptive thinking per model; pi-ai selects it only
-    // through this compat switch for a model its installed catalog lacks.
-    const adaptive = entry?.capabilities?.thinking?.types?.adaptive?.supported === true
     models.push({
       id,
       name,
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
-      ...inputModalities === undefined ? {} : { inputModalities },
-      ...efforts === undefined ? {} : { reasoningEfforts: efforts },
-      ...adaptive ? { compat: { forceAdaptiveThinking: true } } : {},
+    })
+  }
+  return models
+}
+
+/** One entry of a Gemini `GET /models` reply. */
+interface GeminiListingEntry {
+  name?: unknown
+  displayName?: unknown
+  inputTokenLimit?: unknown
+  outputTokenLimit?: unknown
+  supportedGenerationMethods?: unknown
+}
+
+/**
+ * Read a Gemini model-listing reply. Each entry's `name` is a resource name
+ * such as `models/gemini-2.5-pro`; the request id is that name without the
+ * `models/` prefix, because pi-ai's Gemini protocol sends the bare id. Entries
+ * that declare generation methods without `generateContent`, such as embedding
+ * models, cannot serve a conversation and are skipped.
+ */
+function readGeminiListing(body: unknown): LlmDiscoveredModel[] {
+  const listed = (body as { models?: unknown } | null)?.models
+  if (!Array.isArray(listed)) {
+    throw new LlmError(
+      'the endpoint\'s model listing has no "models" array; enter this provider\'s models by hand',
+      'DISCOVERY_FAILED',
+    )
+  }
+  const models: LlmDiscoveredModel[] = []
+  for (const raw of listed as readonly unknown[]) {
+    const entry = raw as GeminiListingEntry | null
+    const methods = entry?.supportedGenerationMethods
+    if (Array.isArray(methods) && !methods.includes('generateContent')) continue
+    const id = label(entry?.name)?.replace(/^models\//, '')
+    if (id === undefined || id.length === 0) continue
+    const contextWindow = capacity(entry?.inputTokenLimit)
+    const maxTokens = capacity(entry?.outputTokenLimit)
+    models.push({
+      id,
+      name: label(entry?.displayName) ?? id,
+      ...contextWindow === undefined ? {} : { contextWindow },
+      ...maxTokens === undefined ? {} : { maxTokens },
     })
   }
   return models
@@ -338,10 +304,6 @@ function usableProbeKey(raw: string): string {
 
 /** Host-owned profile inputs that a configuration draft deliberately omits. */
 export interface StoredModelDiscoveryProfile {
-  /** Listing protocol configured on the named route; `provider` keeps catalog and protocol selection. */
-  readonly source: PiAiModelDiscoverySource
-  /** Endpoint configured on the named route, used when the draft names none. */
-  readonly baseURL: string | undefined
   /** Deployment headers configured on the named route. */
   readonly headers: Readonly<Record<string, string>> | undefined
   /** Resolve the named route's credential only when the draft carries none. */
@@ -351,9 +313,9 @@ export interface StoredModelDiscoveryProfile {
 /**
  * Interrogate one draft provider endpoint for the models it advertises.
  * @param request - the endpoint, protocol, and one-shot credential to use.
- * @param storedProfile - Host-owned listing source, endpoint, headers, and lazy
- *   credential resolution for the named route. The credential is resolved only
- *   on the path that reaches the network, and only when the draft carries none.
+ * @param storedProfile - Host-owned headers and lazy credential resolution for
+ *   the named route. It is read only on the path that reaches the network; the
+ *   credential is resolved only when the draft carries none.
  * @returns the advertised models in endpoint order.
  * @throws LlmError when the protocol has no readable listing, the endpoint
  *   refuses or fails the request, or the reply is not a model listing.
@@ -362,12 +324,9 @@ export async function discoverModels(
   request: LlmModelDiscoveryOperation,
   storedProfile?: () => StoredModelDiscoveryProfile | undefined,
 ): Promise<readonly LlmDiscoveredModel[]> {
-  const stored = storedProfile?.()
-  const source = stored?.source ?? 'provider'
   // A catalog route already has its answer, and a better one: the installed
   // entries carry context windows and output caps no listing endpoint reports.
-  // A route that names a listing source asks its own endpoint instead.
-  if (request.provider !== undefined && source === 'provider') {
+  if (request.provider !== undefined) {
     const installed = catalogModels(request.provider)
     if (installed.size > 0) {
       return [...installed.values()].map(model => ({
@@ -379,8 +338,7 @@ export async function discoverModels(
       }))
     }
   }
-  const baseURL = request.baseURL ?? (source === 'provider' ? undefined : stored?.baseURL)
-  if (baseURL === undefined || baseURL.length === 0) {
+  if (request.baseURL === undefined || request.baseURL.length === 0) {
     throw new LlmError(
       `pi-ai ships no catalog for provider "${request.provider ?? ''}", so its models can only come from its`
       + " endpoint; set a baseURL, or enter this provider's models by hand",
@@ -393,21 +351,20 @@ export async function discoverModels(
   // the action from the case it exists for. The cost is a misdirected message
   // when the endpoint speaks something else (an Anthropic gateway answers 401,
   // which reads as a credential problem), and hand-entry remains the way out.
-  const api = source === 'openai-compatible'
-    ? 'openai-completions'
-    : source === 'anthropic' ? 'anthropic-messages' : request.api ?? 'openai-completions'
+  const api = request.api ?? 'openai-completions'
   if (!LISTABLE_PROTOCOLS.has(api)) {
     throw new LlmError(
       `pi-ai protocol "${api}" has no model listing this build can read; enter this provider's models by hand`,
       'DISCOVERY_UNSUPPORTED',
     )
   }
-  const url = listingUrl(baseURL, api)
+  const url = listingUrl(request.baseURL, api)
   // A key typed into the form wins: it may replace the stored key that is
-  // failing. The stored credential resolver is asked past the catalog and
-  // protocol checks, and remains lazy so a typed key cannot fail over a
+  // failing. The stored profile is asked past the catalog and protocol checks,
+  // and its credential resolver remains lazy so a typed key cannot fail over a
   // stored credential it supersedes. A route may still authenticate through a
   // deployment-owned Authorization header when neither key exists.
+  const stored = storedProfile?.()
   const supplied = request.apiKey ?? await stored?.resolveApiKey()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
   let response: Response
@@ -417,6 +374,8 @@ export async function discoverModels(
     if (api === 'anthropic-messages') {
       headers.set('anthropic-version', ANTHROPIC_VERSION)
       if (apiKey !== undefined) headers.set('x-api-key', apiKey)
+    } else if (api === 'google-generative-ai') {
+      if (apiKey !== undefined) headers.set('x-goog-api-key', apiKey)
     } else if (apiKey !== undefined) {
       headers.set('authorization', `Bearer ${apiKey}`)
     }
@@ -456,5 +415,5 @@ export async function discoverModels(
   } catch (error: unknown) {
     throw new LlmError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
-  return readListing(body)
+  return api === 'google-generative-ai' ? readGeminiListing(body) : readListing(body)
 }

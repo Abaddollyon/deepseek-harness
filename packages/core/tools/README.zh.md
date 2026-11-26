@@ -81,24 +81,7 @@ ctx.tools.register(defineTool({
 - name: '@deepseek-ai/dsh-tool-executor-native'
 ```
 
-Agent 步骤的并发上限使用 [agent-loop 配置](../agent-loop/README.zh.md)。执行器设置参见[原生](../tool-executor-native/README.zh.md)或 [PTC](../tool-executor-ptc/README.zh.md) 包。自定义提供者只需实现 `describe(definitions)` 和 `execute(batch)`，共享流水线和[延迟钩子](#defer-tool-declarations)均为可选项。注册表分别为提示词描述和每次 `ctx.tools.execute()` 批次选择当前作用域的执行器。已接纳批次仍由所选提供者结算，即使该提供者已卸载；根据提供者的卸载策略，结果可能包含取消错误。注册替代提供者之前，新批次会被拒绝。
-
-`dsh-tools` 只接受一个配置字段 `defer`：部署级默认延迟策略（见[延迟工具声明](#defer-tool-declarations)）。生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tools)列出每个受支持字段。
-
-<a id="defer-tool-declarations"></a>
-### 延迟工具声明
-
-工具集较大时，可以只列出大部分工具的名称，使其完整声明不进入提示词。`defer.include` 指定延迟的工具，`defer.exclude` 使匹配的工具保持声明；模式匹配完整名称，`*` 匹配任意长度的字符。定义中设置了 `deferLoading` 的工具同样延迟，除非 `exclude` 指定了它。单个 agent 或 preset 可用 `ctx.tools.deferAs(policy)` 遮蔽部署级策略，[`dsh-agent-tool-presentation`](../agent-tool-presentation/README.zh.md) 以其 `defer` 字段暴露该能力。
-
-```yaml
-- name: '@deepseek-ai/dsh-tools'
-  config:
-    defer:
-      include: ['mcp__*', 'gbrain_*']
-      exclude: ['gbrain_query']
-```
-
-当某个 scope 至少延迟一个可见工具时，注册表会把保留的 `tool_search` 工具追加到该 scope 的定义中：它接受精确的 `names` 或关键词 `query`，最多返回十个声明。延迟的工具仍然注册且可调用。注册表在每次渲染描述和段落时，把该 scope 的延迟信息交给所选执行器。在 [PTC 执行器](../tool-executor-ptc/README.zh.md)下，延迟工具离开 SDK 的 `ToolArgsMap` 与 `ToolOutputMap`；SDK 代码块之后的 "More tools" 索引列出其名称，程序内的 `tool_search` 以 SDK 自身的语言返回其声明。在[原生执行器](../tool-executor-native/README.zh.md)下，它们离开已声明的工具列表，由注册表的 `tools:deferred` 段列出；直接调用 `tool_search` 会返回其 JSON schema，并从该 agent 的下一次请求起将其加入已声明的工具。恢复的 agent 保留其最后一次记录的请求头所声明的延迟工具。延迟工具的参数错误会附带该工具的声明。自定义执行器通过 `describe(definitions, deferral)`、`deferredIndex(tools)` 与 `programDeclarations(tools)` 接入；忽略它们的执行器会声明全部工具。[延迟声明决策](../../../.agents/notes/implemented/feature/2026-10-02-deferred-tool-declarations.zh.md)记录了激活为何从请求头恢复。
+Agent 步骤的并发上限使用 [agent-loop 配置](../agent-loop/README.zh.md)。执行器设置参见[原生](../tool-executor-native/README.zh.md)或 [PTC](../tool-executor-ptc/README.zh.md) 包。自定义提供者只需实现 `describe(definitions)` 和 `execute(batch)`，共享流水线为可选项。注册表分别为提示词描述和每次 `ctx.tools.execute()` 批次选择当前作用域的执行器。已接纳批次仍由所选提供者结算，即使该提供者已卸载；根据提供者的卸载策略，结果可能包含取消错误。注册替代提供者之前，新批次会被拒绝。执行器提示词段遵循普通[段生命周期规则](../system-prompt/README.zh.md)：清理会移除注册，下一次组装再比较替代注册或准备退役通知。
 
 ### 按 agent 限制工具
 
@@ -139,12 +122,10 @@ Agent 步骤的并发上限使用 [agent-loop 配置](../agent-loop/README.zh.md
 - [`src/schema.ts`](src/schema.ts) — 类型化工具定义与面向模型的 schema 投影。
 - [`src/json-schema.ts`](src/json-schema.ts) — 支持的 JSON Schema 校验.
 - [`src/presentation.ts`](src/presentation.ts) — 工具卡片呈现意图.
-- [`src/defer.ts`](src/defer.ts) — 延迟策略、延迟工具索引与 `tool_search` 匹配。
-- [`src/tool-search.ts`](src/tool-search.ts) — 保留的 `tool_search` 定义。
 
 ### 执行与取消
 
-每次类型化调用都会实体化并冻结解析后的参数、分配不透明关联 token，再运行策略与分发。pre-execute 拒绝可以在模型可见原因旁附带 `ToolErrorInfo`；原生与 PTC 持久投影会保留结构化名称、代码与可选用户可见原因，但不会把该详情加入模型内容。取消采用协作式并等待完全停稳：每个工具主体都收到调用方拥有的 `exec.signal` 且必须观测它；调用主体前的取消为 `ABORTED_BEFORE_DISPATCH`，调用主体后的取消只能把成功结果替换为 `ABORTED`。拒绝、包装层失败、工具失败、后置策略失败与超时产生的 `TOOL_TIMEOUT` 仍保留更具体的结果。未知工具与抛出异常的工具都会变成结构化错误（`UNKNOWN_TOOL`），因此调用会失败而不会结束轮次。
+每次类型化调用都会实体化并冻结解析后的参数、分配不透明关联 token，再运行策略与分发。pre-execute 拒绝可以在模型可见原因旁附带 `ToolErrorInfo`；原生与 PTC 持久投影会保留结构化名称、代码与可选用户可见原因，但不会把该详情加入模型内容。取消采用协作式并等待完全停稳：每个工具主体都收到调用方拥有的 `exec.signal` 且必须观测它；调用主体前的取消为 `ABORTED_BEFORE_DISPATCH`，调用主体后的取消只能把成功结果替换为 `ABORTED`，抛出的 signal reason，或不具备 `HarnessError` 身份、name 为 `AbortError` 的 `Error`，保留其 message 并携带 `ABORTED`。`tools/execute` 包装层在调用方取消后抛出这类值时按同样方式归类，工具主体尚未开始时为 `ABORTED_BEFORE_DISPATCH`。拒绝、其他包装层失败、工具失败、后置策略失败与超时产生的 `TOOL_TIMEOUT` 仍保留更具体的结果。未知工具与抛出异常的工具都会变成结构化错误（`UNKNOWN_TOOL`），因此调用会失败而不会结束轮次。
 
 ### PTC mode
 
@@ -191,20 +172,6 @@ Agent 步骤的并发上限使用 [agent-loop 配置](../agent-loop/README.zh.md
 
 只要可见定义及其顺序不变，前缀就保持稳定。注册、dispose 或作用域限制可能从第一个改变的 schema token 起使复用失效。
 
-### 仅列名称的工具索引与 `tool_search`
-
-#### 模型看到什么
-
-存在延迟策略时，PTC 执行器的 SDK 以 `## More tools` 段结尾：先给出一条说明，要求在调用所列工具前用 `tool_search` 查询其声明，然后每个延迟工具一行，附其首句（最多 100 个字符）。超过八个工具的命名空间族（`<prefix>__*` 或 `mcp__<server>__*`）合并为一行成员名称。在原生执行器下，延迟工具在 `tool_search` 返回它们之前不在已声明的列表中，`tool_search` 本身会被声明。此时由注册表的 `tools:deferred` 段承载同样的 `## More tools` 索引，其说明要求用精确的 `names` 调用 `tool_search`，并说明找到的工具从下一步起可调用。它列出每个延迟工具，无论是否已激活。
-
-#### Token 影响
-
-每个延迟工具只占一行索引，而不是完整声明。一次 `tool_search` 结果把返回的声明加入历史一次。
-
-#### KV Cache 影响
-
-可见集合与延迟集合不变时，索引保持前缀稳定。在 PTC 执行器下，查询到的声明留在历史中，提示词不变。SDK 与两种索引都不受激活影响。在原生执行器下，被激活的工具从下一次请求起改变已声明的列表：支持工具更新的路由在缓存历史之后通过已记录的新增项加入它，其他路由则重新声明一次列表。
-
 ### 工具调用历史与结果
 
 #### 模型看到什么
@@ -230,9 +197,8 @@ Agent 步骤的并发上限使用 [agent-loop 配置](../agent-loop/README.zh.md
 - **`tools/pre-execute` 有意不允许改写 `exec.arguments`**：否则日志记录与呈现的参数会与实际运行内容失去同步；改写设计记录在[拟议的 Agent Note](../../../.agents/notes/proposed/feature/2026-06-30-pre-tool-input-rewrite.zh.md)中。
 - **调用方定义的 subagent 与工作流结构化输出仍要求对象根**：这是消费方层面的守卫；共享 schema 词汇与工具输出支持任意 JSON 根。
 - **定义中的 `timeoutMs` 仅作声明之用**：注册表绝不会强制执行截止时间；要强制执行，必须使用 `@deepseek-ai/dsh-tool-call-timeout-policy` 包装层。
-- **native 模式下的 `tool_search` 激活从最后一次记录的请求头恢复**：在该请求头之后做出、且在下一次请求之前因崩溃丢失的激活不会保留；模型可以再次查询该工具。
 
-`defineTool()` 与注册表模式投影会保留 `deferLoading: true`。默认延迟策略只列出此类工具的名称，直到 `tool_search` 激活它；此后其声明保留该标记。该标记请求延迟加载工具定义，并不意味着存在 `tool-addition` 记录；提供方执行语义的限制见 [LLM 包](../../../packages/llm/llm/README.zh.md#known-limitations-and-deferred-work)。
+`defineTool()`、注册表模式投影和系统提示组装会保留 `deferLoading: true`。该标记请求延迟加载工具定义，并不意味着存在 `tool-addition` 记录；提供方执行语义的限制见 [LLM 包](../../../packages/llm/llm/README.zh.md#known-limitations-and-deferred-work)。
 
 <a id="dev-note"></a>
 ### 开发备注

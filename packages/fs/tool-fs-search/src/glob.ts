@@ -11,10 +11,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { sep } from 'node:path'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { ToolArgsError, defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, SearchResultView, ToolResult } from '@deepseek-ai/dsh-tools'
 import type { SpillRef } from '@deepseek-ai/dsh-spill'
-import { presentText, runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
+import { runRipgrep, toWorkdirRelative, trySaveFormattedResult } from './search-core.ts'
 import { globSearchMeta, searchViewFromMeta } from './presentation.ts'
 import { acceptedDirectCallValue } from './direct-call.ts'
 
@@ -52,8 +52,6 @@ export interface GlobToolCaps {
   stderrMaxBytes: number
   /** Cooperative tool-call budget (ms) attached as `ToolDefinition.timeoutMs`. */
   timeoutMs: number
-  /** Ripgrep executable in the execution world; omitted selects the packaged binary. */
-  rgPath?: string
 }
 
 /** Validated `glob` arguments. */
@@ -64,17 +62,16 @@ export interface GlobInput {
 
 /**
  * Validate value constraints the schema DSL can't express: a non-blank
- * `pattern`. A blank `path` counts as omitted, because strict structured
- * output fills every optional field. Throws a plain `Error` (an ordinary tool
- * argument error) otherwise.
+ * `pattern`, and a non-blank `path` when given. Throws `ToolArgsError`
+ * (`INVALID_ARGS`) otherwise.
  *
  * @param args - the schema-validated `glob` arguments.
- * @returns the accepted input without blank optional fields.
+ * @returns the accepted input, unchanged.
  */
 export function parseGlobArgs(args: { pattern: string; path?: string }): GlobInput {
-  if (args.pattern.trim().length === 0) throw new Error('pattern must be a non-empty string')
-  const path = presentText(args.path)
-  return { pattern: args.pattern, ...path !== undefined ? { path } : {} }
+  if (args.pattern.trim().length === 0) throw new ToolArgsError(['pattern must be a non-empty string'])
+  if (args.path !== undefined && args.path.trim().length === 0) throw new ToolArgsError(['path must be a non-empty string when given'])
+  return { pattern: args.pattern, ...args.path !== undefined ? { path: args.path } : {} }
 }
 
 /**
@@ -318,6 +315,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     text: ({ scope }) => ctx.tools.get('glob', scope) === undefined
       ? ''
       : 'Use the glob tool — not shell find — to discover files by path pattern.',
+    retirement: 'The glob tool is no longer available. Its guidance no longer applies.',
   })
 
   const overCapDescription = caps.sampleOverCapGlobResults ? 'is sampled across top-level entries' : 'keeps the first paths'
@@ -336,6 +334,8 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
       path: { type: 'string', description: 'Directory to search in. Defaults to the session workspace; a relative path resolves against it.' },
     },
     timeoutMs: caps.timeoutMs,
+    // Path listing records no file observation; over-cap spilling runs in model-ordered post-execute.
+    isConcurrencySafe: () => true,
     output: {
       schema: {
         type: 'object',
@@ -353,7 +353,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     },
     async execute(args, exec) {
       const input = parseGlobArgs(args)
-      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes, caps.rgPath)
+      const run = await runRipgrep(ctx, exec, 'glob', buildGlobCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)
       const root = input.path === undefined ? '.' : toWorkdirRelative(input.path, run.workdir)
       if (run.noMatches) return { root, paths: [] }
 

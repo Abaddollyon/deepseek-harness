@@ -9,14 +9,14 @@
 
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { EMPTY_RESPONSE_CODE } from './error.ts'
+import { EMPTY_RESPONSE_CODE, RETRY_CODE_CHOICES } from './error.ts'
+import type { BuiltinLlmFailureCode } from './error.ts'
 
 const DEFAULT_MAX_RETRIES = 5
 const DEFAULT_INITIAL_DELAY_MS = 500
 const DEFAULT_MAX_DELAY_MS = 10_000
-const DEFAULT_JITTER: RetryJitter = 'full'
-const DEFAULT_JITTER_RATIO = 1
-const DEFAULT_RETRYABLE_CODES = Object.freeze([
+const DEFAULT_JITTER_RATIO = 0.1
+const DEFAULT_RETRYABLE_CODES: readonly BuiltinLlmFailureCode[] = Object.freeze([
   EMPTY_RESPONSE_CODE,
   'RATE_LIMIT',
   'SERVER',
@@ -24,30 +24,13 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
   'TRANSPORT',
 ])
 
-/**
- * How one random sample `u` in `[0, 1]` spreads a retry delay, given the
- * retry's exponential delay `d` and the `jitterRatio` `r`.
- *
- * - `full` waits `d * (1 - r * u)` locally, so `r = 1` is full jitter over
- *   `[0, d]`; an accepted provider delay `p` waits
- *   `min(p + r * u * max(d, p), maxDelayMs)`, never less than `p`.
- * - `symmetric` waits `min(d * (1 - r + 2 * r * u), maxDelayMs)` locally and
- *   exactly `p` for an accepted provider delay.
- *
- * A provider delay is accepted up to `maxDelayMs`, so a longer one waits
- * exactly `maxDelayMs`. `r = 0` makes both strategies deterministic.
- */
-export type RetryJitter = 'full' | 'symmetric'
-
-/** Bounded exponential backoff with a random spread around each delay. */
+/** Bounded exponential backoff with symmetric jitter around each local delay. */
 export interface BackoffConfig {
   /** Initial local exponential-backoff delay in milliseconds (default 500). */
   initialDelayMs?: number
-  /** Longest retry wait in milliseconds; a longer provider-requested delay waits this long (default 10000). */
+  /** Maximum locally scheduled or accepted provider delay in milliseconds (default 10000). */
   maxDelayMs?: number
-  /** Random spread strategy (default `full`). */
-  jitter?: RetryJitter
-  /** Fraction of the delay the random spread spans, from 0 to 1 (default 1). */
+  /** Symmetric random multiplier range around one (default 0.1). */
   jitterRatio?: number
 }
 
@@ -78,7 +61,6 @@ export type RetryPolicyConfig = NormalRetryPolicyConfig | AlwaysRetryPolicyConfi
 export interface ResolvedRetryBackoff {
   readonly initialDelayMs: number
   readonly maxDelayMs: number
-  readonly jitter: RetryJitter
   readonly jitterRatio: number
 }
 
@@ -97,17 +79,21 @@ export interface ResolvedAlwaysRetryPolicy extends ResolvedRetryBackoff {
 /** Immutable provider policy captured when its adapter route is registered. */
 export type ResolvedRetryPolicy = ResolvedNormalRetryPolicy | ResolvedAlwaysRetryPolicy
 
+// Field bounds live in the schema so settings forms can read them; resolveRetryPolicy
+// additionally enforces the cross-field rules no field bound expresses.
 const backoffSchema: z<BackoffConfig> = z.object({
-  initialDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_INITIAL_DELAY_MS),
-  maxDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_MAX_DELAY_MS),
-  jitter: z.union([z.const('full'), z.const('symmetric')]).default(DEFAULT_JITTER),
+  initialDelayMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_INITIAL_DELAY_MS),
+  maxDelayMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_MAX_DELAY_MS),
   jitterRatio: z.number().min(0).max(1).default(DEFAULT_JITTER_RATIO),
 })
 
 const normalPolicySchema: z<NormalRetryPolicyConfig> = z.object({
   mode: z.const('normal').required(),
   maxRetries: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RETRIES),
-  retryableCodes: z.array(z.string()).default([...DEFAULT_RETRYABLE_CODES]),
+  // The constant branches publish the built-in choices to settings forms; the
+  // string branch admits codes that other providers raise.
+  retryableCodes: z.array(z.union([...RETRY_CODE_CHOICES.map(code => z.const(code)), z.string().min(1)]))
+    .min(1).default([...DEFAULT_RETRYABLE_CODES]),
   backoff: backoffSchema,
 })
 
@@ -130,7 +116,7 @@ const NORMAL_POLICY_KEYS: ReadonlySet<string> = new Set([
 const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set([
   'mode', 'maxRetries', 'retryableCodes', 'backoff',
 ])
-const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitter', 'jitterRatio'])
+const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio'])
 
 function validateKeys(value: object, allowed: ReadonlySet<string>, path: string): void {
   for (const key of Object.keys(value)) {
@@ -142,8 +128,6 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (config !== undefined) validateKeys(config, BACKOFF_KEYS, path)
   const initialDelayMs = config?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS
   const maxDelayMs = config?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS
-  // Layered cordis.yml values reach this resolver unchecked by the TypeScript type.
-  const jitter: unknown = config?.jitter ?? DEFAULT_JITTER
   const jitterRatio = config?.jitterRatio ?? DEFAULT_JITTER_RATIO
 
   if (!Number.isFinite(initialDelayMs) || initialDelayMs <= 0 || initialDelayMs > MAX_TIMER_DELAY_MS) {
@@ -155,14 +139,11 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (initialDelayMs > maxDelayMs) {
     throw new Error(`${path}.initialDelayMs must be less than or equal to maxDelayMs`)
   }
-  if (jitter !== 'full' && jitter !== 'symmetric') {
-    throw new Error(`${path}.jitter must be "full" or "symmetric"`)
-  }
   if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
     throw new Error(`${path}.jitterRatio must be between 0 and 1`)
   }
 
-  return Object.freeze({ initialDelayMs, maxDelayMs, jitter, jitterRatio })
+  return Object.freeze({ initialDelayMs, maxDelayMs, jitterRatio })
 }
 
 /**

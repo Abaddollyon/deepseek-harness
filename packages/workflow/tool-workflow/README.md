@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-workflow` lets a model run JavaScript orchestration that delegates to many subagents and returns a final JSON value. Use it only when the user explicitly requests a workflow or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Foreground execution waits for all work; cancellation or abnormal completion returns an error rather than partial success. `run_in_background: true` returns an owned job id immediately and exposes live output. Deployments can rename the tool with `toolName` and bound returned values with `maxResultChars`.
+`dsh-tool-workflow` lets a model run JavaScript orchestration that delegates to many subagents and returns a final JSON value. Use it only when the user explicitly requests a workflow or large multi-agent orchestration; prefer plain subagent calls for one or two delegations. Foreground execution waits for all work; cancellation or abnormal completion returns an error rather than partial success. `run_in_background: true` returns an owned job id immediately and exposes live output. Deployments can rename the tool with `toolName` and cap rendered results with `maxResultChars`.
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ The `workflow` tool runs a model-authored orchestration script that fans work ou
 
 The model submits three parameters plus one flag: `meta` (required identity data: `name`, `description`, and optional `whenToUse` and `phases`), `script` (required plain JavaScript body — no `export const meta` statement; its parameter description carries the body rules and the tool description carries the hook contract), `args` (optional JSON object exposed to the script as the `args` global; wrap a bare list in a field so the wire schema stays honest), and `run_in_background` (optional; present only while `enableRunInBackground` holds).
 
-A foreground success returns the envelope `{ kind: 'foreground', runId, agentsStarted, result }`, rendered to the model as `workflow "<name>" completed (<count> agent<optional-s>).` followed by `Return value:` and the pretty-printed JSON. A workflow that cannot start — a script parse or meta validation failure — returns an error the model can correct from. Cancellation and execution failures return `Error: workflow run was cancelled` or `Error: workflow run failed: <error>`; partial output is never reported as success.
+A foreground success returns the envelope `{ kind: 'foreground', runId, agentsStarted, result }`, rendered to the model as `workflow "<name>" completed (<count> agent<optional-s>).` followed by `Return value:` and the pretty-printed JSON. A workflow that cannot start — a script parse or meta validation failure — returns an error the model can correct from. Cancelling the calling step returns the tool runtime's `AbortError` `ABORTED` result; any other cancellation and execution failures return `Error: workflow run was cancelled` (`WorkflowError` `CANCELLED`) or `Error: workflow run failed: <error>` (`WorkflowError` with the fatal code that ended the run, such as `AGENT_CAP`, or `RUN_FAILED` without one); partial output is never reported as success.
 
 ### What to expect during a run
 
@@ -46,7 +46,7 @@ While the script runs, the parent turn waits: the tool starts the run, awaits it
 | Field | Default | Meaning |
 |---|---|---|
 | `toolName` | `workflow` | The model-facing tool name to register. |
-| `maxResultChars` | `50000` | Serialized return-value ceiling; longer JSON is saved through `ctx.spillStore` and replaced by `{ truncated: true, originalChars, spillPath, preview }`, or by `{ truncated: true, originalChars, notice, preview }` when no spill backend is mounted. |
+| `maxResultChars` | `50000` | Rendered-result ceiling; longer JSON is truncated with a notice. |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; disabled calls are also rejected. |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-workflow) is the exhaustive source for every accepted field.
@@ -67,7 +67,7 @@ The consumer owns the model-facing schema, the `tool:<toolName>` system-prompt g
 
 ### Run lifecycle
 
-`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason; completion returns `{ kind, runId, agentsStarted, result }`. A value whose pretty-printed JSON exceeds `maxResultChars` is saved whole through the session-scoped `ctx.spillStore`, and `result` becomes `{ truncated: true, originalChars, spillPath, preview }`. Without a spill backend, `result` becomes `{ truncated: true, originalChars, notice, preview }`, whose `notice` states that the complete JSON was not saved. When a mounted backend fails to save, the call (or background job) fails instead of returning a fragment.
+`execute` starts the run and awaits `run.result` inside a `try/finally` that always disposes the run. `exec.signal` is bridged to `run.cancel()`, including the already-aborted-before-start case. A non-`completed` stop reason maps to an `isError` result reporting the reason, rethrowing the caller's abort reason when `exec.signal` aborted and otherwise throwing a `WorkflowError`; completion renders `{ kind, runId, agentsStarted, result }`, with the Native renderer truncating only that projection at `maxResultChars`.
 
 ### Background lifecycle
 
@@ -75,7 +75,7 @@ A background call registers the run through `jobs.start` inside the job starter,
 
 ### Durable session records
 
-For every accepted call, root or dispatched from `run_code` (`exec.parent` set), the tool projects the run into the calling Agent's Session with four log-only events: run-start after `start()` returns, member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. In PTC mode `run_code` is the model's only route to this tool, so a dispatched run records exactly like a root call. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup.
+For a root transport execution (`exec.parent` absent), the tool projects the run into the calling Agent's Session with four log-only events: run-start after `start()` returns, member starts and endings filtered by `run.id`, then run-end only after the result is available and disposal reaches quiescence. Nested transport calls execute normally but write no record. The first failed Session append disables later recording for that run with one warning, leaving either no record or a legal continuous prefix without changing the tool result or cleanup.
 
 The engine's `workflow/phase` and `workflow/log` events have no per-line durable surface from this tool: the session log deliberately records run and member lifecycle only, and the Web transcript derives from those records. A background run's lines reach a human through the job observation record instead, which is transient by design.
 
@@ -150,11 +150,11 @@ Prefix-stable while `toolName`, definition, and visibility are unchanged. Renami
 
 #### What the model sees
 
-The full model-written script, metadata, and args remain in the assistant tool call. A foreground success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; an oversized value is replaced by `{ truncated: true, originalChars, spillPath, preview }`, whose `spillPath` holds the complete JSON; without a spill backend, a `notice` that only the preview remains replaces `spillPath`. A background acceptance is exactly `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`, and the same rendered value later reaches the model through the job's completion notice and `job_output`. Failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)`. Intermediate child messages are omitted.
+The full model-written script, metadata, and args remain in the assistant tool call. A foreground success is exactly `workflow "<name>" completed (<count> agent<optional-s>).`, newline, `Return value:`, newline, and pretty-printed data-dependent JSON; a cap adds `… [truncated: <omitted> more characters]` on a new line. A background acceptance is exactly `workflow "<name>" started in the background as job <jobId>. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`, and the same rendered value later reaches the model through the job's completion notice and `job_output`. Failures after a caller abort render the abort reason; other failures are exactly `Error: workflow run was cancelled`, optionally suffixed ` (<error>)`, `Error: workflow run failed: <error-or-unknown error>`, or defensively `Error: workflow run ended abnormally (<reason>)`; a call without an owning agent becomes `Error: workflow tool requires a calling agent (exec.agent was undefined)` (`ToolContextUnavailableError`). Intermediate child messages are omitted.
 
 #### Token effect
 
-Call tokens can be large and remain until compaction. The serialized return value is capped by `maxResultChars`, and the recovery metadata adds a bounded envelope; child-model tokens are separate from the parent's retained context.
+Call tokens can be large and remain until compaction. Result rendering is capped by `maxResultChars`; child-model tokens are separate from the parent's retained context.
 
 #### KV Cache effect
 
@@ -168,9 +168,9 @@ Append-only; newly visible content follows the reusable request prefix and does 
 These limits define what the tool does not yet support. They are current constraints, not a task backlog.
 
 - **A background run reports no intermediate value to the model** — `job_output` before settlement returns status only; the return value arrives whole at completion, and cancellation still discards partial output.
-- **`args` must be an object and the result envelope may exceed the cap** — callers wrap top-level arrays and scalars in a field; `maxResultChars` caps only the serialized return value, so an oversized value's recovery metadata, including its preview, may exceed it.
+- **`args` must be an object and Native result text is bounded** — callers wrap top-level arrays and scalars in a field; the canonical workflow result stays complete, while JSON beyond `maxResultChars` is truncated in the model-facing projection rather than stored behind a retrieval handle.
 - **Workflow policy is fixed per tool registration** — provider selection, caps, and tool name are deployment config, not model-call arguments.
-- **Durable records are observational** — a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
+- **Durable records are top-level and observational** — nested PTC mode dispatches are not recorded, and a recording failure intentionally degrades to an incomplete prefix rather than changing execution.
 - **No recorded-session scenario replays a background run yet** — unit and real-engine composition suites cover the path; the snapshot tree pins only the schema and prompt text.
 
 <a id="dev-note"></a>
@@ -181,6 +181,6 @@ These limits define what the tool does not yet support. They are current constra
 
 This Dev Note is working context for maintainers: open directions that are not decided. It is explicitly non-authoritative — shipped behavior, limits, and accepted rationale live in the sections above, the package code, and the linked Agent Notes.
 
-Open directions: a recorded-session scenario for the background path.
+Open directions: storing truncated JSON behind a retrieval handle instead of clipping the projection; recording nested dispatches beyond the top level; a recorded-session scenario for the background path.
 
 </details>

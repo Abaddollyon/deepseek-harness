@@ -1,18 +1,18 @@
 // @vitest-environment jsdom
+import { contextMenuHook } from '@deepseek-ai/dsh-client-test-runtime'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useState } from 'react'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
-  WorkspaceId, WorkspaceSnapshot, WorkspaceView, WorkspaceWorld,
+  WorkspaceId, WorkspaceSnapshot, WorkspaceView,
 } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { allowAllAccess, bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
-import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session-status/client'
 import type { DirectoryFlowOwnerProps, WorkspacePickerProps } from '../src/client/contract/slots.ts'
-import { WorkspacePickFlow, WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
+import { WorkspacePicker } from '../src/client/WorkspacePicker.tsx'
 import { zh } from '../src/client/locales.ts'
 
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
@@ -89,40 +89,44 @@ function mount(
   items: readonly WorkspaceView[] = [workspace('alpha', 'Alpha')],
   createWorkspace = vi.fn(),
   occupancy = occupancySource(),
-  extra: Partial<WorkspacePickerProps> = {},
 ) {
   const onPick = vi.fn()
   const onClose = vi.fn()
-  const createLooseSession = vi.fn()
   const anchorRef = anchor()
+  document.body.append(anchorRef.current)
+  onTestFinished(() => { anchorRef.current.remove() })
   const { probe, renderSlot } = flowProbe()
-  const renderPicker = (nextItems: readonly WorkspaceView[], open = true) => (
+  let open = true
+  let currentItems = items
+  const renderPicker = () => (
     <WorkspacePicker
       open={open}
       anchorRef={anchorRef}
       useSessions={hook(sessions)}
       useSessionStatus={hook(noPendingInteraction)}
       useSessionRetainInfo={() => undefined}
-      usePanelInfo={usePanelInfo} useResource={useResource}
-      useWorkspaces={hook(workspaceState(nextItems))}
+      usePanelInfo={usePanelInfo} useContextMenu={contextMenuHook()} useResource={useResource}
+      useWorkspaces={hook(workspaceState(currentItems))}
       {...allowAllAccess}
       onPick={onPick}
       onClose={onClose}
-      createLooseSession={createLooseSession}
       createWorkspace={createWorkspace}
       useDirectoryFlow={occupancy.useDirectoryFlow}
       renderSlot={renderSlot}
       t={t}
-      {...extra}
     />
   )
-  const view = render(
-    renderPicker(items),
-  )
+  const view = render(renderPicker())
   return {
-    view, onPick, onClose, createWorkspace, createLooseSession, probe, occupancy,
-    rerenderItems: (nextItems: readonly WorkspaceView[]) => { view.rerender(renderPicker(nextItems)) },
-    rerenderOpen: (open: boolean) => { view.rerender(renderPicker(items, open)) },
+    view, onPick, onClose, createWorkspace, probe, occupancy, anchor: anchorRef.current,
+    rerenderItems: (nextItems: readonly WorkspaceView[]) => {
+      currentItems = nextItems
+      view.rerender(renderPicker())
+    },
+    setOpen: (nextOpen: boolean) => {
+      open = nextOpen
+      view.rerender(renderPicker())
+    },
   }
 }
 
@@ -131,17 +135,159 @@ function chooseAdd(): void {
 }
 
 describe('WorkspacePicker', () => {
-  it('offers a new Session without a Workspace only where the owner allows it', () => {
-    const onChooseNoWorkspace = vi.fn()
-    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), { allowNoWorkspace: true, onChooseNoWorkspace })
-    fireEvent.click(screen.getByRole('menuitem', { name: '不使用工作区' }))
-    expect(b.onClose).toHaveBeenCalled()
-    expect(onChooseNoWorkspace).toHaveBeenCalledOnce()
-    expect(b.createLooseSession).toHaveBeenCalledOnce()
+  it('shows the sole workspace without search and clears a query when the list shrinks', () => {
+    const alpha = workspace('alpha', 'Alpha')
+    const beta = workspace('beta', 'Beta')
+    const b = mount([alpha])
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(screen.getByRole('menuitem', { name: 'Alpha' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
+
+    b.rerenderItems([alpha, beta])
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Beta' } })
+    expect(screen.queryByRole('menuitem', { name: 'Alpha' })).toBeNull()
+    b.rerenderItems([alpha])
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(screen.getByRole('menuitem', { name: 'Alpha' })).toBeTruthy()
+
+    b.rerenderItems([alpha, beta])
+    expect(screen.getByRole<HTMLInputElement>('searchbox').value).toBe('')
+    expect(screen.getByRole('menuitem', { name: 'Beta' })).toBeTruthy()
+  })
+
+  it('leaves search unfocused on touch and focuses it on mouse and keyboard reopen', () => {
+    const choices = [workspace('alpha', 'Alpha'), workspace('beta', 'Beta')]
+    const b = mount(choices)
+    b.setOpen(false)
+    const getSearch = () => screen.getByRole('searchbox', { name: '搜索工作区' })
+
+    fireEvent.pointerDown(b.anchor, { pointerType: 'touch' })
+    b.setOpen(true)
+    expect(document.activeElement).not.toBe(getSearch())
+    b.setOpen(false)
+
+    fireEvent.pointerDown(b.anchor, { pointerType: 'mouse' })
+    b.setOpen(true)
+    expect(document.activeElement).toBe(getSearch())
+    b.setOpen(false)
+
+    fireEvent.pointerDown(b.anchor, { pointerType: 'touch' })
+    fireEvent.keyDown(b.anchor, { key: 'Enter' })
+    b.setOpen(true)
+    expect(document.activeElement).toBe(getSearch())
+  })
+
+  it('filters the full list by displayed title and keeps matching workspaces in order', () => {
+    const b = mount([
+      workspace('late', 'Later Release'),
+      ...Array.from({ length: 5 }, (_, index) => workspace(`workspace-${index}`, `Other ${index}`)),
+      workspace('early', 'Earlier release'),
+      workspace('default-workspace'),
+    ])
+    const search = screen.getByRole('searchbox', { name: '搜索工作区' })
+    expect(document.activeElement).toBe(search)
+    fireEvent.change(search, { target: { value: '  rElEaSe  ' } })
+    expect(screen.getAllByRole('menuitem', { name: /release/i }).map(entry => entry.textContent))
+      .toEqual(['Later Release', 'Earlier release'])
+    expect(screen.queryByRole('menuitem', { name: 'Other 0' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
+
+    fireEvent.change(search, { target: { value: '默认' } })
+    expect(screen.getByRole('menuitem', { name: '默认工作区' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: 'Later Release' })).toBeNull()
+    fireEvent.change(search, { target: { value: '  ' } })
+    expect(screen.getByRole('menuitem', { name: 'Other 0' })).toBeTruthy()
+    fireEvent.change(search, { target: { value: 'release' } })
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Later Release' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Earlier release' }))
+    expect(b.onPick).toHaveBeenCalledWith(wid('early'))
+  })
+
+  it('keeps the search and Add workspace available on a miss and clears the query on reopen', () => {
+    const choices = [workspace('alpha', 'Alpha'), workspace('beta', 'Beta')]
+    const b = mount(choices)
+    const search = screen.getByRole<HTMLInputElement>('searchbox', { name: '搜索工作区' })
+    fireEvent.change(search, { target: { value: 'missing' } })
+    expect(screen.getByRole('status').textContent).toBe('未找到匹配的工作区')
+    expect(screen.queryByRole('menuitem', { name: 'Alpha' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    fireEvent.keyDown(search, { key: 'Escape', isComposing: true })
+    expect(b.onClose).not.toHaveBeenCalled()
+    expect(fireEvent.keyDown(search, { key: 'Enter' })).toBe(false)
     expect(b.onPick).not.toHaveBeenCalled()
-    cleanup()
-    mount([workspace('alpha', 'Alpha')])
-    expect(screen.queryByRole('menuitem', { name: '不使用工作区' })).toBeNull()
+    expect(screen.queryByTestId('directory-flow')).toBeNull()
+    expect(fireEvent.keyDown(search, { key: 'Tab' })).toBe(false)
+    const add = screen.getByRole('menuitem', { name: '添加工作区…' })
+    expect(document.activeElement).toBe(add)
+    fireEvent.keyDown(add, { key: 'Escape' })
+    expect(b.onClose).toHaveBeenCalledOnce()
+    expect(document.activeElement).toBe(b.anchor)
+    b.setOpen(false)
+    b.setOpen(true)
+
+    expect(screen.getByRole<HTMLInputElement>('searchbox', { name: '搜索工作区' }).value).toBe('')
+    expect(screen.getByRole('menuitem', { name: 'Alpha' })).toBeTruthy()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('shows the no-match status when the directory flow is unavailable', () => {
+    mount([workspace('alpha', 'Alpha'), workspace('beta', 'Beta')], vi.fn(), occupancySource(false))
+    const search = screen.getByRole('searchbox', { name: '搜索工作区' })
+    fireEvent.change(search, { target: { value: 'missing' } })
+    expect(screen.getByRole('status').textContent).toBe('未找到匹配的工作区')
+    expect(screen.queryByRole('menuitem')).toBeNull()
+    expect(fireEvent.keyDown(search, { key: 'Tab' })).toBe(false)
+    expect(document.activeElement).toBe(search)
+    fireEvent.change(search, { target: { value: '' } })
+    expect(screen.getByRole('menuitem', { name: 'Alpha' })).toBeTruthy()
+  })
+
+  it('ranks name prefixes, substrings and fuzzy hits ahead of path matches', () => {
+    const b = mount([
+      { ...workspace('path', 'Archive'), path: '/projects/dsh/Archive' },
+      workspace('fuzzy', 'deepseek-harness'),
+      workspace('substring', 'Team DSH'),
+      workspace('prefix', 'DSH release'),
+    ])
+    const search = screen.getByRole('searchbox', { name: '搜索工作区' })
+    expect(screen.queryByRole('button', { name: '清除搜索' })).toBeNull()
+    fireEvent.change(search, { target: { value: 'ＤＳＨ' } })
+    expect(screen.getAllByRole('menuitem').map(entry => entry.textContent))
+      .toEqual(['DSH release', 'Team DSH', 'deepseek-harness', 'Archive', '添加工作区…'])
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(b.onPick).toHaveBeenCalledWith(wid('prefix'))
+  })
+
+  it('matches every query term across names and paths while ignoring accents', () => {
+    const b = mount([
+      { ...workspace('first', 'Café'), path: '/projects/first/Café' },
+      { ...workspace('second', 'Café'), path: '/checkouts/second/Café' },
+    ])
+    const search = screen.getByRole('searchbox', { name: '搜索工作区' })
+    fireEvent.change(search, { target: { value: 'Cafe /checkouts/' } })
+    expect(screen.getAllByRole('menuitem').map(entry => entry.textContent))
+      .toEqual(['Café second/Café', '添加工作区…'])
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(b.onPick).toHaveBeenCalledWith(wid('second'))
+  })
+
+  it('filters same-title workspaces by a visible suffix or an undisplayed parent path', () => {
+    const b = mount([
+      { ...workspace('alpha', 'Shared'), path: '/projects/first/Shared' },
+      { ...workspace('beta', 'Shared'), path: '/checkouts/second/Shared' },
+    ])
+    const search = screen.getByRole('searchbox', { name: '搜索工作区' })
+    fireEvent.change(search, { target: { value: '  SECOND/SH  ' } })
+    expect(screen.getAllByRole('menuitem').map(entry => entry.textContent))
+      .toEqual(['Shared second/Shared', '添加工作区…'])
+
+    fireEvent.change(search, { target: { value: '/checkouts/' } })
+    expect(screen.getAllByRole('menuitem').map(entry => entry.textContent))
+      .toEqual(['Shared second/Shared', '添加工作区…'])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Shared second/Shared' }))
+    expect(b.onPick).toHaveBeenCalledWith(wid('beta'))
   })
 
   it('labels same-title Workspaces with distinguishing path suffixes and forwards the selected id', () => {
@@ -172,76 +318,6 @@ describe('WorkspacePicker', () => {
     await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
     // Successful adoption withdraws the flow request.
     expect(screen.queryByTestId('directory-flow')).toBeNull()
-  })
-
-  it('adds a Workspace on another execution host from a typed path', async () => {
-    const created = { ...workspace('remote'), path: '/srv/app', agentPreset: 'host-x' }
-    const createWorkspace = vi.fn(async () => created)
-    const listWorlds = vi.fn(async () => [{ agentPreset: 'host-x', name: 'x (SSH)' }])
-    const b = mount([workspace('alpha', 'Alpha')], createWorkspace, occupancySource(), { listWorlds })
-    fireEvent.click(await screen.findByRole('menuitem', { name: '在 x (SSH) 上添加工作区…' }))
-    fireEvent.change(screen.getByRole('textbox', { name: '主机上的文件夹路径' }), { target: { value: ' /srv/app ' } })
-    fireEvent.click(screen.getByRole('button', { name: '添加' }))
-    expect(createWorkspace).toHaveBeenCalledWith({ path: '/srv/app', agentPreset: 'host-x', host: 'x (SSH)' })
-    await waitFor(() => { expect(b.onPick).toHaveBeenCalledWith(created.workspaceId) })
-  })
-
-  it('offers a host added since the add-only menu last opened instead of raising the flow from the old list', async () => {
-    let worlds: readonly WorkspaceWorld[] = []
-    const listWorlds = vi.fn(async () => worlds)
-    const onClose = vi.fn()
-    const anchorRef = anchor()
-    const occupancy = occupancySource()
-    const probe: { flow?: DirectoryFlowOwnerProps } = {}
-    const owner: { setOpen?: (open: boolean) => void } = {}
-    // The sidebar owner: its add-only menu closes when the flow takes over.
-    function SidebarAdd() {
-      const [open, setOpen] = useState(true)
-      owner.setOpen = setOpen
-      return (
-        <WorkspacePickFlow
-          t={t} open={open} anchorRef={anchorRef} useWorkspaces={hook(workspaceState([]))}
-          createWorkspace={vi.fn()} listWorlds={listWorlds} useDirectoryFlow={occupancy.useDirectoryFlow}
-          renderDirectoryFlow={(flow) => {
-            probe.flow = flow
-            return flow.open ? <div data-testid="directory-flow" /> : null
-          }}
-          onPick={vi.fn()} onClose={() => { onClose(); setOpen(false) }} addOnly
-        />
-      )
-    }
-    render(<SidebarAdd />)
-    // No other host yet: adding is the only entry, so the opening raises the directory flow.
-    await waitFor(() => { expect(screen.getByTestId('directory-flow')).toBeTruthy() })
-    act(() => { probe.flow!.onCancel() })
-    // A host is provisioned while the menu is closed; the next opening reads it before deciding.
-    worlds = [{ agentPreset: 'host-sigil', name: 'sigil (SSH)' }]
-    onClose.mockClear()
-    act(() => { owner.setOpen!(true) })
-    expect(await screen.findByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeTruthy()
-    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
-    expect(screen.queryByTestId('directory-flow')).toBeNull()
-    expect(onClose).not.toHaveBeenCalled()
-    expect(listWorlds).toHaveBeenCalledTimes(2)
-  })
-
-  it('does not offer a host from an earlier opening before the fresh host list arrives', async () => {
-    const reads: PromiseWithResolvers<readonly WorkspaceWorld[]>[] = []
-    const listWorlds = vi.fn(() => {
-      const read = Promise.withResolvers<readonly WorkspaceWorld[]>()
-      reads.push(read)
-      return read.promise
-    })
-    const b = mount([workspace('alpha', 'Alpha')], vi.fn(), occupancySource(), { listWorlds })
-    await act(async () => { reads[0]!.resolve([{ agentPreset: 'host-sigil', name: 'sigil (SSH)' }]) })
-    expect(screen.getByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeTruthy()
-    b.rerenderOpen(false)
-    b.rerenderOpen(true)
-    // The host was removed meanwhile: until the new read lands, only the Host directory entry is offered.
-    expect(screen.queryByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeNull()
-    await act(async () => { reads[1]!.resolve([]) })
-    expect(screen.queryByRole('menuitem', { name: '在 sigil (SSH) 上添加工作区…' })).toBeNull()
-    expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
   })
 
   it('raises the flow straight from the anchor gesture when adding is the only entry', () => {
@@ -320,9 +396,9 @@ describe('WorkspacePicker', () => {
         open useSessions={hook(sessions)} useWorkspaces={hook(workspaceState([workspace('alpha', 'Alpha')]))}
         useSessionStatus={hook(noPendingInteraction)}
         useSessionRetainInfo={() => undefined}
-        usePanelInfo={usePanelInfo} useResource={useResource}
+        usePanelInfo={usePanelInfo} useContextMenu={contextMenuHook()} useResource={useResource}
         {...allowAllAccess}
-        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )
@@ -339,9 +415,9 @@ describe('WorkspacePicker', () => {
         open anchorRef={anchor()} useSessions={hook(sessions)} useWorkspaces={hook(state)}
         useSessionStatus={hook(noPendingInteraction)}
         useSessionRetainInfo={() => undefined}
-        usePanelInfo={usePanelInfo} useResource={useResource}
+        usePanelInfo={usePanelInfo} useContextMenu={contextMenuHook()} useResource={useResource}
         {...allowAllAccess}
-        onPick={vi.fn()} onClose={vi.fn()} createLooseSession={vi.fn()} createWorkspace={vi.fn()}
+        onPick={vi.fn()} onClose={vi.fn()} createWorkspace={vi.fn()}
         useDirectoryFlow={occupancySource().useDirectoryFlow} renderSlot={renderSlot} t={t}
       />,
     )
@@ -349,6 +425,7 @@ describe('WorkspacePicker', () => {
     // would pre-empt the workspaces about to arrive.
     expect(screen.getByRole('status').textContent).toBe('正在加载工作区…')
     expect(screen.queryByTestId('directory-flow')).toBeNull()
+    expect(screen.queryByRole('searchbox')).toBeNull()
     expect(screen.getByRole('menuitem', { name: '添加工作区…' })).toBeTruthy()
   })
 

@@ -1,14 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage, type ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
-import { mapStopReason, mapUsage, parseRetryAfterMs, toStreamChunks } from '../src/stream.ts'
+import { mapStopReason, mapUsage, toStreamChunks } from '../src/stream.ts'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
   return {
@@ -47,7 +48,7 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
 
 function requestVersion(ref: ImageAttachmentRef): RequestImageAttachment {
   return {
-    variantId: ImageVariantId(`sha256:${'e'.repeat(64)}`),
+    variantId: brandString<ImageVariantId>(`sha256:${'e'.repeat(64)}`),
     attachment: ref,
     data: Uint8Array.of(1, 2, 3),
     mediaType: ref.mediaType,
@@ -87,7 +88,7 @@ describe('toPiContext', () => {
     expect(context).toEqual({
       systemPrompt: 'be helpful',
       tools: [{ name: 'f', description: 'F', parameters: { type: 'object', properties: {} } }],
-      messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }],
     })
   })
 
@@ -98,7 +99,7 @@ describe('toPiContext', () => {
 
   it('resolves durable image references into native pi-ai image content', async () => {
     const attachment = {
-      attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+      attachmentId: brandString<AttachmentId>(`sha256:${'a'.repeat(64)}`),
       mediaType: 'image/png' as const,
       bytes: 3,
       width: 1,
@@ -118,7 +119,7 @@ describe('toPiContext', () => {
 
     expect(readImageRequest).toHaveBeenCalledWith(
       attachment,
-      { width: 1, height: 1, maxBytes: 1024 * 1024 },
+      { width: 1, height: 1, maxImageBytes: 1024 * 1024, imageTargetBytes: 1024 * 1024 },
       undefined,
     )
     expect(context.messages[0]).toEqual({
@@ -134,7 +135,7 @@ describe('toPiContext', () => {
 
   it('converts a tool message with text and images on the image path', async () => {
     const attachment = {
-      attachmentId: AttachmentId(`sha256:${'c'.repeat(64)}`),
+      attachmentId: brandString<AttachmentId>(`sha256:${'c'.repeat(64)}`),
       mediaType: 'image/png' as const,
       bytes: 3,
       width: 1,
@@ -147,7 +148,7 @@ describe('toPiContext', () => {
       provider: 'openai',
       model: 'gpt-4.1',
       messages: [createToolResultMessage({
-        callId: ToolCallId('outer'),
+        callId: brandString<ToolCallId>('outer'),
         content: [
           { type: 'text', text: 'before' },
           { type: 'text', text: 'middle' },
@@ -181,7 +182,7 @@ describe('toPiContext', () => {
         content: [{
           type: 'image',
           attachment: {
-            attachmentId: AttachmentId(`sha256:${'b'.repeat(64)}`),
+            attachmentId: brandString<AttachmentId>(`sha256:${'b'.repeat(64)}`),
             mediaType: 'image/png', bytes: 1, width: 1, height: 1,
           },
         }],
@@ -199,7 +200,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'hmm' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: { kind: 'model', provider: 'deepseek', model: 'm' },
       })],
@@ -250,7 +251,7 @@ describe('toPiContext', () => {
       model: 'm',
       messages: [createMessage({
         role: 'assistant',
-        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{broken' }],
+        content: [{ type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'f', arguments: '{broken' }],
         source: { kind: 'model', provider: 'deepseek', model: 'm' },
       })],
     })
@@ -264,7 +265,7 @@ describe('toPiContext', () => {
       model: 'm',
       messages: [createMessage({
         role: 'assistant',
-        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '[1,2]' }],
+        content: [{ type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'f', arguments: '[1,2]' }],
         source: { kind: 'model', provider: 'deepseek', model: 'm' },
       })],
     })
@@ -278,11 +279,11 @@ describe('toPiContext', () => {
       messages: [
         createMessage({
           role: 'assistant',
-          content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'get_weather', arguments: '{}' }],
+          content: [{ type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'get_weather', arguments: '{}' }],
           source: { kind: 'model', provider: 'deepseek', model: 'm' },
         }),
         createToolResultMessage({
-          callId: ToolCallId('c1'),
+          callId: brandString<ToolCallId>('c1'),
           content: [
             { type: 'text', text: 'Sunny' },
             { type: 'text', text: '!' },
@@ -296,7 +297,7 @@ describe('toPiContext', () => {
       role: 'toolResult',
       toolCallId: 'c1',
       toolName: 'get_weather',
-      content: [{ type: 'text', text: 'Sunny!' }],
+      content: [{ type: 'text', text: 'Sunny' }, { type: 'text', text: '!' }],
       isError: false,
       timestamp: 0,
     })
@@ -306,7 +307,7 @@ describe('toPiContext', () => {
     const context = toPiContext({
       provider: 'deepseek',
       model: 'm',
-      messages: [createToolResultMessage({ callId: ToolCallId('zz'), content: [], isError: true })],
+      messages: [createToolResultMessage({ callId: brandString<ToolCallId>('zz'), content: [], isError: true })],
     })
     expect(context.messages[0]).toMatchObject({
       role: 'toolResult',
@@ -330,7 +331,7 @@ describe('toPiContext', () => {
           source: { kind: 'model', provider: 'deepseek', model: 'm' },
         }),
         createToolResultMessage({
-          callId: ToolCallId('c1'),
+          callId: brandString<ToolCallId>('c1'),
           content: [{ type: 'text', text: 'ok' }],
           isError: false,
         }),
@@ -378,7 +379,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'private reasoning' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: {
           kind: 'model',
@@ -485,7 +486,7 @@ describe('toPiContext', () => {
         content: [
           { type: 'reasoning', text: 'private reasoning' },
           { type: 'text', text: 'calling' },
-          { type: 'tool-call', id: ToolCallId('c1'), name: 'f', arguments: '{"a":1}' },
+          { type: 'tool-call', id: brandString<ToolCallId>('c1'), name: 'f', arguments: '{"a":1}' },
         ],
         source: {
           kind: 'model',
@@ -670,6 +671,7 @@ describe('toPiContext', () => {
     ['non-string response id', { ...validReplay, response: { ...validResponse, responseId: 1 } }, 'responseId must be a string'],
     ['non-string provider thinking level', { ...validReplay, response: { ...validResponse, providerThinkingLevel: 1 } }, 'providerThinkingLevel must be a string'],
     ['null provider thinking level', { ...validReplay, response: { ...validResponse, providerThinkingLevel: null } }, 'providerThinkingLevel must be a string'],
+    ['non-string prefix digest', { ...validReplay, response: { ...validResponse, prefixDigest: 1 } }, 'prefixDigest must be a string'],
     ['missing blocks', { response: validResponse }, 'blocks must be an array'],
     ['non-array blocks', { ...validReplay, blocks: 'text' }, 'blocks must be an array'],
     ['number block', { ...validReplay, blocks: [1] }, 'block 0 must be an object'],
@@ -939,6 +941,19 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it.each([
+    // The gateway body as the Anthropic SDK renders it: the gateway's own 500 leads.
+    ['a gateway 500 relaying an upstream 401', '500 {"error":{"origin":"upstream","message":"upstream returned an error response: User not found.","type":"upstream_error","code":"upstream_response_error","upstream":{"provider":"custom","status":401,"body":{"error":{"type":"<nil>","message":"User not found."},"type":"error"}}}}', 'SERVER'],
+    ['a 502 quoting a non-retryable 400', '502 {"error":{"message":"upstream status 400"}}', 'SERVER'],
+    ['a 400 quoting a retryable 429', '400 {"error":{"message":"upstream returned 429 Too Many Requests"}}', 'INVALID_REQUEST'],
+    ['a 404 quoting a 403', '404 {"error":{"message":"upstream status 403"}}', 'PI_AI_ERROR'],
+    ['a leading 401', '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}', 'AUTH'],
+    ['a leading 429', '429 Too Many Requests: slow down', 'RATE_LIMIT'],
+  ] as const)('classifies %s by its leading response status', (_label, errorMessage, code) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { message: errorMessage, code } })
+  })
+
+  it.each([
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',
@@ -954,93 +969,6 @@ describe('mapStopReason / mapUsage', () => {
   ])('maps pi-ai transport wording %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
-  })
-
-  it.each([
-    // Status-less overloads: codex-lb failed response, Anthropic SSE error, OpenAI sentence.
-    ['server_is_overloaded: Our servers are currently overloaded. Please try again later.', 'SERVER'],
-    ['{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', 'SERVER'],
-    ['The server is overloaded. Please try again later.', 'SERVER'],
-    // codex-lb upstream WebSocket truncations and rejected continuation anchors.
-    ['stream_incomplete: Upstream websocket closed before response.completed', 'TRANSPORT'],
-    ['stream_incomplete: Upstream websocket closed without a complete handshake', 'TRANSPORT'],
-    ['stream_incomplete: Codex upstream websocket receive failed via proxy endpoint ep_1: OSError', 'TRANSPORT'],
-    ['stream_incomplete: The previous response anchor was rejected upstream; retry the request.', 'TRANSPORT'],
-    ['openai-codex API error (404): {"message":"Upstream websocket closed before response.completed","type":"server_error","code":"bridge_previous_response_not_found"}', 'TRANSPORT'],
-    // HTTP/2 stream resets.
-    ['stream error: stream ID 1; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
-    ['Stream closed with error code NGHTTP2_REFUSED_STREAM', 'TRANSPORT'],
-    ['HTTP/2 stream 0 was reset with RST_STREAM', 'TRANSPORT'],
-    // A stream id that reads like an HTTP status stays a reset.
-    ['stream error: stream ID 401; INTERNAL_ERROR; received from peer', 'TRANSPORT'],
-    ['HTTP/2 stream 429 was reset with RST_STREAM', 'TRANSPORT'],
-    // Look-alikes stay unclassified, and an HTTP status keeps precedence.
-    ['Tool schema has overloaded signatures', 'PI_AI_ERROR'],
-    ['not_overloaded_error', 'PI_AI_ERROR'],
-    ['stream_incomplete: Websocket scope cancelled before response.completed', 'PI_AI_ERROR'],
-    ['bridge_previous_response_not_found: The previous response referenced by this request no longer exists upstream', 'PI_AI_ERROR'],
-    ['stream error: stream ID 1; INTERNAL_ERROR', 'PI_AI_ERROR'],
-    ['certificate received from peer failed validation', 'PI_AI_ERROR'],
-    ['HTTP 401: Our servers are currently overloaded.', 'AUTH'],
-  ] as const)('classifies %j as %s', (errorMessage, code) => {
-    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
-      .toMatchObject({ kind: 'error', failure: { code } })
-  })
-
-  it('adds a failed response status and Retry-After, letting the status classify unrecognized text', () => {
-    const reworded = assistant({ stopReason: 'error', errorMessage: 'admission full' })
-    expect(mapStopReason(reworded, undefined, { status: 429, retryAfterMs: 5_000 })).toEqual({
-      kind: 'error',
-      failure: { message: 'admission full', code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 5_000 },
-    })
-    expect(mapStopReason(reworded, undefined, { status: 503 }))
-      .toEqual({ kind: 'error', failure: { message: 'admission full', code: 'SERVER', status: 503 } })
-    expect(mapStopReason(reworded, undefined, { status: 408 })).toMatchObject({ failure: { code: 'TIMEOUT', status: 408 } })
-    expect(mapStopReason(reworded, undefined, { status: 404 })).toMatchObject({ failure: { code: 'PI_AI_ERROR', status: 404 } })
-    // Recognized text keeps its code; a successful response belongs to a later stream failure.
-    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' }), undefined, { status: 429, retryAfterMs: 1 }))
-      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 1 } })
-    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'terminated' }), undefined, { status: 200, retryAfterMs: 1 }))
-      .toEqual({ kind: 'error', failure: { message: 'terminated', code: 'TRANSPORT' } })
-  })
-
-  it('fails pi-ai\'s Codex usage-limit sentence as QUOTA whatever the status, with its stated reset', () => {
-    const exhausted = (errorMessage: string) => assistant({ stopReason: 'error', errorMessage })
-    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit.'), undefined, { status: 429 }))
-      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit.', code: 'QUOTA', status: 429 } })
-    // The stated minutes cannot read as an authentication status.
-    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.')))
-      .toEqual({
-        kind: 'error',
-        failure: { message: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~401 min.', code: 'QUOTA', providerRetryAfterMs: 401 * 60_000 },
-      })
-    // A response header's exact delay wins over the rounded sentence.
-    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~5 min.'), undefined, { status: 429, retryAfterMs: 90_000 }))
-      .toMatchObject({ failure: { code: 'QUOTA', status: 429, providerRetryAfterMs: 90_000 } })
-    expect(mapStopReason(exhausted('You have hit your ChatGPT usage limit. Try again in ~0 min.'), undefined, { status: 429 }))
-      .toEqual({ kind: 'error', failure: { message: 'You have hit your ChatGPT usage limit. Try again in ~0 min.', code: 'QUOTA', status: 429 } })
-    // A reset sentence without the usage-limit sentence is no delay.
-    expect(mapStopReason(exhausted('server busy. Try again in ~5 min.'))).toEqual({
-      kind: 'error',
-      failure: { message: 'server busy. Try again in ~5 min.', code: 'PI_AI_ERROR' },
-    })
-  })
-
-  it.each([
-    ['delta-seconds', { 'retry-after': '3' }, 3_000],
-    ['fractional seconds', { 'retry-after': ' 1.5 ' }, 1_500],
-    ['an HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:05 GMT' }, 5_000],
-    ['milliseconds over seconds', { 'retry-after-ms': '250', 'retry-after': '9' }, 250],
-    ['seconds after malformed milliseconds', { 'retry-after-ms': 'soon', 'retry-after': '2' }, 2_000],
-    ['seconds after zero milliseconds', { 'retry-after-ms': '0', 'retry-after': '2' }, 2_000],
-    ['seconds after empty milliseconds', { 'retry-after-ms': '', 'retry-after': '2' }, 2_000],
-    ['nothing for a past HTTP-date', { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' }, undefined],
-    ['nothing for zero seconds', { 'retry-after': '0' }, undefined],
-    ['nothing for malformed text', { 'retry-after': 'later' }, undefined],
-    ['nothing for an empty header', { 'retry-after': ' ' }, undefined],
-    ['nothing without either header', {}, undefined],
-  ] as const)('parses %s from Retry-After headers', (_label, headers, expected) => {
-    expect(parseRetryAfterMs(new Headers(headers), Date.parse('Wed, 21 Oct 2026 07:28:00 GMT'))).toBe(expected)
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {
@@ -1062,21 +990,16 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(silent, 100)).toEqual({
       kind: 'error',
       failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
-          + ' (input 101, cache-read 0)',
+        message: 'pi-ai detected context overflow for model "deepseek-v4-flash"',
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
 
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
-    expect(mapStopReason(truncated, 100)).toEqual({
+    expect(mapStopReason(truncated, 100)).toMatchObject({
       kind: 'error',
-      failure: {
-        message: 'pi-ai detected context overflow for model "deepseek-v4-flash" at resolved context window 100 tokens'
-          + ' (input 80, cache-read 19)',
-        code: CONTEXT_WINDOW_EXCEEDED_CODE,
-      },
+      failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE },
     })
   })
 
@@ -1089,13 +1012,6 @@ describe('mapStopReason / mapUsage', () => {
       cacheWriteTokens: 2,
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
-  })
-
-  it('maps the provider-reported reasoning split without adding it to output', () => {
-    expect(mapUsage({ ...usage(10, 12), reasoning: 7 }))
-      .toEqual({ inputTokens: 10, outputTokens: 12, totalTokens: 22, reasoningTokens: 7 })
-    expect(mapUsage({ ...usage(10, 5), reasoning: 0 }))
-      .toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15, reasoningTokens: 0 })
   })
 })
 

@@ -1,10 +1,11 @@
 /**
- * The row an agent preset carries to pick its tool presentation and defer
- * policy. What it owes its caller: the choice reaches THIS agent and no other,
- * it unwinds with the agent, and PTC selection waits for a runtime before
- * replacing the inherited executor.
+ * The row an agent preset carries to pick its tool presentation. What it owes
+ * its caller: the choice reaches THIS agent and no other, it unwinds with the
+ * agent, and PTC selection waits for a runtime before replacing the
+ * inherited executor.
  */
 
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -14,29 +15,36 @@ import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunRequest, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import ToolRuntime, { RUN_CODE_NAME, defineTool } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { apply, Config, inject, name } from '@deepseek-ai/dsh-agent-tool-presentation'
+import { brandString } from '@deepseek-ai/dsh-brand'
 
 /** A runtime that never runs anything: presentation never dispatches. */
 class StubRuntime extends PtcRuntime {
   resolve(request: import('@deepseek-ai/dsh-ptc-runtime').PtcRunRequest): import('@deepseek-ai/dsh-ptc-runtime').PtcRunSpec { return { ...request, cwd: request.cwd ?? process.cwd(), timeoutMs: request.timeoutMs ?? 120_000 } }
 
-  readonly language = 'typescript'
+  readonly language: string
+
+  constructor(ctx: Context, config: { language?: string } = {}) {
+    super(ctx)
+    this.language = config.language ?? 'typescript'
+  }
   readonly isolation = 'stub'
 
   run(_request: PtcRunRequest): Promise<PtcRunResult> {
-    return Promise.resolve({ logs: [] })
+    return Promise.resolve({ output: [] })
   }
 }
 
 /** A host plane with one tool, optionally carrying a PTC runtime. */
-async function host(options: { runtime?: boolean } = {}) {
+async function host(options: { runtime?: boolean; language?: string } = {}) {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(NativeToolExecutor)
-  if (options.runtime !== false) await ctx.plugin(StubRuntime)
+  if (options.runtime !== false) await ctx.plugin(StubRuntime, options.language === undefined ? {} : { language: options.language })
   ctx.tools.register(defineTool({
     name: 'echo',
     description: 'Echo tool.',
@@ -48,8 +56,9 @@ async function host(options: { runtime?: boolean } = {}) {
 }
 
 /** Mount the row under one agent's scope, as a preset subtree does. */
+// oxlint-disable-next-line typescript/no-deprecated -- Exercise the supported compatibility plugin configuration.
 async function mount(ctx: Context, config: Config, id = 'agent') {
-  const agent = { id: SessionId(id) } as Agent
+  const agent = { id: brandString<SessionId>(id) } as Agent
   let inner!: Context
   const fiber = ctx.plugin(Object.assign((host: Context) => {
     inner = createScope(host, agent).ctx
@@ -62,6 +71,7 @@ async function mount(ctx: Context, config: Config, id = 'agent') {
 
 describe('the tool-presentation row', () => {
   it('rejects an unsupported presentation mode in configuration', () => {
+    // oxlint-disable-next-line typescript/no-deprecated -- The compatibility schema must reject unsupported modes.
     expect(() => Config({ mode: 'both' } as never)).toThrow()
   })
 
@@ -113,40 +123,19 @@ describe('the tool-presentation row', () => {
     expect(assembly.tools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
   })
 
-  it('keeps an omitted defer policy absent so the deployment default applies', () => {
-    expect(Config({ mode: 'ptc' })).toEqual({ mode: 'ptc' })
-    expect(Config({ defer: { include: ['echo'] } })).toEqual({ defer: { include: ['echo'], exclude: [] } })
+  it.each([false, true])('rejects an unsupported runtime without inheriting native execution (delayed: %s)', async (delayed) => {
+    const ctx = await host({ runtime: !delayed, language: 'python' })
+    const { agent } = await mount(ctx, { mode: 'ptc' })
+    if (delayed) await ctx.plugin(StubRuntime, { language: 'python' })
+    await expect(ctx.systemPrompt.assemble({ scope: agent })).rejects.toThrow(expect.objectContaining({
+      name: 'ToolContextUnavailableError', code: 'TOOL_CONTEXT_UNAVAILABLE',
+    }))
   })
 
-  it('requires a mode or a defer policy', () => {
-    // A row with neither would be composed for nothing: a preset without this
-    // row already gets the deployment default.
-    expect(() => { apply(new Context(), {}) }).toThrow(/set `mode`, `defer`, or both/)
-  })
-
-  it('lists its own agent\'s matching tools by name only and leaves the rest declared', async () => {
-    const ctx = await host()
-    const deferring = await mount(ctx, { mode: 'ptc', defer: { include: ['ec*'] } }, 'deferring')
-    const plain = await mount(ctx, { mode: 'ptc' }, 'plain')
-
-    const deferringSdk = (await ctx.systemPrompt.assemble({ scope: deferring.agent }))
-      .sections.find(section => section.name === 'tools:sdk')?.text
-    const plainSdk = (await ctx.systemPrompt.assemble({ scope: plain.agent }))
-      .sections.find(section => section.name === 'tools:sdk')?.text
-
-    expect(deferringSdk).not.toContain('  echo: {')
-    expect(deferringSdk).toContain('- `echo` — Echo tool.')
-    expect(deferringSdk).toContain('  tool_search: {')
-    expect(plainSdk).toContain('  echo: {')
-    expect(plainSdk).not.toContain('tool_search')
-  })
-
-  it('defers without changing the presentation', async () => {
-    const ctx = await host()
-    const { agent } = await mount(ctx, { defer: { include: ['echo'] } })
-
-    const assembly = await ctx.systemPrompt.assemble({ scope: agent })
-
-    expect(assembly.tools.map(tool => tool.name)).toEqual(['tool_search'])
+  it('requires a mode rather than defaulting one', () => {
+    // An omitted value would mean the row was composed for nothing: a preset
+    // without this row already gets the deployment default.
+    // oxlint-disable-next-line typescript/no-deprecated -- The compatibility schema still requires an explicit mode.
+    expect(() => Config({} as never)).toThrow()
   })
 })

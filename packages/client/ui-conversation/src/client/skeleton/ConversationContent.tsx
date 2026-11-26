@@ -21,9 +21,9 @@ function NoConversationWidthControls() {
  */
 export function ConversationContent(props: ConversationContentProps) {
   const {
-    sessionId, phase, hero, landing, useSession, useSessions, useSessionStatus,
+    sessionId, phase, hero, useSession, useSessions, useSessionStatus,
     useWorkspaces, useInput, useComposerBlock, renderSlot, renderSlotChain,
-    selectWorkspace, t, useFactorySlot,
+    moveDraft, t, useFactorySlot,
   } = props
   const session = useSession(snapshot => snapshot)
   const Views = useFactorySlot('views', ConversationSessionView)
@@ -46,24 +46,37 @@ export function ConversationContent(props: ConversationContentProps) {
   // scroll body: the seat's height as --dsh-composer-height, so controls clear
   // the composer as it grows, and the scrollport's own height as
   // --dsh-conversation-viewport-height, so a control can sit in the band the
-  // seat leaves visible. Callback ref, not an effect; stable identity prevents
-  // observer churn while the first blank session fills the resident body
-  // outlet.
+  // seat leaves visible. The scrollport's width goes on the body as
+  // --dsh-conversation-viewport-width, where the end reserve's lengths derive
+  // from it for the scrollport and the width handles alike; the width counts
+  // the scrollport's padding, so the inset it sizes does not change it.
+  // Callback ref, not an effect; stable identity prevents observer churn
+  // while the first blank session fills the resident body outlet.
   const seatObserver = useRef<ResizeObserver | null>(null)
   const seatResizeRef = useCallback((seat: HTMLDivElement | null): void => {
     seatObserver.current?.disconnect()
     seatObserver.current = null
     const scroller = seat?.parentElement ?? null
     if (seat === null || scroller === null) return
+    const content = scroller.closest<HTMLElement>('[data-conversation-content]')
+    /* v8 ignore next -- the scroll body renders only inside the Conversation body. */
+    if (content === null) return
+    let width: number | undefined
     seatObserver.current = new ResizeObserver(() => {
       scroller.style.setProperty('--dsh-composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty(
         '--dsh-conversation-viewport-height',
         `${scroller.clientHeight}px`,
       )
+      // The body is an ancestor of the whole transcript: write its property only when the width changes,
+      // not on every report of the composer's height.
+      if (scroller.clientWidth === width) return
+      width = scroller.clientWidth
+      content.style.setProperty('--dsh-conversation-viewport-width', `${width}px`)
     })
     seatObserver.current.observe(seat)
-    seatObserver.current.observe(scroller)
+    // The scrollport's border box: its end inset changes only the content box, and no published length depends on that.
+    seatObserver.current.observe(scroller, { box: 'border-box' })
   }, [])
 
   const sessionWorkspace = sessionId === undefined
@@ -119,18 +132,13 @@ export function ConversationContent(props: ConversationContentProps) {
       {renderSlot('conversation.hero.workspace', {
         open: pickerOpen,
         anchorRef: pickerAnchor,
-        allowNoWorkspace: true,
         selectedId: pendingWorkspaceId ?? sessionWorkspace?.workspaceId,
         onPick: (workspaceId) => {
           setPickerOpen(false)
           setPendingWorkspaceId(workspaceId)
-          void selectWorkspace(workspaceId).catch(() => {
+          void props.onWorkspaceSelected(workspaceId, moveDraft).catch(() => {
             setPendingWorkspaceId(current => current === workspaceId ? undefined : current)
           })
-        },
-        onChooseNoWorkspace: () => {
-          setPickerOpen(false)
-          setPendingWorkspaceId(undefined)
         },
         onClose: () => { setPickerOpen(false) },
       })}
@@ -139,18 +147,19 @@ export function ConversationContent(props: ConversationContentProps) {
     </div>
   )
 
-  // Only the no-Session state needs the Workspace-trigger input: an existing
-  // blank Session drafts and sends without an owning Workspace (a chat
-  // created without one, or one whose Workspace was deleted). The bar is ONE
-  // session-maybe slot rendered unconditionally — inert is a prop, not a
-  // different tree, so the textarea DOM survives the transition.
-  const inert = sessionId === undefined
+  // The placeholder chip ("Choose workspace") and the Workspace-trigger input travel
+  // together: no workspace picked yet (cold start, no session at all), or a
+  // blank session whose workspace vanished (deleted from the sidebar). The
+  // bar is ONE session-maybe slot rendered unconditionally — inert is a prop,
+  // not a different tree, so the textarea DOM survives the transition.
+  const inert = sessionId === undefined || (hero && chipTitle === undefined)
   // A raised block is the same inert posture with the blocker's own reason:
-  // one disabled textarea, never a second tree. The no-Session state wins
-  // when both hold — choosing where to start is the earlier prerequisite.
+  // one disabled textarea, never a second tree. The no-workspace state wins
+  // when both hold — picking a workspace is the earlier prerequisite.
   const blocked = !inert && composerBlock !== undefined
   const inputBar = renderSlot('conversation.composer.bar', {
     variant: hero ? 'hero' : 'composer',
+    occurrence: props.variant,
     ...(inert
       ? {
         disabled: true,
@@ -168,11 +177,8 @@ export function ConversationContent(props: ConversationContentProps) {
 
   const composerBar = (
     <div className={clsx(css.composerStack, hero && css.composerHero)}>
-      {hero && <HeroShell t={t} renderSlot={renderSlot} />}
-      {/* A landing replaces the Hero but not the blank Session's choices:
-          the workspace and preset row stays above the docked card, so the
-          user can still switch the preset (and with it the landing). */}
-      {(hero || landing !== undefined) && heroWorkspaceRow}
+      {hero && <HeroShell t={t} renderSlot={renderSlot} headline={props.headline} />}
+      {hero && heroWorkspaceRow}
       {zone !== undefined && renderSlot('conversation.input.dock', zone)}
       {inputBar}
     </div>
@@ -203,17 +209,15 @@ export function ConversationContent(props: ConversationContentProps) {
       data-conversation-region="chat"
       data-content-phase={phase}
     >
-      <div className={css.scrollBody} data-conversation-scroll="">
-        {sessionId !== undefined && landing !== undefined && (
-          <div className={css.landingSeat} data-conversation-landing={landing}>
-            {renderSlot('conversation.landing', { agentPreset: landing }, { entryKey: landing })}
+      {/* The frame wraps the scroll body in every phase, so leaving the home keeps the composer mounted. */}
+      {renderSlot('conversation.hero.frame', { hero: hero && props.variant !== 'embedded' }, {
+        children: (
+          <div className={css.scrollBody} data-conversation-scroll="">
+            {sessionId === undefined ? null : <Views />}
+            {composerSeat}
           </div>
-        )}
-        {/* The views stay mounted beside a landing: they render nothing for a
-            blank Session, but own the stored-draft seed and the draft mirror. */}
-        {sessionId === undefined ? null : <Views />}
-        {composerSeat}
-      </div>
+        ),
+      })}
       <WidthControls container={body} phase={phase} />
     </div>
   )

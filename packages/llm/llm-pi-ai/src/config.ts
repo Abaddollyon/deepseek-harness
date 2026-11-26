@@ -24,7 +24,6 @@ import type { ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-ll
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import {
   CACHE_CONTROL_FORMATS,
-  catalogModels,
   CHAT_TEMPLATE_VARS,
   MAX_TOKENS_FIELDS,
   MODALITIES,
@@ -48,18 +47,30 @@ import { buildProvider, supportedProtocols } from './provider.ts'
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 
 /**
- * Default request-level bound on base64-encoded image payload. Every image in
- * history is re-encoded into every request body, so an unbounded conversation
- * eventually exceeds a provider or gateway request-size cap and the session
- * can never complete another request. The 20MiB default admits fifteen 1MiB
- * request versions after base64 expansion and reserves request capacity for
- * system prompts, history, tools, and JSON.
- * Deployments behind stricter gateways lower it per route.
+ * Default cap on aggregate base64 image payload, excluding text, tools, and
+ * JSON overhead. Retained image count depends on actual encoded sizes;
+ * per-image catalog targets do not raise this cap. Deployments keep it below
+ * the gateway's complete request-size limit to leave room for other content.
  */
 export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+/**
+ * Default request-level bound on retained image occurrences: Azure OpenAI's
+ * documented limit of 50 images per GPT-4o and GPT-4.1 request
+ * (https://learn.microsoft.com/azure/foundry/openai/quotas-limits). Routes
+ * whose provider accepts more images raise it.
+ */
+export const DEFAULT_MAX_REQUEST_IMAGES = 50
+/**
+ * Default number of oldest occurrences one count overflow offloads, so a
+ * saturated route rewrites its request prefix once per ten new images rather
+ * than once per image.
+ */
+export const DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM = 10
+/** Number of equal image allocations used to derive the default hard per-image byte limit. */
+export const DEFAULT_REQUEST_IMAGE_BUDGET_COUNT = 20
 /** Default total-pixel budget preserves the complete 2048px normalized attachment. */
 export const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
-/** Default raw encoded-byte target before inline base64 expansion; the smallest quality-ladder output is used when no quality fits. */
+/** Fallback hard per-image byte cap when the catalog declares none, before sharing the aggregate budget. */
 export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
@@ -89,51 +100,10 @@ export type {
   PiAiThinkingFormat,
 } from './catalog.ts'
 
-/** Who authenticates a route's requests: pi-ai's provider-native auth, or a proxy in front of the provider. */
-export type PiAiAuthMode = 'provider' | 'proxy'
-
-/** Anthropic Messages request format: the one the credential selects, or Claude Code's. */
-export type PiAiAnthropicRequestMode = 'provider' | 'claude-code'
-
-/** Listing protocol model discovery uses for a configured route. */
-export type PiAiModelDiscoverySource = 'provider' | 'openai-compatible' | 'anthropic'
-
-/** Model discovery choices for one configured route. */
-export interface PiAiModelDiscoveryProfile {
-  /**
-   * `provider` (default) answers a catalog route from the installed catalog
-   * and lists any other route by its protocol. `openai-compatible` lists
-   * `GET {baseURL}/models` with bearer auth; `anthropic` lists
-   * `GET {root}/v1/models` with `x-api-key`. Both read the route's own
-   * endpoint, headers, and `apiKeyEnv`, independently of its generation API.
-   */
-  source?: PiAiModelDiscoverySource
-}
-
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
-  /**
-   * `provider` (default) keeps pi-ai's provider-native auth: stored sign-ins,
-   * their refresh, and ambient environment discovery. `proxy` declares a
-   * gateway that owns provider accounts itself: the route never reads,
-   * refreshes, or offers a stored or ambient provider credential, sends the
-   * {@link apiKeyEnv} value when one is configured, and otherwise sends no
-   * credential, which `openai-completions`, `openai-responses`, and
-   * `anthropic-messages` in `claude-code` mode serve. `proxy` requires an
-   * explicit http(s) {@link baseURL} without embedded credentials.
-   */
-  authMode?: PiAiAuthMode
-  /**
-   * `claude-code` sends Anthropic requests in Claude Code format — identity
-   * headers, beta features, system preamble, and tool names — whatever
-   * credential the route carries, and permits a keyless request. Valid only on
-   * a route whose models speak `anthropic-messages`. Default `provider`.
-   */
-  anthropicRequestMode?: PiAiAnthropicRequestMode
-  /** How the configuration surface's model discovery lists this route. */
-  modelDiscovery?: PiAiModelDiscoveryProfile
   /** Name shown by configuration surfaces; defaults to the route key. */
   displayName?: string
   /**
@@ -213,47 +183,57 @@ export interface PiAiProviderProfile {
    * requests instead of being rejected by a request-size cap.
    */
   maxRequestImageBytes?: number
+  /**
+   * Maximum retained image occurrences per request. A request carrying more
+   * fails with `IMAGE_OFFLOAD_REQUIRED` naming how many of the oldest
+   * occurrences to offload.
+   */
+  maxRequestImages?: number
+  /**
+   * Oldest occurrences offloaded per count overflow (default 10, capped at
+   * {@link maxRequestImages}); an explicit value must not exceed it. Larger
+   * steps rewrite the request prefix less often.
+   */
+  imageOffloadCountQuantum?: number
+  /** Fixed divisor of maxRequestImageBytes when allocating hard per-image budgets; independent of current image count. Default: 20. */
+  requestImageBudgetCount?: number
   /** Total-pixel budget for each deterministic inline request version. */
   requestImagePixelBudget?: number
+  /** Maximum width and height for each request image; omission uses the selected pi-ai model's resize limits. */
+  requestImageMaxDimension?: number
   /**
-   * Raw encoded-byte target for each deterministic inline request version;
-   * the smallest quality-ladder output is used when no quality fits.
+   * Hard per-image encoded-byte cap overriding the selected model's base64 budget.
+   * The effective cap is the smaller of this value and the route's equal share of maxRequestImageBytes.
+   * Omission uses the catalog budget converted to raw bytes, or 1 MiB without catalog metadata.
    */
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
-  /**
-   * Maximum model requests this route streams at once in this Host; further
-   * requests wait in arrival order until one finishes, and a caller's abort
-   * leaves the queue. Omission leaves the route unlimited.
-   */
-  maxConcurrentRequests?: number
 }
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile,
-    'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'authMode' | 'anthropicRequestMode' | 'modelDiscovery'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'requestImageMaxBytes'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
-  /** Resolved authentication owner. */
-  authMode: PiAiAuthMode
-  /** Resolved Anthropic request format. */
-  anthropicRequestMode: PiAiAnthropicRequestMode
-  /** Resolved model-discovery listing protocol. */
-  modelDiscoverySource: PiAiModelDiscoverySource
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
   maxRequestImageBytes: number
+  /** Positive request-level retained image count bound after defaulting. */
+  maxRequestImages: number
+  /** Positive count-overflow offload step, at most {@link maxRequestImages}, after defaulting. */
+  imageOffloadCountQuantum: number
+  /** Positive fixed divisor of the aggregate image-byte budget after defaulting. */
+  requestImageBudgetCount: number
   /** Positive total-pixel request-version budget after defaulting. */
   requestImagePixelBudget: number
-  /** Positive raw request-version byte target after defaulting; the smallest quality-ladder output is used when no quality fits. */
-  requestImageMaxBytes: number
+  /** Configured hard per-image cap in raw encoded bytes, before the request budget is shared. */
+  maxImageBytes?: number
   /** Immutable retry policy captured with this provider route. */
   retryPolicy: ResolvedRetryPolicy
   /**
@@ -380,9 +360,6 @@ const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
-  authMode: z.union(['provider', 'proxy']),
-  anthropicRequestMode: z.union(['provider', 'claude-code']),
-  modelDiscovery: z.object({ source: z.union(['provider', 'openai-compatible', 'anthropic']) }),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
@@ -401,10 +378,13 @@ const profile = z.object({
   websocketConnectTimeoutMs: z.natural(),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   maxRequestImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
+  maxRequestImages: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGES),
+  imageOffloadCountQuantum: z.number().step(1).min(1),
+  requestImageBudgetCount: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_REQUEST_IMAGE_BUDGET_COUNT),
   requestImagePixelBudget: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET),
-  requestImageMaxBytes: z.number().step(1).min(1).default(DEFAULT_REQUEST_IMAGE_MAX_BYTES),
+  requestImageMaxDimension: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  requestImageMaxBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   retryPolicy: RetryPolicySchema,
-  maxConcurrentRequests: z.number().step(1).min(1),
 })
 
 /** Runtime schema for {@link Config}. */
@@ -458,24 +438,6 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
   }
 }
 
-/** Reject a proxy route whose endpoint is missing, not http(s), or carries credentials. */
-function assertProxyEndpoint(provider: string, baseURL: string | undefined): void {
-  const url = baseURL === undefined ? null : URL.parse(baseURL)
-  if (url === null || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.username !== '' || url.password !== '') {
-    throw new Error(
-      `llm-pi-ai: provider "${provider}" sets authMode proxy, which needs an explicit http(s) baseURL`
-      + ' without embedded credentials',
-    )
-  }
-}
-
-/** Whether every model the route serves speaks Anthropic Messages. */
-function speaksAnthropicMessages(provider: string, api: string | undefined): boolean {
-  if (api !== undefined) return api === 'anthropic-messages'
-  const installed = [...catalogModels(provider).values()]
-  return installed.length > 0 && installed.every(model => model.api === 'anthropic-messages')
-}
-
 /**
  * Resolve scalar defaults and materialize each route's serviceable models.
  * Deferred catalog validation retains diagnostics without deleting configured
@@ -495,6 +457,12 @@ export function resolveProfiles(
   const resolved = new Map<string, ResolvedPiAiProviderProfile>()
   for (const [provider, source] of entries) {
     rejectRemovedFields(provider, source)
+    if ('imageTargetBytes' in source) {
+      throw new Error('llm-pi-ai: imageTargetBytes is not configurable; pi uses the effective per-image cap as the target')
+    }
+    if ('maxImageBytes' in source) {
+      throw new Error(`llm-pi-ai: provider "${provider}" must use requestImageMaxBytes to set the per-image cap; maxImageBytes is internal`)
+    }
     if (provider.length === 0) throw new Error('llm-pi-ai: provider names must be non-empty')
     if (source.baseURL !== undefined && source.baseURL.length === 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty baseURL`)
@@ -503,16 +471,6 @@ export function resolveProfiles(
       throw new Error(`llm-pi-ai: provider "${provider}" has an empty displayName`)
     }
     assertValidHeaders(provider, source.headers)
-    const authMode = source.authMode ?? 'provider'
-    if (authMode === 'proxy') assertProxyEndpoint(provider, source.baseURL)
-    const anthropicRequestMode = source.anthropicRequestMode ?? 'provider'
-    if (anthropicRequestMode === 'claude-code' && !speaksAnthropicMessages(provider, source.api)) {
-      throw new Error(`llm-pi-ai: provider "${provider}" sets anthropicRequestMode claude-code, which needs api anthropic-messages`)
-    }
-    const modelDiscoverySource = source.modelDiscovery?.source ?? 'provider'
-    if (modelDiscoverySource !== 'provider' && source.baseURL === undefined) {
-      throw new Error(`llm-pi-ai: provider "${provider}" sets modelDiscovery.source ${modelDiscoverySource}, which needs a baseURL`)
-    }
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
@@ -522,20 +480,33 @@ export function resolveProfiles(
       )
     }
     const maxRequestImageBytes = source.maxRequestImageBytes ?? DEFAULT_MAX_REQUEST_IMAGE_BYTES
-    if (!Number.isInteger(maxRequestImageBytes) || maxRequestImageBytes <= 0) {
+    if (!Number.isSafeInteger(maxRequestImageBytes) || maxRequestImageBytes <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" maxRequestImageBytes must be a positive integer`)
+    }
+    const requestImageBudgetCount = source.requestImageBudgetCount ?? DEFAULT_REQUEST_IMAGE_BUDGET_COUNT
+    if (!Number.isSafeInteger(requestImageBudgetCount) || requestImageBudgetCount <= 0) {
+      throw new Error(`llm-pi-ai: provider "${provider}" requestImageBudgetCount must be a positive safe integer`)
+    }
+    if (requestImageBudgetCount > Math.floor(maxRequestImageBytes / 4)) {
+      throw new Error(`llm-pi-ai: provider "${provider}" maxRequestImageBytes must allow four base64 bytes per requestImageBudgetCount`)
+    }
+    const maxRequestImages = source.maxRequestImages ?? DEFAULT_MAX_REQUEST_IMAGES
+    if (!Number.isSafeInteger(maxRequestImages) || maxRequestImages <= 0) {
+      throw new Error(`llm-pi-ai: provider "${provider}" maxRequestImages must be a positive safe integer`)
+    }
+    const imageOffloadCountQuantum = source.imageOffloadCountQuantum ?? Math.min(DEFAULT_IMAGE_OFFLOAD_COUNT_QUANTUM, maxRequestImages)
+    if (!Number.isSafeInteger(imageOffloadCountQuantum) || imageOffloadCountQuantum <= 0 || imageOffloadCountQuantum > maxRequestImages) {
+      throw new Error(`llm-pi-ai: provider "${provider}" imageOffloadCountQuantum must be a positive safe integer no greater than maxRequestImages`)
     }
     const requestImagePixelBudget = source.requestImagePixelBudget ?? DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET
     if (!Number.isSafeInteger(requestImagePixelBudget) || requestImagePixelBudget <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" requestImagePixelBudget must be a positive safe integer`)
     }
-    const requestImageMaxBytes = source.requestImageMaxBytes ?? DEFAULT_REQUEST_IMAGE_MAX_BYTES
-    if (!Number.isSafeInteger(requestImageMaxBytes) || requestImageMaxBytes <= 0) {
-      throw new Error(`llm-pi-ai: provider "${provider}" requestImageMaxBytes must be a positive safe integer`)
-    }
-    if (source.maxConcurrentRequests !== undefined
-      && (!Number.isSafeInteger(source.maxConcurrentRequests) || source.maxConcurrentRequests <= 0)) {
-      throw new Error(`llm-pi-ai: provider "${provider}" maxConcurrentRequests must be a positive safe integer`)
+    for (const field of ['requestImageMaxDimension', 'requestImageMaxBytes'] as const) {
+      const value = source[field]
+      if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+        throw new Error(`llm-pi-ai: provider "${provider}" ${field} must be a positive safe integer`)
+      }
     }
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty
@@ -573,28 +544,24 @@ export function resolveProfiles(
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         models: catalog.models,
         namesCredential: source.apiKeyEnv !== undefined,
-        authMode,
       })
     } catch (error) {
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
       catalogError ??= error.message
     }
-    const {
-      apiKeyEnv, retryPolicy, models: _models, displayName: _displayName,
-      authMode: _authMode, anthropicRequestMode: _anthropicRequestMode, modelDiscovery: _modelDiscovery, ...rest
-    } = source
+    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, requestImageMaxBytes, ...rest } = source
     resolved.set(provider, {
       ...rest,
+      ...requestImageMaxBytes === undefined ? {} : { maxImageBytes: requestImageMaxBytes },
       provider,
       displayName,
-      authMode,
-      anthropicRequestMode,
-      modelDiscoverySource,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       maxRequestImageBytes,
+      maxRequestImages,
+      imageOffloadCountQuantum,
       requestImagePixelBudget,
-      requestImageMaxBytes,
+      requestImageBudgetCount,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },

@@ -1,31 +1,18 @@
 /** Session-owned MCP browser processes and provider catalog activation. @module */
 
-import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
-import { BrowserUseProviderName } from '@deepseek-ai/dsh-browser-use/brand'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { BrowserUseProviderName } from '@deepseek-ai/dsh-browser-use/types'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
-import { SessionResources } from './index.ts'
-import { SharedServerStart } from './startup.ts'
-import type { DeferredServerTransport } from './startup.ts'
+import { BrowserSessionError, SessionResources } from './index.ts'
 import type {} from '@deepseek-ai/dsh-browser-use'
-import type {} from '@deepseek-ai/dsh-tools'
+import { ToolContextUnavailableError } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-// Type-only: types `ctx.get('agentPresets')`, which tells a preset-owned execution world from the Host.
-import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-working-directory'
-
-/**
- * When each live Session's MCP server process starts. `activation` starts it
- * while the Session's Agent is created or resumed. `first-use` records the
- * first started server's startup exchange, answers later activations from that
- * record, and starts their server at the Session's first browser tool or
- * resource call.
- */
-export type BrowserServerStart = 'activation' | 'first-use'
 
 /** Browser launch settings shared by the MCP integrations. */
 export interface BrowserMcpLaunchConfig {
@@ -37,8 +24,6 @@ export interface BrowserMcpLaunchConfig {
   executablePath?: string
   /** Per-call timeout override in milliseconds; omission uses the MCP client default. */
   toolCallTimeoutMs?: number
-  /** When each Session's server process starts; defaults to `first-use`. */
-  serverStart: BrowserServerStart
 }
 
 /** Attachment to an externally owned Chromium browser. */
@@ -49,34 +34,23 @@ export interface BrowserMcpAttachConfig {
   endpoint: string
   /** Per-call timeout override in milliseconds; omission uses the MCP client default. */
   toolCallTimeoutMs?: number
-  /** When each Session's server process starts; defaults to `first-use`. */
-  serverStart: BrowserServerStart
 }
 
 /** Fixed launch or attachment choice for one MCP browser provider. */
 export type BrowserMcpConfig = BrowserMcpLaunchConfig | BrowserMcpAttachConfig
 
-/** Accepted browser settings before defaults apply. */
-export type BrowserMcpConfigInput =
-  | (Omit<BrowserMcpAttachConfig, 'serverStart'> & { serverStart?: BrowserServerStart })
-  | (Omit<BrowserMcpLaunchConfig, 'headless' | 'serverStart'> & { headless?: boolean; serverStart?: BrowserServerStart })
-
-const ServerStart: Schema<BrowserServerStart> = Schema.union([Schema.const('activation'), Schema.const('first-use')]).default('first-use')
-
 /** Validate the browser mode before the provider reserves browser use. */
-export const BrowserMcpConfig: Schema<BrowserMcpConfigInput, BrowserMcpConfig> = Schema.union([
+export const BrowserMcpConfig: Schema<BrowserMcpAttachConfig | (Omit<BrowserMcpLaunchConfig, 'headless'> & { headless?: boolean }), BrowserMcpConfig> = Schema.union([
   Schema.object({
     mode: Schema.const('launch').required(),
     headless: Schema.boolean().default(true),
     executablePath: Schema.string().pattern(/\S/u),
     toolCallTimeoutMs: Schema.number().min(1),
-    serverStart: ServerStart,
   }),
   Schema.object({
     mode: Schema.const('attach').required(),
     endpoint: Schema.string().pattern(/^https?:\/\/[^\s/]+|^wss?:\/\/[^\s/]+/u).required(),
     toolCallTimeoutMs: Schema.number().min(1),
-    serverStart: ServerStart,
   }),
 ])
 
@@ -84,7 +58,7 @@ export const BrowserMcpConfig: Schema<BrowserMcpConfigInput, BrowserMcpConfig> =
  * Reject an invalid debugging endpoint before acquiring provider or browser resources.
  * @param config - schema-validated browser selection.
  */
-export function validateBrowserMcpConfig(config: BrowserMcpConfigInput): void {
+export function validateBrowserMcpConfig(config: BrowserMcpConfig): void {
   if (config.mode !== 'attach') return
   let endpoint: URL
   try {
@@ -111,20 +85,11 @@ export interface SessionMcpOptions {
   env?: Record<string, string>
   /** Per-call timeout override; omission retains the MCP client default. */
   toolCallTimeoutMs?: number
-  /** When each Session's server process starts. */
-  serverStart: BrowserServerStart
 }
 
 interface ClientState {
   status: 'ready' | 'blocked'
   mask?: Scope
-}
-
-/** Whether the Agent's preset runs it in an execution world other than the Host, such as an SSH host. */
-function inOtherWorld(ctx: Context, agent: Agent): boolean {
-  const presets = ctx.get('agentPresets')
-  const preset = presets?.composedPreset(agent.ctx)
-  return preset !== undefined && presets?.ownsWorld(preset) === true
 }
 
 /**
@@ -139,9 +104,6 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
   const workingDirectory = ctx.get('workingDirectory')
   if (workingDirectory === undefined) throw new Error(`${options.name}: browser MCP requires a working-directory provider`)
   let resources!: SessionResources<Scope>
-  const shared = options.serverStart === 'first-use'
-    ? new SharedServerStart(options.name, (message) => { ctx.logger.warn(message) })
-    : undefined
   const clients = new Map<Agent, ClientState>()
   const toolPrefix = `mcp__${options.name}__`
   const resourceTools = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
@@ -165,7 +127,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
   }
 
   ctx.effect(function* () {
-    yield ctx.browserUse.register(BrowserUseProviderName(options.name))
+    yield ctx.browserUse.register(brandString<BrowserUseProviderName>(options.name))
     resources = new SessionResources(ctx, {
       label: options.name,
       exclusive: options.exclusive,
@@ -175,39 +137,26 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
         const cancel = (): void => { cancellation = scope.dispose() }
         signal.addEventListener('abort', cancel, { once: true })
         try {
-          // The server always runs on the Host: another execution world's directory can be missing there.
-          const cwd = inOtherWorld(ctx, agent) ? tmpdir() : await workingDirectory.ensure(agent, signal)
           signal.throwIfAborted()
           scope.ctx.on('tools/execute', async (exec, next) => {
             if (!exec.name.startsWith(toolPrefix)) return next()
             if (exec.agent !== agent) {
               if (ctx.tools.get(exec.name, exec.agent) !== ctx.tools.get(exec.name, agent)) return next()
-              throw new Error(`${options.name}: browser tool belongs to another Session`)
+              throw new BrowserSessionError(`${options.name}: browser tool belongs to another Session`, 'BROWSER_FOREIGN_SESSION')
             }
             return next()
           })
-          const config = McpClient.Config({
+          await scope.ctx.plugin(McpClient, McpClient.Config({
             transport: 'stdio',
             serverName: options.name,
             command: options.command,
             args: options.args,
             ...options.env === undefined ? {} : { env: options.env },
-            cwd,
+            cwd: await workingDirectory.ensure(agent, signal),
             ...options.toolCallTimeoutMs === undefined ? {} : { toolCallTimeoutMs: options.toolCallTimeoutMs },
             failOnStartupError: true,
             reconnect: { enabled: false },
-          })
-          // Reconnect is disabled, so the client opens at most one transport generation.
-          const generation: { transport?: DeferredServerTransport } = {}
-          const client = shared === undefined
-            ? McpClient
-            : McpClient.withTransportWrapper((open) => {
-              // The replayed startup precedes the call that started the server, so it shares that call's timeout.
-              generation.transport = shared.wrap(open, config.toolCallTimeoutMs)
-              return generation.transport
-            })
-          await scope.ctx.plugin(client, config)
-          generation.transport?.commit()
+          }))
           signal.throwIfAborted()
           return {
             value: scope,
@@ -241,17 +190,7 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
       refreshBlockedMasks()
       return
     }
-    try {
-      await resources.get(agent, signal)
-    } catch (error) {
-      // The browser runs on the Host: a Host failure must not keep a Session in another world from starting.
-      if (signal?.aborted === true || !inOtherWorld(ctx, agent)) throw error
-      ctx.logger.warn(`${options.name}: browser tools are unavailable to Session ${agent.id}: the browser server failed to start on the Host: ${String(error)}`)
-      state.status = 'blocked'
-      clients.set(agent, state)
-      refreshBlockedMasks()
-      return
-    }
+    await resources.get(agent, signal)
     clients.set(agent, state)
   }, { prepend: true })
   ctx.on('tools/change', refreshBlockedMasks)
@@ -261,8 +200,9 @@ export function mountSessionMcp(ctx: Context, options: SessionMcpOptions): void 
       && (exec.arguments as { server?: unknown }).server === options.name
     if (!exec.name.startsWith(toolPrefix) && !ownResource) return next()
     const agent = exec.agent
-    if (agent === undefined || clients.get(agent)?.status !== 'ready') {
-      throw new Error(`${options.name}: browser tool belongs to another Session`)
+    if (agent === undefined) throw new ToolContextUnavailableError(`${options.name}: browser tools require a calling Agent`)
+    if (clients.get(agent)?.status !== 'ready') {
+      throw new BrowserSessionError(`${options.name}: browser tool belongs to another Session`, 'BROWSER_FOREIGN_SESSION')
     }
     return resources.run(agent, exec.signal, async (_scope, combined) => {
       const original = exec.signal

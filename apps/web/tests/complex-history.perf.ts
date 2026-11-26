@@ -10,8 +10,9 @@ import type { Browser, CDPSession, Locator, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import {
-  ToolCallId,
+  type ToolCallId,
   createAssistantMessage,
   createSystemMessage,
   createToolResultMessage,
@@ -23,7 +24,7 @@ import type { SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import {
   SESSION_FORMAT_VERSION,
   Session,
-  SessionId,
+  type SessionId,
 } from '@deepseek-ai/dsh-session'
 // Carries the session/title event declaration into the fixture builder.
 import type {} from '@deepseek-ai/dsh-session-title'
@@ -246,7 +247,7 @@ function appendToolStep(
   toolCount: number,
 ): void {
   const calls = Array.from({ length: toolCount }, (_, index) => {
-    const callId = ToolCallId(`perf-call-${String(turn)}-${String(index)}`)
+    const callId = brandString<ToolCallId>(`perf-call-${String(turn)}-${String(index)}`)
     const args = JSON.stringify({
       turn,
       index,
@@ -335,7 +336,7 @@ function fixtureLog(session: Session): string {
 }
 
 function smallSidebarFixture(): string {
-  const session = Session.create(SessionId('perf-small-template'))
+  const session = Session.create(brandString<SessionId>('perf-small-template'))
   session.append('turn/start', {
     turn: 1,
   })
@@ -358,7 +359,7 @@ function smallSidebarFixture(): string {
 }
 
 function longHistoryFixture(): string {
-  const session = Session.create(SessionId(LONG_SESSION_ID))
+  const session = Session.create(brandString<SessionId>(LONG_SESSION_ID))
   for (let turn = 1; turn <= LONG_HISTORY_TURNS; turn += 1) {
     session.append('turn/start', {
       turn,
@@ -485,7 +486,7 @@ function soakTurn(index: number): ConversationTurnSpec {
 }
 
 function toolStream(index: number, marker: string): StreamChunk[] {
-  const callId = ToolCallId(`performance-tool-${marker.toLowerCase()}-${String(index)}`)
+  const callId = brandString<ToolCallId>(`performance-tool-${marker.toLowerCase()}-${String(index)}`)
   const args = JSON.stringify({
     command: `printf '${marker}\\n'`,
     description: `Emit performance marker ${String(index)}`,
@@ -1345,7 +1346,7 @@ describe('manual web performance: complex workspace and history', () => {
         startingTurns: DEFAULT_HISTORY_TURNS,
         turnCount: COMPARISON_TURNS,
         turnSpec: comparisonTurn,
-        expectedSessionId: SessionId(LONG_SESSION_ID),
+        expectedSessionId: brandString<SessionId>(LONG_SESSION_ID),
       })
       expect(conversation.toolTurns).toBe(2)
       console.info(`WEB_PERF_RESULT ${JSON.stringify({
@@ -1391,7 +1392,7 @@ describe('manual web performance: complex workspace and history', () => {
         startingTurns: LONG_HISTORY_TURNS,
         turnCount: COMPARISON_TURNS,
         turnSpec: comparisonTurn,
-        expectedSessionId: SessionId(LONG_SESSION_ID),
+        expectedSessionId: brandString<SessionId>(LONG_SESSION_ID),
       })
       expect(conversation.toolTurns).toBe(2)
       console.info(`WEB_PERF_RESULT ${JSON.stringify({

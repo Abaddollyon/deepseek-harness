@@ -16,9 +16,44 @@
  * @module dsh-sandbox/escalation
  */
 
+import { HarnessError } from '@deepseek-ai/dsh-error'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { escalationDisplayReason } from './locales.ts'
 import type { SandboxMode } from './index.ts'
+
+/**
+ * Every {@link SandboxEscalationError} code:
+ * - `SANDBOX_ESCALATION_INVALID_ARGUMENT` — the escalation fields are unpaired, the justification is blank, or the
+ *   target is not strictly wider than the call's effective mode; the model corrects the request.
+ * - `SANDBOX_ESCALATION_UNAVAILABLE` — the composition cannot ask for approval: no approval service, no calling Agent,
+ *   or no approval channel.
+ * - `SANDBOX_ESCALATION_REJECTED` — the user declined the escalation; the operation stays denied.
+ * - `SANDBOX_ESCALATION_CANCELLED` — the approval request ended without a decision while the call itself was not cancelled.
+ */
+export const SANDBOX_ESCALATION_ERROR_CODES = [
+  'SANDBOX_ESCALATION_INVALID_ARGUMENT',
+  'SANDBOX_ESCALATION_UNAVAILABLE',
+  'SANDBOX_ESCALATION_REJECTED',
+  'SANDBOX_ESCALATION_CANCELLED',
+] as const
+
+/** One code from {@link SANDBOX_ESCALATION_ERROR_CODES}. */
+export type SandboxEscalationErrorCode = typeof SANDBOX_ESCALATION_ERROR_CODES[number]
+
+/** A `sandbox_permissions` request that did not produce a grant; nothing executed. */
+export class SandboxEscalationError extends HarnessError {
+  override readonly code: SandboxEscalationErrorCode
+
+  /**
+   * @param message - the model-facing explanation and the safe next step.
+   * @param code - the failure class consumers route on.
+   */
+  constructor(message: string, code: SandboxEscalationErrorCode) {
+    super(message, code)
+    this.name = 'SandboxEscalationError'
+    this.code = code
+  }
+}
 
 /**
  * The strictly-wider table: what a call whose effective mode is the key may
@@ -46,18 +81,19 @@ export const ESCALATION_TARGETS: readonly SandboxMode[] = ['workspace-write', 'd
  * `sandbox_permissions` and `justification` travel together — an approval
  * prompt without a reason, or a reason driving nothing, is a malformed ask —
  * and the justification must be a non-empty sentence.
+ * A violation throws {@link SandboxEscalationError} `SANDBOX_ESCALATION_INVALID_ARGUMENT`.
  * @param sandboxPermissions - the raw `sandbox_permissions` argument, if given.
  * @param justification - the raw `justification` argument, if given.
  */
 export function validateEscalationArgs(sandboxPermissions: string | undefined, justification: string | undefined): void {
   if (sandboxPermissions !== undefined && justification === undefined) {
-    throw new Error('invalid escalation: sandbox_permissions requires a justification')
+    throw new SandboxEscalationError('invalid escalation: sandbox_permissions requires a justification', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   if (justification !== undefined && sandboxPermissions === undefined) {
-    throw new Error('invalid escalation: justification is only valid together with sandbox_permissions')
+    throw new SandboxEscalationError('invalid escalation: justification is only valid together with sandbox_permissions', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   if (justification !== undefined && justification.trim().length === 0) {
-    throw new Error('invalid justification: expected a non-empty sentence')
+    throw new SandboxEscalationError('invalid justification: expected a non-empty sentence', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
 }
 
@@ -161,11 +197,11 @@ export interface EscalationRequest {
 
 /**
  * Resolve a sandbox permission request before execution. Repeating the call's
- * effective mode returns it without approval. A strictly narrower mode is
- * returned without approval, so the call runs confined at that mode. A
- * strictly wider mode requires approval and applies only to this call.
- * Unsupported targets, missing approval services or agents for widening, and
- * non-grant outcomes throw before execution.
+ * effective mode returns it without approval. A strictly wider mode requires
+ * approval and applies only to this call. Narrower or unsupported targets,
+ * missing approval services or agents for widening, and non-grant outcomes
+ * throw {@link SandboxEscalationError} before execution; a `cancelled`
+ * outcome while `approval.signal` is aborted rethrows the signal's reason.
  * @param request - the escalation to judge (see {@link EscalationRequest}).
  * @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
  * @returns the granted mode, consumed by the one call that asked.
@@ -173,19 +209,26 @@ export interface EscalationRequest {
 export async function approveEscalation<A, C>(request: EscalationRequest, approval: EscalationApproval<A, C>): Promise<SandboxMode> {
   const { requestedMode: mode, effectiveMode, justification, subject } = request
   if (mode === effectiveMode) return effectiveMode
-  // Both directions are EXECUTION checks against the call's effective mode —
-  // deliberately not schema constraints (the enum is the closed target
-  // vocabulary; the effective mode is per-call truth). Asking for less access
-  // only confines the call further.
-  if ((WIDER_MODES[mode] ?? []).includes(effectiveMode)) return mode as SandboxMode
+  // Strict widening is an EXECUTION check against the call's effective mode —
+  // deliberately not a schema constraint (the enum is the closed target
+  // vocabulary; the effective mode is per-call truth).
   if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode)) {
-    throw new Error(`sandbox_permissions "${mode}" is not a supported mode for this call's current "${effectiveMode}" mode`)
+    throw new SandboxEscalationError(
+      `sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`,
+      'SANDBOX_ESCALATION_INVALID_ARGUMENT',
+    )
   }
   if (approval.approver === undefined) {
-    throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval service is composed`)
+    throw new SandboxEscalationError(
+      `sandbox escalation to "${mode}" requires approval, but no approval service is composed`,
+      'SANDBOX_ESCALATION_UNAVAILABLE',
+    )
   }
   if (approval.agent === undefined) {
-    throw new Error(`sandbox escalation to "${mode}" requires approval, but the call has no agent to route it through`)
+    throw new SandboxEscalationError(
+      `sandbox escalation to "${mode}" requires approval, but the call has no agent to route it through`,
+      'SANDBOX_ESCALATION_UNAVAILABLE',
+    )
   }
   // Self-contained for the audit trail: approval/asked stores this reason,
   // and the target mode is part of the grant's identity.
@@ -201,9 +244,20 @@ export async function approveEscalation<A, C>(request: EscalationRequest, approv
     // The schema enum already pinned `mode` to the closed target vocabulary;
     // the check above proved it is strictly wider.
     case 'allowed-once': return mode as SandboxMode
-    case 'rejected': throw new Error(`the user rejected escalating this ${subject} to "${mode}"; it stays denied, so stop and explain instead of working around it`)
-    case 'cancelled': throw new Error(`approval for escalating to "${mode}" was cancelled`)
-    case 'unavailable': throw new Error(`sandbox escalation to "${mode}" requires approval, but no approval channel is available`)
+    case 'rejected':
+      throw new SandboxEscalationError(
+        `the user rejected escalating this ${subject} to "${mode}"; it stays denied, so stop and explain instead of working around it`,
+        'SANDBOX_ESCALATION_REJECTED',
+      )
+    case 'cancelled':
+      // A cancelled call keeps its own cancellation so the registry records it as aborted.
+      approval.signal?.throwIfAborted()
+      throw new SandboxEscalationError(`approval for escalating to "${mode}" was cancelled`, 'SANDBOX_ESCALATION_CANCELLED')
+    case 'unavailable':
+      throw new SandboxEscalationError(
+        `sandbox escalation to "${mode}" requires approval, but no approval channel is available`,
+        'SANDBOX_ESCALATION_UNAVAILABLE',
+      )
     default: return assertNever(outcome, 'EscalationOutcome')
   }
 }

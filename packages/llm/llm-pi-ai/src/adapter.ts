@@ -27,7 +27,6 @@
  */
 
 import type {
-  AnthropicOptions,
   Api,
   AuthContext,
   CredentialStore,
@@ -43,7 +42,6 @@ import {
   contentHasImage,
   LlmAdapter,
   LlmError,
-  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -58,13 +56,16 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
+import { resolveImageRequestBudget } from './image-policy.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
-import { RouteRequestLimiter } from './request-limit.ts'
-import { ProviderResponseObserver } from './response-observer.ts'
 import { toStreamChunks } from './stream.ts'
+import { bindThinkingToPrefix } from './prefix-binding.ts'
+import type { PrefixDigests } from './prefix-binding.ts'
+import type { PiAiRequestHeaderContext } from './types.ts'
 
 /**
  * Initially active declaration added to an Anthropic request whose projected
@@ -107,6 +108,18 @@ export interface PiAiAdapterOptions {
    * every request no matter how often the human signed in.
    */
   auth: PiAiAuthInjection
+  /**
+   * Synchronously prepare this call's headers before SDK dispatch. The input
+   * contains a fresh copy of profile headers; attribution is enforced afterward.
+   * Omission preserves profile headers. Throws fail the call with REQUEST_HEADERS
+   * before inference I/O. Do not retain or mutate headers after returning.
+   * Non-TypeError messages become public diagnostics and must exclude secrets;
+   * TypeError details and non-Error values are replaced with safe guidance.
+   * @param request - immutable routing metadata from the prepared call.
+   * @param headers - request-owned headers initialized from the profile.
+   * @returns headers to pass to pi-ai after applying Harness attribution.
+   */
+  prepareHeaders?: (request: PiAiRequestHeaderContext, headers: Headers) => Headers
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Bridge one attachment reference into the current model-tool execution world. */
@@ -116,6 +129,13 @@ export interface PiAiAdapterOptions {
    * conversion because its stored replay state is unusable by this build.
    */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+  /**
+   * Observe one request that sent replayed assistant messages without their
+   * signed Anthropic thinking because the request prefix changed or was never
+   * recorded. Stale messages stay omitted, so later requests of the
+   * conversation report them again.
+   */
+  onThinkingOmitted?: (detail: { provider: string; model: string; count: number }) => void
 }
 
 /** The two auth injectables a pi-ai collection is built with. */
@@ -126,60 +146,15 @@ export interface PiAiAuthInjection {
   authContext: AuthContext
 }
 
-/**
- * The auth one snapshot's collection resolves through. A proxy route's
- * gateway owns its provider accounts, so the collection never reads or
- * refreshes a credential stored under that route's id; every other route
- * sees the store unchanged.
- * @param auth - the plugin-wide auth injection.
- * @param profiles - the snapshot's resolved profiles.
- * @returns the injection for this snapshot's collection.
- */
-function snapshotAuth(
-  auth: PiAiAuthInjection,
-  profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>,
-): PiAiAuthInjection {
-  const proxied = new Set([...profiles.values()].flatMap(profile => profile.authMode === 'proxy' ? [profile.provider] : []))
-  if (proxied.size === 0) return auth
-  const { credentials } = auth
-  return {
-    authContext: auth.authContext,
-    credentials: {
-      read: (providerId, options) => proxied.has(providerId) ? Promise.resolve(undefined) : credentials.read(providerId, options),
-      list: options => credentials.list(options),
-      modify: (providerId, mutate, options) => proxied.has(providerId)
-        ? Promise.reject(new LlmError(`llm-pi-ai: proxy route "${providerId}" stores no provider credential`, 'INVALID_CONFIG'))
-        : credentials.modify(providerId, mutate, options),
-      delete: (providerId, options) => credentials.delete(providerId, options),
-    },
-  }
-}
-
-/**
- * pi-ai APIs whose HTTP requests go through a caller-supplied `fetch`. The
- * Google adapters reject a custom `fetch`, Bedrock signs through the AWS SDK,
- * and WebSocket transports bypass `fetch`, so their failures carry no status.
- */
-const FETCH_OBSERVING_APIS: ReadonlySet<Api> = new Set<Api>([
-  'anthropic-messages',
-  'azure-openai-responses',
-  'mistral-conversations',
-  'openai-codex-responses',
-  'openai-completions',
-  'openai-responses',
-  'pi-messages',
-])
-
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
 function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
   apiKey: string | undefined,
-): SimpleStreamOptions & Pick<AnthropicOptions, 'requestMode'> {
+): SimpleStreamOptions {
   const enabledReasoning: ThinkingLevel | undefined = reasoning === 'off' ? undefined : reasoning
   return {
     ...apiKey === undefined ? {} : { apiKey },
-    ...profile.anthropicRequestMode === 'claude-code' ? { requestMode: 'claude-code' as const } : {},
     ...enabledReasoning === undefined ? {} : { reasoning: enabledReasoning },
     ...profile.thinkingBudgets === undefined ? {} : { thinkingBudgets: profile.thinkingBudgets },
     ...profile.cacheRetention === undefined ? {} : { cacheRetention: profile.cacheRetention },
@@ -253,38 +228,50 @@ function reasoningInfo(
   return {
     reasoning: {
       efforts: levels.map(level => ({
-        id: ReasoningEffortId(level),
+        id: brandString<ReasoningEffortIdType>(level),
         name: `${level.charAt(0).toUpperCase()}${level.slice(1)}`,
       })),
-      ...defaultLevel === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultLevel) },
+      ...defaultLevel === undefined ? {} : { defaultEffort: brandString<ReasoningEffortIdType>(defaultLevel) },
     },
   }
 }
 
-/**
- * pi-ai's OpenAI protocols refuse a request that carries neither a key nor an
- * `Authorization` header. A keyless proxy route hands them this placeholder and
- * removes the `Authorization` header the OpenAI SDK builds from it, so the
- * gateway receives no credential and the SDK never reads an ambient key.
- */
-const KEYLESS_PROXY_KEY = 'keyless-proxy'
-
-/** Protocols whose keyless proxy requests go through {@link KEYLESS_PROXY_KEY}. */
-const KEYLESS_PROXY_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
-
-/** Whether one request is a keyless proxy request on a protocol that needs {@link KEYLESS_PROXY_KEY}. */
-function isKeylessProxyRequest(profile: ResolvedPiAiProviderProfile, model: Model<Api>, apiKey: string | undefined): boolean {
-  return apiKey === undefined && profile.authMode === 'proxy' && KEYLESS_PROXY_APIS.has(model.api)
-    && !Object.keys(profile.headers ?? {}).some(name => name.toLowerCase() === 'authorization')
+/** Native header TypeErrors can echo credentials; other plugin errors own their public message. */
+function requestHeaderDiagnostic(error: unknown): string {
+  if (error instanceof TypeError) {
+    return 'TypeError during header preparation; check the contributing plugin\'s header names, values, and configuration'
+  }
+  return error instanceof Error
+    ? error.message
+    : 'the contributing plugin threw a non-Error value; throw an Error with a safe diagnostic'
 }
 
-/** Merge deployment headers while removing case-insensitive attribution collisions. */
-function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
-  const attribution = attributionHeaders()
-  const reserved = new Set(Object.keys(attribution).map(name => name.toLowerCase()))
-  return {
-    ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
-    ...attribution,
+/** Prepare request-owned headers without allowing contributors to replace attribution. */
+function requestHeaders(
+  configured: Readonly<Record<string, string>> | undefined,
+  options: GenerateOptions<string>,
+  baseURL: string,
+  prepare: PiAiAdapterOptions['prepareHeaders'],
+): Record<string, string> {
+  try {
+    const initial = new Headers()
+    // Profile aliases overwrite case-insensitively; the Headers constructor appends them.
+    for (const [name, value] of Object.entries(configured ?? {})) initial.set(name, value)
+    const request: PiAiRequestHeaderContext = Object.freeze({
+      provider: options.provider,
+      model: options.model,
+      baseURL,
+      ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
+      ...options.purpose === undefined ? {} : { purpose: options.purpose },
+    })
+    const headers = prepare === undefined ? initial : prepare(request, initial)
+    for (const [name, value] of Object.entries(attributionHeaders())) headers.set(name, value)
+    return Object.fromEntries(headers)
+  } catch (error) {
+    throw new LlmError(
+      `pi-ai request header preparation failed for provider "${options.provider}": ${requestHeaderDiagnostic(error)}`,
+      'REQUEST_HEADERS', { cause: error },
+    )
   }
 }
 
@@ -295,8 +282,6 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
-  private readonly requestLimiter = new RouteRequestLimiter()
-  private readonly responses = new ProviderResponseObserver()
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
@@ -304,9 +289,9 @@ export class PiAiAdapter extends LlmAdapter {
 
   override imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef) {
     const snapshot = this.current()
-    this.modelOf(snapshot, provider, model)
+    const selected = this.modelOf(snapshot, provider, model)
     const profile = this.profileOf(snapshot, provider)
-    return requestImageTarget(image, { maxPixels: profile.requestImagePixelBudget, maxBytes: profile.requestImageMaxBytes })
+    return requestImageTarget(image, resolveImageRequestBudget(selected, profile))
   }
 
   /**
@@ -318,7 +303,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels(snapshotAuth(this.config.auth, profiles))
+    const models: MutableModels = createModels(this.config.auth)
     for (const profile of profiles.values()) {
       if (profile.piProvider !== undefined) models.setProvider(profile.piProvider)
     }
@@ -420,15 +405,6 @@ export class PiAiAdapter extends LlmAdapter {
     return this.streamWithSnapshot(options, this.current())
   }
 
-  /** Wait for a request slot; a caller abort while queued ends the request before pi-ai sees it. */
-  private async admit(provider: string, limit: number | undefined, signal: AbortSignal | undefined): Promise<Disposable> {
-    try {
-      return await this.requestLimiter.acquire(provider, limit, signal)
-    } catch (error: unknown) {
-      throw new LlmError(`pi-ai request to provider "${provider}" aborted while waiting for a request slot`, 'ABORTED', { cause: error })
-    }
-  }
-
   private async * streamWithSnapshot(
     options: GenerateOptions,
     snapshot: PiAiSnapshot,
@@ -457,12 +433,8 @@ export class PiAiAdapter extends LlmAdapter {
       model,
       options.reasoningEffort ?? profile.reasoning,
     )
-    const resolvedKey = await this.config.resolveApiKey(options.provider, profile)
-    const keyless = isKeylessProxyRequest(profile, model, resolvedKey)
-    const apiKey = keyless ? KEYLESS_PROXY_KEY : resolvedKey
+    const apiKey = await this.config.resolveApiKey(options.provider, profile)
 
-    // Held until this stream ends; queueing precedes the watchdog because waiting is not provider idleness.
-    using _slot = await this.admit(options.provider, profile.maxConcurrentRequests, options.signal)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
       ? consumer.signal
@@ -482,30 +454,31 @@ export class PiAiAdapter extends LlmAdapter {
       const onReplayDegrade = (reason: string): void => {
         this.config.onReplayDegrade?.({ provider: options.provider, model: options.model, reason })
       }
-      const context = attachments === undefined
-        ? toPiContext(request, undefined, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
+      const prefixDigests: PrefixDigests = new Map()
+      const converted = attachments === undefined
+        ? toPiContext(request, undefined, onReplayDegrade, updates.systemPromptUpdate === 'in-history', prefixDigests)
         : await toPiContext({ ...request, signal: watchdog.signal }, {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
           maxRequestImageBytes: profile.maxRequestImageBytes,
-          requestImagePolicy: {
-            maxPixels: profile.requestImagePixelBudget,
-            maxBytes: profile.requestImageMaxBytes,
-          },
-        }, onReplayDegrade, updates.systemPromptUpdate === 'in-history')
-      const observed = this.responses.observe(() => snapshot.models.streamSimple(model, context, {
+          maxRequestImages: profile.maxRequestImages,
+          imageOffloadCountQuantum: profile.imageOffloadCountQuantum,
+          requestImagePolicy: resolveImageRequestBudget(model, profile),
+        }, onReplayDegrade, updates.systemPromptUpdate === 'in-history', prefixDigests)
+      const manualThinking = model.reasoning && reasoning !== undefined && reasoning !== 'off'
+        && (model as Model<'anthropic-messages'>).compat?.forceAdaptiveThinking !== true
+      const { context, digest } = bindThinkingToPrefix(converted, model.api, prefixDigests, manualThinking, (count) => {
+        this.config.onThinkingOmitted?.({ provider: options.provider, model: options.model, count })
+      })
+      const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
-        ...FETCH_OBSERVING_APIS.has(model.api) ? { fetch: this.responses.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
-        // Profile headers are deployment-owned; attribution names are
-        // Harness-owned and therefore win collisions.
-        headers: keyless ? { ...requestHeaders(profile.headers), Authorization: null } : requestHeaders(profile.headers),
-      }))
-      const chunks = toStreamChunks(observed.result, model.contextWindow, options.signal, model.id, observed.lastResponse)
-      const iterator = chunks[Symbol.asyncIterator]()
+        headers: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders),
+      })
+      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id, digest)[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

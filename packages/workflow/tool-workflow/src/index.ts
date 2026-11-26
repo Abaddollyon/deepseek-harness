@@ -14,18 +14,18 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ToolCallView, ToolExecution, ToolResultView } from '@deepseek-ai/dsh-tools'
+import { defineTool, ToolArgsError, ToolContextUnavailableError } from '@deepseek-ai/dsh-tools'
+import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobId, JobOutcome, JobToolCall } from '@deepseek-ai/dsh-jobs'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
-// Type-only: `ctx.get('spillStore')` resolves when an optional spill backend is composed.
-import type { SaveTextSpill } from '@deepseek-ai/dsh-spill'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type {
-  WorkflowResult, WorkflowRun, WorkflowRunId, WorkflowStopReason,
+  WorkflowResult, WorkflowRun, WorkflowStopReason,
 } from '@deepseek-ai/dsh-workflow'
+import type { WorkflowRunId } from '@deepseek-ai/dsh-workflow/types'
 import { createWorkflowRecordMirror } from './record.ts'
 import type { WorkflowRecordMirror } from './record.ts'
 import type {
@@ -46,7 +46,7 @@ export const inject = ['tools', 'workflowEngine', 'systemPrompt']
 export interface Config {
   /** The model-facing tool name to register (default `workflow`). */
   toolName?: string
-  /** Serialized-result ceiling in characters; longer JSON spills through `ctx.spillStore` and returns recovery metadata (default 50000). */
+  /** Rendered-result ceiling, in characters: a longer JSON value is truncated with a notice (default 50000). */
   maxResultChars?: number
   /**
    * Expose `run_in_background` (default true); disabled calls are also
@@ -89,8 +89,8 @@ function renderRecordingError(error: unknown): string {
 }
 
 /**
- * Project active workflow runs into their calling Sessions, top-level and
- * `run_code`-dispatched alike, without letting recording failure affect tool execution.
+ * Project active top-level workflow runs into their parent Sessions without
+ * letting recording failure affect tool execution.
  */
 function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
   const active = new Map<WorkflowRunId, Session>()
@@ -160,7 +160,7 @@ function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
 const DESCRIPTION = `Run a JavaScript workflow script that orchestrates subagents at scale. Use this for work that fans out across many independent pieces — an audit over many files, a migration, multi-angle research, adversarial verification of findings — where you write the orchestration as a script instead of delegating turn by turn.
 
 Script-body hooks:
-- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\`/\`reasoningEffort\` LLM target overrides (an effort the target model does not offer ends the script).
+- \`agent(prompt, opts?): Promise<any>\` — run one subagent to completion. Without \`opts.schema\` it resolves to the child's final text; with \`opts.schema\` (an object-rooted JSON Schema using ONLY type/properties/required/additionalProperties/items/enum/const/oneOf) it resolves to the validated object. Resolves \`null\` when the child fails (filter with \`.filter(Boolean)\`). Other opts: \`label\` (display), \`phase\` (progress group), and independent \`provider\`/\`model\` LLM target overrides.
 - \`pipeline(items, ...stages): Promise<any[]>\` — run each item through the stages independently with NO barrier between stages (prefer this for multi-stage work). Each stage receives \`(prev, item, index)\`. A stage throw drops that ITEM to \`null\` and skips its remaining stages.
 - \`parallel(thunks): Promise<any[]>\` — run zero-argument functions concurrently and await ALL of them (a barrier; use only when a stage genuinely needs every prior result together). A throwing thunk resolves to \`null\`.
 - \`phase(title)\` — start a progress phase; \`log(message)\` — narrate progress; \`args\` — the tool call's \`args\` input, verbatim.
@@ -196,48 +196,36 @@ function presentWorkflowResult(args: WorkflowCallArgs, result: { content: Conten
 }
 
 /** A non-`completed` stop reason means the script did not finish cleanly. */
-function stopReasonError(result: WorkflowResult): string | undefined {
+function stopReasonError(result: WorkflowResult): WorkflowError | undefined {
   switch (result.stopReason) {
     case 'completed':
       return undefined
     case 'cancelled':
-      return `workflow run was cancelled${result.error !== undefined ? ` (${result.error})` : ''}`
+      return new WorkflowError(`workflow run was cancelled${result.error !== undefined ? ` (${result.error})` : ''}`, 'CANCELLED')
     case 'error':
-      return `workflow run failed: ${result.error ?? 'unknown error'}`
+      return new WorkflowError(`workflow run failed: ${result.error ?? 'unknown error'}`, result.errorCode ?? 'RUN_FAILED')
     /* v8 ignore start -- defensive: WorkflowStopReason is a closed union, exhaustive by construction; a future variant fails here loudly */
     default:
-      return `workflow run ended abnormally (${String(result.stopReason satisfies never)})`
+      return new WorkflowError(`workflow run ended abnormally (${String(result.stopReason satisfies never)})`, 'RUN_FAILED')
     /* v8 ignore stop */
   }
 }
 
 /**
  * Map a settled background run onto the job outcome vocabulary. A completed
- * run carries the rendered, bounded return value as the job's result, or fails
- * when a mounted spill backend cannot save an oversized value; a
+ * run carries the rendered return value as the job's result; a
  * cancelled run leaves the detail to the registry's kill-reason merge (the
  * cancel reason it forwarded is the same string); an errored run fails with
  * the script's failure message.
  */
-async function jobOutcomeOf(
-  result: WorkflowResult,
-  name: string,
-  project: (value: JsonValue) => JsonValue | Promise<JsonValue>,
-): Promise<JobOutcome> {
+function jobOutcomeOf(result: WorkflowResult, name: string, maxChars: number): JobOutcome {
   switch (result.stopReason) {
-    case 'completed': {
-      let value: JsonValue
-      try {
-        value = await project(result.value as JsonValue)
-      } catch (error: unknown) {
-        return { status: 'failed', detail: `workflow result could not be returned: ${String(error)}` }
-      }
+    case 'completed':
       return {
         status: 'completed',
         detail: `${result.agentsStarted} agent${result.agentsStarted === 1 ? '' : 's'}`,
-        result: renderResult(name, result.agentsStarted, value),
+        result: renderResult(name, result.agentsStarted, result.value as JsonValue, maxChars),
       }
-    }
     case 'cancelled':
       return { status: 'killed' }
     case 'error':
@@ -249,75 +237,14 @@ async function jobOutcomeOf(
   }
 }
 
-/**
- * Recovery metadata that replaces a completed value whose serialized JSON exceeds `maxResultChars`.
- * `spillPath` names the saved complete JSON; without a mounted `ctx.spillStore` it is absent and
- * `notice` states that only `preview` remains.
- */
-interface SpilledWorkflowResult {
-  [key: string]: JsonValue
-  truncated: true
-  originalChars: number
-  spillPath?: string
-  notice?: string
-  preview: string
-}
-
-/** The spill request for one call's result, without its content. */
-function resultSpill(parent: Agent, exec: ToolExecution, name: string): Omit<SaveTextSpill, 'content'> {
-  return {
-    owner: { sessionId: parent.session.id },
-    source: { kind: 'tool', toolName: exec.name, callId: exec.callId, label: 'result' },
-    suggestedName: `${name}-result.json`,
-  }
-}
-
-/**
- * Bound a completed value for the model. A value whose pretty-printed JSON exceeds `maxChars` is saved
- * whole through `ctx.spillStore` and replaced by {@link SpilledWorkflowResult}; without a mounted spill
- * backend the replacement carries the preview and a notice instead of a path. The cap covers the
- * serialized value only, so the metadata itself may exceed it. A value within the cap returns synchronously.
- * @param ctx - plugin context; the spill backend is optional.
- * @param spill - the owning Session, producing call, and suggested file name.
- * @param value - the run's JSON return value.
- * @param maxChars - the serialized-value ceiling.
- * @returns the value itself, or a promise of its recovery metadata that rejects when a mounted spill backend fails to save it.
- */
-function projectResult(
-  ctx: Context,
-  spill: Omit<SaveTextSpill, 'content'>,
-  value: JsonValue,
-  maxChars: number,
-): JsonValue | Promise<SpilledWorkflowResult> {
+/** Render the run's outcome text: the meta name, agent count, and the JSON value (capped). */
+function renderResult(name: string, agentsStarted: number, value: JsonValue, maxChars: number): string {
   // The engine returns JSON data (null for a valueless script), so stringify never yields undefined.
   const rendered = JSON.stringify(value, null, 2)
-  return rendered.length <= maxChars ? value : spillResult(ctx, spill, rendered, maxChars)
-}
-
-/** Save one oversized serialized value and return its recovery metadata. */
-async function spillResult(
-  ctx: Context,
-  spill: Omit<SaveTextSpill, 'content'>,
-  rendered: string,
-  maxChars: number,
-): Promise<SpilledWorkflowResult> {
-  const spillStore = ctx.get('spillStore')
-  const preview = rendered.slice(0, maxChars)
-  if (spillStore === undefined) {
-    return {
-      truncated: true,
-      originalChars: rendered.length,
-      notice: `no ctx.spillStore backend is mounted, so the complete value was not saved; only the first ${maxChars} characters remain in preview`,
-      preview,
-    }
-  }
-  const ref = await spillStore.saveText({ ...spill, content: rendered })
-  return { truncated: true, originalChars: rendered.length, spillPath: String(ref.locator), preview }
-}
-
-/** Render the run's outcome text: the meta name, agent count, and the bounded JSON value. */
-function renderResult(name: string, agentsStarted: number, value: JsonValue): string {
-  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${JSON.stringify(value, null, 2)}`
+  const clipped = rendered.length > maxChars
+    ? `${rendered.slice(0, maxChars)}\n… [truncated: ${rendered.length - maxChars} more characters]`
+    : rendered
+  return `workflow "${name}" completed (${agentsStarted} agent${agentsStarted === 1 ? '' : 's'}).\nReturn value:\n${clipped}`
 }
 
 /**
@@ -331,7 +258,8 @@ function renderResult(name: string, agentsStarted: number, value: JsonValue): st
  * @param args - the validated tool call.
  * @param parent - the calling agent; owns the job.
  * @param toolCall - creating invocation, including its root call.
- * @param deps - the tool's recorder/mirror taps, the result cap, and the result spill request.
+ * @param recordsRun - whether this top-level call records durable run events.
+ * @param deps - the tool's recorder/mirror taps and the render cap.
  * @returns the background result for the tool's output schema.
  */
 function startBackgroundRun(
@@ -339,11 +267,12 @@ function startBackgroundRun(
   args: WorkflowCallArgs,
   parent: Agent,
   toolCall: JobToolCall,
-  deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number; spill: Omit<SaveTextSpill, 'content'> },
+  recordsRun: boolean,
+  deps: { recorder: WorkflowRecorder; mirror: WorkflowRecordMirror; maxResultChars: number },
 ): { kind: 'background'; jobId: JobId; runId: WorkflowRunId } {
   const jobs = ctx.get('jobs')
   if (jobs === undefined) {
-    throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+    throw new ToolContextUnavailableError('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
   }
   let run!: WorkflowRun
   const jobId = jobs.start({
@@ -362,7 +291,7 @@ function startBackgroundRun(
         parent,
       })
       deps.mirror.start(run.id, job)
-      deps.recorder.start(parent.session, run)
+      if (recordsRun) deps.recorder.start(parent.session, run)
       const done = run.result.then(async (result): Promise<JobOutcome> => {
         try {
           // Keep member listeners alive through disposal: an engine may
@@ -373,9 +302,11 @@ function startBackgroundRun(
           ctx.logger.warn(`background workflow run ${run.id} dispose failed: ${String(error)}`)
         }
         deps.mirror.stop(run.id)
-        deps.recorder.finish(run.id, result.stopReason)
-        deps.recorder.abandon(run.id)
-        return jobOutcomeOf(result, args.meta.name, value => projectResult(ctx, deps.spill, value, deps.maxResultChars))
+        if (recordsRun) {
+          deps.recorder.finish(run.id, result.stopReason)
+          deps.recorder.abandon(run.id)
+        }
+        return jobOutcomeOf(result, args.meta.name, deps.maxResultChars)
       })
       return {
         cancel: (reason?: string) => { run.cancel(reason ?? 'background workflow job killed') },
@@ -398,6 +329,7 @@ export function apply(ctx: Context, config: Config): void {
     name: `tool:${toolName}`,
     order: ctx.systemPrompt.getSectionOrder('TOOL_WORKFLOW'),
     text: `Use the ${toolName} tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration: you write a JavaScript script (the tool description documents the exact format) that fans work out across many subagents with phases and structured results. For one or two delegations, prefer plain subagent calls.`,
+    retirement: `The ${toolName} tool is no longer available. Its instructions no longer apply.`,
   })
   ctx.tools.register(defineTool({
     name: toolName,
@@ -474,7 +406,7 @@ export function apply(ctx: Context, config: Config): void {
         type: 'text',
         text: value.kind === 'background'
           ? `workflow "${args.meta.name}" started in the background as job ${value.jobId}. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.`
-          : renderResult(args.meta.name, value.agentsStarted, value.result),
+          : renderResult(args.meta.name, value.agentsStarted, value.result, maxResultChars),
       }],
     },
     async execute(args, exec) {
@@ -483,22 +415,22 @@ export function apply(ctx: Context, config: Config): void {
         // The loop sets `exec.agent` for every model-driven call; its absence
         // means a non-agent caller invoked the tool directly, which has no
         // parent to attribute the children to. Fail loud rather than guess.
-        throw new Error('workflow tool requires a calling agent (exec.agent was undefined)')
+        throw new ToolContextUnavailableError('workflow tool requires a calling agent (exec.agent was undefined)')
       }
       if (args.run_in_background === true) {
         if (!enableRunInBackground) {
-          throw new Error('run_in_background is disabled for this tool')
+          // The schema omits the field when disabled, so the model corrects by omitting it.
+          throw new ToolArgsError(['run_in_background is disabled for this tool'])
         }
         // No pre-abort check here, unlike bash/pwsh: ToolRuntime re-reads the
         // caller signal right before execute(), and this branch reaches
         // jobs.start synchronously from there. The shell tools await a
         // sandbox escalation approval before registering, which is the window
         // their check covers.
-        return startBackgroundRun(ctx, args, parent, { callId: exec.callId, rootCallId: exec.rootCallId }, {
+        return startBackgroundRun(ctx, args, parent, { callId: exec.callId, rootCallId: exec.rootCallId }, exec.parent === undefined, {
           recorder,
           mirror,
           maxResultChars,
-          spill: resultSpill(parent, exec, args.meta.name),
         })
       }
 
@@ -512,10 +444,9 @@ export function apply(ctx: Context, config: Config): void {
         parent,
         signal: exec.signal,
       })
-      // A run_code dispatch (`exec.parent` set) records like a top-level call: in Code Mode it is the
-      // model's only route to this tool. The engine publishes member events after start() returns
-      // and this run record is active.
-      recorder.start(parent.session, run)
+      const recordsRun = exec.parent === undefined
+      // The engine publishes member events after start() returns and this run record is active.
+      if (recordsRun) recorder.start(parent.session, run)
 
       // Bridge the tool's abort signal to the run: if the parent step is aborted while the
       // script is in flight, cancel the whole run. The signal also enters the engine directly, but
@@ -528,17 +459,17 @@ export function apply(ctx: Context, config: Config): void {
         result = await run.result
         const error = stopReasonError(result)
         if (error !== undefined) {
-          // Map a non-clean finish to an isError result (the registry turns a
-          // throw into an isError). Report the reason, not partial output.
-          throw new Error(error)
+          // Caller cancellation keeps the registry's AbortError identity; any
+          // other non-clean finish becomes a coded isError result. Report the
+          // reason, not partial output.
+          exec.signal.throwIfAborted()
+          throw error
         }
-        // Only an oversized value awaits its spill; an in-cap value returns without an extra turn.
-        const projected = projectResult(ctx, resultSpill(parent, exec, args.meta.name), result.value as JsonValue, maxResultChars)
         return {
           kind: 'foreground' as const,
           runId: run.id,
           agentsStarted: result.agentsStarted,
-          result: projected instanceof Promise ? await projected : projected,
+          result: result.value as JsonValue,
         }
       } finally {
         exec.signal.removeEventListener('abort', onAbort)
@@ -546,11 +477,13 @@ export function apply(ctx: Context, config: Config): void {
           // Keep member listeners alive through disposal: an engine may
           // synthesize cancelled member endings while reaching quiescence.
           await run.dispose()
-          /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
-          if (result === undefined) throw new Error('workflow run settled without a result')
-          recorder.finish(run.id, result.stopReason)
+          if (recordsRun) {
+            /* v8 ignore next -- WorkflowRun.result never rejects by contract, so result is assigned before finally. */
+            if (result === undefined) throw new WorkflowError('workflow run settled without a result', 'RUN_FAILED')
+            recorder.finish(run.id, result.stopReason)
+          }
         } finally {
-          recorder.abandon(run.id)
+          if (recordsRun) recorder.abandon(run.id)
         }
       }
     },

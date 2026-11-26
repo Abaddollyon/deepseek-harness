@@ -10,17 +10,19 @@
  * `clientModules` service (the HMR node half's registration/notification
  * face).
  *
- * Scanning is incremental per package — there is no full-rescan code path.
+ * Package reconciliation is incremental by Loader entry name.
  * Every cordis `internal/plugin` emission (fiber construction/disposal) marks
  * the fiber's entry name dirty; a microtask flush reconciles each dirty name
- * against the live loader entries. The activation pass seeds the same dirty
- * set with all current entries and flushes synchronously, so first scan and
- * steady state share one implementation. Each reconciliation reads the
- * package manifest and the bundle metadata again, so an entry that restarts
- * after its package was reinstalled or moved publishes them as they are now;
- * an unchanged result publishes nothing and does not read the bundle. The
- * manifest package name identifies the browser module; distinct active Loader
- * sources for that package are a composition error. Bundle rebuilds outside
+ * against the Loader entries indexed at the start of that flush. Synchronous
+ * package resolution must not add or remove Loader entries during reconciliation.
+ * The activation pass seeds the same pending names and flushes synchronously,
+ * so initial activation and steady state share one implementation. Each
+ * reconciliation reads the package manifest and the bundle metadata again,
+ * so an entry that restarts after its package was reinstalled or moved
+ * publishes them as they are now; an unchanged result publishes nothing and
+ * does not read the bundle. The manifest package name identifies the browser
+ * module; distinct active Loader sources for that package are a composition
+ * error. Bundle rebuilds outside
  * an entry restart reach the graph through {@link ClientModuleRegistry.rebuilt}.
  * @module @deepseek-ai/dsh-client-modules
  */
@@ -37,8 +39,10 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
+import type { Principal } from '@deepseek-ai/dsh-typert-protocol'
 import { PACKAGE_ASSET_SEGMENT, packageAssetMediaType } from './assets.ts'
 import { exactPackageSpecifier, parseDshClient, stripClientSuffix } from './client/manifest.ts'
+import { SyncedConfigPublisher } from './config-sync.ts'
 import type { WebBootBatch, WebBootBatchPhase, WebBootEntry, WebBootGraph, WebBootRelease } from './client/manifest.ts'
 
 export { stripClientSuffix } from './client/manifest.ts'
@@ -50,8 +54,6 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The web plugin table (provided by the client-modules node half). */
     clientModules: ClientModuleRegistry
-    /** Exact index paths that boot their own dependency-closed graph (provided with `clientModules`). */
-    clientSurfaces: ClientSurfaceRegistry
   }
 }
 
@@ -78,8 +80,6 @@ export interface ClientArtifactBaseline {
 /** Package metadata read from the manifest of one active Loader source. */
 interface PkgMeta extends WebBootRowFields {
   clientPath: string
-  /** `dsh.client.defaultRoot`; false keeps the package out of the ordinary graph unless a root depends on it. */
-  defaultRoot: boolean
   /** The package's own manifest; package-asset requests resolve against it as a self-reference. */
   manifestPath: string
 }
@@ -471,7 +471,7 @@ function buildComboSourceMap(
     if (sourceMap !== undefined) {
       try {
         section = comboSectionMap(resource, sourceMap)
-      } catch {
+      } catch (_malformedSourceMap) {
         // An invalid authored source URL is a malformed map, so the generated
         // bundle remains debuggable through the same identity fallback.
       }
@@ -638,88 +638,6 @@ window.__ModuleLoader__={
   return rows
 }
 
-/** One client surface: an exact index path whose boot graph is the dependency closure of its roots. */
-export interface ClientSurfaceDefinition {
-  /** Stable surface id (`[a-z][a-z0-9-]*`), passed as the index-render variant. */
-  readonly id: string
-  /** Exact clean pathname, such as `/companion`, that Frontend Static renders as this surface's index. */
-  readonly path: string
-  /** Package that mounts the surface UI; it must declare `dsh.client.defaultRoot: false`. */
-  readonly rootPlugin: string
-  /** Additional packages the surface loads beside the root plugin's own dependencies. */
-  readonly roots?: readonly string[]
-}
-
-/**
- * `ctx.clientSurfaces`: registered client surfaces. A surface index boots only
- * the client-modules bootstrap plus the `inject`/`external` closure of its
- * root plugin and extra roots; a required `inject` package that is not loaded
- * makes the closure fail.
- */
-export class ClientSurfaceRegistry extends Service {
-  private readonly surfaces = new Map<string, ClientSurfaceDefinition>()
-
-  /**
-   * @param ctx - the client-modules plugin context that owns the registry.
-   * @param composeGraph - composes the current boot graph for one surface, throwing when its closure is incomplete.
-   */
-  constructor(ctx: Context, private readonly composeGraph: (surface: ClientSurfaceDefinition) => WebBootGraph) {
-    super(ctx, 'clientSurfaces')
-  }
-
-  /**
-   * Register one surface. The first graph composition runs immediately, so a
-   * missing root or required dependency throws here.
-   * @param definition - surface id, exact path, root plugin, and extra roots.
-   * @returns the disposer that removes the surface; callers run `register` inside `ctx.effect`.
-   * @throws when the id or path is malformed or already registered, or the graph cannot be composed.
-   */
-  register(definition: ClientSurfaceDefinition): () => void {
-    if (!/^[a-z][a-z0-9-]*$/u.test(definition.id)) {
-      throw new Error(`client-surfaces: invalid id ${JSON.stringify(definition.id)}`)
-    }
-    if (!/^(?:\/[A-Za-z0-9._~-]+)+$/u.test(definition.path)) {
-      throw new Error(`client-surfaces: invalid path ${JSON.stringify(definition.path)}`)
-    }
-    for (const existing of this.surfaces.values()) {
-      if (existing.id === definition.id) throw new Error(`client-surfaces: duplicate id ${JSON.stringify(definition.id)}`)
-      if (existing.path === definition.path) throw new Error(`client-surfaces: duplicate path ${JSON.stringify(definition.path)}`)
-    }
-    const surface = Object.freeze({ ...definition, roots: Object.freeze([...definition.roots ?? []]) })
-    this.composeGraph(surface)
-    this.surfaces.set(surface.id, surface)
-    return () => {
-      if (this.surfaces.get(surface.id) === surface) this.surfaces.delete(surface.id)
-    }
-  }
-
-  /**
-   * Find the surface served at one exact pathname without composing its graph,
-   * so a request that has not passed authentication composes nothing.
-   * @param path - decoded request pathname.
-   * @returns the surface, or undefined when none is registered there.
-   */
-  findByPath(path: string): ClientSurfaceDefinition | undefined {
-    for (const surface of this.surfaces.values()) {
-      if (surface.path === path) return surface
-    }
-    return undefined
-  }
-
-  /**
-   * Compose the current boot graph of one registered surface. The graph is
-   * reused until the ordinary graph is next recomposed.
-   * @param id - registered surface id.
-   * @returns the graph served as that surface's `window.__DSH_BOOT__`.
-   * @throws when the id is not registered or the graph cannot be composed.
-   */
-  graph(id: string): WebBootGraph {
-    const surface = this.surfaces.get(id)
-    if (surface === undefined) throw new Error(`client-surfaces: unknown surface ${JSON.stringify(id)}`)
-    return this.composeGraph(surface)
-  }
-}
-
 /**
  * The web plugin table service: incremental `dsh.client` scan + wire composition
  * + bundle and package-asset route + index injection rows. Construction runs
@@ -746,12 +664,7 @@ export class ClientModuleRegistry extends Service {
   private previousBatchResponses = new Map<string, LazyResponse>()
   private flushQueued = false
   private composed: WebBootGraph
-  private readonly surfaces: ClientSurfaceRegistry
-  /**
-   * Each surface's graph and the ordinary graph it was composed beside; it stays
-   * valid while `composed`, and with it the response table holding its batches, is unchanged.
-   */
-  private readonly surfaceGraphs = new WeakMap<ClientSurfaceDefinition, { readonly base: WebBootGraph; readonly graph: WebBootGraph }>()
+  private readonly syncedConfig: SyncedConfigPublisher
 
   /**
    * Build the service: subscribe, seed, and run the activation flush.
@@ -764,7 +677,6 @@ export class ClientModuleRegistry extends Service {
     // The client build fixes this read into the built Host artifact.
     const commit = process.env.DSH_CLIENT_COMMIT_HASH
     this.release = commit === undefined ? { version } : { version, commit }
-    this.surfaces = new ClientSurfaceRegistry(ctx, surface => this.surfaceGraph(surface))
     // Subscribe before seeding so a fiber arriving mid-activation lands in the
     // same dirty set (Set idempotence makes the overlap harmless). An entry-less
     // fiber is a child plugin or a manual mount — never a loader row; O(1) drop.
@@ -783,7 +695,14 @@ export class ClientModuleRegistry extends Service {
     // Activation pass: the initial scan IS the incremental path over the
     // current entries, flushed synchronously (nothing async between subscribe,
     // seed, and flush).
-    for (const entry of ctx.loader.entries()) this.dirty.add(entry.options.name)
+    const entries = [...ctx.loader.entries()]
+    for (const entry of entries) this.dirty.add(entry.options.name)
+    this.syncedConfig = new SyncedConfigPublisher(ctx, entries, () => {
+      // Only rows and rev change: the batch artifacts and the prior batch generation stay.
+      const rows = this.syncedConfig.apply(this.composed.entries, this.table)
+      this.composed = { ...this.composed, entries: rows, rev: shortHash(JSON.stringify({ entries: rows, batches: this.composed.batches })) }
+      this.notifyGraphChanged()
+    })
     this.composed = this.compose()
     const failures: Error[] = []
     this.flush(err => failures.push(err))
@@ -793,23 +712,32 @@ export class ClientModuleRegistry extends Service {
 
     const registerWebCarrier = (webCtx: Context): void => {
       webCtx.effect(
-        () => webCtx.webServer.register({ kind: 'prefix', path: PLUGIN_ROUTE, resource: request => this.fetchBundle(request) }),
+        () => webCtx.webServer.register({ kind: 'prefix', path: PLUGIN_ROUTE, auth: 'anonymous', resource: request => this.fetchBundle(request) }),
         'client-modules: bundle route',
       )
     }
     ctx.inject(['webServer'], registerWebCarrier)
-    ctx.on('webserver/index-inject', (table, _peer, context) => {
-      const variant = context?.variant
-      table.push(...bootInjections(variant === undefined ? this.composed : this.surfaces.graph(variant)))
+    ctx.on('webserver/index-inject', (table, peer) => {
+      table.push(...bootInjections(this.graphFor(peer.principal)))
     })
   }
 
   /**
-   * Current composed entry graph (stable object between changes).
-   * @returns the graph served as `window.__DSH_BOOT__`.
+   * Current composed entry graph (stable object between changes), carrying the configured synced values.
+   * @returns the graph served as the owner's `window.__DSH_BOOT__`.
    */
   graph(): WebBootGraph {
     return this.composed
+  }
+
+  /**
+   * The current graph as one Peer may see it: the owner receives the configured synced values, and every other Peer
+   * receives each row's schema defaults in their place.
+   * @param principal - the Peer's principal; undefined for the owner or an in-process caller.
+   * @returns the graph served to that Peer at first render and in plugin-events frames.
+   */
+  graphFor(principal: Principal | undefined): WebBootGraph {
+    return this.syncedConfig.graphFor(this.composed, principal)
   }
 
   /**
@@ -900,8 +828,10 @@ export class ClientModuleRegistry extends Service {
   }
 
   /**
-   * Fires after any flush that recomposed the graph (row added/removed, or a
-   * rebuilt rev change). Pull model: listeners re-read {@link graph}.
+   * Fires after the graph's rows or rev change: a flush that recomposed the
+   * graph (row added/removed, or a rebuilt rev change), or a republication of
+   * synced configuration alone, which leaves the batch artifacts unchanged.
+   * Pull model: listeners re-read {@link graph}.
    * @param listener - notified with no payload.
    * @returns the unsubscriber.
    */
@@ -910,12 +840,8 @@ export class ClientModuleRegistry extends Service {
     return () => { this.graphListeners.delete(listener) }
   }
 
-  /**
-   * Compose the ordinary graph, or with `surface` a surface graph whose batch
-   * responses join the current generation instead of replacing it.
-   */
-  private compose(records: readonly WebPluginRecord[] = this.defaultRecords(), surface = false): WebBootGraph {
-    const entries = orderByModuleGraph(records.map(record => record.entry))
+  private compose(): WebBootGraph {
+    const entries = orderByModuleGraph([...this.table.values()].map(record => record.entry))
     const bootstrap = PARSER_PRELOAD_IDS
       .map(id => this.table.get(id))
       .filter((record): record is WebPluginRecord => record !== undefined)
@@ -945,20 +871,6 @@ export class ClientModuleRegistry extends Service {
         contentType: 'application/json; charset=utf-8',
       })
     }
-    const batches = artifacts.map(artifact => artifact.descriptor)
-    const graph = {
-      rev: shortHash(JSON.stringify({ entries, batches })),
-      release: this.release,
-      entries,
-      batches,
-    }
-    if (surface) {
-      for (const [resourceUrl, response] of batchResponses) {
-        this.batchResponses.set(resourceUrl, response)
-        this.responses.set(resourceUrl, response)
-      }
-      return graph
-    }
     const responses = new Map(batchResponses)
     for (const record of this.table.values()) {
       const artifact = buildCombo([record], this.readSourceMap, record.entry.rev)
@@ -977,50 +889,14 @@ export class ClientModuleRegistry extends Service {
     this.previousBatchResponses = this.batchResponses
     this.batchResponses = batchResponses
     this.responses = responses
-    return graph
-  }
-
-  /** Records of the ordinary graph: the closure of every package that does not opt out of `defaultRoot`. */
-  private defaultRecords(): WebPluginRecord[] {
-    const roots = [...this.table.values()].filter(record => record.meta.defaultRoot).map(record => record.entry.id)
-    const selected = this.dependencyClosure(roots, false)
-    return [...this.table.values()].filter(record => selected.has(record.entry.id))
-  }
-
-  private surfaceGraph(surface: ClientSurfaceDefinition): WebBootGraph {
-    const cached = this.surfaceGraphs.get(surface)
-    if (cached?.base === this.composed) return cached.graph
-    if (this.table.get(surface.rootPlugin)?.meta.defaultRoot === true) {
-      throw new Error(`client-surfaces: root plugin ${surface.rootPlugin} must declare dsh.client.defaultRoot false`)
+    const batches = artifacts.map(artifact => artifact.descriptor)
+    const rows = this.syncedConfig.apply(entries, this.table)
+    return {
+      rev: shortHash(JSON.stringify({ entries: rows, batches })),
+      release: this.release,
+      entries: rows,
+      batches,
     }
-    const selected = this.dependencyClosure([CLIENT_MODULES_ID, surface.rootPlugin, ...surface.roots ?? []], true)
-    const graph = this.compose([...this.table.values()].filter(record => selected.has(record.entry.id)), true)
-    this.surfaceGraphs.set(surface, { base: this.composed, graph })
-    return graph
-  }
-
-  /**
-   * Collect the packages reachable from `roots` through `inject` and loaded `external` rows.
-   * @param strict - throw for a missing root or `inject` package instead of skipping it.
-   */
-  private dependencyClosure(roots: readonly string[], strict: boolean): Set<string> {
-    const selected = new Set<string>()
-    const visit = (id: string, requestedBy?: string): void => {
-      if (selected.has(id)) return
-      const record = this.table.get(id)
-      if (record === undefined) {
-        if (!strict) return
-        throw new Error(`client-surfaces: missing client module ${id}${requestedBy === undefined ? '' : ` requested by ${requestedBy}`}`)
-      }
-      selected.add(id)
-      for (const name of record.meta.inject ?? []) visit(stripClientSuffix(name), id)
-      for (const name of record.meta.external) {
-        const dependency = stripClientSuffix(name)
-        if (this.table.has(dependency)) visit(dependency, id)
-      }
-    }
-    for (const root of roots) visit(root)
-    return selected
   }
 
   private notifyGraphChanged(): void {
@@ -1060,7 +936,6 @@ export class ClientModuleRegistry extends Service {
       ...(decl.inject !== undefined ? { inject: decl.inject } : {}),
       external: decl.external ?? [],
       immediately: decl.immediately === true,
-      defaultRoot: decl.defaultRoot !== false,
     }
     return { packageName, meta }
   }
@@ -1122,14 +997,15 @@ export class ClientModuleRegistry extends Service {
     while (true) {
       const candidate = join(dir, 'package.json')
       if (existsSync(candidate)) {
+        let name: unknown
         try {
-          const name = (JSON.parse(readFileSync(candidate, 'utf8')) as { name?: unknown }).name
-          if (typeof name === 'string' && (expectedPackageName === undefined || name === expectedPackageName)) {
-            return { path: candidate, packageName: name }
-          }
-        } catch {
+          name = (JSON.parse(readFileSync(candidate, 'utf8')) as { name?: unknown }).name
+        } catch (_unreadableManifest) {
           // An unreadable or malformed intermediate manifest cannot own the
           // module; keep walking toward the declaring package root.
+        }
+        if (typeof name === 'string' && (expectedPackageName === undefined || name === expectedPackageName)) {
+          return { path: candidate, packageName: name }
         }
       }
       const parent = dirname(dir)
@@ -1181,11 +1057,17 @@ export class ClientModuleRegistry extends Service {
     }
   }
 
-  /** Reconcile one entry name against the live Loader sources. @returns whether the table changed. */
-  private processOne(entryName: string, onError: (err: Error) => void): boolean {
+  /**
+   * Reconcile one entry name against its sources at flush start.
+   * @param entryName - Loader entry name being reconciled.
+   * @param entries - same-name entries collected at flush start.
+   * @param onError - receives package reconciliation failures.
+   * @returns whether the table changed.
+   */
+  private processOne(entryName: string, entries: readonly Entry[], onError: (err: Error) => void): boolean {
     const nextSources = new Map<string, ClientPackageSource>()
-    for (const entry of this.ctx.loader.entries()) {
-      if (entry.options.name !== entryName || entry.fiber === undefined || entry.disabled) continue
+    for (const entry of entries) {
+      if (entry.fiber === undefined || entry.disabled) continue
       const source = this.resolveSource(entry)
       if (source !== undefined) nextSources.set(source.sourceKey, source)
     }
@@ -1258,11 +1140,26 @@ export class ClientModuleRegistry extends Service {
   }
 
   private flush(onError: (err: Error) => void): void {
+    if (this.dirty.size === 0) return
+    const entriesByName = new Map<string, Entry[]>()
+    try {
+      for (const entry of this.ctx.loader.entries()) {
+        const name = entry.options.name
+        const entries = entriesByName.get(name)
+        if (entries) entries.push(entry)
+        else entriesByName.set(name, [entry])
+      }
+    } catch (error) {
+      // No package state changed; consume this failed batch and retain the published graph.
+      this.dirty.clear()
+      onError(error instanceof Error ? error : new Error(String(error)))
+      return
+    }
     let changed = false
     for (const entryName of [...this.dirty]) {
       this.dirty.delete(entryName)
       try {
-        if (this.processOne(entryName, onError)) changed = true
+        if (this.processOne(entryName, entriesByName.get(entryName) ?? [], onError)) changed = true
       } catch (error) {
         // Steady state: one broken package must not poison the others; the
         // activation pass aggregates these into a loud throw instead.
@@ -1415,7 +1312,7 @@ export class ClientModuleRegistry extends Service {
       }
     }
     // Anything else under /plugins (including unadvertised combinations and
-    // /plugins/events when the HMR row is absent) is an unknown resource.
+    // an unknown path) is an unknown resource.
     return { status: 404 }
   }
 
